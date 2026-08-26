@@ -21,17 +21,50 @@ final class InMemoryGateway implements GatewayInterface
     /** @var array<string, array<string, mixed>> index => definition */
     public array $indices = [];
 
+    /** @var array<string, list<string|null>> index => the _id each document was written with, in order */
+    public array $ids = [];
+
     public ?\Throwable $failWith = null;
+
+    /** @var array<string, \Throwable> method name => what that method throws (wrapped as TransportUnavailableException) */
+    public array $failOn = [];
+
+    /** @var list<array{index: string, body: array<string, mixed>}> every search() call, for asserting on the request */
+    public array $searches = [];
+
+    /** @var (callable(string, array<string, mixed>): array<string, mixed>)|null scripted search responses */
+    public $respondToSearch = null;
+
+    /** @var (callable(string, array<string, mixed>): void)|null observes every index() call */
+    public $onIndex = null;
 
     public function index(string $index, array $document, ?string $id = null, bool $refresh = false): void
     {
         $this->maybeFail();
+
+        if ($this->onIndex !== null) {
+            ($this->onIndex)($index, $document);
+        }
+
+        // Same id, same document: what a retried write does on the real cluster.
+        if ($id !== null && ($at = array_search($id, $this->ids[$index] ?? [], true)) !== false) {
+            $this->documents[$index][$at] = $document;
+
+            return;
+        }
+
         $this->documents[$index][] = $document;
+        $this->ids[$index][] = $id;
     }
 
     public function search(string $index, array $body): array
     {
         $this->maybeFail();
+        $this->searches[] = ['index' => $index, 'body' => $body];
+
+        if ($this->respondToSearch !== null) {
+            return ($this->respondToSearch)($index, $body);
+        }
 
         if (!isset($this->documents[$index]) && !isset($this->indices[$index])) {
             throw IndexNotFoundException::forIndex($index);
@@ -61,7 +94,7 @@ final class InMemoryGateway implements GatewayInterface
 
     public function mapping(string $index): array
     {
-        $this->maybeFail();
+        $this->maybeFail(__FUNCTION__);
 
         if (!isset($this->indices[$index])) {
             throw IndexNotFoundException::forIndex($index);
@@ -87,8 +120,12 @@ final class InMemoryGateway implements GatewayInterface
         return $this->documents[$index][0];
     }
 
-    private function maybeFail(): void
+    private function maybeFail(?string $method = null): void
     {
+        if ($method !== null && isset($this->failOn[$method])) {
+            throw TransportUnavailableException::because($this->failOn[$method]);
+        }
+
         if ($this->failWith !== null) {
             throw $this->failWith instanceof TransportUnavailableException ? $this->failWith : TransportUnavailableException::because($this->failWith);
         }
