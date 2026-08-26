@@ -92,7 +92,8 @@ abstract class DoctrineTestCase extends TestCase
             {
             }
 
-            public function log($level, \Stringable|string $message, array $context = []): void
+            /** @param mixed $level */
+            public function log($level, $message, array $context = []): void // untyped $message: psr/log 1.x
             {
                 $this->logs[] = strtr((string) $message, ['{reason}' => (string) ($context['reason'] ?? '')]);
             }
