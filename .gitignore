@@ -1,0 +1,8 @@
+/vendor/
+composer.lock
+.idea/
+.phpunit.cache/
+.phpunit.result.cache
+
+# Internal working notes (not part of the bundle)
+/docs/

@@ -1,0 +1,70 @@
+{
+    "name": "borsche/elasticsearch-audit-bundle",
+    "description": "Symfony bundle that records who changed what in your application into Elasticsearch: automatic Doctrine entity auditing, arbitrary domain events, coalescing of many small changes into one record, async writes through Messenger, and a filterable read API.",
+    "keywords": [
+        "symfony",
+        "bundle",
+        "audit",
+        "audit-log",
+        "audit-trail",
+        "elasticsearch",
+        "doctrine",
+        "history",
+        "changelog"
+    ],
+    "type": "symfony-bundle",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Yliy Shcherbak",
+            "email": "ylikscherbak@gmail.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "elasticsearch/elasticsearch": "^8.0 || ^9.0",
+        "psr/log": "^1.0 || ^2.0 || ^3.0",
+        "symfony/config": "^6.4 || ^7.0 || ^8.0",
+        "symfony/dependency-injection": "^6.4 || ^7.0 || ^8.0",
+        "symfony/http-kernel": "^6.4 || ^7.0 || ^8.0"
+    },
+    "require-dev": {
+        "doctrine/dbal": "^3.8 || ^4.0",
+        "doctrine/orm": "^2.19 || ^3.0",
+        "guzzlehttp/guzzle": "^7.8",
+        "phpstan/phpstan": "^2.0",
+        "phpunit/phpunit": "^10.5 || ^11.0 || ^12.0",
+        "psr/event-dispatcher": "^1.0",
+        "symfony/console": "^6.4 || ^7.0 || ^8.0",
+        "symfony/event-dispatcher": "^6.4 || ^7.0 || ^8.0",
+        "symfony/messenger": "^6.4 || ^7.0 || ^8.0",
+        "symfony/security-core": "^6.4 || ^7.0 || ^8.0"
+    },
+    "suggest": {
+        "doctrine/orm": "To audit Doctrine entities automatically",
+        "symfony/messenger": "To write audit records asynchronously",
+        "symfony/security-core": "To record the authenticated user as the actor of each change",
+        "symfony/console": "To create and check the Elasticsearch indices from the command line",
+        "guzzlehttp/guzzle": "A PSR-18 HTTP client, required by elasticsearch/elasticsearch 9 which no longer ships one"
+    },
+    "autoload": {
+        "psr-4": {
+            "Borsche\\ElasticsearchAuditBundle\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Borsche\\ElasticsearchAuditBundle\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "test:integration": "phpunit --group integration",
+        "phpstan": "phpstan analyse"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

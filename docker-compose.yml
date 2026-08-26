@@ -1,0 +1,22 @@
+# Local Elasticsearch for the integration tests. Not part of the bundle.
+#
+#   docker compose up -d es8        # or es9
+#   AUDIT_ES_URL=http://localhost:9208 composer test:integration
+services:
+  es8:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9208:9200"
+
+  es9:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.1.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9209:9200"

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache"
+         failOnRisky="true"
+         failOnWarning="true"
+         displayDetailsOnTestsThatTriggerDeprecations="true"
+>
+    <testsuites>
+        <testsuite name="default">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+
+    <groups>
+        <!-- Integration tests need a live Elasticsearch: set AUDIT_ES_URL and run `composer test:integration` -->
+        <exclude>
+            <group>integration</group>
+        </exclude>
+    </groups>
+
+    <php>
+        <ini name="error_reporting" value="-1"/>
+        <env name="AUDIT_ES_URL" value=""/>
+    </php>
+
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>
