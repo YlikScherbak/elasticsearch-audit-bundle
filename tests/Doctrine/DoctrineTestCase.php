@@ -44,6 +44,11 @@ abstract class DoctrineTestCase extends TestCase
         $config->setProxyNamespace('BorscheAuditProxies');
         $config->setAutoGenerateProxyClasses(true);
 
+        // ORM 3 on PHP 8.4 without symfony/var-exporter needs native lazy objects for proxies.
+        if (\PHP_VERSION_ID >= 80400 && method_exists($config, 'enableNativeLazyObjects')) {
+            $config->enableNativeLazyObjects(true);
+        }
+
         $connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config);
 
         $this->em = new EntityManager($connection, $config);
