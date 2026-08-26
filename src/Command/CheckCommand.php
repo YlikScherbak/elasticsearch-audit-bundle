@@ -18,8 +18,10 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 /**
  * Answers "is the audit log going to work?" in one run: cluster reachable, every
  * configured index present, and every field the bundle or an enricher writes
- * actually mapped — a field missing from the mapping is the usual reason a filter
- * silently returns nothing.
+ * mapped with the type it declares — a field missing from the mapping is the
+ * usual reason a filter silently returns nothing, and a field of another type
+ * (loggedAt as text, say) is what an index Elasticsearch created on its own
+ * looks like: reads fail, and the fix is a reindex.
  */
 #[AsCommand(name: 'audit:check', description: 'Check the Elasticsearch connection and the audit indices')]
 final class CheckCommand extends Command
@@ -54,23 +56,55 @@ final class CheckCommand extends Command
         $healthy = true;
 
         foreach ($this->indexResolver->all() as $index) {
-            if (!$this->gateway->indexExists($index)) {
-                $io->text(sprintf('<error>%s</error> missing — run audit:index:create', $index));
+            try {
+                $healthy = $this->checkIndex($io, $index, $expected) && $healthy;
+            } catch (AuditException $e) {
+                $io->text(sprintf('<error>%s</error>: %s', $index, $e->getMessage()));
                 $healthy = false;
-                continue;
             }
-
-            $missing = array_diff_key($expected, $this->gateway->mapping($index));
-
-            if ($missing === []) {
-                $io->text(sprintf('<info>%s</info> ok', $index));
-                continue;
-            }
-
-            $io->text(sprintf('<comment>%s</comment> exists but lacks mapping for: %s', $index, implode(', ', array_keys($missing))));
-            $healthy = false;
         }
 
         return $healthy ? self::SUCCESS : self::FAILURE;
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $expected
+     */
+    private function checkIndex(SymfonyStyle $io, string $index, array $expected): bool
+    {
+        if (!$this->gateway->indexExists($index)) {
+            $io->text(sprintf('<error>%s</error> missing — run audit:index:create', $index));
+
+            return false;
+        }
+
+        $actual = $this->gateway->mapping($index);
+        $missing = array_keys(array_diff_key($expected, $actual));
+        $mismatched = [];
+
+        foreach (array_intersect_key($expected, $actual) as $field => $property) {
+            $expectedType = $property['type'] ?? null;
+            $actualType = $actual[$field]['type'] ?? null;
+
+            if ($expectedType !== null && $actualType !== $expectedType) {
+                $mismatched[] = sprintf('%s is %s, expected %s', $field, $actualType ?? 'an object', $expectedType);
+            }
+        }
+
+        if ($missing === [] && $mismatched === []) {
+            $io->text(sprintf('<info>%s</info> ok', $index));
+
+            return true;
+        }
+
+        if ($missing !== []) {
+            $io->text(sprintf('<comment>%s</comment> exists but lacks mapping for: %s', $index, implode(', ', $missing)));
+        }
+
+        if ($mismatched !== []) {
+            $io->text(sprintf('<error>%s</error> is mapped differently (reindex needed): %s', $index, implode('; ', $mismatched)));
+        }
+
+        return false;
     }
 }

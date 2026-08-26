@@ -18,6 +18,7 @@ final class AuditRecord
     /**
      * @param array<string, Change|mixed> $changes    field => Change, or any JSON-able value
      * @param array<string, mixed>        $attributes extra top-level, filterable fields
+     * @param string|null                 $id         the document id; the writer assigns a UUID v7 when left out
      */
     public function __construct(
         public readonly string $objectType,
@@ -27,6 +28,7 @@ final class AuditRecord
         public readonly ?string $actor = null,
         public readonly array $changes = [],
         public readonly array $attributes = [],
+        public readonly ?string $id = null,
     ) {
         if ($objectType === '') {
             throw new \InvalidArgumentException('An audit record needs a non-empty object type.');
@@ -39,12 +41,25 @@ final class AuditRecord
 
     public function withLoggedAt(\DateTimeImmutable $loggedAt): self
     {
-        return new self($this->objectType, $this->objectId, $this->event, $loggedAt, $this->actor, $this->changes, $this->attributes);
+        return new self($this->objectType, $this->objectId, $this->event, $loggedAt, $this->actor, $this->changes, $this->attributes, $this->id);
+    }
+
+    /**
+     * The document id. Set it yourself only when you have a natural one; otherwise
+     * the writer's UUID v7 gives you time-ordered ids and retry-safe writes for free.
+     */
+    public function withId(string $id): self
+    {
+        if ($id === '') {
+            throw new \InvalidArgumentException('An audit record id cannot be empty.');
+        }
+
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $this->attributes, $id);
     }
 
     public function withActor(?string $actor): self
     {
-        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $actor, $this->changes, $this->attributes);
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $actor, $this->changes, $this->attributes, $this->id);
     }
 
     /**
@@ -52,7 +67,7 @@ final class AuditRecord
      */
     public function withChanges(array $changes): self
     {
-        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $changes, $this->attributes);
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $changes, $this->attributes, $this->id);
     }
 
     public function withChange(string $field, mixed $old, mixed $new): self
@@ -74,7 +89,7 @@ final class AuditRecord
             }
         }
 
-        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, array_replace($this->attributes, $attributes));
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, array_replace($this->attributes, $attributes), $this->id);
     }
 
     public function hasChanges(): bool
@@ -103,14 +118,20 @@ final class AuditRecord
             $changes[$field] = $change instanceof Change ? $change->toArray() : $change;
         }
 
-        return [
+        $document = [
             'objectType' => $this->objectType,
             'objectId' => $this->objectId,
             'event' => $this->event,
             'loggedAt' => $this->loggedAt->setTimezone(new \DateTimeZone('UTC'))->format(self::DATE_FORMAT),
             'source' => $this->actor,
             'changes' => $changes,
-        ] + $this->attributes;
+        ];
+
+        if ($this->id !== null) {
+            $document['id'] = $this->id;
+        }
+
+        return $document + $this->attributes;
     }
 
     /**
@@ -118,6 +139,6 @@ final class AuditRecord
      */
     public static function reservedFields(): array
     {
-        return ['objectType', 'objectId', 'event', 'loggedAt', 'source', 'changes'];
+        return ['id', 'objectType', 'objectId', 'event', 'loggedAt', 'source', 'changes'];
     }
 }

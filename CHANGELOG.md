@@ -8,6 +8,86 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-26
+
+The history can be read back. Together with 0.1 and 0.2 this is the complete write → read
+loop; what follows are refinements.
+
+### Added
+- **`AuditQuery`** — an immutable query: `for(objectType)` / `any()`, `withObjectIds()`,
+  `withEvents()`, `withActors()`, `withIds()`, `between()` / `since()` / `until()`, `where()` /
+  `whereIn()` on enricher attributes, `oldestFirst()` / `newestFirst()`, `page(n, limit)` or
+  `after(cursor)`. Options (`withOption()`) carry application parameters for extensions.
+  Invalid input — empty lists, a limit over 1000, a page past Elasticsearch's 10 000-row window,
+  a base field passed to `where()` — is an `InvalidQueryException` before anything is sent
+- **`AuditReader`** — `find(AuditQuery): AuditPage` and `iterate(AuditQuery, batchSize)`, a
+  generator that follows the cursor through every matching entry (exports, backfills). Reads the
+  index the object type routes to. Does not swallow failures: an unreachable cluster or a missing
+  index is an exception, unlike the writer
+- **`AuditEntry` / `AuditPage`** — typed read models with `toArray()` for JSON endpoints;
+  `AuditPage::nextCursor()` feeds `AuditQuery::after()`
+- **`QueryExtensionInterface`** — the application rewrites the query (`country → withActors(...)`,
+  visibility rules) in terms of `AuditQuery`, never Elasticsearch. Autoconfigured, runs on every read
+- **`RecordDecoratorInterface`** — attaches display data to a whole page at once (names for ids);
+  stored nowhere, computed on read. Autoconfigured
+- **`QueryBuilder`** — every condition is a `bool.filter` clause (no scoring); sort is `loggedAt`
+  plus the record id as tiebreaker (`unmapped_type: keyword`, so an index from 0.1/0.2 without
+  the field still reads); `track_total_hits` so the total is exact past 10 000
+- **Record ids** — every record gets a UUID v7 built from its timestamp (`AuditRecord::$id`,
+  `withId()`, `RecordId::v7()`), stored as `id` (keyword) and used as the document `_id`. Time-ordered,
+  so it is a stable cursor tiebreaker (`_doc` moves when segments merge); known before the write,
+  so a Messenger redelivery after a timeout overwrites its own document instead of duplicating it
+- **`RequestRejectedException`** — Elasticsearch answered with a 4xx other than 404: a document that
+  does not fit the mapping, missing permissions, a rate limit. Previously reported as
+  `TransportUnavailableException` ("unreachable"), which sent people looking at the network
+- `audit:check` compares the *type* of every expected field with the live mapping, not just its
+  presence — `loggedAt is text, expected date` is what an index Elasticsearch created on its own
+  looks like — and reports a failing index without giving up on the others
+- Index names in `indices.default` / `indices.routing` are validated at compile time against
+  Elasticsearch's rules (lowercase, no wildcards or special characters, not starting with `-_+`)
+
+### Changed
+- **A write to a missing index is refused** (`IndexNotFoundException`, subject to `on_failure`)
+  instead of letting Elasticsearch auto-create the index with a guessed mapping — `loggedAt` as
+  `text` (every read then fails with 400), `changes` indexed field by field (mapping growth and
+  rejected documents on type conflicts), enricher attributes as `text` (`term` filters miss).
+  Verified on ES 9.1. The gateway checks existence once per index per process (one `HEAD`) and
+  forgets the answer when a write comes back 404. An index dropped under a running worker is the
+  one case that check cannot see; the README shows how to close it on the cluster
+  (`action.auto_create_index: "-audit_*,+*"`)
+- **`AuditQuery::any()` searches every routed index at once**, not only the default one, so a
+  type living in its own index is part of "everything"
+- **`id` is now a reserved document field**: an enricher attribute named `id` is refused by
+  `AuditRecord::withAttributes()` — rename it
+- **The index mapping is `dynamic: false`**: a field no enricher declared is stored but not
+  indexed, rather than mapped by guess. Declare it in `mapping()` — `audit:check` tells you when
+  you did not. Existing indices are not changed; recreate or update their mapping to opt in
+- **Doctrine records are written after the commit.** The listener collects records in
+  `postPersist`/`postUpdate`/`postRemove` and sends them in `postFlush`; `onClear` drops what a
+  failed flush collected. A rolled-back flush no longer leaves phantom history. Inside an outer
+  transaction (`wrapInTransaction`) records still go out when the inner `flush()` ends. With
+  `on_failure: throw` the exception now surfaces from `flush()` after the commit. The listener
+  is registered for `postFlush` and `onClear` in addition to the four lifecycle events
+- **A mistake in an audit declaration no longer aborts the flush** with the default policy: the
+  listener hands build errors (unknown `alwaysRecord` field, association without a representer,
+  an identifier it cannot represent) to `AuditWriter::reportFailure()` — logged under `log`,
+  `WriteFailedException` under `throw`. `WriteFailedException::$record` is therefore nullable
+- **`SecurityActorResolver` names the impersonating user** under `switch_user`
+  (`SwitchUserToken::getOriginalToken()`), not the impersonated account
+- `TransportInterface::send()` and `IndexAuditRecord` gained a third parameter, the document id.
+  Custom transports must accept it (`?string $id = null`); messages queued by 0.2 are still handled
+- `AuditQuery::where()` / `whereIn()` / `withOption()` replace an earlier value for the same key
+  instead of silently keeping it, so a `QueryExtension` can narrow a filter the caller set
+- A 400 from Elasticsearch on a search (a stale cursor, an unmapped sort) is an
+  `InvalidQueryException` carrying Elasticsearch's reason, not "unreachable"
+- `AuditReader::iterate()` takes the cursor and the stop condition from the hits Elasticsearch
+  returned, so a decorator that drops entries cannot end an export early
+- An entity whose identifier includes an association (a join entity with payload) is audited;
+  the associated entity is represented by its own identifier
+- `Change` stores a backed enum by its value and a pure enum by its name; `json_encode` would
+  have refused the latter and the record would have been lost
+- `id` joined the reserved document fields: it cannot be used as an attribute or a `where()` name
+
 ## [0.2.0] - 2026-08-26
 
 Entities audit themselves. Declare what to record and every `flush()` writes the history.

@@ -8,7 +8,8 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 
 /**
  * The worker side of MessengerTransport. Exceptions propagate on purpose:
- * Messenger's retry strategy is the right place to deal with a flaky cluster.
+ * Messenger's retry strategy is the right place to deal with a flaky cluster —
+ * and a retry is safe, because the document is written under the record's id.
  */
 final class IndexAuditRecordHandler
 {
@@ -18,6 +19,6 @@ final class IndexAuditRecordHandler
 
     public function __invoke(IndexAuditRecord $message): void
     {
-        $this->gateway->index($message->index, $message->document);
+        $this->gateway->index($message->index, $message->document, $message->id);
     }
 }

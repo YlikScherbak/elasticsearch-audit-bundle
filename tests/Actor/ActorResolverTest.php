@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Actor\SecurityActorResolver;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage;
+use Symfony\Component\Security\Core\Authentication\Token\SwitchUserToken;
 use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
 use Symfony\Component\Security\Core\User\InMemoryUser;
 
@@ -34,6 +35,15 @@ final class ActorResolverTest extends TestCase
         $storage->setToken(new UsernamePasswordToken(new InMemoryUser('alice', null), 'main'));
 
         self::assertSame('alice', (new SecurityActorResolver($storage))->resolve());
+    }
+
+    public function testSecurityResolverNamesTheImpersonatingUserNotTheImpersonated(): void
+    {
+        $admin = new UsernamePasswordToken(new InMemoryUser('admin', null), 'main');
+        $storage = new TokenStorage();
+        $storage->setToken(new SwitchUserToken(new InMemoryUser('alice', null), 'main', ['ROLE_USER'], $admin));
+
+        self::assertSame('admin', (new SecurityActorResolver($storage))->resolve(), 'who really acted — the impersonated user did nothing');
     }
 
     public function testSecurityResolverIsSilentWithoutAToken(): void

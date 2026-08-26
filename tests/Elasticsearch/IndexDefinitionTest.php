@@ -19,6 +19,16 @@ final class IndexDefinitionTest extends TestCase
         self::assertSame(['type' => 'date', 'format' => 'yyyy-MM-dd HH:mm:ss'], $definition['mappings']['properties']['loggedAt']);
     }
 
+    public function testTheRecordIdIsAKeyword(): void
+    {
+        self::assertSame(['type' => 'keyword'], (new IndexDefinition())->properties()['id']);
+    }
+
+    public function testUndeclaredFieldsAreStoredButNotIndexed(): void
+    {
+        self::assertFalse((new IndexDefinition())->toArray()['mappings']['dynamic'], 'dynamic: false — a field without a declared mapping must not be guessed at (text for a keyword, long for a later string...)');
+    }
+
     public function testObjectIdCanBeAnInteger(): void
     {
         $definition = new IndexDefinition(IndexDefinition::OBJECT_ID_INTEGER);

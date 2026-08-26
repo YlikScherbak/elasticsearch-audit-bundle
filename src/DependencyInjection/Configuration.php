@@ -45,11 +45,21 @@ final class Configuration implements ConfigurationInterface
                             ->info('Index every record goes to unless routed elsewhere.')
                             ->cannotBeEmpty()
                             ->defaultValue('audit_log')
+                            ->validate()
+                                ->ifTrue(self::invalidIndexName(...))
+                                ->thenInvalid('%s is not a valid Elasticsearch index name: lowercase, no spaces or \\ / * ? " < > | , # :, and not starting with - _ +.')
+                            ->end()
                         ->end()
                         ->arrayNode('routing')
                             ->info('Per object type index, e.g. { auth: audit_auth_log, warehouse_stock: audit_stock_log }.')
                             ->useAttributeAsKey('object_type')
-                            ->scalarPrototype()->cannotBeEmpty()->end()
+                            ->scalarPrototype()
+                                ->cannotBeEmpty()
+                                ->validate()
+                                    ->ifTrue(self::invalidIndexName(...))
+                                    ->thenInvalid('%s is not a valid Elasticsearch index name: lowercase, no spaces or \\ / * ? " < > | , # :, and not starting with - _ +.')
+                                ->end()
+                            ->end()
                             ->defaultValue([])
                         ->end()
                         ->enumNode('object_id_type')
@@ -106,5 +116,22 @@ final class Configuration implements ConfigurationInterface
             ->end();
 
         return $treeBuilder;
+    }
+
+    /**
+     * Elasticsearch's own rules for index names, checked at compile time rather than
+     * on the first write. Wildcards are refused too: an index the bundle writes to
+     * has to be one concrete index.
+     */
+    private static function invalidIndexName(mixed $name): bool
+    {
+        if (!\is_string($name)) {
+            return true;
+        }
+
+        return $name === '.' || $name === '..'
+            || \strlen($name) > 255
+            || \in_array($name[0], ['-', '_', '+'], true)
+            || preg_match('/[A-Z\s\\\\\/*?"<>|,#:]/', $name) === 1;
     }
 }

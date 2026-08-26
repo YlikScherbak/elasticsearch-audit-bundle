@@ -9,23 +9,39 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Event\OnClearEventArgs;
+use Doctrine\ORM\Event\PostFlushEventArgs;
+use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
 
 /**
  * Records entity lifecycle events during flush().
  *
- * Registered as a Doctrine listener for postPersist, postUpdate, preRemove and
- * postRemove. The remove is recorded in two steps: the record is built in
- * preRemove, while the entity still has its identifier, and written in
- * postRemove, once the delete actually happened.
+ * The records are built while the unit of work still knows the change sets —
+ * postPersist, postUpdate, and for removals preRemove (while the entity has its
+ * identifier) — but written only in postFlush, once the transaction committed.
+ * A flush that fails half-way rolls its INSERTs back and closes the manager;
+ * onClear then drops what was collected, so the history never describes a state
+ * the database did not reach.
  *
- * Everything runs inside flush(), so a failure here would abort the transaction —
- * the writer's failure policy decides whether that is wanted (it is not, by default).
+ * A flush inside an outer transaction (wrapInTransaction) is the one case where
+ * postFlush still precedes the real commit; the records are sent then anyway,
+ * since nothing later would tell the listener the transaction ended.
+ *
+ * What goes wrong while building a record — a declaration naming an unknown
+ * field, an identifier the listener cannot represent — is handed to the writer's
+ * failure policy like a failed write, so with the default "log" the flush goes
+ * through and the mistake is in the log.
  *
  * @internal register through the bundle configuration (doctrine.enabled)
  */
 final class AuditSubscriber
 {
+    public const EVENTS = [Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear];
+
+    /** @var list<AuditRecord> records built during the current flush, written after its commit */
+    private array $pending = [];
+
     /** @var array<int, AuditRecord> records for entities being removed, keyed by object id */
     private array $pendingRemovals = [];
 
@@ -44,7 +60,7 @@ final class AuditSubscriber
         $record = $this->recordFor($args, AuditEvent::CREATE);
 
         if ($record !== null) {
-            $this->writer->write($record);
+            $this->pending[] = $record;
         }
     }
 
@@ -59,7 +75,7 @@ final class AuditSubscriber
             return;
         }
 
-        $this->writer->write($record);
+        $this->pending[] = $record;
     }
 
     /**
@@ -84,8 +100,32 @@ final class AuditSubscriber
         unset($this->pendingRemovals[$key]);
 
         if ($record !== null) {
+            $this->pending[] = $record;
+        }
+    }
+
+    /**
+     * The transaction is committed: send what this flush collected.
+     */
+    public function postFlush(PostFlushEventArgs $args): void
+    {
+        $records = $this->pending;
+        $this->pending = [];
+        $this->pendingRemovals = [];
+
+        foreach ($records as $record) {
             $this->writer->write($record);
         }
+    }
+
+    /**
+     * The manager was cleared — after a failed flush, or by the application: whatever
+     * was collected belongs to a flush that will not commit.
+     */
+    public function onClear(OnClearEventArgs $args): void
+    {
+        $this->pending = [];
+        $this->pendingRemovals = [];
     }
 
     /**
@@ -94,28 +134,40 @@ final class AuditSubscriber
     private function recordFor(LifecycleEventArgs $args, string $event, bool $withChanges = true): ?AuditRecord
     {
         $entity = $args->getObject();
-        $metadata = $this->metadataFactory->for($entity);
+        $record = null;
 
-        if ($metadata === null) {
+        try {
+            $metadata = $this->metadataFactory->for($entity);
+
+            if ($metadata === null) {
+                return null;
+            }
+
+            $em = $args->getObjectManager();
+            $id = $this->identifierOf($em, $entity);
+
+            if ($id === null) {
+                return null; // nothing to attach a history to
+            }
+
+            $record = new AuditRecord($metadata->objectType, $id, $event);
+
+            if ($withChanges) {
+                $record = $record->withChanges((new ChangeSetBuilder($em))->build($entity, $metadata));
+            }
+
+            return $record;
+        } catch (\Throwable $e) {
+            $this->writer->reportFailure($e, $record);
+
             return null;
         }
-
-        $em = $args->getObjectManager();
-        $id = $this->identifierOf($em, $entity);
-
-        if ($id === null) {
-            return null; // nothing to attach a history to
-        }
-
-        $record = new AuditRecord($metadata->objectType, $id, $event);
-
-        if ($withChanges) {
-            $record = $record->withChanges((new ChangeSetBuilder($em))->build($entity, $metadata));
-        }
-
-        return $record;
     }
 
+    /**
+     * Identifiers are ints, strings, objects with a string form (Uuid, Ulid, enums)
+     * or — in a composite key — other entities, represented by their own identifier.
+     */
     private function identifierOf(EntityManagerInterface $em, object $entity): int|string|null
     {
         $values = $em->getClassMetadata($entity::class)->getIdentifierValues($entity);
@@ -124,7 +176,7 @@ final class AuditSubscriber
             return null;
         }
 
-        $parts = array_map(self::stringify(...), array_values($values));
+        $parts = array_map(fn (mixed $value): string => $this->stringify($em, $value), array_values($values));
 
         if (\count($parts) === 1) {
             $only = reset($values);
@@ -135,16 +187,14 @@ final class AuditSubscriber
         return implode('|', $parts); // composite key
     }
 
-    /**
-     * Identifiers are ints, strings or objects with a string form (Uuid, Ulid, enums).
-     */
-    private static function stringify(mixed $value): string
+    private function stringify(EntityManagerInterface $em, mixed $value): string
     {
         return match (true) {
             \is_string($value) => $value,
             \is_int($value) => (string) $value,
             $value instanceof \Stringable => (string) $value,
             $value instanceof \BackedEnum => (string) $value->value,
+            \is_object($value) => (string) ($this->identifierOf($em, $value) ?? throw new \LogicException(sprintf('%s has no identifier yet and cannot be part of an audit object id.', get_debug_type($value)))),
             default => throw new \LogicException(sprintf('Cannot use a %s as an audit object id.', get_debug_type($value))),
         };
     }

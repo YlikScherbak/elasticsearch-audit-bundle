@@ -19,10 +19,10 @@ final class MessengerTransport implements TransportInterface
     {
     }
 
-    public function send(string $index, array $document): void
+    public function send(string $index, array $document, ?string $id = null): void
     {
         try {
-            $this->bus->dispatch(new IndexAuditRecord($index, $document));
+            $this->bus->dispatch(new IndexAuditRecord($index, $document, $id));
         } catch (\Throwable $e) {
             throw TransportUnavailableException::because($e);
         }

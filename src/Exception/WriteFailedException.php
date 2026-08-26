@@ -12,17 +12,21 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
  */
 final class WriteFailedException extends \RuntimeException implements AuditException
 {
-    private function __construct(string $message, public readonly AuditRecord $record, \Throwable $previous)
+    /**
+     * @param AuditRecord|null $record null when the failure happened before a record existed
+     *                                 (the Doctrine listener could not build one)
+     */
+    private function __construct(string $message, public readonly ?AuditRecord $record, \Throwable $previous)
     {
         parent::__construct($message, 0, $previous);
     }
 
-    public static function for(AuditRecord $record, \Throwable $previous): self
+    public static function for(?AuditRecord $record, \Throwable $previous): self
     {
-        return new self(
-            sprintf('Writing the audit record %s#%s (%s) failed: %s', $record->objectType, $record->objectId, $record->event, $previous->getMessage()),
-            $record,
-            $previous,
-        );
+        $message = $record === null
+            ? sprintf('An audit record could not be built: %s', $previous->getMessage())
+            : sprintf('Writing the audit record %s#%s (%s) failed: %s', $record->objectType, $record->objectId, $record->event, $previous->getMessage());
+
+        return new self($message, $record, $previous);
     }
 }

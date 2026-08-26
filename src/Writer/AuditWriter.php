@@ -20,8 +20,8 @@ use Psr\Log\NullLogger;
 /**
  * The one entry point for writing history.
  *
- * Completes the record (timestamp, actor), lets the application's enrichers add
- * their attributes, routes it to an index and hands it to the transport. What
+ * Completes the record (timestamp, actor, id), lets the application's enrichers
+ * add their attributes, routes it to an index and hands it to the transport. What
  * happens when that fails is decided by the FailurePolicy — by default the
  * failure is logged and swallowed, because an audit log that can take the
  * business operation down is worse than a gap in the history.
@@ -92,9 +92,9 @@ final class AuditWriter
             $index = $this->indexResolver->resolve($record->objectType);
             $transport = $immediately ? $this->immediateTransport : $this->transport;
 
-            $transport->send($index, $record->toDocument());
+            $transport->send($index, $record->toDocument(), $record->id);
         } catch (\Throwable $e) {
-            $this->fail($record, $e);
+            $this->reportFailure($e, $record);
         }
     }
 
@@ -111,6 +111,10 @@ final class AuditWriter
             $record = $record->withActor($this->actorResolver->resolve());
         }
 
+        if ($record->id === null) {
+            $record = $record->withId(RecordId::v7($record->loggedAt ?? throw new \LogicException('unreachable: the timestamp was just set')));
+        }
+
         foreach ($this->enrichers as $enricher) {
             if ($enricher->supports($record)) {
                 $record = $enricher->enrich($record);
@@ -120,9 +124,19 @@ final class AuditWriter
         return $record;
     }
 
-    private function fail(AuditRecord $record, \Throwable $e): void
+    /**
+     * Applies the failure policy to something that kept a record from being written —
+     * a transport error, or (for the Doctrine listener) a record that could not even be
+     * built, in which case there is no record to report. Log: logged and done. Throw:
+     * WriteFailedException.
+     *
+     * @throws WriteFailedException
+     */
+    public function reportFailure(\Throwable $e, ?AuditRecord $record = null): void
     {
-        $this->events?->dispatch(new RecordFailedEvent($record, $e));
+        if ($record !== null) {
+            $this->events?->dispatch(new RecordFailedEvent($record, $e));
+        }
 
         if ($this->failurePolicy === FailurePolicy::Throw) {
             throw WriteFailedException::for($record, $e);
@@ -130,9 +144,9 @@ final class AuditWriter
 
         $this->logger->error('Audit record could not be written: {reason}', [
             'reason' => $e->getMessage(),
-            'objectType' => $record->objectType,
-            'objectId' => $record->objectId,
-            'event' => $record->event,
+            'objectType' => $record?->objectType,
+            'objectId' => $record?->objectId,
+            'event' => $record?->event,
             'exception' => $e,
         ]);
     }

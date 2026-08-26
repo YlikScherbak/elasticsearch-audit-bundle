@@ -85,6 +85,8 @@ final class WriteAndReadBackTest extends ElasticsearchTestCase
 
         $orders = $this->gateway->search($this->index, ['query' => ['term' => ['salesType' => 3]], 'sort' => ['objectId' => 'asc']]);
         self::assertSame(2, $orders['hits']['total']['value']);
+        self::assertSame($orders['hits']['hits'][0]['_id'], $orders['hits']['hits'][0]['_source']['id'], 'the record id is the document id');
+        unset($orders['hits']['hits'][0]['_source']['id']);
         self::assertSame([
             'objectType' => 'order',
             'objectId' => 42,
@@ -122,6 +124,29 @@ final class WriteAndReadBackTest extends ElasticsearchTestCase
         $this->expectException(IndexNotFoundException::class);
 
         $this->gateway->search($this->index, ['query' => ['match_all' => new \stdClass()]]);
+    }
+
+    public function testWritingTheSameRecordTwiceLeavesOneDocument(): void
+    {
+        $this->gateway->createIndex($this->index, (new IndexDefinition())->toArray());
+        $document = (new AuditRecord('order', 1, AuditEvent::CREATE, new \DateTimeImmutable()))->withId('0198e6b0-0000-7000-8000-000000000001')->toDocument();
+
+        $this->gateway->index($this->index, $document, $document['id']);
+        $this->gateway->index($this->index, $document, $document['id']); // the retry
+        self::client()->indices()->refresh(['index' => $this->index]);
+
+        self::assertSame(1, $this->gateway->search($this->index, ['query' => ['match_all' => new \stdClass()]])['hits']['total']['value']);
+    }
+
+    public function testAWriteToAMissingIndexDoesNotLetElasticsearchGuessAMapping(): void
+    {
+        try {
+            $this->gateway->index($this->index, (new AuditRecord('order', 1, AuditEvent::CREATE, new \DateTimeImmutable()))->toDocument());
+            self::fail('expected an exception');
+        } catch (IndexNotFoundException) {
+        }
+
+        self::assertFalse($this->gateway->indexExists($this->index), 'the index must not have been auto-created with a guessed mapping');
     }
 
     public function testWithTheThrowPolicyAMissingIndexIsNotSwallowed(): void

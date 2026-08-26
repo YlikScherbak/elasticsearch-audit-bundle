@@ -76,6 +76,29 @@ bin/console audit:check          # cluster reachable? indices there? every field
 `audit:index:create --dump` prints the mapping instead, for when the index is provisioned by
 other means (Terraform, an ILM policy, a hand-written template).
 
+The bundle refuses to write to an index that does not exist, because Elasticsearch would
+otherwise create it on the fly with a guessed mapping — `loggedAt` as `text`, every read failing
+from then on. It checks once per index per process; an index dropped *under* a running worker is
+the one case that check cannot see. Close that gap on the cluster, where it belongs, by keeping
+Elasticsearch from auto-creating audit indices at all:
+
+```yaml
+# elasticsearch.yml — or PUT _cluster/settings {"persistent": {"action.auto_create_index": "-audit_*,+*"}}
+action.auto_create_index: "-audit_*,+*"
+```
+
+With that in place a write to a missing index is a clean `IndexNotFoundException` whatever the
+bundle remembers.
+
+The index has to exist before the first record: **a write to a missing index is refused**
+(`IndexNotFoundException`, handled by `on_failure` like any other failure) rather than left to
+Elasticsearch, which would create the index on the fly with a guessed mapping — `loggedAt` as
+`text`, so every read fails; `changes` indexed field by field, so later documents are rejected
+over type conflicts. The check costs one `HEAD` per index per process. The mapping the bundle
+creates is `dynamic: false`: a field nobody declared is stored with the document but not
+indexed, and `audit:check` reports it, as it does a field mapped with another type than the one
+declared (the sign of an index Elasticsearch created on its own — the fix is a reindex).
+
 ## Recording an action
 
 ```php
@@ -200,9 +223,162 @@ borsche_elasticsearch_audit:
     connection: default        # the Doctrine connection the listener attaches to
 ```
 
-Everything happens inside `flush()`. With the default `on_failure: log` an unreachable cluster
-costs you a history entry, never the transaction; with `throw` it aborts the flush — choose
-deliberately.
+Records are built during `flush()`, while Doctrine still knows the change sets, and **written
+once the transaction has committed** (`postFlush`). A flush that fails half-way leaves no trace
+in the history, and a rolled-back order never shows up as created. Inside an outer transaction
+(`wrapInTransaction()`) the records are sent when the inner `flush()` finishes, since nothing
+later would tell the listener the transaction ended. With the default `on_failure: log` an
+unreachable cluster costs you a history entry, never the transaction.
+
+> **With `on_failure: throw`, read this twice.** The `WriteFailedException` surfaces from
+> `flush()` *after* the commit: the data **is** in the database, the history entry is not. Code
+> that catches exceptions around `flush()` and treats them as "the save failed" — showing an
+> error, retrying, rolling back something else — will be wrong about that. Catch
+> `WriteFailedException` separately, or keep `log` and alert on `RecordFailedEvent` instead.
+
+A mistake in an audit declaration — `alwaysRecord` naming a field that is not audited, an
+association without a representer — is handled by the same policy: logged and skipped by
+default, fatal to the flush with `throw`. Composite identifiers are joined with `|`; an
+identifier that is itself an entity is represented by that entity's identifier.
+
+## Reading the history
+
+```php
+use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
+use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
+
+$page = $this->reader->find(
+    AuditQuery::for('order')
+        ->withObjectId(42)                          // one object's history...
+        ->withEvents('update', 'order_call')        // ...or by event
+        ->withActors('7')                           // who
+        ->between($since, $until)                   // when (either side may be null)
+        ->where('salesType', 3)                     // any attribute an enricher added
+        ->whereIn('warehouseId', [1, 2])
+        ->page(2, 50)                               // newest first by default; ->oldestFirst()
+);
+
+$page->entries;          // list<AuditEntry>: id, objectType, objectId, event, loggedAt, actor, changes, attributes, extra
+$page->total;            // exact
+$page->totalPages();
+$page->toArray();        // ['items' => [...], 'pagination' => [currentPage, limit, total, totalPages, nextCursor]]
+```
+
+`AuditQuery::any()` reads across object types — every index the configuration routes to, in one
+multi-index search, so a type that lives in its own index is not left out. Every filter is an exact
+match on an indexed field, so queries stay fast at millions of records; a filter on a base field
+uses its named method, an attribute uses `where()`.
+
+### Two ways to page
+
+`page(n, limit)` is the familiar one and stops at row 10 000 — Elasticsearch's `from/size`
+ceiling. The query refuses a page beyond it with an `InvalidQueryException` that says so, rather
+than letting the cluster answer 400. For deep paging, "load more" buttons and exports, page by
+cursor instead:
+
+```php
+$page = $this->reader->find($query->page(1, 100));
+// ... later, for the next page:
+$next = $this->reader->find($query->after($page->nextCursor()));
+```
+
+The cursor is the sort value of the last entry: `loggedAt` plus the record's id, a time-ordered
+UUID, which breaks ties in write order and — unlike Elasticsearch's `_doc` — does not move when
+segments merge. It stays valid while new records arrive. To stream everything — an XLSX export,
+a backfill — let the reader do the cursor loop:
+
+```php
+foreach ($this->reader->iterate(AuditQuery::for('order')->since($start)->oldestFirst(), batchSize: 500) as $entry) {
+    $sheet->addRow([$entry->loggedAt->format('Y-m-d H:i'), $entry->actor, $entry->event, json_encode($entry->changes)]);
+}
+```
+
+### Filters your application defines
+
+A history screen filters by things the bundle knows nothing about: operators of a country, the
+current user's own team, what the viewer is allowed to see. Carry such parameters as **options**
+and turn them into real filters in a `QueryExtensionInterface` — it speaks `AuditQuery`, never
+Elasticsearch, and runs on every read:
+
+```php
+use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
+
+final class CountryFilter implements QueryExtensionInterface
+{
+    public function __construct(private UserRepository $users) {}
+
+    public function extend(AuditQuery $query): AuditQuery
+    {
+        if (!$query->hasOption('country')) {
+            return $query;
+        }
+
+        $ids = $this->users->idsInCountry($query->option('country'));
+
+        return $query->withActors(...($ids ?: ['-']));   // no operators → match nobody, not everybody
+    }
+}
+
+// in the controller:
+$query = AuditQuery::for('order')->withOption('country', $request->query->get('country'));
+```
+
+Because extensions see every query, they are also the place for **visibility rules** — restrict
+to the actors the current user may see, and no endpoint can forget to. Setting an attribute or
+option a second time replaces the first value, so an extension can narrow a filter the
+controller already set.
+
+### Making a page readable
+
+Records store identifiers. A `RecordDecoratorInterface` receives the whole page and attaches what
+a screen wants — one query per entity type, not one per line:
+
+```php
+use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
+
+final class ActorNames implements RecordDecoratorInterface
+{
+    public function __construct(private UserRepository $users) {}
+
+    public function decorate(array $entries): array
+    {
+        $users = $this->users->findIndexedByIds(array_unique(array_filter(array_map(fn ($e) => $e->actor, $entries))));
+
+        return array_map(
+            fn (AuditEntry $e) => $e->withExtra(['actor' => $users[$e->actor] ?? null ? ['id' => $e->actor, 'name' => $users[$e->actor]->getName()] : null]),
+            $entries,
+        );
+    }
+}
+```
+
+`extra` is never stored — it is computed on read, so a renamed user shows the current name.
+Both extensions and decorators are picked up automatically when they are registered as services.
+
+### An endpoint
+
+```php
+#[Route('/api/history', methods: ['GET'])]
+public function history(Request $request, AuditReader $reader): JsonResponse
+{
+    $query = AuditQuery::for($request->query->getString('objectType', 'order'))
+        ->page($request->query->getInt('page', 1), min(100, $request->query->getInt('limit', 20)));
+
+    if ($id = $request->query->get('objectId')) {
+        $query = $query->withObjectId($id);
+    }
+
+    try {
+        return $this->json($reader->find($query)->toArray());
+    } catch (InvalidQueryException $e) {
+        return $this->json(['error' => $e->getMessage()], 400);
+    }
+}
+```
+
+Unlike the writer, the reader does not swallow failures: an unreachable cluster is a
+`TransportUnavailableException`, a missing index an `IndexNotFoundException` — map them to the
+HTTP status you want.
 
 ## Reacting to records
 
@@ -245,9 +421,10 @@ final class CountAuditFailures
 ### Who did it
 
 The bundle asks each registered `ActorResolverInterface` in turn and takes the first answer.
-With `symfony/security-core` installed, the security token is asked first. Work that runs
-without a token — message handlers, console commands — usually knows who it is acting for;
-register a resolver and it is picked up automatically:
+With `symfony/security-core` installed, the security token is asked first. Under `switch_user`
+that is the **impersonating** user — the administrator who acted, not the account they were
+looking at. Work that runs without a token — message handlers, console commands — usually
+knows who it is acting for; register a resolver and it is picked up automatically:
 
 ```php
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
@@ -321,7 +498,9 @@ framework:
 The request now only pays for the dispatch; a worker writes the document. The message carries
 plain arrays, so it serialises with any Messenger serializer and survives a deploy that changes
 the model. Failures in the worker propagate on purpose — Messenger's retry strategy is the right
-place to deal with a flaky cluster.
+place to deal with a flaky cluster — and a retry is safe: the document is written under the
+record's id, so a redelivery after a timeout overwrites the same document instead of adding a
+second one.
 
 A record that must be visible before the request ends can bypass the queue:
 
@@ -339,13 +518,16 @@ Set `on_failure: throw` when the opposite holds (compliance logs): the failure s
 `WriteFailedException` carrying the record.
 
 Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Exception\AuditException`:
-`NotConfiguredException`, `IndexNotFoundException`, `TransportUnavailableException`,
-`WriteFailedException`.
+`NotConfiguredException`, `IndexNotFoundException`, `TransportUnavailableException` (the cluster
+did not answer), `RequestRejectedException` (it answered and refused — a document that does not
+fit the mapping, missing permissions, a rate limit; retrying will not help), `InvalidQueryException`
+(a query the bundle or Elasticsearch rejected), `WriteFailedException`.
 
 ## The document
 
 ```json
 {
+  "id": "01a03df1-0200-7c3e-9a1b-5f6d7e8f9a0b",
   "objectType": "order",
   "objectId": 42,
   "event": "update",
@@ -356,8 +538,10 @@ Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Except
 }
 ```
 
-`source` holds the actor. `loggedAt` is always UTC in `yyyy-MM-dd HH:mm:ss`. Everything after
-`changes` is an attribute added by an enricher.
+`id` is the document's `_id` as well: a UUID v7 built from `loggedAt`, so ids sort in time order
+(pass your own with `withId()` when you have a natural one). `source` holds the actor. `loggedAt`
+is always UTC in `yyyy-MM-dd HH:mm:ss`. Everything after `changes` is an attribute added by an
+enricher.
 
 ## Roadmap
 
@@ -365,7 +549,7 @@ Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Except
 |---|---|
 | 0.1 | Recording arbitrary actions, sync and Messenger transports, enrichers, index commands — done |
 | 0.2 | Automatic Doctrine entity auditing (`AuditableInterface`, `#[Auditable]`), PSR-14 events — done |
-| 0.3 | Reading: `AuditQuery` / `AuditReader` with filters, pagination, `search_after`, decorators |
+| 0.3 | Reading: `AuditQuery` / `AuditReader` with filters, pagination, `search_after`, decorators — done |
 | 0.4 | Coalescing many small changes into one record |
 | 1.0 | The API settles |
 

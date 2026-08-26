@@ -8,9 +8,14 @@ use Borsche\ElasticsearchAuditBundle\Actor\SecurityActorResolver;
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
+use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
+use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
+use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
@@ -33,6 +38,27 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertInstanceOf(SyncTransport::class, $container->get(TransportInterface::class));
     }
 
+    public function testTheReaderIsWiredWithExtensionsAndDecorators(): void
+    {
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']]], static function (ContainerBuilder $c): void {
+            $c->setDefinition(MineOnlyExtension::class, (new Definition(MineOnlyExtension::class))->setAutoconfigured(true));
+            $c->setDefinition(ActorNameDecorator::class, (new Definition(ActorNameDecorator::class))->setAutoconfigured(true));
+        });
+
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+        $gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 1], 'hits' => [
+            ['_id' => 'x', '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => 'me', 'changes' => []]],
+        ]]];
+
+        /** @var AuditReader $reader */
+        $reader = $container->get(AuditReader::class);
+        $page = $reader->find(AuditQuery::for('order'));
+
+        self::assertContains(['term' => ['source' => 'me']], $gateway->searches[0]['body']['query']['bool']['filter']);
+        self::assertSame('Me, Myself', $page->entries[0]->extra['actorName']);
+    }
+
     public function testTheDoctrineListenerIsAttachedToTheFourLifecycleEvents(): void
     {
         $definition = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['connection' => 'audit']])
@@ -40,7 +66,7 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
         $events = array_column($definition->getTag('doctrine.event_listener'), 'event');
 
-        self::assertSame(['postPersist', 'postUpdate', 'preRemove', 'postRemove'], $events);
+        self::assertSame(['postPersist', 'postUpdate', 'preRemove', 'postRemove', 'postFlush', 'onClear'], $events);
         self::assertSame('audit', $definition->getTag('doctrine.event_listener')[0]['connection']);
     }
 
@@ -170,5 +196,21 @@ final class RecordingBus implements MessageBusInterface
     public function dispatch(object $message, array $stamps = []): Envelope
     {
         return new Envelope($message);
+    }
+}
+
+final class MineOnlyExtension implements QueryExtensionInterface
+{
+    public function extend(AuditQuery $query): AuditQuery
+    {
+        return $query->withActors('me');
+    }
+}
+
+final class ActorNameDecorator implements RecordDecoratorInterface
+{
+    public function decorate(array $entries): array
+    {
+        return array_map(static fn (AuditEntry $e) => $e->withExtra(['actorName' => 'Me, Myself']), $entries);
     }
 }

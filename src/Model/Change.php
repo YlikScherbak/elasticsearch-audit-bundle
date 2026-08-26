@@ -39,12 +39,18 @@ final class Change
 
     /**
      * Dates are serialised in UTC the way the index mapping expects them (the same
-     * form as loggedAt); everything else is left to json_encode.
+     * form as loggedAt); enums by their value or, for a pure enum, their name — which
+     * json_encode would refuse, and a record it refuses is a record lost. Everything
+     * else is left to json_encode.
      */
     private static function normalize(mixed $value): mixed
     {
         if ($value instanceof \DateTimeInterface) {
             return \DateTimeImmutable::createFromInterface($value)->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+        }
+
+        if ($value instanceof \UnitEnum) {
+            return $value instanceof \BackedEnum ? $value->value : $value->name;
         }
 
         if (\is_array($value)) {

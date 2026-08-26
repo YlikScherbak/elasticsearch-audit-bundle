@@ -11,6 +11,12 @@ namespace Borsche\ElasticsearchAuditBundle\Elasticsearch;
  * "changes" is deliberately not indexed (enabled: false). Its shape differs per
  * object type and per field, and indexing it would blow the mapping up over
  * time; anything worth filtering on belongs in a top-level attribute instead.
+ *
+ * The mapping is "dynamic: false": a field nobody declared is stored with the
+ * document but not indexed, instead of Elasticsearch guessing a type for it (text
+ * for what should be a keyword, long for what later turns out to be a string and
+ * then rejects the document). Enrichers declare their fields in mapping(), and
+ * audit:check reports a field that is missing or mapped with another type.
  */
 final class IndexDefinition
 {
@@ -64,13 +70,13 @@ final class IndexDefinition
     /**
      * The body of an indices.create request.
      *
-     * @return array{settings: array<string, mixed>, mappings: array{properties: array<string, array<string, mixed>>}}
+     * @return array{settings: array<string, mixed>, mappings: array{dynamic: false, properties: array<string, array<string, mixed>>}}
      */
     public function toArray(): array
     {
         return [
             'settings' => $this->settings,
-            'mappings' => ['properties' => $this->properties()],
+            'mappings' => ['dynamic' => false, 'properties' => $this->properties()],
         ];
     }
 
@@ -80,6 +86,7 @@ final class IndexDefinition
     private function baseProperties(): array
     {
         return [
+            'id' => ['type' => 'keyword'],
             'objectType' => ['type' => 'keyword'],
             'objectId' => ['type' => $this->objectIdType],
             'event' => ['type' => 'keyword'],

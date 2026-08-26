@@ -36,6 +36,9 @@ final class AuditWriterTest extends TestCase
     {
         $this->writer(routing: ['auth' => 'audit_auth'])->record('auth', 'alice', 'login_failed', ['ip' => '10.0.0.1']);
 
+        $document = $this->gateway->only('audit_auth');
+        unset($document['id']);
+
         self::assertSame([
             'objectType' => 'auth',
             'objectId' => 'alice',
@@ -43,7 +46,29 @@ final class AuditWriterTest extends TestCase
             'loggedAt' => '2026-08-26 12:00:00',
             'source' => 'system',
             'changes' => ['ip' => '10.0.0.1'],
-        ], $this->gateway->only('audit_auth'));
+        ], $document);
+    }
+
+    public function testEveryRecordGetsATimeOrderedIdThatIsAlsoTheDocumentId(): void
+    {
+        $writer = $this->writer();
+        $writer->record('order', 1, AuditEvent::CREATE);
+        $writer->record('order', 2, AuditEvent::CREATE);
+
+        [$first, $second] = $this->gateway->documents['audit_log'];
+
+        self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $first['id'], 'a UUID v7');
+        self::assertNotSame($first['id'], $second['id']);
+        self::assertSame([$first['id'], $second['id']], $this->gateway->ids['audit_log'], 'the same id is the Elasticsearch _id, so a retried write overwrites instead of duplicating');
+        $expectedTime = str_pad(dechex((int) (new \DateTimeImmutable('2026-08-26 12:00:00', new \DateTimeZone('UTC')))->format('Uv')), 12, '0', STR_PAD_LEFT);
+        self::assertSame($expectedTime, substr(str_replace('-', '', $first['id']), 0, 12), 'the time part comes from loggedAt, not from the wall clock');
+    }
+
+    public function testAnExplicitIdIsKept(): void
+    {
+        $this->writer()->write((new AuditRecord('order', 1, AuditEvent::CREATE))->withId('my-own-id'));
+
+        self::assertSame(['my-own-id'], $this->gateway->ids['audit_log']);
     }
 
     public function testExplicitActorAndTimeWin(): void
@@ -141,7 +166,7 @@ final class AuditWriterTest extends TestCase
         $queued = new class implements TransportInterface {
             public int $sent = 0;
 
-            public function send(string $index, array $document): void
+            public function send(string $index, array $document, ?string $id = null): void
             {
                 ++$this->sent;
             }

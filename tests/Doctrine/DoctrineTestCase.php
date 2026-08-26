@@ -21,6 +21,7 @@ use Doctrine\ORM\Events;
 use Doctrine\ORM\Mapping\Driver\AttributeDriver;
 use Doctrine\ORM\Tools\SchemaTool;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\AbstractLogger;
 
 /**
  * A real EntityManager on an in-memory SQLite database with the audit listener
@@ -30,6 +31,11 @@ abstract class DoctrineTestCase extends TestCase
 {
     protected EntityManagerInterface $em;
     protected InMemoryGateway $gateway;
+    private Configuration $ormConfig;
+    private \Doctrine\DBAL\Connection $connection;
+
+    /** @var list<string> messages the writer logged */
+    protected array $logs = [];
 
     protected function setUp(): void
     {
@@ -50,21 +56,49 @@ abstract class DoctrineTestCase extends TestCase
         }
 
         $connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config);
+        $this->ormConfig = $config;
+        $this->connection = $connection;
 
         $this->em = new EntityManager($connection, $config);
         $this->gateway = new InMemoryGateway();
 
         (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
 
-        $listener = new AuditSubscriber($this->writer(FailurePolicy::Log), new AuditMetadataFactory(), skipEmptyUpdates: true);
-        $this->em->getEventManager()->addEventListener([Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove], $listener);
+        $this->attachListener(FailurePolicy::Log);
+    }
+
+    /**
+     * What ManagerRegistry::resetManager() does after a failed flush closed the manager:
+     * a fresh EntityManager on the same connection, with the same listeners.
+     */
+    protected function reopen(): void
+    {
+        $this->em = new EntityManager($this->connection, $this->ormConfig, $this->em->getEventManager());
+    }
+
+    protected function attachListener(FailurePolicy $policy): void
+    {
+        $listener = new AuditSubscriber($this->writer($policy), new AuditMetadataFactory(), skipEmptyUpdates: true);
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, $listener);
     }
 
     protected function writer(FailurePolicy $policy): AuditWriter
     {
         $transport = new SyncTransport($this->gateway);
+        $logs = &$this->logs;
+        $logger = new class($logs) extends AbstractLogger {
+            /** @param list<string> $logs */
+            public function __construct(private array &$logs)
+            {
+            }
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), [], $policy);
+            public function log($level, \Stringable|string $message, array $context = []): void
+            {
+                $this->logs[] = strtr((string) $message, ['{reason}' => (string) ($context['reason'] ?? '')]);
+            }
+        };
+
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), [], $policy, $logger);
     }
 
     /**

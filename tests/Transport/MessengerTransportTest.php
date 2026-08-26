@@ -28,11 +28,12 @@ final class MessengerTransportTest extends TestCase
             }
         };
 
-        (new MessengerTransport($bus))->send('audit_log', ['objectType' => 'order']);
+        (new MessengerTransport($bus))->send('audit_log', ['objectType' => 'order'], 'rec-1');
 
         self::assertInstanceOf(IndexAuditRecord::class, $bus->dispatched);
         self::assertSame('audit_log', $bus->dispatched->index);
         self::assertSame(['objectType' => 'order'], $bus->dispatched->document);
+        self::assertSame('rec-1', $bus->dispatched->id);
     }
 
     public function testABrokenBusIsReportedAsTransportUnavailable(): void
@@ -54,8 +55,30 @@ final class MessengerTransportTest extends TestCase
     {
         $gateway = new InMemoryGateway();
 
-        (new IndexAuditRecordHandler($gateway))(new IndexAuditRecord('audit_log', ['objectType' => 'order', 'objectId' => 1]));
+        (new IndexAuditRecordHandler($gateway))(new IndexAuditRecord('audit_log', ['objectType' => 'order', 'objectId' => 1], 'rec-1'));
 
         self::assertSame(['objectType' => 'order', 'objectId' => 1], $gateway->only('audit_log'));
+        self::assertSame(['rec-1'], $gateway->ids['audit_log']);
+    }
+
+    public function testARedeliveredMessageDoesNotDuplicateTheRecord(): void
+    {
+        $gateway = new InMemoryGateway();
+        $handler = new IndexAuditRecordHandler($gateway);
+        $message = new IndexAuditRecord('audit_log', ['objectType' => 'order', 'objectId' => 1], 'rec-1');
+
+        $handler($message);
+        $handler($message); // Messenger retried after a timeout on a write that had in fact succeeded
+
+        self::assertCount(1, $gateway->documents['audit_log']);
+    }
+
+    public function testAMessageFromBeforeIdsExistedIsStillHandled(): void
+    {
+        $gateway = new InMemoryGateway();
+
+        (new IndexAuditRecordHandler($gateway))(new IndexAuditRecord('audit_log', ['objectType' => 'order']));
+
+        self::assertSame([null], $gateway->ids['audit_log']);
     }
 }

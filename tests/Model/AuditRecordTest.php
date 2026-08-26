@@ -37,6 +37,15 @@ final class AuditRecordTest extends TestCase
         ], $record->toDocument());
     }
 
+    public function testTheIdIsPartOfTheDocumentWhenSet(): void
+    {
+        $record = (new AuditRecord('order', 1, AuditEvent::CREATE, new \DateTimeImmutable('2026-08-26 12:00:00', new \DateTimeZone('UTC'))))->withId('0198e6b0-1234-7abc-8def-0123456789ab');
+
+        self::assertSame('0198e6b0-1234-7abc-8def-0123456789ab', $record->id);
+        self::assertSame('0198e6b0-1234-7abc-8def-0123456789ab', $record->toDocument()['id']);
+        self::assertContains('id', AuditRecord::reservedFields());
+    }
+
     public function testTimestampIsAlwaysWrittenInUtc(): void
     {
         $record = (new AuditRecord('user', 'u-1', AuditEvent::CREATE))

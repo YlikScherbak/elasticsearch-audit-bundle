@@ -16,8 +16,8 @@ final class SyncTransport implements TransportInterface
     {
     }
 
-    public function send(string $index, array $document): void
+    public function send(string $index, array $document, ?string $id = null): void
     {
-        $this->gateway->index($index, $document);
+        $this->gateway->index($index, $document, $id);
     }
 }

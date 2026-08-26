@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Elasticsearch;
 
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
+use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
+use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 
 /**
@@ -16,9 +18,13 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 interface GatewayInterface
 {
     /**
+     * Stores one document. The index has to exist already: a write must never let
+     * Elasticsearch create the index with a guessed mapping (see audit:index:create).
+     *
      * @param array<string, mixed> $document
      *
-     * @throws IndexNotFoundException
+     * @throws IndexNotFoundException      the index does not exist — nothing was written
+     * @throws RequestRejectedException    Elasticsearch refused the document (it does not fit the mapping, say)
      * @throws TransportUnavailableException
      */
     public function index(string $index, array $document, ?string $id = null, bool $refresh = false): void;
@@ -29,6 +35,7 @@ interface GatewayInterface
      * @return array<string, mixed> the raw response
      *
      * @throws IndexNotFoundException
+     * @throws InvalidQueryException       Elasticsearch rejected the request body (a stale cursor, an unmapped sort)
      * @throws TransportUnavailableException
      */
     public function search(string $index, array $body): array;

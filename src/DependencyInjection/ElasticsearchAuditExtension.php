@@ -10,6 +10,8 @@ use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClientFactory;
@@ -17,6 +19,8 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\ElasticsearchGateway;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
+use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
+use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
@@ -43,6 +47,9 @@ final class ElasticsearchAuditExtension extends Extension
 {
     public const TAG_ENRICHER = 'borsche_elasticsearch_audit.enricher';
     public const TAG_ACTOR_RESOLVER = 'borsche_elasticsearch_audit.actor_resolver';
+    public const TAG_QUERY_EXTENSION = 'borsche_elasticsearch_audit.query_extension';
+    public const TAG_DECORATOR = 'borsche_elasticsearch_audit.decorator';
+    public const SERVICE_READER = 'borsche_elasticsearch_audit.reader';
 
     public const SERVICE_CLIENT = 'borsche_elasticsearch_audit.client';
     public const SERVICE_GATEWAY = 'borsche_elasticsearch_audit.gateway';
@@ -71,14 +78,29 @@ final class ElasticsearchAuditExtension extends Extension
 
         $container->registerForAutoconfiguration(AuditEnricherInterface::class)->addTag(self::TAG_ENRICHER);
         $container->registerForAutoconfiguration(ActorResolverInterface::class)->addTag(self::TAG_ACTOR_RESOLVER);
+        $container->registerForAutoconfiguration(QueryExtensionInterface::class)->addTag(self::TAG_QUERY_EXTENSION);
+        $container->registerForAutoconfiguration(RecordDecoratorInterface::class)->addTag(self::TAG_DECORATOR);
 
         $this->registerClient($config['client'], $container);
         $this->registerIndices($config['indices'], $container);
         $this->registerTransport($config['transport'], $config['message_bus'], $container);
         $this->registerActor($config['actor'], $container);
         $this->registerWriter($config['on_failure'], $container);
+        $this->registerReader($container);
         $this->registerDoctrine($config['doctrine'], $container);
         $this->registerCommands($container);
+    }
+
+    private function registerReader(ContainerBuilder $container): void
+    {
+        $container->setDefinition(self::SERVICE_READER, new Definition(AuditReader::class, [
+            new Reference(self::SERVICE_GATEWAY),
+            new Reference(self::SERVICE_INDEX_RESOLVER),
+            new Definition(QueryBuilder::class),
+            new TaggedIteratorArgument(self::TAG_QUERY_EXTENSION),
+            new TaggedIteratorArgument(self::TAG_DECORATOR),
+        ]));
+        $container->setAlias(AuditReader::class, self::SERVICE_READER)->setPublic(true);
     }
 
     /**
@@ -99,7 +121,7 @@ final class ElasticsearchAuditExtension extends Extension
             $doctrine['skip_empty_updates'],
         ]);
 
-        foreach (['postPersist', 'postUpdate', 'preRemove', 'postRemove'] as $event) {
+        foreach (AuditSubscriber::EVENTS as $event) {
             $listener->addTag('doctrine.event_listener', ['event' => $event, 'connection' => $doctrine['connection']]);
         }
 

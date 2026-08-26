@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\DependencyInjection;
 
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\Configuration;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
@@ -48,6 +49,38 @@ final class ConfigurationTest extends TestCase
         ]);
 
         self::assertSame(['auth' => 'audit_auth', 'stock' => 'audit_stock'], $config['indices']['routing']);
+    }
+
+    /**
+     * @param array<string, mixed> $indices
+     */
+    #[DataProvider('badIndexNames')]
+    public function testIndexNamesElasticsearchWouldRefuseAreRejected(array $indices, string $offender): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage($offender);
+
+        $this->process(['client' => ['hosts' => ['http://es:9200']], 'indices' => $indices]);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>, string}>
+     */
+    public static function badIndexNames(): iterable
+    {
+        yield 'uppercase' => [['default' => 'Audit_Log'], 'Audit_Log'];
+        yield 'leading dash' => [['default' => '-audit'], '-audit'];
+        yield 'leading underscore in routing' => [['routing' => ['auth' => '_audit_auth']], '_audit_auth'];
+        yield 'wildcard' => [['routing' => ['auth' => 'audit_*']], 'audit_*'];
+        yield 'space' => [['default' => 'audit log'], 'audit log'];
+        yield 'dot only' => [['default' => '..'], '".."'];
+    }
+
+    public function testDotsDashesAndDigitsAreFineInIndexNames(): void
+    {
+        $config = $this->process(['client' => ['hosts' => ['http://es:9200']], 'indices' => ['default' => 'crm.audit-log-2026', 'routing' => ['auth' => 'crm.audit-auth']]]);
+
+        self::assertSame('crm.audit-log-2026', $config['indices']['default']);
     }
 
     public function testUnknownTransportIsRejected(): void

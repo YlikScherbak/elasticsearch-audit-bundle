@@ -89,6 +89,36 @@ final class CommandsTest extends TestCase
         self::assertStringContainsString('audit_auth missing', $tester->getDisplay());
     }
 
+    public function testCheckFlagsAFieldMappedWithTheWrongType(): void
+    {
+        // What Elasticsearch guesses when a record lands before audit:index:create ran.
+        $guessed = (new IndexDefinition())->toArray();
+        $guessed['mappings']['properties']['loggedAt'] = ['type' => 'text'];
+        $guessed['mappings']['properties']['salesType'] = ['type' => 'long'];
+        $this->gateway->indices['audit_log'] = $guessed;
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->enricher()]));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('loggedAt is text, expected date', $tester->getDisplay());
+        self::assertStringContainsString('salesType is long, expected integer', $tester->getDisplay());
+        self::assertStringContainsString('audit_auth exists but lacks mapping for: salesType', $tester->getDisplay());
+    }
+
+    public function testCheckReportsAFailureOnOneIndexAndGoesOn(): void
+    {
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+        $this->gateway->failOn = ['mapping' => new \RuntimeException('shard unavailable')];
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('audit_log: Elasticsearch is unreachable: shard unavailable', $tester->getDisplay());
+        self::assertStringContainsString('audit_auth: Elasticsearch is unreachable: shard unavailable', $tester->getDisplay(), 'the second index is still checked');
+    }
+
     public function testCheckFailsFastWhenTheClusterIsDown(): void
     {
         $this->gateway->failWith = new \RuntimeException('refused');
