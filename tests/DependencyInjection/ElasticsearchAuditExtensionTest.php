@@ -33,6 +33,24 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertInstanceOf(SyncTransport::class, $container->get(TransportInterface::class));
     }
 
+    public function testTheDoctrineListenerIsAttachedToTheFourLifecycleEvents(): void
+    {
+        $definition = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['connection' => 'audit']])
+            ->getDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER);
+
+        $events = array_column($definition->getTag('doctrine.event_listener'), 'event');
+
+        self::assertSame(['postPersist', 'postUpdate', 'preRemove', 'postRemove'], $events);
+        self::assertSame('audit', $definition->getTag('doctrine.event_listener')[0]['connection']);
+    }
+
+    public function testDoctrineAuditingCanBeSwitchedOff(): void
+    {
+        $container = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['enabled' => false]]);
+
+        self::assertFalse($container->hasDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER));
+    }
+
     public function testCommandsAreRegisteredForTheConsole(): void
     {
         $container = $this->load(['client' => ['hosts' => ['http://localhost:9200']]]);

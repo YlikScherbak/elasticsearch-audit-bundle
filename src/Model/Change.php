@@ -38,13 +38,13 @@ final class Change
     }
 
     /**
-     * Dates are serialised the way the index mapping expects them; everything else
-     * is left to json_encode.
+     * Dates are serialised in UTC the way the index mapping expects them (the same
+     * form as loggedAt); everything else is left to json_encode.
      */
     private static function normalize(mixed $value): mixed
     {
         if ($value instanceof \DateTimeInterface) {
-            return $value->format('Y-m-d H:i:s');
+            return \DateTimeImmutable::createFromInterface($value)->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s');
         }
 
         if (\is_array($value)) {

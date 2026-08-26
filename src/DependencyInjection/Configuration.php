@@ -88,6 +88,21 @@ final class Configuration implements ConfigurationInterface
                         ->end()
                     ->end()
                 ->end()
+                ->arrayNode('doctrine')
+                    ->info('Automatic auditing of entities implementing AuditableInterface or marked #[Auditable]. Needs doctrine/orm.')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->booleanNode('enabled')->defaultTrue()->end()
+                        ->booleanNode('skip_empty_updates')
+                            ->info('Do not record an update whose audited fields did not change.')
+                            ->defaultTrue()
+                        ->end()
+                        ->scalarNode('connection')
+                            ->info('Doctrine connection name the listener is attached to.')
+                            ->defaultValue('default')
+                        ->end()
+                    ->end()
+                ->end()
             ->end();
 
         return $treeBuilder;

@@ -9,10 +9,10 @@ use PHPUnit\Framework\TestCase;
 
 final class ChangeTest extends TestCase
 {
-    public function testDatesAreFormattedLikeTheMapping(): void
+    public function testDatesAreFormattedLikeTheMappingInUtc(): void
     {
         $change = new Change(
-            new \DateTimeImmutable('2026-08-26 10:00:00', new \DateTimeZone('UTC')),
+            new \DateTime('2026-08-26 13:00:00', new \DateTimeZone('Europe/Kyiv')),
             null,
         );
 

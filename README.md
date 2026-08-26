@@ -113,9 +113,134 @@ $this->audit->record('order', 42, 'update', at: $importedAt, actor: 'legacy-impo
 
 ### Events are just strings
 
-`AuditEvent::CREATE`, `UPDATE` and `REMOVE` are what the Doctrine integration emits (coming in
-0.2). Anything else is up to you: `login_failed`, `order_call`, `google_sheet_shared`. Keep them
-stable — they are what you filter the history by.
+`AuditEvent::CREATE`, `UPDATE` and `REMOVE` are what the Doctrine integration emits. Anything
+else is up to you: `login_failed`, `order_call`, `google_sheet_shared`. Keep them stable — they
+are what you filter the history by.
+
+## Auditing Doctrine entities
+
+Declare what to record and the bundle listens to `flush()`: a `create` record when the entity is
+inserted, an `update` with `old`/`new` for every audited field that changed, a `remove` with the
+identifier the entity had. Two ways to declare, treated identically:
+
+```php
+use Borsche\ElasticsearchAuditBundle\Attribute\Auditable;
+use Borsche\ElasticsearchAuditBundle\Attribute\AuditField;
+
+#[ORM\Entity]
+#[Auditable(type: 'article', alwaysRecord: ['status'])]
+class Article
+{
+    #[ORM\Column, AuditField]
+    private string $title;
+
+    #[ORM\Column, AuditField]
+    private string $status = 'draft';
+
+    #[ORM\Column]
+    private int $views = 0;                       // not audited: changes here record nothing
+
+    #[ORM\ManyToOne, AuditField(represent: 'getName')]
+    private ?Author $author = null;               // stored as the author's name, not the object
+
+    #[ORM\ManyToMany(targetEntity: Tag::class), AuditField(represent: 'getLabel')]
+    private Collection $tags;                     // stored as ['php'] → ['php', 'elasticsearch']
+}
+```
+
+```php
+use Borsche\ElasticsearchAuditBundle\Contract\AuditableInterface;
+
+class Article implements AuditableInterface
+{
+    public function getAuditObjectType(): string { return 'article'; }
+
+    public function getAuditedFields(): array
+    {
+        return [
+            'title' => null,                                    // scalar
+            'status' => null,
+            'author' => fn (Author $a) => $a->getName(),        // to-one, through a representer
+            'tags' => fn (Tag $t) => $t->getLabel(),            // to-many, each element represented
+        ];
+    }
+
+    public function getAlwaysRecordedFields(): array { return ['status']; }
+}
+```
+
+Use the attributes when a static declaration reads well; use the interface when you need a
+closure (attributes can only name a method on the related object) or the field list depends
+on state.
+
+What gets recorded, and what deliberately does not:
+
+- **Associations are stored through their representer** — a name, an id, a small array. Storing
+  the related entity itself is neither possible nor useful in a history.
+- **Two dates for the same instant are not a change.** Doctrine compares objects by identity, so
+  re-assigning `new DateTimeImmutable('2026-08-26 10:00')` looks like a change to it; the record
+  skips it.
+- **`alwaysRecord` fields** appear on every update as `old == new`, so each history line is
+  readable on its own (the order's status next to the field that changed). They give context to
+  a change; they do not make one — an update that touched only unaudited fields records nothing
+  (`doctrine.skip_empty_updates`, default `true`).
+- **Collections** are recorded as the snapshot against the current contents, only when dirty. A
+  lazy collection is loaded first, so the `old` side is real, not empty.
+- **Removes carry no changes**, only the identifier — which is captured in `preRemove`, while the
+  entity still has one.
+
+Values are read through Doctrine's metadata, so entities need no getters. Identifiers may be
+ints, strings, `Stringable` (Uuid, Ulid) or backed enums; composite keys are joined with `|`.
+
+```yaml
+borsche_elasticsearch_audit:
+  doctrine:
+    enabled: true              # set false to keep the writer and drop the listener
+    skip_empty_updates: true
+    connection: default        # the Doctrine connection the listener attaches to
+```
+
+Everything happens inside `flush()`. With the default `on_failure: log` an unreachable cluster
+costs you a history entry, never the transaction; with `throw` it aborts the flush — choose
+deliberately.
+
+## Reacting to records
+
+Two PSR-14 events, dispatched when an event dispatcher is available:
+
+```php
+use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
+
+#[AsEventListener]
+final class RedactSecrets
+{
+    public function __invoke(RecordCreatedEvent $event): void
+    {
+        $record = $event->getRecord();
+
+        if ($record->objectType === 'user' && isset($record->changes['password'])) {
+            $event->setRecord($record->withChanges(['password' => new Change('***', '***')] + $record->changes));
+        }
+
+        if ($record->event === 'heartbeat') {
+            $event->veto();          // not written, not an error
+        }
+    }
+}
+
+#[AsEventListener]
+final class CountAuditFailures
+{
+    public function __invoke(RecordFailedEvent $event): void
+    {
+        $this->metrics->increment('audit.write_failed', ['type' => $event->record->objectType]);
+    }
+}
+```
+
+`RecordCreatedEvent` fires after the record is complete and enriched, right before it is sent;
+`RecordFailedEvent` fires on every failed write, whatever the failure policy.
 
 ### Who did it
 
@@ -238,8 +363,8 @@ Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Except
 
 | Release | Adds |
 |---|---|
-| 0.1 | Recording arbitrary actions, sync and Messenger transports, enrichers, index commands |
-| 0.2 | Automatic Doctrine entity auditing (`AuditableInterface`, `#[Auditable]`), PSR-14 events |
+| 0.1 | Recording arbitrary actions, sync and Messenger transports, enrichers, index commands — done |
+| 0.2 | Automatic Doctrine entity auditing (`AuditableInterface`, `#[Auditable]`), PSR-14 events — done |
 | 0.3 | Reading: `AuditQuery` / `AuditReader` with filters, pagination, `search_after`, decorators |
 | 0.4 | Coalescing many small changes into one record |
 | 1.0 | The API settles |

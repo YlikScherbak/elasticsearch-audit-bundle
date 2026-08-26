@@ -6,11 +6,14 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
 
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Psr\Clock\ClockInterface;
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -37,6 +40,7 @@ final class AuditWriter
         private readonly iterable $enrichers = [],
         private readonly FailurePolicy $failurePolicy = FailurePolicy::Log,
         ?LoggerInterface $logger = null,
+        private readonly ?EventDispatcherInterface $events = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
@@ -73,6 +77,18 @@ final class AuditWriter
     {
         try {
             $record = $this->complete($record);
+
+            if ($this->events !== null) {
+                $event = new RecordCreatedEvent($record);
+                $this->events->dispatch($event);
+
+                if ($event->isVetoed()) {
+                    return;
+                }
+
+                $record = $event->getRecord();
+            }
+
             $index = $this->indexResolver->resolve($record->objectType);
             $transport = $immediately ? $this->immediateTransport : $this->transport;
 
@@ -106,6 +122,8 @@ final class AuditWriter
 
     private function fail(AuditRecord $record, \Throwable $e): void
     {
+        $this->events?->dispatch(new RecordFailedEvent($record, $e));
+
         if ($this->failurePolicy === FailurePolicy::Throw) {
             throw WriteFailedException::for($record, $e);
         }

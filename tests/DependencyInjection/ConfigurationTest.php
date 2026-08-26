@@ -22,6 +22,7 @@ final class ConfigurationTest extends TestCase
         self::assertSame('log', $config['on_failure']);
         self::assertSame('system', $config['actor']['fallback']);
         self::assertTrue($config['client']['ssl_verification']);
+        self::assertSame(['enabled' => true, 'skip_empty_updates' => true, 'connection' => 'default'], $config['doctrine']);
     }
 
     public function testEitherHostsOrServiceIsRequired(): void

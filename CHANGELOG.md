@@ -8,6 +8,38 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-26
+
+Entities audit themselves. Declare what to record and every `flush()` writes the history.
+
+### Added
+- **Doctrine integration** — a listener on `postPersist`, `postUpdate`, `preRemove`, `postRemove`
+  records `create` / `update` / `remove` for declared entities. The remove is built in `preRemove`,
+  while the entity still has its identifier, and written in `postRemove`. Enabled when
+  `doctrine/orm` is installed; `doctrine.enabled: false` turns it off, `doctrine.connection`
+  picks the connection
+- **Two ways to declare**: `AuditableInterface` (`getAuditObjectType()`, `getAuditedFields()`
+  with closures for associations, `getAlwaysRecordedFields()`) or the attributes `#[Auditable(type,
+  alwaysRecord)]` and `#[AuditField(represent)]`. Both reduce to the same metadata; attributes are
+  found on parent classes too, so Doctrine proxies work
+- **`ChangeSetBuilder`** — scalars from the unit-of-work change set; to-one associations through
+  their representer (old from the change set, new from the entity); to-many as the represented
+  snapshot against the current contents, loading a lazy collection first so the old side is real;
+  `alwaysRecord` fields as `old == new`. Two dates for the same instant are not a change, and
+  neither is Doctrine's `null → null` on insert
+- **`skip_empty_updates`** (default `true`) — an update touching no audited field records nothing.
+  Always-recorded fields give context to a change but do not count as one
+- **PSR-14 events** — `RecordCreatedEvent` (replace the record or `veto()` it before it is sent)
+  and `RecordFailedEvent` (every failed write, whatever the policy). Dispatched when an event
+  dispatcher is available
+- Identifiers may be ints, strings, `Stringable` (Uuid, Ulid) or backed enums; composite keys
+  join with `|`
+
+### Changed
+- Dates inside `changes` are now written in **UTC**, like `loggedAt`, instead of in their own
+  timezone — the two were inconsistent in 0.1
+- `psr/event-dispatcher` is a hard dependency (it is an interface package with no code)
+
 ## [0.1.0] - 2026-08-26
 
 The write path. Nothing reads yet, nothing watches Doctrine yet — this release is the

@@ -10,6 +10,8 @@ use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClientFactory;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ElasticsearchGateway;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
@@ -23,7 +25,9 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Borsche\ElasticsearchAuditBundle\Writer\SystemClock;
+use Doctrine\ORM\EntityManagerInterface;
 use Elastic\Elasticsearch\Client;
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\DependencyInjection\Argument\TaggedIteratorArgument;
@@ -49,6 +53,8 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_ACTOR_RESOLVER = 'borsche_elasticsearch_audit.actor_resolver';
     public const SERVICE_CLOCK = 'borsche_elasticsearch_audit.clock';
     public const SERVICE_WRITER = 'borsche_elasticsearch_audit.writer';
+    public const SERVICE_METADATA_FACTORY = 'borsche_elasticsearch_audit.doctrine.metadata_factory';
+    public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
 
     public function getAlias(): string
     {
@@ -71,7 +77,33 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerTransport($config['transport'], $config['message_bus'], $container);
         $this->registerActor($config['actor'], $container);
         $this->registerWriter($config['on_failure'], $container);
+        $this->registerDoctrine($config['doctrine'], $container);
         $this->registerCommands($container);
+    }
+
+    /**
+     * @param array{enabled: bool, skip_empty_updates: bool, connection: string} $doctrine
+     */
+    private function registerDoctrine(array $doctrine, ContainerBuilder $container): void
+    {
+        if (!$doctrine['enabled'] || !interface_exists(EntityManagerInterface::class)) {
+            return;
+        }
+
+        $container->setDefinition(self::SERVICE_METADATA_FACTORY, new Definition(AuditMetadataFactory::class));
+        $container->setAlias(AuditMetadataFactory::class, self::SERVICE_METADATA_FACTORY);
+
+        $listener = new Definition(AuditSubscriber::class, [
+            new Reference(self::SERVICE_WRITER),
+            new Reference(self::SERVICE_METADATA_FACTORY),
+            $doctrine['skip_empty_updates'],
+        ]);
+
+        foreach (['postPersist', 'postUpdate', 'preRemove', 'postRemove'] as $event) {
+            $listener->addTag('doctrine.event_listener', ['event' => $event, 'connection' => $doctrine['connection']]);
+        }
+
+        $container->setDefinition(self::SERVICE_DOCTRINE_LISTENER, $listener);
     }
 
     /**
@@ -162,6 +194,7 @@ final class ElasticsearchAuditExtension extends Extension
             new TaggedIteratorArgument(self::TAG_ENRICHER),
             FailurePolicy::from($onFailure),
             new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            new Reference(EventDispatcherInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]));
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
