@@ -1,0 +1,91 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Borsche\ElasticsearchAuditBundle\Elasticsearch;
+
+/**
+ * Settings and mapping of an audit index: the fields every record has, plus
+ * whatever the application's enrichers add on top.
+ *
+ * "changes" is deliberately not indexed (enabled: false). Its shape differs per
+ * object type and per field, and indexing it would blow the mapping up over
+ * time; anything worth filtering on belongs in a top-level attribute instead.
+ */
+final class IndexDefinition
+{
+    public const OBJECT_ID_KEYWORD = 'keyword';
+    public const OBJECT_ID_INTEGER = 'integer';
+
+    /**
+     * @param array<string, array<string, mixed>> $properties additional mapping properties
+     * @param array<string, mixed>                $settings
+     */
+    public function __construct(
+        private readonly string $objectIdType = self::OBJECT_ID_KEYWORD,
+        private readonly array $properties = [],
+        private readonly array $settings = ['number_of_shards' => 1, 'number_of_replicas' => 0],
+    ) {
+        if (!\in_array($objectIdType, [self::OBJECT_ID_KEYWORD, self::OBJECT_ID_INTEGER], true)) {
+            throw new \InvalidArgumentException(sprintf('objectId can be mapped as "keyword" or "integer", not "%s".', $objectIdType));
+        }
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $properties
+     */
+    public function withProperties(array $properties): self
+    {
+        foreach (array_keys($properties) as $name) {
+            if (\array_key_exists($name, $this->baseProperties())) {
+                throw new \InvalidArgumentException(sprintf('"%s" is a base field of every audit record; its mapping cannot be overridden.', $name));
+            }
+        }
+
+        return new self($this->objectIdType, array_replace($this->properties, $properties), $this->settings);
+    }
+
+    /**
+     * @param array<string, mixed> $settings
+     */
+    public function withSettings(array $settings): self
+    {
+        return new self($this->objectIdType, $this->properties, array_replace($this->settings, $settings));
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    public function properties(): array
+    {
+        return $this->baseProperties() + $this->properties;
+    }
+
+    /**
+     * The body of an indices.create request.
+     *
+     * @return array{settings: array<string, mixed>, mappings: array{properties: array<string, array<string, mixed>>}}
+     */
+    public function toArray(): array
+    {
+        return [
+            'settings' => $this->settings,
+            'mappings' => ['properties' => $this->properties()],
+        ];
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private function baseProperties(): array
+    {
+        return [
+            'objectType' => ['type' => 'keyword'],
+            'objectId' => ['type' => $this->objectIdType],
+            'event' => ['type' => 'keyword'],
+            'loggedAt' => ['type' => 'date', 'format' => 'yyyy-MM-dd HH:mm:ss'],
+            'source' => ['type' => 'keyword'],
+            'changes' => ['type' => 'object', 'enabled' => false],
+        ];
+    }
+}
