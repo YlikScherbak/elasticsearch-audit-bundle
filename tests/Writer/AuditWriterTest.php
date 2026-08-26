@@ -169,7 +169,8 @@ final class AuditWriterTest extends TestCase
             {
             }
 
-            public function log($level, string|\Stringable $message, array $context = []): void
+            /** @param mixed $level */
+            public function log($level, $message, array $context = []): void // untyped $message: psr/log 1.x
             {
                 $this->logs[] = ['level' => (string) $level, 'message' => (string) $message, 'context' => $context];
             }
