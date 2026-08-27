@@ -8,6 +8,12 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-27
+
+What the trail keeps, and what it must not. Redaction for values that may never be stored,
+the documentation a privacy review and an operations team will ask for, and the code held to
+PHPStan level 8 with strict rules and a coverage floor.
+
 ### Added
 - **Redaction** — `redact.fields` names the fields whose values must never be stored (plainly, or
   scoped as `user.email`); they are replaced with `redact.placeholder` at the moment a record
