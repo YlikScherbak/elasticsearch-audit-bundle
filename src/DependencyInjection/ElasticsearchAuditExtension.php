@@ -25,6 +25,7 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\ElasticsearchGateway;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
+use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
@@ -77,9 +78,6 @@ final class ElasticsearchAuditExtension extends Extension
         return Configuration::ROOT;
     }
 
-    /**
-     * @param array<int, array<string, mixed>> $configs
-     */
     public function load(array $configs, ContainerBuilder $container): void
     {
         /** @var array<string, mixed> $config */
@@ -94,11 +92,26 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerIndices($config['indices'], $container);
         $this->registerTransport($config['transport'], $config['message_bus'], $container);
         $this->registerActor($config['actor'], $container);
+        $this->registerRedaction($config['redact'], $container);
         $this->registerCoalescing($config['coalescing'], $container);
         $this->registerWriter($config['on_failure'], $container);
         $this->registerReader($container);
         $this->registerDoctrine($config['doctrine'], $container);
         $this->registerCommands($container);
+    }
+
+    /**
+     * @param array{fields: list<string>, placeholder: string} $redact
+     */
+    private function registerRedaction(array $redact, ContainerBuilder $container): void
+    {
+        if ($redact['fields'] === []) {
+            return;
+        }
+
+        // Not an enricher: the writer applies it on the way out, after the enrichers and after
+        // a frame closed, so redaction cannot hide from coalescing that a field moved.
+        $container->setDefinition(ChangeRedactor::class, new Definition(ChangeRedactor::class, [$redact['fields'], $redact['placeholder']]));
     }
 
     /**
@@ -262,6 +275,7 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             new Reference(EventDispatcherInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             new Reference(self::SERVICE_FRAME_BUFFER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            new Reference(ChangeRedactor::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]));
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }

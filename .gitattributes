@@ -9,3 +9,5 @@
 /docker-compose.yml export-ignore
 /phpstan.neon.dist  export-ignore
 /phpunit.xml.dist   export-ignore
+/CONTRIBUTING.md    export-ignore
+/SECURITY.md        export-ignore

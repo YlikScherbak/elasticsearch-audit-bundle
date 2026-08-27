@@ -8,6 +8,29 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Added
+- **Redaction** — `redact.fields` names the fields whose values must never be stored (plainly, or
+  scoped as `user.email`); they are replaced with `redact.placeholder` at the moment a record
+  leaves the writer, keeping the fact that the field changed. A side that was null or empty stays
+  as it was, so "had no password, now has one" is still readable. Applied on the way out — after
+  the enrichers, after a frame has merged its steps, and on the failure path — so a frame still
+  sees the real values and records a password change as the change it is, while neither the
+  document, `RecordCreatedEvent`, `RecordFailedEvent` nor `WriteFailedException` carries the
+  value. Covers the top-level fields of `changes`; a value inside a free-form array or an
+  attribute is the caller's to keep out. `ChangeRedactor::redact()` is the class behind it
+- **README: «Audit records and personal data»** — redaction, why the default actor may be an email
+  address and how to make it an id, retention through ILM or `delete_by_query`, and erasure
+  recipes (`_update_by_query` pseudonymising the actor, since `changes` is not searchable)
+- **README: «Index mapping and rotation»** — the ILM policy, template and write-alias recipe;
+  `indices.default` may be an alias, which is all rollover needs
+- **README: «Performance»** and **«Limitations»** — what each transport costs, where enrichers and
+  decorators belong, and an honest list: DQL bypasses the listener, embeddables and inverse
+  collections are not tracked, `iterate()` has no point-in-time, frames are per process, a mapping
+  is forever
+- **`CONTRIBUTING.md`, `SECURITY.md`, `UPGRADE.md`** and issue/PR templates
+- A coverage job in CI with a floor (`tools/coverage-floor.php`, also `composer test:coverage`),
+  since PHPUnit reports coverage but will not fail on a drop
+
 ## [0.4.0] - 2026-08-27
 
 One operation, one record. A business operation that saves several times now leaves one

@@ -1,5 +1,11 @@
 # Elasticsearch Audit Bundle
 
+[![CI](https://github.com/YlikScherbak/elasticsearch-audit-bundle/actions/workflows/ci.yml/badge.svg)](https://github.com/YlikScherbak/elasticsearch-audit-bundle/actions/workflows/ci.yml)
+![PHP](https://img.shields.io/badge/php-8.1%20%E2%80%93%208.4-777bb4)
+![Symfony](https://img.shields.io/badge/symfony-6.4%20%7C%207%20%7C%208-000000)
+![Elasticsearch](https://img.shields.io/badge/elasticsearch-8%20%7C%209-005571)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 > **Work in progress.** The API is being built up release by release on the `0.x` line; see the
 > [CHANGELOG](CHANGELOG.md) for what each release adds and what is still to come. On `0.x`,
 > `^0.1` does **not** pull in `0.2` — pin the minor you tested against.
@@ -64,6 +70,8 @@ borsche_elasticsearch_audit:
   on_failure: log                         # or "throw"
   actor:
     fallback: system                      # recorded when nobody is authenticated
+  redact:
+    fields: [password, token]             # values replaced before anything is written
 ```
 
 Then create the indices:
@@ -477,18 +485,18 @@ use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 
 #[AsEventListener]
-final class RedactSecrets
+final class ShapeTheTrail
 {
     public function __invoke(RecordCreatedEvent $event): void
     {
         $record = $event->getRecord();
 
-        if ($record->objectType === 'user' && isset($record->changes['password'])) {
-            $event->setRecord($record->withChanges(['password' => new Change('***', '***')] + $record->changes));
-        }
-
         if ($record->event === 'heartbeat') {
             $event->veto();          // not written, not an error
+        }
+
+        if ($record->objectType === 'order' && !$this->tenants->auditsDetails($record)) {
+            $event->setRecord($record->withChanges([]));   // this tenant keeps the fact, not the diff
         }
     }
 }
@@ -503,8 +511,11 @@ final class CountAuditFailures
 }
 ```
 
-`RecordCreatedEvent` fires after the record is complete and enriched, right before it is sent;
-`RecordFailedEvent` fires on every failed write, whatever the failure policy.
+`RecordCreatedEvent` fires after the record is complete, enriched and redacted, right before it
+is sent — inside a frame, once for the coalesced record; `RecordFailedEvent` fires on every failed
+write, whatever the failure policy. Both see the redacted record, so a listener can queue or log
+it without a second thought. (Fields that must never be stored belong in `redact.fields`, not in a
+listener — see «Audit records and personal data».)
 
 ### Who did it
 
@@ -639,7 +650,164 @@ enricher.
 | 0.2 | Automatic Doctrine entity auditing (`AuditableInterface`, `#[Auditable]`), PSR-14 events — done |
 | 0.3 | Reading: `AuditQuery` / `AuditReader` with filters, pagination, `search_after`, decorators — done |
 | 0.4 | Coalescing many small changes into one record — done |
+| 0.5 | Redaction, PII and retention docs, ILM recipe, level 8 + strict rules, coverage floor — done |
+| 0.6 | Bulk indexing, point-in-time exports |
 | 1.0 | The API settles |
+
+## Audit records and personal data
+
+An audit log is the one place in an application that keeps **every version of every value, on
+purpose, for years**. That is what makes it useful and what makes it the first thing a privacy
+review asks about. None of the following is legal advice; it is what the bundle gives you to
+work with.
+
+**Some values must never be stored.** Name them and they are replaced before anything leaves the
+process — the fact that the field changed is kept, the value is not:
+
+```yaml
+borsche_elasticsearch_audit:
+  redact:
+    fields: [password, token, 'customer.cardNumber']   # plain or scoped as objectType.field
+    placeholder: '***'
+```
+
+A side that was `null` or empty stays as it was, so "had no password, now has one" is still
+readable (`false` and `0` are values and are hidden like any other). Redaction is applied at the
+moment a record leaves the writer — after your enrichers, after a frame has merged its steps, and
+on the failure path — so it also covers what enrichers put into `changes`, a frame still sees the
+real values and records a password change as a change, and neither `RecordCreatedEvent`,
+`RecordFailedEvent` nor `WriteFailedException` carries the value. It covers the **top-level fields
+of `changes`** by name: a secret inside a free-form array, or in an attribute, has to be kept out by
+the code that puts it there. For anything conditional — redact only for this tenant, only outside
+the office — listen to `RecordCreatedEvent` and rewrite or `veto()` the record there.
+
+**Who the actor is, is a choice.** By default the actor is `getUserIdentifier()`, and in many
+applications that is an **email address** — which means every record carries personal data in an
+indexed field. Register an `ActorResolverInterface` that returns the internal id instead:
+
+```php
+public function resolve(): ?string
+{
+    $user = $this->tokenStorage->getToken()?->getUser();
+
+    return $user instanceof User ? (string) $user->getId() : null;   // an id, not an email
+}
+```
+
+**Retention: decide how long, and let Elasticsearch enforce it.** With an ILM policy the cluster
+deletes what is past its time without anybody remembering to (see the next section). Without ILM,
+a scheduled command is enough, since `loggedAt` is indexed:
+
+```bash
+curl -X POST "$ES/audit_log/_delete_by_query?conflicts=proceed" -H 'Content-Type: application/json' -d'
+{"query": {"range": {"loggedAt": {"lt": "2024-01-01 00:00:00"}}}}'
+```
+
+**Erasure requests.** A person appears in the trail in up to three places: `source` (they acted),
+`objectId` (they were the object — an audited `User`), and values inside `changes`. `changes` is
+stored but not indexed, so you cannot search by it — which is why the two indexed fields are the
+handles you use:
+
+```bash
+# what the trail holds about them
+curl "$ES/audit_log/_search" -H 'Content-Type: application/json' -d'
+{"query": {"bool": {"should": [
+  {"term": {"source": "4711"}},
+  {"bool": {"filter": [{"term": {"objectType": "user"}}, {"term": {"objectId": "4711"}}]}}
+]}}}'
+
+# pseudonymise rather than delete, when the trail itself has to stay
+curl -X POST "$ES/audit_log/_update_by_query?conflicts=proceed" -H 'Content-Type: application/json' -d'
+{"query": {"term": {"source": "4711"}},
+ "script": {"source": "ctx._source.source = params.pseudonym; ctx._source.changes = new HashMap();",
+            "params": {"pseudonym": "erased:4711"}}}'
+```
+
+Deleting audit records can collide with other obligations (financial trails, security incident
+history). Pseudonymising the actor and dropping `changes` keeps "something happened, and when"
+while removing the person — usually the better trade, but that is a decision for your case.
+
+**What not to put in `changes` in the first place.** Anything you would not want in a JSON
+document that is copied into every backup and replica: secrets, full documents, base64 blobs.
+Enrich with an id and resolve it on read through a `RecordDecorator` instead — decorated data is
+computed, never stored.
+
+## Index mapping and rotation
+
+An audit index grows forever, so plan for rotation before the first million records. The bundle
+writes to whatever name `indices.default` (or a routing entry) holds, and **that name may be a
+write alias** — which is all ILM needs:
+
+```bash
+# 1. the policy: roll over daily or at 50 GB, delete after a year
+curl -X PUT "$ES/_ilm/policy/audit" -H 'Content-Type: application/json' -d'
+{"policy": {"phases": {
+  "hot": {"actions": {"rollover": {"max_primary_shard_size": "50gb", "max_age": "1d"}}},
+  "delete": {"min_age": "365d", "actions": {"delete": {}}}}}}'
+
+# 2. the template, with the mapping this bundle expects
+bin/console audit:index:create --dump > mapping.json    # settings + mappings, enricher fields included
+curl -X PUT "$ES/_index_template/audit" -H 'Content-Type: application/json' -d'
+{"index_patterns": ["audit_log-*"], "template": {
+  "settings": {"index.lifecycle.name": "audit", "index.lifecycle.rollover_alias": "audit_log"},
+  "mappings": { … from mapping.json … }}}'
+
+# 3. the first index, carrying the write alias the bundle and ILM both use
+curl -X PUT "$ES/audit_log-000001" -H 'Content-Type: application/json' -d'
+{"aliases": {"audit_log": {"is_write_index": true}}}'
+```
+
+Then leave `indices.default: audit_log` as it is: writes go to the current index behind the
+alias, reads cover every index behind it, and `audit:check` verifies the mapping through it.
+`audit:index:create` sees the alias as existing and leaves it alone.
+
+Two things to keep in mind. `audit:check` compares the mapping of the index the alias resolves to,
+so run it after a rollover if you changed an enricher. And `object_id_type` is a mapping decision
+you cannot revise in place: switching between `keyword` and `integer` needs a reindex, so decide
+once, at the start.
+
+## Performance
+
+- **The default `sync` transport costs one HTTP round-trip per record**, inside the request.
+  Fine for entity edits at human pace; switch to `transport: messenger` for anything that writes
+  in bulk, and the request pays only for the dispatch.
+- **There is no bulk indexing yet** — a `flush()` producing 50 records makes 50 requests.
+  Batch imports belong behind Messenger, or behind a frame if they are one logical operation.
+- **`changes` is not indexed**, so a wide record costs storage and nothing else. Attributes are
+  indexed, so add them for what you filter by and nothing more.
+- **Enrichers run once per record.** A repository call in an enricher is a query per record: keep
+  the value on the entity, or cache it per request. Decorators are the opposite — they receive a
+  whole page and should load in one query per entity type.
+- **Reads are exact-match filters** with no scoring, and the sort is `loggedAt` plus the record
+  id: both are indexed keywords, so paging stays fast at millions of records. Use `after()` /
+  `iterate()` rather than deep `page()` — Elasticsearch stops serving `from + size` past 10 000.
+- **The default index has one shard and no replica.** That is a starting point for a dev cluster,
+  not a production setting: give the template the shard and replica counts your cluster wants.
+
+## Limitations
+
+Honest list, so nothing surprises you in production:
+
+- **Doctrine events are the only source of automatic records.** A DQL `UPDATE`/`DELETE`, a raw SQL
+  statement or `Query::getResult()` with a bulk update bypasses the unit of work, and nothing is
+  recorded. Audit those paths explicitly with `AuditWriter::record()`.
+- **Embeddables are not audited** as fields of their owner; audit the owning entity's scalar
+  fields, or record the change yourself.
+- **Only the owning side of an association is dirty-tracked.** A `OneToMany` inverse collection
+  never reports changes; declare the owning side (`ManyToOne`, or the owning `ManyToMany`).
+- **`iterate()` has no point-in-time.** Order is stable — the tiebreaker is a document field, not
+  `_doc` — but a long export over an index that is being written to can still miss or repeat
+  entries at the edges. Export a closed time range (`between()`), or a snapshot index.
+- **Frames live in one process.** Two workers handling parts of the same business operation
+  produce a record each; nothing coordinates coalescing across processes.
+- **This is not entity-audit.** There is no revert, no "restore the entity as of yesterday": the
+  trail is what happened, not a version store.
+- **`on_failure: throw` surfaces after the commit** for Doctrine records — see the warning in the
+  Doctrine section.
+- **Coalescing holds records in memory** until the frame closes (`max_held`, default 10 000
+  objects, then it releases what it has).
+- **A mapping is forever.** `object_id_type`, and any enricher field type, can only be changed by
+  reindexing.
 
 ## Contributing
 

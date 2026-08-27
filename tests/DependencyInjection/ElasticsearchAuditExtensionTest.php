@@ -7,7 +7,6 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\DependencyInjection;
 use Borsche\ElasticsearchAuditBundle\Actor\SecurityActorResolver;
 use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
-use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
@@ -17,6 +16,8 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
+use Borsche\ElasticsearchAuditBundle\Model\Change;
+use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
@@ -38,6 +39,29 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
         self::assertInstanceOf(AuditWriter::class, $container->get(AuditWriter::class));
         self::assertInstanceOf(SyncTransport::class, $container->get(TransportInterface::class));
+    }
+
+    public function testRedactedFieldsNeverReachTheTransport(): void
+    {
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']], 'redact' => ['fields' => ['password'], 'placeholder' => 'xxx']]);
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        $writer->record('user', 1, 'update', ['password' => new Change('hunter2', 'letmein'), 'name' => new Change('a', 'b')]);
+
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+        $changes = $gateway->only('audit_log')['changes'];
+
+        self::assertSame(['old' => 'xxx', 'new' => 'xxx'], $changes['password']);
+        self::assertSame(['old' => 'a', 'new' => 'b'], $changes['name']);
+    }
+
+    public function testWithoutConfiguredFieldsThereIsNoRedactor(): void
+    {
+        $container = $this->load(['client' => ['hosts' => ['http://localhost:9200']]]);
+
+        self::assertFalse($container->hasDefinition(ChangeRedactor::class));
     }
 
     public function testTheFrameIsWiredIntoTheWriter(): void

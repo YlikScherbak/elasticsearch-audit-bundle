@@ -12,6 +12,7 @@ use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
+use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Psr\Clock\ClockInterface;
 use Psr\EventDispatcher\EventDispatcherInterface;
@@ -22,7 +23,8 @@ use Psr\Log\NullLogger;
  * The one entry point for writing history.
  *
  * Completes the record (timestamp, actor, id), lets the application's enrichers
- * add their attributes, routes it to an index and hands it to the transport. What
+ * add their attributes, redacts what must not be stored, routes it to an index
+ * and hands it to the transport. What
  * happens when that fails is decided by the FailurePolicy — by default the
  * failure is logged and swallowed, because an audit log that can take the
  * business operation down is worse than a gap in the history.
@@ -43,6 +45,7 @@ final class AuditWriter
         ?LoggerInterface $logger = null,
         private readonly ?EventDispatcherInterface $events = null,
         private readonly ?FrameBuffer $frame = null,
+        private readonly ?ChangeRedactor $redactor = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
@@ -114,6 +117,11 @@ final class AuditWriter
     private function dispatch(AuditRecord $record, bool $immediately): void
     {
         try {
+            // Redaction happens here, on the way out, and not in complete(): a frame has to
+            // see the real values to know that a field moved, and the event below is the
+            // first place a record is seen outside the writer.
+            $record = $this->redactor?->redact($record) ?? $record;
+
             if ($this->events !== null) {
                 $event = new RecordCreatedEvent($record);
                 $this->events->dispatch($event);
@@ -170,6 +178,10 @@ final class AuditWriter
      */
     public function reportFailure(\Throwable $e, ?AuditRecord $record = null): void
     {
+        // The record may have failed before it was redacted; nothing carrying it out of
+        // here — the event, the exception — may hold a value that must not be stored.
+        $record = $record === null ? null : ($this->redactor?->redact($record) ?? $record);
+
         if ($record !== null) {
             $this->events?->dispatch(new RecordFailedEvent($record, $e));
         }
