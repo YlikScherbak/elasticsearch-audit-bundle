@@ -31,6 +31,15 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 - A coverage job in CI with a floor (`tools/coverage-floor.php`, also `composer test:coverage`),
   since PHPUnit reports coverage but will not fail on a drop
 
+### Changed
+- **Static analysis is PHPStan level 8 with strict rules**, nothing suppressed. Two findings were
+  real: arrays inside `changes` are now compared **element by element and strictly**, so `['1']`
+  becoming `[1]` counts as the change it is instead of being dropped as coalescing noise; and a
+  `#[AuditField(represent: ...)]` naming a method the related object does not have now raises a
+  `LogicException` that names the declaration, rather than a PHP error from inside a flush
+- An asynchronous Elasticsearch client is refused with `NotConfiguredException` instead of a
+  method-not-found error: every call the bundle makes needs its answer
+
 ## [0.4.0] - 2026-08-27
 
 One operation, one record. A business operation that saves several times now leaves one

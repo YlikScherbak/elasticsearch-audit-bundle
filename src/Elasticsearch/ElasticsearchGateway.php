@@ -6,10 +6,12 @@ namespace Borsche\ElasticsearchAuditBundle\Elasticsearch;
 
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Elastic\Elasticsearch\Client;
 use Elastic\Elasticsearch\Exception\ClientResponseException;
+use Elastic\Elasticsearch\Response\Elasticsearch;
 
 /**
  * GatewayInterface over the official client. The same calls work on the 8.x and
@@ -60,12 +62,12 @@ final class ElasticsearchGateway implements GatewayInterface
 
     public function search(string $index, array $body): array
     {
-        return $this->call(fn () => $this->client->search(['index' => $index, 'body' => $body])->asArray(), $index, query: true);
+        return $this->call(fn () => self::answer($this->client->search(['index' => $index, 'body' => $body]))->asArray(), $index, query: true);
     }
 
     public function indexExists(string $index): bool
     {
-        $exists = $this->call(fn () => $this->client->indices()->exists(['index' => $index])->asBool());
+        $exists = $this->call(fn () => self::answer($this->client->indices()->exists(['index' => $index]))->asBool());
 
         if ($exists) {
             $this->known[$index] = true;
@@ -82,7 +84,7 @@ final class ElasticsearchGateway implements GatewayInterface
 
     public function mapping(string $index): array
     {
-        $response = $this->call(fn () => $this->client->indices()->getMapping(['index' => $index])->asArray(), $index);
+        $response = $this->call(fn () => self::answer($this->client->indices()->getMapping(['index' => $index]))->asArray(), $index);
 
         // The response is keyed by the concrete index name, which differs from $index when it is an alias.
         $first = reset($response);
@@ -92,7 +94,21 @@ final class ElasticsearchGateway implements GatewayInterface
 
     public function info(): array
     {
-        return $this->call(fn () => $this->client->info()->asArray());
+        return $this->call(fn () => self::answer($this->client->info())->asArray());
+    }
+
+    /**
+     * The client answers with a promise instead of a response when it is built for
+     * asynchronous use, which this bundle does not support: every call here needs its
+     * answer before it can go on.
+     */
+    private static function answer(object $response): Elasticsearch
+    {
+        if (!$response instanceof Elasticsearch) {
+            throw new NotConfiguredException(sprintf('The Elasticsearch client answered with a %s: it is built for asynchronous responses, and the audit bundle needs a synchronous client.', get_debug_type($response)));
+        }
+
+        return $response;
     }
 
     /**

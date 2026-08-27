@@ -46,7 +46,7 @@ final class CreateIndexCommand extends Command
         $io = new SymfonyStyle($input, $output);
         $definition = EnricherMapping::apply($this->definition, $this->enrichers);
 
-        if ($input->getOption('dump')) {
+        if ($input->getOption('dump') === true) {
             $output->writeln((string) json_encode($definition->toArray(), \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES));
 
             return self::SUCCESS;

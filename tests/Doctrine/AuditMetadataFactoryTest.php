@@ -50,6 +50,18 @@ final class AuditMetadataFactoryTest extends TestCase
         self::assertArrayHasKey('body', $metadata->fields);
     }
 
+    public function testARepresenterNamingAMethodThatDoesNotExistSaysWhereItWasDeclared(): void
+    {
+        $metadata = (new AuditMetadataFactory())->for(new Misrepresented());
+
+        self::assertNotNull($metadata);
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('#[AuditField(represent: "getNope")] on '.Misrepresented::class.'::$author names a method');
+
+        $metadata->fields['author'](new Author('alice'));
+    }
+
     public function testUndeclaredObjectsAreNotAuditable(): void
     {
         $factory = new AuditMetadataFactory();
@@ -76,4 +88,15 @@ final class AuditMetadataFactoryTest extends TestCase
     {
         self::assertNull((new AuditField())->represent);
     }
+}
+
+/**
+ * A declaration whose representer names a method the related object does not have.
+ * Not an entity: the factory reads attributes, and needs no mapping to do it.
+ */
+#[Auditable(type: 'misrepresented')]
+final class Misrepresented
+{
+    #[AuditField(represent: 'getNope')]
+    public ?Author $author = null;
 }

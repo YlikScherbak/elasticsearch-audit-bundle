@@ -39,9 +39,32 @@ final class ValueComparator
         }
 
         if (\is_array($old) && \is_array($new)) {
-            return $old == $new;
+            return self::sameArray($old, $new);
         }
 
         return $old === $new;
+    }
+
+    /**
+     * Same keys, and every value the same by this comparison — element by element, so
+     * "1" and 1 inside a collection snapshot count as the change they are, which PHP's
+     * own == between arrays would hide.
+     *
+     * @param array<mixed> $old
+     * @param array<mixed> $new
+     */
+    private static function sameArray(array $old, array $new): bool
+    {
+        if (\count($old) !== \count($new)) {
+            return false;
+        }
+
+        foreach ($old as $key => $value) {
+            if (!\array_key_exists($key, $new) || !self::same($value, $new[$key])) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

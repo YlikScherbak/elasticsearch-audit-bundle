@@ -122,6 +122,29 @@ jobs:
           AUDIT_ES_URL: http://localhost:9200
         run: vendor/bin/phpunit --group integration
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite
+          coverage: pcov
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Run tests with coverage
+        run: vendor/bin/phpunit --coverage-clover coverage.xml
+
+      - name: Enforce the coverage floor
+        run: php tools/coverage-floor.php coverage.xml 94
+
   static-analysis:
     name: Static analysis
     runs-on: ubuntu-latest

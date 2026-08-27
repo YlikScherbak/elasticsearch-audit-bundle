@@ -197,7 +197,7 @@ final class AuditQuery
     /**
      * Continue after the entry a previous page ended with (AuditPage::nextCursor()).
      *
-     * @param list<mixed> $cursor
+     * @param array<mixed> $cursor the sort values of that entry, in order; keys are ignored
      */
     public function after(array $cursor): self
     {

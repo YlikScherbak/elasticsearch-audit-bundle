@@ -3,6 +3,8 @@ composer.lock
 .idea/
 .phpunit.cache/
 .phpunit.result.cache
+coverage.xml
+/.phpunit.coverage/
 
 # Internal working notes (not part of the bundle)
 /docs/

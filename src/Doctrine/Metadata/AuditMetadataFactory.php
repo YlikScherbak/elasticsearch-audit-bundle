@@ -64,11 +64,32 @@ final class AuditMetadataFactory
                 }
 
                 $represent = $attributes[0]->newInstance()->represent;
-                $fields[$property->getName()] = $represent === null ? null : static fn (object $related): mixed => $related->{$represent}();
+                $fields[$property->getName()] = $represent === null ? null : self::representer($represent, $current->getName().'::$'.$property->getName());
             }
         }
 
         return new AuditMetadata($auditable->type, $fields, $auditable->alwaysRecord);
+    }
+
+    /**
+     * Turns #[AuditField(represent: 'getName')] into the callable the metadata carries.
+     * The method is named in an attribute, so whether it exists can only be answered
+     * when a related object shows up — and then the answer names the declaration that
+     * was wrong, instead of a PHP error somewhere inside a flush.
+     *
+     * @return callable(object): mixed
+     */
+    private static function representer(string $method, string $declaredOn): callable
+    {
+        return static function (object $related) use ($method, $declaredOn): mixed {
+            $callable = [$related, $method];
+
+            if (!\is_callable($callable)) {
+                throw new \LogicException(sprintf('#[AuditField(represent: "%s")] on %s names a method %s does not have.', $method, $declaredOn, $related::class));
+            }
+
+            return $callable();
+        };
     }
 
     /**

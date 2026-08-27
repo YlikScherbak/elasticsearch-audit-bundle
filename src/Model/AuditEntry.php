@@ -48,7 +48,7 @@ final class AuditEntry
             actor: isset($source['source']) ? (string) $source['source'] : null,
             changes: \is_array($source['changes'] ?? null) ? $source['changes'] : [],
             attributes: array_diff_key($source, array_fill_keys($base, true)),
-            sort: $hit['sort'] ?? [],
+            sort: array_values(\is_array($hit['sort'] ?? null) ? $hit['sort'] : []),
         );
     }
 
