@@ -76,20 +76,6 @@ bin/console audit:check          # cluster reachable? indices there? every field
 `audit:index:create --dump` prints the mapping instead, for when the index is provisioned by
 other means (Terraform, an ILM policy, a hand-written template).
 
-The bundle refuses to write to an index that does not exist, because Elasticsearch would
-otherwise create it on the fly with a guessed mapping — `loggedAt` as `text`, every read failing
-from then on. It checks once per index per process; an index dropped *under* a running worker is
-the one case that check cannot see. Close that gap on the cluster, where it belongs, by keeping
-Elasticsearch from auto-creating audit indices at all:
-
-```yaml
-# elasticsearch.yml — or PUT _cluster/settings {"persistent": {"action.auto_create_index": "-audit_*,+*"}}
-action.auto_create_index: "-audit_*,+*"
-```
-
-With that in place a write to a missing index is a clean `IndexNotFoundException` whatever the
-bundle remembers.
-
 The index has to exist before the first record: **a write to a missing index is refused**
 (`IndexNotFoundException`, handled by `on_failure` like any other failure) rather than left to
 Elasticsearch, which would create the index on the fly with a guessed mapping — `loggedAt` as
@@ -98,6 +84,16 @@ over type conflicts. The check costs one `HEAD` per index per process. The mappi
 creates is `dynamic: false`: a field nobody declared is stored with the document but not
 indexed, and `audit:check` reports it, as it does a field mapped with another type than the one
 declared (the sign of an index Elasticsearch created on its own — the fix is a reindex).
+
+An index dropped *under* a running worker is the one case that per-process check cannot see.
+Close that gap on the cluster, where it belongs, by keeping Elasticsearch from auto-creating
+audit indices at all — a write to a missing index is then a clean `IndexNotFoundException`
+whatever the bundle remembers:
+
+```yaml
+# elasticsearch.yml — or PUT _cluster/settings {"persistent": {"action.auto_create_index": "-audit_*,+*"}}
+action.auto_create_index: "-audit_*,+*"
+```
 
 ## Recording an action
 
@@ -241,6 +237,98 @@ association without a representer — is handled by the same policy: logged and 
 default, fatal to the flush with `throw`. Composite identifiers are joined with `|`; an
 identifier that is itself an entity is represented by that entity's identifier.
 
+## One operation, one record
+
+Some operations save several times on their way to their result. A stock movement in the CRM
+this bundle came from reverses the old state in one `flush()` and applies the new one in the
+next; each flush fires `postUpdate`, so the history showed a pair of mirror-image records —
+`1000 → 1040`, then `1040 → 1000` — for an edit that changed nothing, and intermediate values
+(negative stock, half-applied totals) nobody ever meant to be visible.
+
+Open a **frame** around the operation and the history gets one record per object with the
+values before and after the whole thing:
+
+```php
+use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+
+final class MoveStockHandler
+{
+    public function __construct(private AuditFrame $frame, private StockService $stock) {}
+
+    public function __invoke(MoveStock $command): void
+    {
+        $this->frame->coalesce(fn () => $this->stock->move($command));
+    }
+}
+```
+
+While the frame is open, records are held instead of written and merged per object: the
+**earliest `old`** and the **latest `new`** of every field survive. When the outermost frame
+closes:
+
+- a field that moved and came back is dropped — `1000 → 1040 → 1000` leaves nothing;
+- `1000 → 1040 → 995` becomes one record, `1000 → 995`;
+- a field whose two sides were the same in every step never moved: that is a context field
+  (`alwaysRecord`), and it stays, so a coalesced record reads like any other;
+- an update in which nothing moved is not written at all — context alone is not history;
+- a `create` followed by updates stays one `create`, with the final values;
+- a `remove` is terminal: what was held for that object goes out first, then the remove.
+
+The record keeps the timestamp, actor and id of the **first** step — the operation began there —
+and the attributes of the last one. Enrichers run once per step, when the record enters the
+frame, not again when it leaves.
+
+Frames nest — a product move inside an order status change — and only the outermost writes.
+`begin()`/`end()` are there for code that cannot wrap a closure; keep them in a `try`/`finally`.
+`write($record, immediately: true)` bypasses an open frame.
+
+### What counts as "unchanged"
+
+Two questions are asked about every field. *Did it move?* — plainly, whether the two sides
+differ at all (dates by instant, arrays by value, everything else strictly); a field that never
+moved is context and is kept. *Did it end where it started?* — asked about the merged pair, and
+this is where the application gets a say. Some data disagrees with a strict answer: for a stock
+quantity, `null`, `''` and `0` are the same thing. Name those fields and the bundle compares
+them as numbers:
+
+```yaml
+borsche_elasticsearch_audit:
+  coalescing:
+    enabled: true             # false: frames still work, they just hold nothing
+    numeric_fields: [quantity, reserve, 'stock.onWay']   # a field on every type, or on one
+    object_types: []          # hold every type while a frame is open; or list the ones to coalesce
+    max_held: 10000           # safety valve: a frame holding more objects releases what it has
+```
+
+A value that is neither a number nor "nothing" is left alone — two different words must not
+look equal — so `numeric_fields` is safe on a column that sometimes holds text.
+
+Anything else — case-insensitive strings, rounding — is a `ValueComparatorInterface` you
+register; it is asked first and may defer with `null`.
+
+### Frames in workers
+
+The frame lives in a service, and a worker shares services across messages. A handler that
+throws between `begin()` and `end()` — or forgets `end()` — would leave the frame open and
+swallow the next message's history. `FrameResetMiddleware` closes that door: after every
+message it closes whatever is still open and **writes** what it held, with a warning that names
+the missing `try`/`finally`. Written, not dropped: a record only reaches the frame once the save
+behind it went through, so those changes are in the database whether the handler finished or
+not — and a gap in an audit log is harder to notice than a record too many. For the rare
+operation whose records must not exist, `$frame->reset()` drops them on purpose.
+
+```yaml
+framework:
+  messenger:
+    buses:
+      messenger.bus.default:
+        middleware:
+          - Borsche\ElasticsearchAuditBundle\Coalescing\Messenger\FrameResetMiddleware
+```
+
+With `on_failure: throw`, a write that fails surfaces from `end()` (or `coalesce()`), not from
+the `flush()` that produced the record.
+
 ## Reading the history
 
 ```php
@@ -283,7 +371,7 @@ $next = $this->reader->find($query->after($page->nextCursor()));
 ```
 
 The cursor is the sort value of the last entry: `loggedAt` plus the record's id, a time-ordered
-UUID, which breaks ties in write order and — unlike Elasticsearch's `_doc` — does not move when
+UUID (millisecond precision), which breaks ties in time order and — unlike Elasticsearch's `_doc` — does not move when
 segments merge. It stays valid while new records arrive. To stream everything — an XLSX export,
 a backfill — let the reader do the cursor loop:
 
@@ -550,7 +638,7 @@ enricher.
 | 0.1 | Recording arbitrary actions, sync and Messenger transports, enrichers, index commands — done |
 | 0.2 | Automatic Doctrine entity auditing (`AuditableInterface`, `#[Auditable]`), PSR-14 events — done |
 | 0.3 | Reading: `AuditQuery` / `AuditReader` with filters, pagination, `search_after`, decorators — done |
-| 0.4 | Coalescing many small changes into one record |
+| 0.4 | Coalescing many small changes into one record — done |
 | 1.0 | The API settles |
 
 ## Contributing

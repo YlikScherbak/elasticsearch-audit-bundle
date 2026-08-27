@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\DependencyInjection;
 
 use Borsche\ElasticsearchAuditBundle\Actor\SecurityActorResolver;
+use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
+use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
@@ -36,6 +38,64 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
         self::assertInstanceOf(AuditWriter::class, $container->get(AuditWriter::class));
         self::assertInstanceOf(SyncTransport::class, $container->get(TransportInterface::class));
+    }
+
+    public function testTheFrameIsWiredIntoTheWriter(): void
+    {
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']], 'coalescing' => ['numeric_fields' => ['fact']]]);
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        /** @var AuditFrame $frame */
+        $frame = $container->get(AuditFrame::class);
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        $frame->coalesce(static function () use ($writer): void {
+            $writer->record('stock', 1, 'update', ['fact' => new Change(null, 0), 'name' => new Change('a', 'b')]);
+            $writer->record('stock', 1, 'update', ['name' => new Change('b', 'c')]);
+        });
+
+        self::assertSame(['name' => ['old' => 'a', 'new' => 'c']], $gateway->only('audit_log')['changes'], 'null → 0 on a numeric field is not a change');
+    }
+
+    public function testCoalescingCanBeSwitchedOffWithoutBreakingTheCodeThatOpensFrames(): void
+    {
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']], 'coalescing' => ['enabled' => false]]);
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        /** @var AuditFrame $frame */
+        $frame = $container->get(AuditFrame::class);
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        $frame->coalesce(static function () use ($writer): void {
+            $writer->record('stock', 1, 'update', ['fact' => new Change(1, 2)]);
+            $writer->record('stock', 1, 'update', ['fact' => new Change(2, 3)]);
+        });
+
+        self::assertCount(2, $gateway->documents['audit_log'], 'with coalescing off a frame holds nothing and every step is its own record');
+    }
+
+    public function testNumericFieldsCanBeScopedToAnObjectType(): void
+    {
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']], 'coalescing' => ['numeric_fields' => ['stock.fact']]]);
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        /** @var AuditFrame $frame */
+        $frame = $container->get(AuditFrame::class);
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        $frame->coalesce(static function () use ($writer): void {
+            $writer->record('stock', 1, 'update', ['fact' => new Change(null, 0)]);
+            $writer->record('order', 1, 'update', ['fact' => new Change(null, 0)]);
+        });
+
+        self::assertCount(1, $gateway->documents['audit_log'], 'the scoped field is numeric for stock only');
+        self::assertSame('order', $gateway->only('audit_log')['objectType']);
     }
 
     public function testTheReaderIsWiredWithExtensionsAndDecorators(): void

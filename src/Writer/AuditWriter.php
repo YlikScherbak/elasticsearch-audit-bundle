@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Writer;
 
+use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
@@ -41,6 +42,7 @@ final class AuditWriter
         private readonly FailurePolicy $failurePolicy = FailurePolicy::Log,
         ?LoggerInterface $logger = null,
         private readonly ?EventDispatcherInterface $events = null,
+        private readonly ?FrameBuffer $frame = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
@@ -78,6 +80,40 @@ final class AuditWriter
         try {
             $record = $this->complete($record);
 
+            // Inside an open frame the record is held and merged with the others for
+            // the same object; the frame writes the result when it closes. A remove or
+            // a full buffer hands back records that have to go out right now.
+            if (!$immediately && $this->frame !== null && $this->frame->accepts($record->objectType)) {
+                foreach ($this->frame->hold($record) as $released) {
+                    $this->dispatch($released, false);
+                }
+
+                return;
+            }
+
+            $this->dispatch($record, $immediately);
+        } catch (\Throwable $e) {
+            $this->reportFailure($e, $record);
+        }
+    }
+
+    /**
+     * Writes a record that already went through complete() — what a frame releases when
+     * it closes. The completion pass is skipped on purpose: the timestamp, the actor, the
+     * id and the enrichers' attributes were settled when the record entered the frame, and
+     * running the enrichers again would repeat their queries and whatever else they do.
+     */
+    public function writeCompleted(AuditRecord $record): void
+    {
+        $this->dispatch($record, false);
+    }
+
+    /**
+     * The completed record's way out: the RecordCreated event, the index, the transport.
+     */
+    private function dispatch(AuditRecord $record, bool $immediately): void
+    {
+        try {
             if ($this->events !== null) {
                 $event = new RecordCreatedEvent($record);
                 $this->events->dispatch($event);

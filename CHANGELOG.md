@@ -8,6 +8,39 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Added
+- **Coalescing** — `AuditFrame::coalesce(fn () => ...)` (or `begin()`/`end()`) around a business
+  operation that saves several times records each object **once**, with the earliest `old` and the
+  latest `new` of every field. A field that moved and came back is dropped, and an update in which
+  nothing moved is not written: `1000 → 1040 → 1000` leaves no record, `1000 → 1040 → 995` leaves
+  `1000 → 995`. A field whose two sides were the same in every step never moved — that is a context
+  field, what `#[Auditable(alwaysRecord: ...)]` produces — and it survives coalescing, so a merged
+  record reads like the ones written outside a frame. A `create` followed by updates stays one
+  `create`; a `remove` is terminal. Frames nest — only the outermost writes. The merged record
+  carries the first step's timestamp, actor and id and the last step's attributes; enrichers run
+  once per step, when a record enters the frame. `write($record, immediately: true)` bypasses an
+  open frame
+- **`ValueComparatorInterface`** — the application decides what counts as unchanged; comparators
+  are autoconfigured and asked in order. `coalescing.numeric_fields` registers one that treats
+  `null`, `''`, `'-'` and `0` as the same value for the listed fields — named as `quantity` for
+  every object type or `stock.quantity` for one. A value that is neither a number nor "nothing"
+  makes it defer to the strict comparison, so two different words never look equal
+- **`AuditWriter::writeCompleted()`** — writes a record that already went through the completion
+  pass; what `AuditFrame` releases when it closes, and what keeps enrichers from running twice
+- **`FrameResetMiddleware`** (Messenger) — closes a frame a handler left open so one buggy handler
+  cannot swallow the next message's history, and **writes** what it held (`AuditFrame::release()`),
+  because a record reaches the frame only after the save behind it went through. `reset()` remains
+  for the case where the records must not exist
+- Configuration: `coalescing.enabled` (`false` keeps `AuditFrame` injectable and working — the
+  buffer simply holds nothing, so turning the feature off is a config change and not a
+  refactoring), `object_types` (types held while a frame is open; empty means all),
+  `numeric_fields`, `max_held` (a frame holding more objects releases what it has)
+
+### Changed
+- `RecordCreatedEvent` fires for the coalesced record when a frame is open, not for every step
+- With `on_failure: throw` a write that fails inside a frame surfaces from `end()` / `coalesce()`,
+  not from the `flush()` that produced it
+
 ## [0.3.0] - 2026-08-26
 
 The history can be read back. Together with 0.1 and 0.2 this is the complete write → read

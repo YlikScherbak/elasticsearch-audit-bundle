@@ -6,12 +6,18 @@ namespace Borsche\ElasticsearchAuditBundle\DependencyInjection;
 
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Actor\SecurityActorResolver;
+use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
+use Borsche\ElasticsearchAuditBundle\Coalescing\Messenger\FrameResetMiddleware;
+use Borsche\ElasticsearchAuditBundle\Coalescing\NumericNullAsZeroComparator;
+use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClientFactory;
@@ -50,6 +56,9 @@ final class ElasticsearchAuditExtension extends Extension
     public const TAG_QUERY_EXTENSION = 'borsche_elasticsearch_audit.query_extension';
     public const TAG_DECORATOR = 'borsche_elasticsearch_audit.decorator';
     public const SERVICE_READER = 'borsche_elasticsearch_audit.reader';
+    public const TAG_VALUE_COMPARATOR = 'borsche_elasticsearch_audit.value_comparator';
+    public const SERVICE_FRAME_BUFFER = 'borsche_elasticsearch_audit.coalescing.buffer';
+    public const SERVICE_FRAME = 'borsche_elasticsearch_audit.coalescing.frame';
 
     public const SERVICE_CLIENT = 'borsche_elasticsearch_audit.client';
     public const SERVICE_GATEWAY = 'borsche_elasticsearch_audit.gateway';
@@ -85,10 +94,45 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerIndices($config['indices'], $container);
         $this->registerTransport($config['transport'], $config['message_bus'], $container);
         $this->registerActor($config['actor'], $container);
+        $this->registerCoalescing($config['coalescing'], $container);
         $this->registerWriter($config['on_failure'], $container);
         $this->registerReader($container);
         $this->registerDoctrine($config['doctrine'], $container);
         $this->registerCommands($container);
+    }
+
+    /**
+     * @param array{enabled: bool, object_types: list<string>, numeric_fields: list<string>, max_held: int} $coalescing
+     */
+    private function registerCoalescing(array $coalescing, ContainerBuilder $container): void
+    {
+        // Registered even when coalescing is off: code that opens frames keeps working,
+        // the buffer simply holds nothing, so switching the feature off is a config change
+        // and not a refactoring.
+        $container->registerForAutoconfiguration(ValueComparatorInterface::class)->addTag(self::TAG_VALUE_COMPARATOR);
+
+        if ($coalescing['numeric_fields'] !== []) {
+            $container->setDefinition(NumericNullAsZeroComparator::class, (new Definition(NumericNullAsZeroComparator::class, [$coalescing['numeric_fields']]))
+                ->addTag(self::TAG_VALUE_COMPARATOR, ['priority' => -100]));
+        }
+
+        $container->setDefinition(self::SERVICE_FRAME_BUFFER, new Definition(FrameBuffer::class, [
+            new Definition(ValueComparator::class, [new TaggedIteratorArgument(self::TAG_VALUE_COMPARATOR)]),
+            $coalescing['object_types'],
+            $coalescing['max_held'],
+            $coalescing['enabled'],
+        ]));
+
+        $container->setDefinition(self::SERVICE_FRAME, new Definition(AuditFrame::class, [
+            new Reference(self::SERVICE_FRAME_BUFFER),
+            new Reference(self::SERVICE_WRITER),
+            new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+        ]));
+        $container->setAlias(AuditFrame::class, self::SERVICE_FRAME)->setPublic(true);
+
+        if (interface_exists(MessageBusInterface::class)) {
+            $container->setDefinition(FrameResetMiddleware::class, new Definition(FrameResetMiddleware::class, [new Reference(self::SERVICE_FRAME)]));
+        }
     }
 
     private function registerReader(ContainerBuilder $container): void
@@ -217,6 +261,7 @@ final class ElasticsearchAuditExtension extends Extension
             FailurePolicy::from($onFailure),
             new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             new Reference(EventDispatcherInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            new Reference(self::SERVICE_FRAME_BUFFER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]));
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
