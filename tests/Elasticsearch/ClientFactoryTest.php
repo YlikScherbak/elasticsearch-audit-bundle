@@ -17,7 +17,13 @@ final class ClientFactoryTest extends TestCase
         $client = ClientFactory::create(['http://localhost:9200', 'http://localhost:9201'], sslVerification: false, logger: new NullLogger());
 
         self::assertInstanceOf(Client::class, $client);
-        self::assertSame('localhost:9200', $client->getTransport()->getNodePool()->nextNode()->getUri()->getAuthority(), 'the first configured host is the first node');
+
+        // The pool rotates from a random start, so ask it twice and look at the set, not the order.
+        $pool = $client->getTransport()->getNodePool();
+        $nodes = [$pool->nextNode()->getUri()->getAuthority(), $pool->nextNode()->getUri()->getAuthority()];
+        sort($nodes);
+
+        self::assertSame(['localhost:9200', 'localhost:9201'], $nodes, 'both configured hosts are nodes');
     }
 
     public function testTheLoggerIsOptional(): void
