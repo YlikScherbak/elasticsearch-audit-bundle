@@ -121,9 +121,19 @@ final class AuditSubscriber
     /**
      * The manager was cleared — after a failed flush, or by the application: whatever
      * was collected belongs to a flush that will not commit.
+     *
+     * ORM 2 can clear a single entity class while the flush that is running commits
+     * the rest, and dropping the records then would lose history that did happen. But
+     * a closed manager means the flush failed, and a partial clear does not change
+     * that: those records describe a state the database never reached, and inventing
+     * history is worse than missing it.
      */
     public function onClear(OnClearEventArgs $args): void
     {
+        if (method_exists($args, 'clearsAllEntities') && !$args->clearsAllEntities() && $args->getObjectManager()->isOpen()) {
+            return;
+        }
+
         $this->pending = [];
         $this->pendingRemovals = [];
     }

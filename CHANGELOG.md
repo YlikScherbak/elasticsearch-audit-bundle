@@ -41,6 +41,19 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 - With `on_failure: throw` a write that fails inside a frame surfaces from `end()` / `coalesce()`,
   not from the `flush()` that produced it
 
+### Fixed
+- **Record ids wasted entropy** (since 0.3.0): `RecordId::v7()` used the same two random bits for
+  the UUID variant and for `rand_b`, and left eight other random bits unused — 60 random bits
+  where the format allows 62, with two of them correlated. The layout now takes each bit from one
+  place only. Ids already written are unaffected: they are valid version 7 UUIDs, unique in
+  practice, and nothing needs reindexing
+- **A partial `clear()` no longer discards records of a flush that is still running.** On ORM 2,
+  `$em->clear(SomeClass::class)` clears one class while the rest of the flush commits; the
+  listener dropped everything it had collected, losing history that did happen. It now keeps
+  those records — unless the manager is closed, which means the flush failed and its records
+  describe a state the database never reached. (ORM 3 has no partial clear; a failed flush still
+  drops everything, as `close()` performs a full clear.)
+
 ## [0.3.0] - 2026-08-26
 
 The history can be read back. Together with 0.1 and 0.2 this is the complete write → read

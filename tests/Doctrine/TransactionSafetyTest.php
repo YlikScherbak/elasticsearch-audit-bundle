@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Misdeclared;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Reaction;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Doctrine\ORM\Event\OnClearEventArgs;
+use Doctrine\ORM\Event\PostFlushEventArgs;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
 
@@ -93,6 +97,48 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame(['old' => null, 'new' => 'Second'], $this->documents()[0]['changes']['title']);
     }
 
+    /**
+     * ORM 2 only: clearing one entity class while a flush is running leaves that flush
+     * to commit the rest, so its records are history and must survive the clear.
+     *
+     * Driven by hand, because the point is a clear arriving between the lifecycle events
+     * and postFlush — a window a normal flush does not expose.
+     */
+    public function testAPartialClearKeepsTheRecordsOfAFlushThatIsStillRunning(): void
+    {
+        self::skipUnlessPartialClearsExist();
+
+        $article = $this->persisted(new Article('Hello'));
+        $this->gateway->documents = [];
+
+        $listener = $this->detachedListener();
+        $listener->postPersist(new LifecycleEventArgs($article, $this->em));
+        $listener->onClear(new OnClearEventArgs($this->em, Article::class)); // @phpstan-ignore-line ORM 2 signature
+        $listener->postFlush(new PostFlushEventArgs($this->em));
+
+        self::assertCount(1, $this->documents(), 'the other classes in that flush still committed');
+    }
+
+    /**
+     * ORM 2 only: a closed manager means the flush failed. A partial clear does not make
+     * its records true, and inventing history is worse than missing it.
+     */
+    public function testAPartialClearOnAClosedManagerStillDropsThem(): void
+    {
+        self::skipUnlessPartialClearsExist();
+
+        $article = $this->persisted(new Article('Hello'));
+        $this->gateway->documents = [];
+
+        $listener = $this->detachedListener();
+        $listener->postPersist(new LifecycleEventArgs($article, $this->em));
+        $this->em->close();
+        $listener->onClear(new OnClearEventArgs($this->em, Article::class)); // @phpstan-ignore-line ORM 2 signature
+        $listener->postFlush(new PostFlushEventArgs($this->em));
+
+        self::assertSame([], $this->documents());
+    }
+
     public function testAnEntityIdentifiedByAnAssociationIsAudited(): void
     {
         $article = $this->persisted(new Article('Hello'));
@@ -130,6 +176,22 @@ final class TransactionSafetyTest extends DoctrineTestCase
 
         $this->em->persist(new Misdeclared());
         $this->em->flush();
+    }
+
+    private static function skipUnlessPartialClearsExist(): void
+    {
+        if (!method_exists(OnClearEventArgs::class, 'clearsAllEntities')) {
+            self::markTestSkipped('Partial clears exist only in ORM 2; the lowest-dependencies CI job covers this.');
+        }
+    }
+
+    /**
+     * A listener of its own, not registered with the event manager, so the test decides
+     * which events it sees and in which order.
+     */
+    private function detachedListener(): AuditSubscriber
+    {
+        return new AuditSubscriber($this->writer(FailurePolicy::Log), new AuditMetadataFactory(), skipEmptyUpdates: true);
     }
 
     private function persisted(Article $article): Article
