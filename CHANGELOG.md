@@ -8,6 +8,11 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-27
+
+One operation, one record. A business operation that saves several times now leaves one
+history entry per object, with the values before and after the whole thing.
+
 ### Added
 - **Coalescing** — `AuditFrame::coalesce(fn () => ...)` (or `begin()`/`end()`) around a business
   operation that saves several times records each object **once**, with the earliest `old` and the
