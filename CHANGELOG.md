@@ -8,6 +8,10 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-28
+
+The surface is drawn: what an application may call, and what is the bundle's own machinery.
+
 ### Changed
 - **The public surface is drawn.** Everything that is machinery rather than API is marked
   `@internal` — `FrameBuffer`, `ChangeSetBuilder`, `AuditMetadataFactory` and `AuditMetadata`,
