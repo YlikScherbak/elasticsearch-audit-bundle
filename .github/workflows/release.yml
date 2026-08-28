@@ -71,7 +71,8 @@ jobs:
 
       - name: Stop here if this is a rehearsal
         if: inputs.dry_run
-        run: echo "::notice::Dry run: everything passed. Nothing was tagged."
+        run: |
+          echo "::notice::Dry run: everything passed. Nothing was tagged."
 
       - name: Tag it
         if: ${{ !inputs.dry_run }}
@@ -92,5 +93,3 @@ jobs:
           gh release create "v${{ inputs.version }}" \
             --title "$TITLE" \
             --notes-file release-notes.md
-
-# Dispatched by hand from the Actions tab; see CONTRIBUTING.md, "Releasing".
