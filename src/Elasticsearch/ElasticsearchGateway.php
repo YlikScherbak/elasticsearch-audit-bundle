@@ -65,6 +65,75 @@ final class ElasticsearchGateway implements GatewayInterface
         return $this->call(fn () => self::answer($this->client->search(['index' => $index, 'body' => $body]))->asArray(), $index, query: true);
     }
 
+    public function bulk(array $items): BulkResult
+    {
+        if ($items === []) {
+            return BulkResult::empty();
+        }
+
+        // The same guarantee as index(): no index is created by a write with a guessed mapping.
+        foreach (array_unique(array_column($items, 'index')) as $index) {
+            if (!isset($this->known[$index]) && !$this->indexExists($index)) {
+                throw IndexNotFoundException::forIndex($index);
+            }
+        }
+
+        $body = [];
+
+        foreach ($items as $item) {
+            $action = ['_index' => $item['index']];
+
+            if ($item['id'] !== null) {
+                $action['_id'] = $item['id'];
+            }
+
+            $body[] = ['index' => $action];
+            $body[] = $item['document'];
+        }
+
+        $response = $this->call(fn () => self::answer($this->client->bulk(['body' => $body]))->asArray());
+
+        return BulkResult::fromResponse($response, \count($items));
+    }
+
+    public function openPointInTime(string $index, string $keepAlive): string
+    {
+        $response = $this->call(fn () => self::answer($this->client->openPointInTime(['index' => $index, 'keep_alive' => $keepAlive]))->asArray(), $index);
+        $id = $response['id'] ?? null;
+
+        if (!\is_string($id) || $id === '') {
+            throw TransportUnavailableException::because(new \UnexpectedValueException('Elasticsearch opened a point in time but returned no id.'));
+        }
+
+        return $id;
+    }
+
+    public function searchPointInTime(string $pitId, string $keepAlive, array $body): array
+    {
+        $body['pit'] = ['id' => $pitId, 'keep_alive' => $keepAlive];
+
+        try {
+            return $this->call(fn () => self::answer($this->client->search(['body' => $body]))->asArray(), query: true);
+        } catch (InvalidQueryException $e) {
+            // "No search context found": the view expired between two batches. The cluster's
+            // message does not say what to do about it; the setting does.
+            if (str_contains($e->getMessage(), 'search context')) {
+                throw new InvalidQueryException(sprintf('%s — the point in time expired between two batches (keep-alive %s): raise reader.point_in_time_keep_alive above the time a consumer needs for one batch, or iterate with consistent: false.', $e->getMessage(), $keepAlive), $e->getCode(), $e);
+            }
+
+            throw $e;
+        }
+    }
+
+    public function closePointInTime(string $pitId): void
+    {
+        try {
+            $this->call(fn () => $this->client->closePointInTime(['body' => ['id' => $pitId]]));
+        } catch (RequestRejectedException) {
+            // Already expired or unknown: the cluster answers 404, and there is nothing to release.
+        }
+    }
+
     public function indexExists(string $index): bool
     {
         $exists = $this->call(fn () => self::answer($this->client->indices()->exists(['index' => $index]))->asBool());
@@ -161,6 +230,6 @@ final class ElasticsearchGateway implements GatewayInterface
 
         $reason = \is_array($body) ? ($body['error']['root_cause'][0]['reason'] ?? $body['error']['reason'] ?? null) : null;
 
-        return \is_string($reason) && $reason !== '' ? $reason : $e->getMessage();
+        return \is_string($reason) && $reason !== '' ? RequestRejectedException::withoutValuePreview($reason) : $e->getMessage();
     }
 }

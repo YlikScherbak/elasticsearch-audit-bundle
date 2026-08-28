@@ -25,6 +25,15 @@ final class ConfigurationTest extends TestCase
         self::assertTrue($config['client']['ssl_verification']);
         self::assertSame(['enabled' => true, 'skip_empty_updates' => true, 'connection' => 'default'], $config['doctrine']);
         self::assertSame(['enabled' => true, 'object_types' => [], 'numeric_fields' => [], 'max_held' => 10000], $config['coalescing']);
+        self::assertSame(['point_in_time_keep_alive' => '1m'], $config['reader']);
+    }
+
+    public function testTheKeepAliveMustBeAnElasticsearchTimeValue(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage('not an Elasticsearch time value');
+
+        $this->process(['client' => ['hosts' => ['http://es:9200']], 'reader' => ['point_in_time_keep_alive' => '5 minutes']]);
     }
 
     public function testEitherHostsOrServiceIsRequired(): void

@@ -15,4 +15,15 @@ final class RequestRejectedException extends \RuntimeException implements AuditE
     {
         return new self(sprintf('Elasticsearch rejected the request (HTTP %d): %s', $status, $reason), $status, $previous);
     }
+
+    /**
+     * Elasticsearch's reason for refusing a document ends with a preview of the value
+     * it could not parse. That value is the one thing an audit log's error path must
+     * not carry — it may be a person's data, and the log, the failure event and the
+     * exception all repeat the reason — so it is cut off here, before anyone sees it.
+     */
+    public static function withoutValuePreview(string $reason): string
+    {
+        return rtrim((string) preg_replace("/\\.?\\s*Preview of field's value:.*$/s", '', $reason));
+    }
 }

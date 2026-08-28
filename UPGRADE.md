@@ -4,6 +4,33 @@ On the `0.x` line every minor may change the API, and Composer does not treat `0
 compatible: `^0.4` will not pull in `0.5`. Pin the minor you tested against and read this file
 when you move.
 
+## 0.5 → 0.6
+
+Nothing to do for an application that uses the bundle through its configuration and services.
+
+Two things to know if you extended it:
+
+- **A custom `GatewayInterface` implementation has to add four methods**: `bulk()`,
+  `openPointInTime()`, `searchPointInTime()` and `closePointInTime()`. The in-memory gateway in
+  the test suite shows the smallest faithful implementation of each.
+- **A custom transport keeps working unchanged.** Batches go through the new
+  `BatchTransportInterface`; a transport that implements only `TransportInterface` receives the
+  records one `send()` at a time, exactly as before. Implement `sendMany()` to get one request per
+  flush.
+
+Two behaviour changes you may notice:
+
+- **`iterate()` opens a point in time.** The export is now a frozen view: records written while it
+  runs do not appear in it. If you relied on picking them up, pass `consistent: false`. The cluster
+  keeps the view alive for `reader.point_in_time_keep_alive` (default `1m`) between two batches;
+  raise it if a consumer of one batch is slower than that, or the next search fails with
+  `InvalidQueryException`.
+- **A refused document in a batch is reported on its own**, and no longer takes the rest of the
+  flush's records down with it. With `on_failure: throw` the exception raised is the first failure,
+  after every failure was logged and dispatched as `RecordFailedEvent` — and the accepted records
+  of that batch **are written**: with batches, an exception no longer means "nothing was stored".
+  Look at `RecordFailedEvent` (or the log) for the exact records that were not.
+
 ## 0.4 → 0.5
 
 Nothing to do. New configuration, all optional:

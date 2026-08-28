@@ -389,6 +389,14 @@ foreach ($this->reader->iterate(AuditQuery::for('order')->since($start)->oldestF
 }
 ```
 
+`iterate()` reads from a **point in time**: the index as it was when the export started. Records
+written while it runs are not in it, and no record shows up twice because a segment merged
+underneath — the two ways a long walk over a live index goes wrong. The view is opened before the
+first batch, kept alive by every search for `reader.point_in_time_keep_alive` (default `1m`), and
+closed however the export ends, a `break` included. If a consumer of one batch takes longer than
+that, raise the keep-alive; if you want the live index instead — a tail that should pick up what
+arrives — pass `consistent: false`.
+
 ### Filters your application defines
 
 A history screen filters by things the bundle knows nothing about: operators of a country, the
@@ -768,11 +776,12 @@ once, at the start.
 
 ## Performance
 
-- **The default `sync` transport costs one HTTP round-trip per record**, inside the request.
-  Fine for entity edits at human pace; switch to `transport: messenger` for anything that writes
-  in bulk, and the request pays only for the dispatch.
-- **There is no bulk indexing yet** — a `flush()` producing 50 records makes 50 requests.
-  Batch imports belong behind Messenger, or behind a frame if they are one logical operation.
+- **A flush is one request.** The records one `flush()` produces — or one frame releases — travel
+  together: one `_bulk` call with the `sync` transport, one message that becomes one `_bulk` call
+  in the worker with `messenger`. Fifty audited entities in a flush cost one round-trip, not fifty.
+- **The default `sync` transport still pays that round-trip inside the request.** Fine for entity
+  edits at human pace; switch to `transport: messenger` for anything that writes in bulk, and the
+  request pays only for the dispatch.
 - **`changes` is not indexed**, so a wide record costs storage and nothing else. Attributes are
   indexed, so add them for what you filter by and nothing more.
 - **Enrichers run once per record.** A repository call in an enricher is a query per record: keep
@@ -795,9 +804,9 @@ Honest list, so nothing surprises you in production:
   fields, or record the change yourself.
 - **Only the owning side of an association is dirty-tracked.** A `OneToMany` inverse collection
   never reports changes; declare the owning side (`ManyToOne`, or the owning `ManyToMany`).
-- **`iterate()` has no point-in-time.** Order is stable — the tiebreaker is a document field, not
-  `_doc` — but a long export over an index that is being written to can still miss or repeat
-  entries at the edges. Export a closed time range (`between()`), or a snapshot index.
+- **A point in time costs the cluster memory while it is open.** `iterate()` holds one for the
+  duration of the export; an export that is abandoned without the generator being destroyed keeps
+  it until `reader.point_in_time_keep_alive` runs out. Iterate to the end, or let the generator go.
 - **Frames live in one process.** Two workers handling parts of the same business operation
   produce a record each; nothing coordinates coalescing across processes.
 - **This is not entity-audit.** There is no revert, no "restore the entity as of yesterday": the

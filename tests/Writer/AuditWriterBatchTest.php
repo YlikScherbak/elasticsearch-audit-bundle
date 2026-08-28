@@ -1,0 +1,200 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Borsche\ElasticsearchAuditBundle\Tests\Writer;
+
+use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
+use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
+use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
+use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
+use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
+use Borsche\ElasticsearchAuditBundle\Model\Change;
+use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
+use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
+use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
+use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
+use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
+use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
+use PHPUnit\Framework\TestCase;
+use Psr\EventDispatcher\EventDispatcherInterface;
+
+/**
+ * Many records, one request: what writeAll() does with a flush's worth of records,
+ * and what happens when the cluster refuses some of them.
+ */
+final class AuditWriterBatchTest extends TestCase
+{
+    private InMemoryGateway $gateway;
+
+    /** @var list<object> */
+    private array $events = [];
+
+    protected function setUp(): void
+    {
+        $this->gateway = new InMemoryGateway();
+    }
+
+    public function testAFlushsWorthOfRecordsIsOneBulkRequest(): void
+    {
+        $this->writer()->writeAll([
+            new AuditRecord('order', 1, AuditEvent::UPDATE, changes: ['status' => new Change('a', 'b')]),
+            new AuditRecord('order', 2, AuditEvent::CREATE),
+            new AuditRecord('auth', 'alice', 'login_failed'),
+        ]);
+
+        self::assertCount(1, $this->gateway->bulks, 'one request for the whole batch');
+        self::assertSame(['audit_log', 'audit_log', 'audit_auth'], array_column($this->gateway->bulks[0], 'index'), 'routing applies per item');
+        self::assertCount(2, $this->gateway->documents['audit_log']);
+        self::assertCount(1, $this->gateway->documents['audit_auth']);
+        self::assertSame('system', $this->gateway->documents['audit_log'][0]['source'], 'every record was completed');
+        self::assertNotNull($this->gateway->bulks[0][0]['id'], 'and carries its id, so a retry overwrites instead of duplicating');
+    }
+
+    public function testNothingToWriteMeansNoRequest(): void
+    {
+        $this->writer()->writeAll([]);
+
+        self::assertSame([], $this->gateway->bulks);
+    }
+
+    public function testAVetoedRecordLeavesTheBatchAndTheOthersStillGo(): void
+    {
+        $listener = static function (object $event): void {
+            if ($event instanceof RecordCreatedEvent && $event->getRecord()->event === 'heartbeat') {
+                $event->veto();
+            }
+        };
+
+        $this->writer(listener: $listener)->writeAll([
+            new AuditRecord('order', 1, 'heartbeat'),
+            new AuditRecord('order', 2, AuditEvent::UPDATE),
+        ]);
+
+        self::assertCount(1, $this->gateway->bulks[0]);
+        self::assertSame(2, $this->gateway->only('audit_log')['objectId']);
+    }
+
+    public function testARefusedItemIsReportedOnItsOwnUnderTheLogPolicy(): void
+    {
+        $this->gateway->rejectInBulk = static fn (array $document) => $document['objectId'] === 2;
+
+        $this->writer()->writeAll([
+            new AuditRecord('order', 1, AuditEvent::UPDATE),
+            new AuditRecord('order', 2, AuditEvent::UPDATE),
+            new AuditRecord('order', 3, AuditEvent::UPDATE),
+        ]);
+
+        self::assertSame([1, 3], array_column($this->gateway->documents['audit_log'], 'objectId'), 'the others were written');
+
+        $failed = array_values(array_filter($this->events, static fn (object $e) => $e instanceof RecordFailedEvent));
+        self::assertCount(1, $failed);
+        self::assertSame(2, $failed[0]->record->objectId);
+        self::assertStringContainsString('rejected by the test', $failed[0]->reason->getMessage());
+    }
+
+    public function testUnderTheThrowPolicyEveryFailureIsReportedBeforeTheFirstIsThrown(): void
+    {
+        $this->gateway->rejectInBulk = static fn (array $document) => $document['objectId'] !== 2;
+
+        try {
+            $this->writer(FailurePolicy::Throw)->writeAll([
+                new AuditRecord('order', 1, AuditEvent::UPDATE),
+                new AuditRecord('order', 2, AuditEvent::UPDATE),
+                new AuditRecord('order', 3, AuditEvent::UPDATE),
+            ]);
+            self::fail('expected WriteFailedException');
+        } catch (WriteFailedException $e) {
+            self::assertSame(1, $e->record?->objectId, 'the first failure is the one thrown');
+        }
+
+        $failed = array_filter($this->events, static fn (object $e) => $e instanceof RecordFailedEvent);
+        self::assertCount(2, $failed, 'both refused records were reported, not just the thrown one');
+        self::assertSame([2], array_column($this->gateway->documents['audit_log'], 'objectId'));
+    }
+
+    public function testAWholeBatchFailingFailsEveryRecord(): void
+    {
+        $this->gateway->failWith = new \RuntimeException('cluster down');
+
+        $this->writer()->writeAll([
+            new AuditRecord('order', 1, AuditEvent::UPDATE),
+            new AuditRecord('order', 2, AuditEvent::UPDATE),
+        ]);
+
+        $failed = array_filter($this->events, static fn (object $e) => $e instanceof RecordFailedEvent);
+        self::assertCount(2, $failed);
+    }
+
+    public function testATransportThatCannotBatchGetsTheRecordsOneByOne(): void
+    {
+        $plain = new class implements TransportInterface {
+            /** @var list<string> */
+            public array $sent = [];
+
+            public function send(string $index, array $document, ?string $id = null): void
+            {
+                $this->sent[] = $index;
+            }
+        };
+
+        $writer = new AuditWriter($plain, $plain, new IndexResolver('audit_log'), new ChainActorResolver([]), new FrozenClock());
+        $writer->writeAll([new AuditRecord('order', 1, AuditEvent::UPDATE), new AuditRecord('order', 2, AuditEvent::UPDATE)]);
+
+        self::assertSame(['audit_log', 'audit_log'], $plain->sent);
+    }
+
+    public function testInsideAFrameTheBatchIsHeldAndTheFrameWritesOneBulk(): void
+    {
+        $buffer = new FrameBuffer();
+        $writer = $this->writer(buffer: $buffer);
+        $frame = new AuditFrame($buffer, $writer);
+
+        $frame->coalesce(function () use ($writer): void {
+            $writer->writeAll([new AuditRecord('stock', 1, AuditEvent::UPDATE, changes: ['fact' => new Change(1, 2)])]);
+            $writer->writeAll([new AuditRecord('stock', 1, AuditEvent::UPDATE, changes: ['fact' => new Change(2, 3)]), new AuditRecord('stock', 2, AuditEvent::UPDATE, changes: ['fact' => new Change(5, 6)])]);
+
+            self::assertSame([], $this->gateway->bulks, 'nothing leaves while the frame is open');
+        });
+
+        self::assertCount(1, $this->gateway->bulks, 'the frame released everything in one request');
+        self::assertCount(2, $this->gateway->bulks[0]);
+        self::assertSame(['old' => 1, 'new' => 3], $this->gateway->documents['audit_log'][0]['changes']['fact']);
+    }
+
+    /**
+     * @param (callable(object): void)|null $listener
+     */
+    private function writer(FailurePolicy $policy = FailurePolicy::Log, ?callable $listener = null, ?FrameBuffer $buffer = null): AuditWriter
+    {
+        $events = &$this->events;
+        $dispatcher = new class($events, $listener) implements EventDispatcherInterface {
+            /**
+             * @param list<object>                  $events
+             * @param (callable(object): void)|null $listener
+             */
+            public function __construct(private array &$events, private $listener)
+            {
+            }
+
+            public function dispatch(object $event): object
+            {
+                $this->events[] = $event;
+
+                if ($this->listener !== null) {
+                    ($this->listener)($event);
+                }
+
+                return $event;
+            }
+        };
+
+        $transport = new SyncTransport($this->gateway);
+
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log', ['auth' => 'audit_auth']), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $dispatcher, $buffer);
+    }
+}

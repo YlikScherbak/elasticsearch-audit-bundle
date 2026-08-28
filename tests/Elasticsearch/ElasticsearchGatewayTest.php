@@ -48,7 +48,7 @@ final class ElasticsearchGatewayTest extends TestCase
     {
         $gateway = $this->gateway(static fn (RequestInterface $request) => $request->getMethod() === 'HEAD'
             ? self::response(200, [])
-            : self::response(400, ['error' => ['type' => 'document_parsing_exception', 'reason' => 'failed to parse field [objectId] of type [long]']]));
+            : self::response(400, ['error' => ['type' => 'document_parsing_exception', 'reason' => "failed to parse field [objectId] of type [long]. Preview of field's value: 'abc'"]]));
 
         try {
             $gateway->index('audit_log', ['objectId' => 'abc']);
@@ -56,6 +56,7 @@ final class ElasticsearchGatewayTest extends TestCase
         } catch (RequestRejectedException $e) {
             self::assertStringContainsString('rejected', $e->getMessage());
             self::assertStringContainsString('failed to parse field [objectId]', $e->getMessage());
+            self::assertStringNotContainsString('abc', $e->getMessage(), 'the refused value stays out of the exception');
             self::assertNotInstanceOf(TransportUnavailableException::class, $e);
         }
     }
@@ -155,6 +156,21 @@ final class ElasticsearchGatewayTest extends TestCase
         $gateway->index('audit_log', ['objectType' => 'order']);
 
         self::assertSame(['PUT /audit_log', 'POST /audit_log/_doc'], $requests);
+    }
+
+    public function testAnExpiredPointInTimeSaysWhichSettingToRaise(): void
+    {
+        // What the cluster answers once the view is gone — verified against ES 9.1.
+        $gateway = $this->gateway(static fn () => self::response(404, ['error' => ['type' => 'search_phase_execution_exception', 'root_cause' => [['type' => 'search_context_missing_exception', 'reason' => 'No search context found for id [1234]']]]]));
+
+        try {
+            $gateway->searchPointInTime('pit-id', '1m', ['size' => 1]);
+            self::fail('expected InvalidQueryException');
+        } catch (InvalidQueryException $e) {
+            self::assertStringContainsString('No search context found', $e->getMessage());
+            self::assertStringContainsString('point in time expired', $e->getMessage());
+            self::assertStringContainsString('reader.point_in_time_keep_alive', $e->getMessage(), 'the fix is a setting; the message names it');
+        }
     }
 
     public function testASuccessfulSearchIsReturnedAsAnArray(): void

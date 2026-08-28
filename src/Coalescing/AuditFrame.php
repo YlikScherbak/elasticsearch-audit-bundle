@@ -48,9 +48,7 @@ final class AuditFrame
      */
     public function end(): void
     {
-        foreach ($this->buffer->close() ?? [] as $record) {
-            $this->writer->writeCompleted($record);
-        }
+        $this->writer->writeManyCompleted($this->buffer->close() ?? []);
     }
 
     /**
@@ -91,9 +89,7 @@ final class AuditFrame
 
         $this->logger->warning('An audit frame was left open; its {held} held record(s) have been written and the frame closed. Pair begin() with end() in a try/finally, or use coalesce().', ['held' => $held]);
 
-        foreach ($records as $record) {
-            $this->writer->writeCompleted($record);
-        }
+        $this->writer->writeManyCompleted($records);
 
         return true;
     }

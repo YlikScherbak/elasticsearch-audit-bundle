@@ -113,9 +113,8 @@ final class AuditSubscriber
         $this->pending = [];
         $this->pendingRemovals = [];
 
-        foreach ($records as $record) {
-            $this->writer->write($record);
-        }
+        // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
+        $this->writer->writeAll($records);
     }
 
     /**

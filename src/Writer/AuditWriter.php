@@ -9,10 +9,12 @@ use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
+use Borsche\ElasticsearchAuditBundle\Transport\BatchTransportInterface;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Psr\Clock\ClockInterface;
 use Psr\EventDispatcher\EventDispatcherInterface;
@@ -114,23 +116,107 @@ final class AuditWriter
     /**
      * The completed record's way out: the RecordCreated event, the index, the transport.
      */
+    /**
+     * Writes several records as one batch — what a flush or a closing frame produces.
+     * Each record is completed and held or released by the frame exactly as write()
+     * would; what comes out goes to the transport in one call when it can take a
+     * batch, and one by one otherwise. Failures are reported per record.
+     *
+     * @param list<AuditRecord> $records
+     */
+    public function writeAll(array $records): void
+    {
+        $outgoing = [];
+
+        foreach ($records as $record) {
+            try {
+                $record = $this->complete($record);
+
+                if ($this->frame !== null && $this->frame->accepts($record->objectType)) {
+                    foreach ($this->frame->hold($record) as $released) {
+                        $outgoing[] = $released;
+                    }
+
+                    continue;
+                }
+
+                $outgoing[] = $record;
+            } catch (\Throwable $e) {
+                $this->reportFailure($e, $record);
+            }
+        }
+
+        $this->writeManyCompleted($outgoing);
+    }
+
+    /**
+     * The batch form of writeCompleted(): records that already went through the
+     * completion pass, sent together.
+     *
+     * @param list<AuditRecord> $records
+     */
+    public function writeManyCompleted(array $records): void
+    {
+        if ($records === []) {
+            return;
+        }
+
+        if (!$this->transport instanceof BatchTransportInterface) {
+            foreach ($records as $record) {
+                $this->dispatch($record, false);
+            }
+
+            return;
+        }
+
+        $items = [];
+        $sent = [];
+
+        foreach ($records as $record) {
+            try {
+                $prepared = $this->prepare($record);
+
+                if ($prepared === null) {
+                    continue; // vetoed
+                }
+
+                $items[] = ['index' => $this->indexResolver->resolve($prepared->objectType), 'document' => $prepared->toDocument(), 'id' => $prepared->id];
+                $sent[] = $prepared;
+            } catch (\Throwable $e) {
+                $this->reportFailure($e, $record);
+            }
+        }
+
+        if ($items === []) {
+            return;
+        }
+
+        try {
+            $result = $this->transport->sendMany($items);
+        } catch (\Throwable $e) {
+            // The whole batch did not go: every record failed, and with "throw" the
+            // exception carries the first of them — the others are still logged.
+            $this->reportFailures($sent, $e);
+
+            return;
+        }
+
+        $failures = [];
+
+        foreach ($result->failures as $position => $failure) {
+            $failures[] = [$sent[$position], RequestRejectedException::because($failure['status'], $failure['reason'], new \RuntimeException('bulk item rejected'))];
+        }
+
+        $this->reportEach($failures);
+    }
+
     private function dispatch(AuditRecord $record, bool $immediately): void
     {
         try {
-            // Redaction happens here, on the way out, and not in complete(): a frame has to
-            // see the real values to know that a field moved, and the event below is the
-            // first place a record is seen outside the writer.
-            $record = $this->redactor?->redact($record) ?? $record;
+            $record = $this->prepare($record);
 
-            if ($this->events !== null) {
-                $event = new RecordCreatedEvent($record);
-                $this->events->dispatch($event);
-
-                if ($event->isVetoed()) {
-                    return;
-                }
-
-                $record = $event->getRecord();
+            if ($record === null) {
+                return; // vetoed
             }
 
             $index = $this->indexResolver->resolve($record->objectType);
@@ -139,6 +225,59 @@ final class AuditWriter
             $transport->send($index, $record->toDocument(), $record->id);
         } catch (\Throwable $e) {
             $this->reportFailure($e, $record);
+        }
+    }
+
+    /**
+     * The last steps before a record leaves: redaction, then the RecordCreated event.
+     * Null when a listener vetoed it.
+     */
+    private function prepare(AuditRecord $record): ?AuditRecord
+    {
+        // Redaction happens here, on the way out, and not in complete(): a frame has to
+        // see the real values to know that a field moved, and the event below is the
+        // first place a record is seen outside the writer.
+        $record = $this->redactor?->redact($record) ?? $record;
+
+        if ($this->events === null) {
+            return $record;
+        }
+
+        $event = new RecordCreatedEvent($record);
+        $this->events->dispatch($event);
+
+        return $event->isVetoed() ? null : $event->getRecord();
+    }
+
+    /**
+     * Reports one failure for each record; with "throw", the first exception is raised
+     * after every record was logged and every RecordFailedEvent dispatched, so a batch
+     * that failed as a whole does not lose the other records' failure notices.
+     *
+     * @param list<AuditRecord> $records
+     */
+    private function reportFailures(array $records, \Throwable $e): void
+    {
+        $this->reportEach(array_map(static fn (AuditRecord $r) => [$r, $e], $records));
+    }
+
+    /**
+     * @param list<array{AuditRecord, \Throwable}> $failures
+     */
+    private function reportEach(array $failures): void
+    {
+        $first = null;
+
+        foreach ($failures as [$record, $e]) {
+            try {
+                $this->reportFailure($e, $record);
+            } catch (WriteFailedException $thrown) {
+                $first ??= $thrown;
+            }
+        }
+
+        if ($first !== null) {
+            throw $first;
         }
     }
 

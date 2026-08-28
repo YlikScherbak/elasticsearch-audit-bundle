@@ -20,9 +20,13 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 final class QueryBuilder
 {
     /**
+     * @param bool $pointInTime the body is for a search inside a point in time: Elasticsearch
+     *                          then offers _shard_doc, the tiebreaker it recommends for deep
+     *                          paging there, and it goes last so the record id still decides first
+     *
      * @return array<string, mixed>
      */
-    public function build(AuditQuery $query): array
+    public function build(AuditQuery $query, bool $pointInTime = false): array
     {
         $filter = [];
 
@@ -60,10 +64,11 @@ final class QueryBuilder
 
         $body = [
             'query' => $filter === [] ? ['match_all' => new \stdClass()] : ['bool' => ['filter' => $filter]],
-            'sort' => [
+            'sort' => array_values(array_filter([
                 ['loggedAt' => $query->sort],
                 ['id' => ['order' => $query->sort, 'unmapped_type' => 'keyword']],
-            ],
+                $pointInTime ? ['_shard_doc' => $query->sort] : null,
+            ])),
             'size' => $query->limit,
             'track_total_hits' => true,
         ];

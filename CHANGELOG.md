@@ -8,6 +8,43 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Added
+- **Bulk writes.** A flush that produced fifty records used to cost fifty requests in the tail
+  of the web request; it is now one `_bulk` call (`sync`) or one message that becomes one `_bulk`
+  call in the worker (`messenger`). The same for a frame closing. `AuditWriter::writeAll()` and
+  `writeManyCompleted()` are the batch forms of `write()` and `writeCompleted()`
+- **`BatchTransportInterface`** — a transport that can carry a batch; `SyncTransport` and
+  `MessengerTransport` implement it. A custom transport that only knows `send()` keeps working:
+  the writer falls back to one record at a time
+- **Per-record failure handling for batches.** Elasticsearch judges each document on its own, so
+  a batch can be partly written; `BulkResult` carries the refused positions and their reasons,
+  the writer reports each one (log, `RecordFailedEvent`, and with `throw` the first
+  `WriteFailedException` — after every failure was reported). In the worker, a refused document is
+  raised as Messenger's `UnrecoverableMessageHandlingException` (with the bundle's
+  `RequestRejectedException` underneath, naming the refused positions and reasons), so the message
+  goes to the failure transport at once instead of around the retry loop — Messenger retries every
+  other exception, and a document the mapping refuses would be refused again. An unreachable
+  cluster still propagates as `TransportUnavailableException` and is retried; the ids make that
+  harmless.
+- The value preview Elasticsearch appends to a parsing error (`Preview of field's value: '...'`)
+  is cut from every reason the bundle reports — in the log, in `RecordFailedEvent`, in
+  `WriteFailedException` and in a failed message. A refused value may be a person's data, and
+  the error path is not where it should end up
+- **`iterate()` reads from a point in time.** A long export sees the index as it was when the
+  export started: records written meanwhile do not appear, and none appears twice because a
+  segment merged underneath. Opened before the first batch, kept alive by each search
+  (`reader.point_in_time_keep_alive`, default `1m`), closed however the export ends — a `break`
+  included. `iterate($query, $batchSize, consistent: false)` searches the live index as before
+- `GatewayInterface` gains `bulk()`, `openPointInTime()`, `searchPointInTime()` and
+  `closePointInTime()`; `QueryBuilder::build()` adds `_shard_doc` as the last sort key inside a
+  point in time, the tiebreaker Elasticsearch recommends there
+
+### Changed
+- Doctrine records of one flush and the records a frame releases go out as **one batch** instead
+  of one request each. Order within the batch is preserved; failures are reported per record as
+  before
+- **`GatewayInterface` grew four methods** — an implementation of your own has to add them
+
 ## [0.5.0] - 2026-08-27
 
 What the trail keeps, and what it must not. Redaction for values that may never be stored,

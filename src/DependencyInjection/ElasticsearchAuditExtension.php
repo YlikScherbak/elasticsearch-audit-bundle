@@ -29,6 +29,7 @@ use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
@@ -95,7 +96,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerRedaction($config['redact'], $container);
         $this->registerCoalescing($config['coalescing'], $container);
         $this->registerWriter($config['on_failure'], $container);
-        $this->registerReader($container);
+        $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
         $this->registerCommands($container);
     }
@@ -148,7 +149,10 @@ final class ElasticsearchAuditExtension extends Extension
         }
     }
 
-    private function registerReader(ContainerBuilder $container): void
+    /**
+     * @param array{point_in_time_keep_alive: string} $reader
+     */
+    private function registerReader(array $reader, ContainerBuilder $container): void
     {
         $container->setDefinition(self::SERVICE_READER, new Definition(AuditReader::class, [
             new Reference(self::SERVICE_GATEWAY),
@@ -156,6 +160,7 @@ final class ElasticsearchAuditExtension extends Extension
             new Definition(QueryBuilder::class),
             new TaggedIteratorArgument(self::TAG_QUERY_EXTENSION),
             new TaggedIteratorArgument(self::TAG_DECORATOR),
+            $reader['point_in_time_keep_alive'],
         ]));
         $container->setAlias(AuditReader::class, self::SERVICE_READER)->setPublic(true);
     }
@@ -233,6 +238,8 @@ final class ElasticsearchAuditExtension extends Extension
 
             $container->setDefinition(self::SERVICE_TRANSPORT, new Definition(MessengerTransport::class, [new Reference($busId)]));
             $container->setDefinition(IndexAuditRecordHandler::class, (new Definition(IndexAuditRecordHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
+                ->addTag('messenger.message_handler'));
+            $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
                 ->addTag('messenger.message_handler'));
         } else {
             $container->setAlias(self::SERVICE_TRANSPORT, self::SERVICE_SYNC_TRANSPORT);

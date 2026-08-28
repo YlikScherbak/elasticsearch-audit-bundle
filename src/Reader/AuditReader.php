@@ -35,6 +35,7 @@ final class AuditReader
         private readonly QueryBuilder $queryBuilder = new QueryBuilder(),
         private readonly iterable $extensions = [],
         private readonly iterable $decorators = [],
+        private readonly string $pointInTimeKeepAlive = '1m',
     ) {
     }
 
@@ -64,29 +65,49 @@ final class AuditReader
      * @throws IndexNotFoundException
      * @throws TransportUnavailableException
      */
-    public function iterate(AuditQuery $query, int $batchSize = 500): \Generator
+    public function iterate(AuditQuery $query, int $batchSize = 500, bool $consistent = true): \Generator
     {
         $query = $this->extend($query)->page(1, $batchSize);
         $index = $this->indexFor($query);
 
-        while (true) {
-            $hits = array_values($this->gateway->search($index, $this->queryBuilder->build($query))['hits']['hits'] ?? []);
+        // A point in time freezes what the export sees: records written while it runs do
+        // not appear, and no record appears twice because a segment merged underneath.
+        // Closed in finally, which a generator runs when the consumer stops early too.
+        $pit = $consistent ? $this->gateway->openPointInTime($index, $this->pointInTimeKeepAlive) : null;
 
-            if ($hits === []) {
-                return;
+        try {
+            while (true) {
+                $response = $pit === null
+                    ? $this->gateway->search($index, $this->queryBuilder->build($query))
+                    : $this->gateway->searchPointInTime($pit, $this->pointInTimeKeepAlive, $this->queryBuilder->build($query, pointInTime: true));
+
+                // Elasticsearch may hand back a renewed id; the next search must use it.
+                if ($pit !== null && \is_string($response['pit_id'] ?? null) && $response['pit_id'] !== '') {
+                    $pit = $response['pit_id'];
+                }
+
+                $hits = array_values($response['hits']['hits'] ?? []);
+
+                if ($hits === []) {
+                    return;
+                }
+
+                // The cursor and the stop condition follow what Elasticsearch returned, so
+                // a decorator that drops entries from the page cannot end the export early.
+                yield from $this->decorate(array_map(AuditEntry::fromHit(...), $hits));
+
+                $cursor = $hits[array_key_last($hits)]['sort'] ?? [];
+
+                if (\count($hits) < $batchSize || !\is_array($cursor) || $cursor === []) {
+                    return; // last batch, or no sort values to continue from
+                }
+
+                $query = $query->after($cursor);
             }
-
-            // The cursor and the stop condition follow what Elasticsearch returned, so
-            // a decorator that drops entries from the page cannot end the export early.
-            yield from $this->decorate(array_map(AuditEntry::fromHit(...), $hits));
-
-            $cursor = $hits[array_key_last($hits)]['sort'] ?? [];
-
-            if (\count($hits) < $batchSize || !\is_array($cursor) || $cursor === []) {
-                return; // last batch, or no sort values to continue from
+        } finally {
+            if ($pit !== null) {
+                $this->gateway->closePointInTime($pit);
             }
-
-            $query = $query->after($cursor);
         }
     }
 
