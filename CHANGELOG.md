@@ -8,6 +8,11 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-28
+
+A flush is one request, and an export is a frozen view. Writes go out in batches, and
+iterate() reads from a point in time instead of a moving index.
+
 ### Added
 - **Bulk writes.** A flush that produced fifty records used to cost fifty requests in the tail
   of the web request; it is now one `_bulk` call (`sync`) or one message that becomes one `_bulk`
