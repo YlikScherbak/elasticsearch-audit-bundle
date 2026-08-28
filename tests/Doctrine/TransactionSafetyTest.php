@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Reaction;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\PostFlushEventArgs;
+use Doctrine\ORM\Event\PostPersistEventArgs;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
 
@@ -112,7 +113,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->gateway->documents = [];
 
         $listener = $this->detachedListener();
-        $listener->postPersist(new LifecycleEventArgs($article, $this->em));
+        $listener->postPersist(new PostPersistEventArgs($article, $this->em));
         $listener->onClear(new OnClearEventArgs($this->em, Article::class)); // @phpstan-ignore-line ORM 2 signature
         $listener->postFlush(new PostFlushEventArgs($this->em));
 
@@ -131,7 +132,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->gateway->documents = [];
 
         $listener = $this->detachedListener();
-        $listener->postPersist(new LifecycleEventArgs($article, $this->em));
+        $listener->postPersist(new PostPersistEventArgs($article, $this->em));
         $this->em->close();
         $listener->onClear(new OnClearEventArgs($this->em, Article::class)); // @phpstan-ignore-line ORM 2 signature
         $listener->postFlush(new PostFlushEventArgs($this->em));

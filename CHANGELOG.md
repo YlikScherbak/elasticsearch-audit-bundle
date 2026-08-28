@@ -19,6 +19,14 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
   as `text`, and every read then fails with *Fielddata is disabled on [id]* —  `unmapped_type`
   applies only to a field that is unmapped. Verified on Elasticsearch 9.1; the note now carries the
   one-line `PUT _mapping` that has to run before the first write
+- **A release workflow that tags only after the checks pass.** `ci.yml` became callable, and
+  `release.yml` runs it whole as a gate before creating anything; the tag and the GitHub release
+  are made inside that run, with the notes read out of `CHANGELOG.md`. It refuses a version that
+  is already tagged or has no changelog section, and `dry_run: true` rehearses the lot without
+  creating a thing. `git tag` by hand is no longer part of releasing
+- The lowest-dependencies job now runs **PHPStan as well as the tests** — that pairing is where an
+  annotation that narrows, or a method the oldest supported version does not have, shows up — and
+  static analysis validates `composer.json` with `--strict`
 - README: how to chunk a decorator's lookups. A decorator receives as many entries as the page
   holds, and an `IN (...)` of ten thousand ids makes MySQL's range optimizer give up and scan the
   table — worth knowing before raising `max_limit`
@@ -29,6 +37,17 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
   refuses a page number or size below 1. `AuditQuery::MAX_LIMIT` and `MAX_WINDOW` are now
   `DEFAULT_MAX_LIMIT` and `DEFAULT_MAX_WINDOW` — they are defaults the reader takes, not ceilings
   the query enforces. Extensions are applied before the check, so what runs is what was checked
+
+### Fixed
+- **The oldest supported dependencies pass static analysis too**, which is what the new job
+  found: the Doctrine listener takes ORM's own event classes (`PostPersistEventArgs` and its
+  siblings) instead of the generic persistence one, and asks the event through reflection
+  whether this Doctrine can clear a single class — a question ORM 2 answers and ORM 3 does not
+  have. The behaviour of both is unchanged
+- The suite declares `guzzlehttp/psr7 ^2.4.5` itself. With the `php-http/discovery` Composer
+  plugin no longer allowed to install an implementation behind your back, PSR-7 1.9 leaves the
+  Elasticsearch transport with *No PSR-17 url factory found* — worth knowing if you pin old
+  dependencies: install `guzzlehttp/psr7 ^2` or `nyholm/psr7` yourself
 
 ## [0.7.0] - 2026-08-28
 

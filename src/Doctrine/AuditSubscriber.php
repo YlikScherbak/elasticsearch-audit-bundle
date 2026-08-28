@@ -11,8 +11,12 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\PostFlushEventArgs;
+use Doctrine\ORM\Event\PostPersistEventArgs;
+use Doctrine\ORM\Event\PostRemoveEventArgs;
+use Doctrine\ORM\Event\PostUpdateEventArgs;
+use Doctrine\ORM\Event\PreRemoveEventArgs;
 use Doctrine\ORM\Events;
-use Doctrine\Persistence\Event\LifecycleEventArgs;
+use Doctrine\Persistence\ObjectManager;
 
 /**
  * Records entity lifecycle events during flush().
@@ -52,10 +56,7 @@ final class AuditSubscriber
     ) {
     }
 
-    /**
-     * @param LifecycleEventArgs<EntityManagerInterface> $args
-     */
-    public function postPersist(LifecycleEventArgs $args): void
+    public function postPersist(PostPersistEventArgs $args): void
     {
         $record = $this->recordFor($args, AuditEvent::CREATE);
 
@@ -64,10 +65,7 @@ final class AuditSubscriber
         }
     }
 
-    /**
-     * @param LifecycleEventArgs<EntityManagerInterface> $args
-     */
-    public function postUpdate(LifecycleEventArgs $args): void
+    public function postUpdate(PostUpdateEventArgs $args): void
     {
         $record = $this->recordFor($args, AuditEvent::UPDATE);
 
@@ -78,10 +76,7 @@ final class AuditSubscriber
         $this->pending[] = $record;
     }
 
-    /**
-     * @param LifecycleEventArgs<EntityManagerInterface> $args
-     */
-    public function preRemove(LifecycleEventArgs $args): void
+    public function preRemove(PreRemoveEventArgs $args): void
     {
         $record = $this->recordFor($args, AuditEvent::REMOVE, withChanges: false);
 
@@ -90,10 +85,7 @@ final class AuditSubscriber
         }
     }
 
-    /**
-     * @param LifecycleEventArgs<EntityManagerInterface> $args
-     */
-    public function postRemove(LifecycleEventArgs $args): void
+    public function postRemove(PostRemoveEventArgs $args): void
     {
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
@@ -129,7 +121,7 @@ final class AuditSubscriber
      */
     public function onClear(OnClearEventArgs $args): void
     {
-        if (method_exists($args, 'clearsAllEntities') && !$args->clearsAllEntities() && $args->getObjectManager()->isOpen()) {
+        if (self::isPartialClear($args) && self::entityManagerOf($args->getObjectManager())?->isOpen() === true) {
             return;
         }
 
@@ -138,9 +130,36 @@ final class AuditSubscriber
     }
 
     /**
-     * @param LifecycleEventArgs<EntityManagerInterface> $args
+     * Whether this clear names a single entity class rather than emptying the manager.
+     *
+     * Only ORM 2 can do that, and only ORM 2 has the method to ask, so the question is
+     * put through reflection: a static analyser sees one version at a time and would
+     * call any direct check redundant on ORM 2 and impossible on ORM 3. It is neither —
+     * it is what tells the two versions apart, and both are supported.
      */
-    private function recordFor(LifecycleEventArgs $args, string $event, bool $withChanges = true): ?AuditRecord
+    private static function isPartialClear(OnClearEventArgs $args): bool
+    {
+        $event = new \ReflectionClass($args);
+
+        if (!$event->hasMethod('clearsAllEntities')) {
+            return false; // ORM 3: a clear is always a full one
+        }
+
+        return $event->getMethod('clearsAllEntities')->invoke($args) === false;
+    }
+
+    /**
+     * Doctrine's own listeners always hand an entity manager, but the event only
+     * promises an ObjectManager on the oldest supported doctrine/persistence, so the
+     * narrowing is real rather than decorative: without an entity manager there is no
+     * unit of work to read a change set from.
+     */
+    private static function entityManagerOf(ObjectManager $manager): ?EntityManagerInterface
+    {
+        return $manager instanceof EntityManagerInterface ? $manager : null;
+    }
+
+    private function recordFor(PostPersistEventArgs|PostUpdateEventArgs|PreRemoveEventArgs $args, string $event, bool $withChanges = true): ?AuditRecord
     {
         $entity = $args->getObject();
         $record = null;
@@ -152,7 +171,12 @@ final class AuditSubscriber
                 return null;
             }
 
-            $em = $args->getObjectManager();
+            $em = self::entityManagerOf($args->getObjectManager());
+
+            if ($em === null) {
+                return null;
+            }
+
             $id = $this->identifierOf($em, $entity);
 
             if ($id === null) {
