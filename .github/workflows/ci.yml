@@ -4,6 +4,10 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  # Callable, so release.yml can require every job below before a tag exists.
+  workflow_call:
+  # Re-runnable from the Actions tab without an empty commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -75,6 +79,11 @@ jobs:
 
       - name: Run tests
         run: vendor/bin/phpunit
+
+      # This job is the one that pays: an annotation that narrows, or an SDK method the
+      # oldest supported version does not have, is invisible everywhere else.
+      - name: Run PHPStan against the oldest dependencies
+        run: vendor/bin/phpstan analyse --no-progress
 
   integration:
     name: Integration (Elasticsearch ${{ matrix.elasticsearch }}, client ${{ matrix.client }})
@@ -160,6 +169,9 @@ jobs:
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Validate composer.json
+        run: composer validate --strict
 
       - name: Run PHPStan
         run: vendor/bin/phpstan analyse --no-progress

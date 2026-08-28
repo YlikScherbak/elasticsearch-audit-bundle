@@ -51,6 +51,45 @@ CI runs the same tests against live Elasticsearch 8.19 and 9.1, each with its ma
 - **Nothing suppressed.** No `@phpstan-ignore`, no baseline: if the analyser complains, the code
   or the types are wrong.
 
+## Releasing
+
+**`git tag` is not part of releasing.** A tag is a promise that cannot be withdrawn, and a tag
+made before the checks have finished is one the checks have no authority over. Here the tag is
+created *inside* the run that verified it, so a failing check is a release that never happened.
+
+1. **Work commit** — the code, and the changelog entry under `## [Unreleased]`. Not under a
+   version number yet.
+2. **Release commit** — move the heading: `## [Unreleased]` becomes `## [0.8.0] - 2026-09-04`
+   with a fresh empty `## [Unreleased]` above it. Nothing else in that commit. Push.
+   Keeping the stamp in its own commit is what stops it from being empty — and an empty release
+   commit means the version was stamped too early, in the work commit.
+3. **Run the workflow**, from the Actions tab or:
+
+   ```bash
+   gh workflow run release.yml -f version=0.8.0 -f title="v0.8.0 — what this release is about"
+   ```
+
+   It runs the whole of CI as a gate, refuses a version that is already tagged or has no
+   changelog section, then tags and publishes with the notes read out of `CHANGELOG.md`.
+   Packagist picks it up from the webhook.
+
+The notes come from the changelog on purpose: a release note typed into a box is a second
+account of the same change, and second accounts drift. If the entry is thin, the release page is
+thin, and you notice while you can still fix it.
+
+**Rehearse before trusting it.** A gate tested during a release is not a gate:
+
+```bash
+gh workflow run release.yml -f version=0.7.0 -f dry_run=true
+```
+
+That runs everything, finds the existing tag, says a real run would have stopped, prints the
+notes it would have published, and creates nothing. Rehearsing against a version that already
+shipped is deliberate — it is the only kind with a changelog section to read. Afterwards check
+the three things rather than the green tick: the job names are prefixed `Gate /` (that is the
+proof the `workflow_call` wiring took), `git ls-remote --tags origin` is unchanged, and the
+notes in the log are the right section and stop before the previous heading.
+
 ## What belongs in the bundle
 
 The bundle knows about audit records, Elasticsearch and Doctrine. It does not know about your

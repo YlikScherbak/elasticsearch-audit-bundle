@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the v — for example 0.8.0'
+        required: true
+        type: string
+      title:
+        description: 'Release title. Defaults to the version on its own.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Run every check and print the notes, but tag nothing'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything CI runs. Nothing below starts until this is green.
+  gate:
+    name: Gate
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  release:
+    name: Tag and publish
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the version is not already released
+        run: |
+          git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1 || exit 0
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "::notice::v${{ inputs.version }} already exists. Carrying on because this is a"
+            echo "::notice::dry run; a real one would stop here."
+            exit 0
+          fi
+
+          echo "::error::v${{ inputs.version }} already exists."
+          exit 1
+
+      - name: Take the release notes from the changelog
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          awk -v version="## [$VERSION]" '
+            index($0, version) == 1 { inside = 1; next }
+            inside && /^## \[/      { exit }
+            inside                  { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for $VERSION."
+            exit 1
+          fi
+
+          echo "Release notes for $VERSION:"
+          cat release-notes.md
+
+      - name: Stop here if this is a rehearsal
+        if: inputs.dry_run
+        run: echo "::notice::Dry run: everything passed. Nothing was tagged."
+
+      - name: Tag it
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git tag -a "v${{ inputs.version }}" -m "v${{ inputs.version }}"
+          git push origin "v${{ inputs.version }}"
+
+      - name: Publish the release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="${{ inputs.title }}"
+          [ -n "$TITLE" ] || TITLE="v${{ inputs.version }}"
+
+          gh release create "v${{ inputs.version }}" \
+            --title "$TITLE" \
+            --notes-file release-notes.md

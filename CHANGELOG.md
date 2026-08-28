@@ -8,6 +8,16 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Added
+- **A release workflow that tags only after the checks pass.** `ci.yml` became callable, and
+  `release.yml` runs it whole as a gate before creating anything; the tag and the GitHub release
+  are made inside that run, with the notes read out of `CHANGELOG.md`. It refuses a version that
+  is already tagged or has no changelog section, and `dry_run: true` rehearses the lot without
+  creating a thing. `git tag` by hand is no longer part of releasing
+- The lowest-dependencies job now runs **PHPStan as well as the tests** — that pairing is where an
+  annotation that narrows, or a method the oldest supported version does not have, shows up — and
+  static analysis validates `composer.json` with `--strict`
+
 ## [0.7.0] - 2026-08-28
 
 The surface is drawn: what an application may call, and what is the bundle's own machinery.

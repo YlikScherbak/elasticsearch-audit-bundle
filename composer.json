@@ -69,7 +69,10 @@
         "phpstan": "phpstan analyse"
     },
     "config": {
-        "sort-packages": true
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
     },
     "minimum-stability": "stable",
     "prefer-stable": true
