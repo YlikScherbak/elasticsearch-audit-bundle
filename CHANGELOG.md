@@ -9,14 +9,26 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 ## [Unreleased]
 
 ### Added
-- **A release workflow that tags only after the checks pass.** `ci.yml` became callable, and
-  `release.yml` runs it whole as a gate before creating anything; the tag and the GitHub release
-  are made inside that run, with the notes read out of `CHANGELOG.md`. It refuses a version that
-  is already tagged or has no changelog section, and `dry_run: true` rehearses the lot without
-  creating a thing. `git tag` by hand is no longer part of releasing
-- The lowest-dependencies job now runs **PHPStan as well as the tests** — that pairing is where an
-  annotation that narrows, or a method the oldest supported version does not have, shows up — and
-  static analysis validates `composer.json` with `--strict`
+- **`reader.max_limit` and `reader.max_result_window`** — how large a page may be and how deep
+  `page(n, limit)` may reach are now configuration, not constants. Both keep Elasticsearch's own
+  defaults (1000 and 10 000), and a screen that shows five or ten thousand rows at once raises the
+  first; pages beyond the window need the second raised together with the cluster's
+  `index.max_result_window`. A cursor is bounded by neither
+- UPGRADE: the 0.2 → 0.3 note about pre-0.3 indices was wrong and is corrected. Such an index does
+  **not** keep working: with dynamic mapping still on, the first record the bundle writes maps `id`
+  as `text`, and every read then fails with *Fielddata is disabled on [id]* —  `unmapped_type`
+  applies only to a field that is unmapped. Verified on Elasticsearch 9.1; the note now carries the
+  one-line `PUT _mapping` that has to run before the first write
+- README: how to chunk a decorator's lookups. A decorator receives as many entries as the page
+  holds, and an `IN (...)` of ten thousand ids makes MySQL's range optimizer give up and scan the
+  table — worth knowing before raising `max_limit`
+
+### Changed
+- **The page-size and window checks moved from `AuditQuery` to `AuditReader`**, where the
+  configuration lives; the exception now names the setting to raise. `AuditQuery::page()` still
+  refuses a page number or size below 1. `AuditQuery::MAX_LIMIT` and `MAX_WINDOW` are now
+  `DEFAULT_MAX_LIMIT` and `DEFAULT_MAX_WINDOW` — they are defaults the reader takes, not ceilings
+  the query enforces. Extensions are applied before the check, so what runs is what was checked
 
 ## [0.7.0] - 2026-08-28
 

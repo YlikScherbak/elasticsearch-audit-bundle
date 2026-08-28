@@ -25,7 +25,7 @@ final class ConfigurationTest extends TestCase
         self::assertTrue($config['client']['ssl_verification']);
         self::assertSame(['enabled' => true, 'skip_empty_updates' => true, 'connection' => 'default'], $config['doctrine']);
         self::assertSame(['enabled' => true, 'object_types' => [], 'numeric_fields' => [], 'max_held' => 10000], $config['coalescing']);
-        self::assertSame(['point_in_time_keep_alive' => '1m'], $config['reader']);
+        self::assertSame(['max_limit' => 1000, 'max_result_window' => 10000, 'point_in_time_keep_alive' => '1m'], $config['reader']);
     }
 
     public function testTheKeepAliveMustBeAnElasticsearchTimeValue(): void

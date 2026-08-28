@@ -150,7 +150,7 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{point_in_time_keep_alive: string} $reader
+     * @param array{point_in_time_keep_alive: string, max_limit: int, max_result_window: int} $reader
      */
     private function registerReader(array $reader, ContainerBuilder $container): void
     {
@@ -161,6 +161,8 @@ final class ElasticsearchAuditExtension extends Extension
             new TaggedIteratorArgument(self::TAG_QUERY_EXTENSION),
             new TaggedIteratorArgument(self::TAG_DECORATOR),
             $reader['point_in_time_keep_alive'],
+            $reader['max_limit'],
+            $reader['max_result_window'],
         ]));
         $container->setAlias(AuditReader::class, self::SERVICE_READER)->setPublic(true);
     }

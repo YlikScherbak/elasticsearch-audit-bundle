@@ -19,8 +19,15 @@ use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
  */
 final class AuditQuery
 {
-    public const MAX_LIMIT = 1000;
-    public const MAX_WINDOW = 10_000; // Elasticsearch's default index.max_result_window
+    /**
+     * How large a page may be, and how deep from/size may reach, unless the reader is
+     * configured otherwise (reader.max_limit, reader.max_result_window). They are
+     * defaults rather than absolutes because both are properties of the deployment —
+     * the second one has to match the cluster's own index.max_result_window — and the
+     * reader is what knows them. A query is checked against them when it is read.
+     */
+    public const DEFAULT_MAX_LIMIT = 1000;
+    public const DEFAULT_MAX_WINDOW = 10_000; // Elasticsearch's default index.max_result_window
 
     public const SORT_DESC = 'desc';
     public const SORT_ASC = 'asc';
@@ -180,10 +187,8 @@ final class AuditQuery
             throw new InvalidQueryException('The page number starts at 1.');
         }
 
-        self::assertLimit($limit);
-
-        if ($page * $limit > self::MAX_WINDOW) {
-            throw new InvalidQueryException(sprintf('Page %d with %d per page reaches past row %d, which Elasticsearch does not serve with from/size. Use after() to page with a cursor instead.', $page, $limit, self::MAX_WINDOW));
+        if ($limit < 1) {
+            throw new InvalidQueryException(sprintf('The page size must be at least 1, %d given.', $limit));
         }
 
         return $this->with(page: $page, limit: $limit, searchAfter: null);
@@ -242,13 +247,6 @@ final class AuditQuery
 
         if (\in_array($attribute, AuditRecord::reservedFields(), true)) {
             throw new InvalidQueryException(sprintf('"%s" is a base field; filter it with the dedicated method (withObjectIds, withEvents, withActors, between...).', $attribute));
-        }
-    }
-
-    private static function assertLimit(int $limit): void
-    {
-        if ($limit < 1 || $limit > self::MAX_LIMIT) {
-            throw new InvalidQueryException(sprintf('The limit must be between 1 and %d, %d given.', self::MAX_LIMIT, $limit));
         }
     }
 

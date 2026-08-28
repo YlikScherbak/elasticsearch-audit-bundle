@@ -36,6 +36,8 @@ final class AuditReader
         private readonly iterable $extensions = [],
         private readonly iterable $decorators = [],
         private readonly string $pointInTimeKeepAlive = '1m',
+        private readonly int $maxLimit = AuditQuery::DEFAULT_MAX_LIMIT,
+        private readonly int $maxResultWindow = AuditQuery::DEFAULT_MAX_WINDOW,
     ) {
     }
 
@@ -47,6 +49,8 @@ final class AuditReader
     public function find(AuditQuery $query): AuditPage
     {
         $query = $this->extend($query);
+        $this->assertWithinLimits($query);
+
         $response = $this->gateway->search($this->indexFor($query), $this->queryBuilder->build($query));
 
         $entries = array_map(AuditEntry::fromHit(...), array_values($response['hits']['hits'] ?? []));
@@ -68,6 +72,8 @@ final class AuditReader
     public function iterate(AuditQuery $query, int $batchSize = 500, bool $consistent = true): \Generator
     {
         $query = $this->extend($query)->page(1, $batchSize);
+        $this->assertWithinLimits($query);
+
         $index = $this->indexFor($query);
 
         // A point in time freezes what the export sees: records written while it runs do
@@ -108,6 +114,31 @@ final class AuditReader
             if ($pit !== null) {
                 $this->gateway->closePointInTime($pit);
             }
+        }
+    }
+
+    /**
+     * How big a page may be, and how deep from/size may reach, is a property of the
+     * deployment: the second one has to match the cluster's own index.max_result_window,
+     * which an operator raises when the screens need deeper pages. Checked here, after
+     * the extensions have had their say, so what runs is what was checked — and before
+     * anything reaches Elasticsearch, so the message names the setting rather than
+     * arriving as a 400 from the cluster.
+     *
+     * A cursor is not bounded by the window at all; only its page size is checked.
+     */
+    private function assertWithinLimits(AuditQuery $query): void
+    {
+        if ($query->limit > $this->maxLimit) {
+            throw new InvalidQueryException(sprintf('A page of %d is larger than reader.max_limit (%d). Raise the setting, or read in smaller pages.', $query->limit, $this->maxLimit));
+        }
+
+        if ($query->usesCursor()) {
+            return;
+        }
+
+        if ($query->page * $query->limit > $this->maxResultWindow) {
+            throw new InvalidQueryException(sprintf('Page %d with %d per page reaches row %d, past reader.max_result_window (%d). Raise it here and index.max_result_window on the cluster to match, or page with a cursor — after() has no such ceiling.', $query->page, $query->limit, $query->page * $query->limit, $this->maxResultWindow));
         }
     }
 

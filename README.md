@@ -72,6 +72,9 @@ borsche_elasticsearch_audit:
     fallback: system                      # recorded when nobody is authenticated
   redact:
     fields: [password, token]             # values replaced before anything is written
+  reader:
+    max_limit: 1000                       # largest page; raise for screens showing thousands of rows
+    max_result_window: 10000              # how deep page/limit may reach; match index.max_result_window
 ```
 
 Then create the indices:
@@ -367,10 +370,25 @@ uses its named method, an attribute uses `where()`.
 
 ### Two ways to page
 
-`page(n, limit)` is the familiar one and stops at row 10 000 — Elasticsearch's `from/size`
-ceiling. The query refuses a page beyond it with an `InvalidQueryException` that says so, rather
-than letting the cluster answer 400. For deep paging, "load more" buttons and exports, page by
-cursor instead:
+`page(n, limit)` is the familiar one, and it is bounded twice: by how large a page may be
+(`reader.max_limit`, default 1000) and by how deep `from + size` may reach
+(`reader.max_result_window`, default 10 000 — Elasticsearch's own default). The reader refuses a
+query beyond either with an `InvalidQueryException` naming the setting, rather than letting the
+cluster answer 400.
+
+Both are properties of your deployment, not of the bundle. A screen that shows five thousand rows
+at a time needs the first raised; pages beyond the window need the second raised **together with
+the cluster's** `index.max_result_window`, because a `from` deeper than that is a queue of
+`from + size` hits held on every shard:
+
+```yaml
+borsche_elasticsearch_audit:
+  reader:
+    max_limit: 10000          # a page of ten thousand rows
+    max_result_window: 50000  # five such pages; raise index.max_result_window to match
+```
+
+For deep paging, "load more" buttons and exports, page by cursor instead — it has no ceiling:
 
 ```php
 $page = $this->reader->find($query->page(1, 100));
@@ -787,9 +805,35 @@ once, at the start.
 - **Enrichers run once per record.** A repository call in an enricher is a query per record: keep
   the value on the entity, or cache it per request. Decorators are the opposite — they receive a
   whole page and should load in one query per entity type.
+- **A decorator receives as many entries as the page holds** — up to `reader.max_limit`. At a
+  thousand that is a comfortable `IN (...)`; at ten thousand it is not. MySQL's range optimizer
+  gives up somewhere around a thousand values (`range_optimizer_max_mem_size`) and falls back to
+  a full table scan, which turns a fast page into tens of seconds. Deduplicate the ids and load
+  in chunks:
+
+  ```php
+  public function decorate(array $entries): array
+  {
+      $ids = array_values(array_unique(array_filter(array_map(fn ($e) => $e->objectId, $entries))));
+      $orders = [];
+
+      foreach (array_chunk($ids, 500) as $chunk) {
+          foreach ($this->orders->findSummaries($chunk) as $row) {   // array rows, not entities
+              $orders[$row['id']] = $row;
+          }
+      }
+
+      return array_map(fn (AuditEntry $e) => $e->withExtra(['order' => $orders[$e->objectId] ?? null]), $entries);
+  }
+  ```
+
+  Load arrays rather than entities while you are there: a wide entity hydrated ten thousand times
+  costs more than the query did.
 - **Reads are exact-match filters** with no scoring, and the sort is `loggedAt` plus the record
   id: both are indexed keywords, so paging stays fast at millions of records. Use `after()` /
-  `iterate()` rather than deep `page()` — Elasticsearch stops serving `from + size` past 10 000.
+  `iterate()` rather than deep `page()` — past `reader.max_result_window` (10 000 by default,
+  and by Elasticsearch's own default) a jump to a far page is refused, and raising it costs heap
+  on every shard.
 - **The default index has one shard and no replica.** That is a starting point for a dev cluster,
   not a production setting: give the template the shard and replica counts your cluster wants.
 

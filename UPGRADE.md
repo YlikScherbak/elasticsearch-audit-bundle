@@ -4,6 +4,22 @@ On the `0.x` line every minor may change the API, and Composer does not treat `0
 compatible: `^0.4` will not pull in `0.5`. Pin the minor you tested against and read this file
 when you move.
 
+## 0.7 → 0.8
+
+Nothing to do unless you referenced the constants or relied on the query object refusing a large
+page.
+
+- **`AuditQuery::MAX_LIMIT` / `MAX_WINDOW` are renamed** to `DEFAULT_MAX_LIMIT` /
+  `DEFAULT_MAX_WINDOW`. They are what the reader takes when nothing is configured, not limits the
+  query enforces.
+- **A page larger than the limit, or deeper than the window, is now refused by `AuditReader`
+  rather than by `AuditQuery::page()`.** Same exception (`InvalidQueryException`), same "before
+  anything reaches Elasticsearch" guarantee, one step later — and the message names the setting.
+  Code that caught it around `page()` should catch it around `find()`.
+- To show more rows per page, raise `reader.max_limit`; to page deeper, raise
+  `reader.max_result_window` **and** the cluster's `index.max_result_window` to match. Remember
+  that a decorator then receives that many entries in one call — chunk its lookups.
+
 ## 0.5 → 0.6
 
 Nothing to do for an application that uses the bundle through its configuration and services.
@@ -81,10 +97,21 @@ correlated random bits. They stay valid version 7 UUIDs — no reindexing, no mi
   `action.auto_create_index: "-audit_*,+*"` on the cluster.
 - **`id` became a reserved document field.** An enricher attribute named `id` is refused by
   `AuditRecord::withAttributes()`; rename it.
-- **Indices created before 0.3 have no `id` field and no `dynamic: false`.** They keep working —
-  the sort declares `unmapped_type: keyword` — but new records carry an `id` that old indices do
-  not index, so cursor paging over them falls back to the timestamp alone. Recreate or update the
-  mapping when convenient.
+- **An index created before 0.3 needs `id` added to its mapping before the bundle writes to it.**
+  Such an index has no `id` field and, unless you set one, no `dynamic: false` — so the first
+  record the bundle writes makes Elasticsearch map `id` as `text`, and every read afterwards fails
+  with *Fielddata is disabled on [id]*, because the sort cannot use a text field.
+  `unmapped_type: keyword` does not save you: it applies only while the field is **unmapped**.
+  Verified on Elasticsearch 9.1. Add the mapping first — it is one call per index, and it is safe
+  to run before or after the upgrade, as long as it is before the first write:
+
+  ```bash
+  curl -X PUT "$ES/audit_log/_mapping" -H 'Content-Type: application/json'        -d '{"properties": {"id": {"type": "keyword"}}}'
+  ```
+
+  Then `bin/console audit:check` confirms the index, and recreating it with
+  `audit:index:create` (which sets `dynamic: false`) is the tidier fix when you can afford a
+  reindex.
 - **`AuditQuery::any()` reads every routed index**, not only the default one. A query that
   expected the default index alone now sees more.
 - **`TransportInterface::send()` takes a third argument**, `?string $id`. Custom transports must

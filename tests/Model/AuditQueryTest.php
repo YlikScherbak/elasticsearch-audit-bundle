@@ -36,6 +36,16 @@ final class AuditQueryTest extends TestCase
         self::assertTrue($query->option('mine'));
     }
 
+    public function testHowLargeAndHowDeepIsTheReadersToJudge(): void
+    {
+        // The query object no longer carries the ceilings: they belong to the deployment
+        // (reader.max_limit, reader.max_result_window) and are checked when it is read.
+        $deep = AuditQuery::for('order')->page(11, 1000);
+
+        self::assertSame(10_000, $deep->offset());
+        self::assertSame(5000, AuditQuery::for('order')->page(1, 5000)->limit);
+    }
+
     public function testPagingDefaultsAndOffset(): void
     {
         $query = AuditQuery::for('order');
@@ -93,8 +103,7 @@ final class AuditQueryTest extends TestCase
         yield 'base field as attribute' => [static fn (AuditQuery $q) => $q->where('source', 'x'), 'dedicated method'];
         yield 'from after to' => [static fn (AuditQuery $q) => $q->between(new \DateTimeImmutable('2026-02-01'), new \DateTimeImmutable('2026-01-01')), 'after the "to"'];
         yield 'page zero' => [static fn (AuditQuery $q) => $q->page(0), 'starts at 1'];
-        yield 'limit too high' => [static fn (AuditQuery $q) => $q->page(1, 1001), 'between 1 and 1000'];
-        yield 'too deep' => [static fn (AuditQuery $q) => $q->page(11, 1000), 'Use after()'];
+        yield 'page size below one' => [static fn (AuditQuery $q) => $q->page(1, 0), 'at least 1'];
         yield 'empty cursor' => [static fn (AuditQuery $q) => $q->after([]), 'cursor is empty'];
     }
 }

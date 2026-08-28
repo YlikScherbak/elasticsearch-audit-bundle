@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\DependencyInjection;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
+use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Symfony\Component\Config\Definition\Builder\ArrayNodeDefinition;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
@@ -16,164 +18,211 @@ final class Configuration implements ConfigurationInterface
 {
     public const ROOT = 'borsche_elasticsearch_audit';
 
+    private const INVALID_INDEX_NAME = '%s is not a valid Elasticsearch index name: lowercase, no spaces or \\ / * ? " < > | , # :, and not starting with - _ +.';
+
+    /**
+     * The tree is built section by section rather than as one chain of end() calls.
+     * A child is attached to its parent the moment it is created, so end() only walks
+     * back up — and on the oldest supported symfony/config its return type includes
+     * null, which makes a long chain unanalysable. Sections read better anyway.
+     */
     public function getConfigTreeBuilder(): TreeBuilder
     {
         $treeBuilder = new TreeBuilder(self::ROOT);
+        $root = $treeBuilder->getRootNode();
 
-        $treeBuilder->getRootNode()
-            ->validate()
-                ->ifTrue(static fn (array $c) => ($c['client']['service'] ?? null) === null && ($c['client']['hosts'] ?? []) === [])
-                ->thenInvalid('Set either client.hosts or client.service.')
-            ->end()
-            ->children()
-                ->arrayNode('client')
-                    ->info('How to reach Elasticsearch: either hosts to build a client from, or the id of a client service you already have.')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->arrayNode('hosts')
-                            ->scalarPrototype()->cannotBeEmpty()->end()
-                            ->defaultValue([])
-                        ->end()
-                        ->scalarNode('service')
-                            ->info('Service id of an existing Elastic\Elasticsearch\Client. Takes precedence over hosts.')
-                            ->defaultNull()
-                        ->end()
-                        ->booleanNode('ssl_verification')->defaultTrue()->end()
-                    ->end()
-                ->end()
-                ->arrayNode('indices')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->scalarNode('default')
-                            ->info('Index every record goes to unless routed elsewhere.')
-                            ->cannotBeEmpty()
-                            ->defaultValue('audit_log')
-                            ->validate()
-                                ->ifTrue(self::invalidIndexName(...))
-                                ->thenInvalid('%s is not a valid Elasticsearch index name: lowercase, no spaces or \\ / * ? " < > | , # :, and not starting with - _ +.')
-                            ->end()
-                        ->end()
-                        ->arrayNode('routing')
-                            ->info('Per object type index, e.g. { auth: audit_auth_log, warehouse_stock: audit_stock_log }.')
-                            ->useAttributeAsKey('object_type')
-                            ->scalarPrototype()
-                                ->cannotBeEmpty()
-                                ->validate()
-                                    ->ifTrue(self::invalidIndexName(...))
-                                    ->thenInvalid('%s is not a valid Elasticsearch index name: lowercase, no spaces or \\ / * ? " < > | , # :, and not starting with - _ +.')
-                                ->end()
-                            ->end()
-                            ->defaultValue([])
-                        ->end()
-                        ->enumNode('object_id_type')
-                            ->info('How objectId is mapped: "keyword" fits any identifier (UUIDs, external ids); "integer" allows range queries on numeric ids.')
-                            ->values([IndexDefinition::OBJECT_ID_KEYWORD, IndexDefinition::OBJECT_ID_INTEGER])
-                            ->defaultValue(IndexDefinition::OBJECT_ID_KEYWORD)
-                        ->end()
-                        ->arrayNode('settings')
-                            ->info('Index settings applied by audit:index:create.')
-                            ->variablePrototype()->end()
-                            ->defaultValue(['number_of_shards' => 1, 'number_of_replicas' => 0])
-                        ->end()
-                    ->end()
-                ->end()
-                ->enumNode('transport')
-                    ->info('"sync" writes in the request; "messenger" dispatches a message and a worker writes it.')
-                    ->values(['sync', 'messenger'])
-                    ->defaultValue('sync')
-                ->end()
-                ->scalarNode('message_bus')
-                    ->info('Service id of the bus to dispatch to when transport is "messenger".')
-                    ->defaultValue('messenger.default_bus')
-                ->end()
-                ->enumNode('on_failure')
-                    ->info('"log" (default): a failed write is logged and ignored. "throw": it raises WriteFailedException.')
-                    ->values(array_map(static fn (FailurePolicy $p) => $p->value, FailurePolicy::cases()))
-                    ->defaultValue(FailurePolicy::Log->value)
-                ->end()
-                ->arrayNode('actor')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->scalarNode('fallback')
-                            ->info('Recorded as the actor when nobody is authenticated (workers, console commands).')
-                            ->cannotBeEmpty()
-                            ->defaultValue('system')
-                        ->end()
-                    ->end()
-                ->end()
-                ->arrayNode('reader')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->scalarNode('point_in_time_keep_alive')
-                            ->info('How long a point in time opened by AuditReader::iterate() stays alive between two batches, e.g. "1m". Long enough for the slowest consumer of one batch.')
-                            ->cannotBeEmpty()
-                            ->defaultValue('1m')
-                            ->validate()
-                                ->ifTrue(static fn (mixed $v) => !\is_string($v) || preg_match('/^\d+(d|h|m|s|ms|micros|nanos)$/', $v) !== 1)
-                                ->thenInvalid('%s is not an Elasticsearch time value (e.g. "30s", "1m", "2h").')
-                            ->end()
-                        ->end()
-                    ->end()
-                ->end()
-                ->arrayNode('redact')
-                    ->info('Fields whose values are replaced before a record is written — passwords, tokens, personal data you must not keep.')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->arrayNode('fields')
-                            ->info('Field names, plainly ("password") or per object type ("user.email").')
-                            ->scalarPrototype()->cannotBeEmpty()->end()
-                            ->defaultValue([])
-                        ->end()
-                        ->scalarNode('placeholder')
-                            ->info('What the value is replaced with. A side that was null or empty is left as it was.')
-                            ->cannotBeEmpty()
-                            ->defaultValue('***')
-                        ->end()
-                    ->end()
-                ->end()
-                ->arrayNode('coalescing')
-                    ->info('Merging the records one business operation produces across several saves into one per object (AuditFrame).')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->booleanNode('enabled')
-                            ->info('false: frames still open and close, but hold nothing — every save is its own record again.')
-                            ->defaultTrue()
-                        ->end()
-                        ->arrayNode('object_types')
-                            ->info('Object types held while a frame is open; empty means every type.')
-                            ->scalarPrototype()->cannotBeEmpty()->end()
-                            ->defaultValue([])
-                        ->end()
-                        ->arrayNode('numeric_fields')
-                            ->info('Fields for which null, "" and 0 count as the same value when deciding whether anything changed. "quantity" for every object type, "stock.quantity" for one.')
-                            ->scalarPrototype()->cannotBeEmpty()->end()
-                            ->defaultValue([])
-                        ->end()
-                        ->integerNode('max_held')
-                            ->info('Objects a frame may hold before it releases what it has (a safety valve for runaway frames).')
-                            ->min(1)
-                            ->defaultValue(10000)
-                        ->end()
-                    ->end()
-                ->end()
-                ->arrayNode('doctrine')
-                    ->info('Automatic auditing of entities implementing AuditableInterface or marked #[Auditable]. Needs doctrine/orm.')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->booleanNode('enabled')->defaultTrue()->end()
-                        ->booleanNode('skip_empty_updates')
-                            ->info('Do not record an update whose audited fields did not change.')
-                            ->defaultTrue()
-                        ->end()
-                        ->scalarNode('connection')
-                            ->info('Doctrine connection name the listener is attached to.')
-                            ->defaultValue('default')
-                        ->end()
-                    ->end()
-                ->end()
-            ->end();
+        // The builder's return type widened only in newer symfony/config; on the oldest
+        // supported version it is the parent class, which has no children().
+        if (!$root instanceof ArrayNodeDefinition) {
+            throw new \LogicException('The root of a configuration tree is an array node.');
+        }
+
+        $root->validate()
+            ->ifTrue(static fn (array $c) => ($c['client']['service'] ?? null) === null && ($c['client']['hosts'] ?? []) === [])
+            ->thenInvalid('Set either client.hosts or client.service.');
+
+        $children = $root->children();
+
+        self::client($children->arrayNode('client'));
+        self::indices($children->arrayNode('indices'));
+
+        $children->enumNode('transport')
+            ->info('"sync" writes in the request; "messenger" dispatches a message and a worker writes it.')
+            ->values(['sync', 'messenger'])
+            ->defaultValue('sync');
+
+        $children->scalarNode('message_bus')
+            ->info('Service id of the bus to dispatch to when transport is "messenger".')
+            ->defaultValue('messenger.default_bus');
+
+        $children->enumNode('on_failure')
+            ->info('"log" (default): a failed write is logged and ignored. "throw": it raises WriteFailedException.')
+            ->values(array_map(static fn (FailurePolicy $p) => $p->value, FailurePolicy::cases()))
+            ->defaultValue(FailurePolicy::Log->value);
+
+        self::actor($children->arrayNode('actor'));
+        self::reader($children->arrayNode('reader'));
+        self::redact($children->arrayNode('redact'));
+        self::coalescing($children->arrayNode('coalescing'));
+        self::doctrine($children->arrayNode('doctrine'));
 
         return $treeBuilder;
+    }
+
+    private static function client(ArrayNodeDefinition $client): void
+    {
+        $client
+            ->info('How to reach Elasticsearch: either hosts to build a client from, or the id of a client service you already have.')
+            ->addDefaultsIfNotSet();
+
+        $children = $client->children();
+
+        $children->arrayNode('hosts')
+            ->defaultValue([])
+            ->scalarPrototype()->cannotBeEmpty();
+
+        $children->scalarNode('service')
+            ->info('Service id of an existing Elastic\Elasticsearch\Client. Takes precedence over hosts.')
+            ->defaultNull();
+
+        $children->booleanNode('ssl_verification')->defaultTrue();
+    }
+
+    private static function indices(ArrayNodeDefinition $indices): void
+    {
+        $indices->addDefaultsIfNotSet();
+
+        $children = $indices->children();
+
+        $children->scalarNode('default')
+            ->info('Index every record goes to unless routed elsewhere.')
+            ->cannotBeEmpty()
+            ->defaultValue('audit_log')
+            ->validate()
+                ->ifTrue(self::invalidIndexName(...))
+                ->thenInvalid(self::INVALID_INDEX_NAME);
+
+        $routing = $children->arrayNode('routing');
+        $routing
+            ->info('Per object type index, e.g. { auth: audit_auth_log, warehouse_stock: audit_stock_log }.')
+            ->useAttributeAsKey('object_type')
+            ->defaultValue([]);
+        $routing->scalarPrototype()
+            ->cannotBeEmpty()
+            ->validate()
+                ->ifTrue(self::invalidIndexName(...))
+                ->thenInvalid(self::INVALID_INDEX_NAME);
+
+        $children->enumNode('object_id_type')
+            ->info('How objectId is mapped: "keyword" fits any identifier (UUIDs, external ids); "integer" allows range queries on numeric ids.')
+            ->values([IndexDefinition::OBJECT_ID_KEYWORD, IndexDefinition::OBJECT_ID_INTEGER])
+            ->defaultValue(IndexDefinition::OBJECT_ID_KEYWORD);
+
+        $children->arrayNode('settings')
+            ->info('Index settings applied by audit:index:create.')
+            ->defaultValue(['number_of_shards' => 1, 'number_of_replicas' => 0])
+            ->variablePrototype();
+    }
+
+    private static function actor(ArrayNodeDefinition $actor): void
+    {
+        $actor->addDefaultsIfNotSet();
+
+        $actor->children()->scalarNode('fallback')
+            ->info('Recorded as the actor when nobody is authenticated (workers, console commands).')
+            ->cannotBeEmpty()
+            ->defaultValue('system');
+    }
+
+    private static function reader(ArrayNodeDefinition $reader): void
+    {
+        $reader->addDefaultsIfNotSet();
+
+        $children = $reader->children();
+
+        $children->integerNode('max_limit')
+            ->info('Largest page AuditReader will read. Raise it for screens that show thousands of rows at once, and remember a decorator then receives that many entries in one call.')
+            ->min(1)
+            ->defaultValue(AuditQuery::DEFAULT_MAX_LIMIT);
+
+        $children->integerNode('max_result_window')
+            ->info('How deep page/limit may reach. Must not exceed the cluster\'s own index.max_result_window — raise both together, or page with a cursor, which has no ceiling.')
+            ->min(1)
+            ->defaultValue(AuditQuery::DEFAULT_MAX_WINDOW);
+
+        $children->scalarNode('point_in_time_keep_alive')
+            ->info('How long a point in time opened by AuditReader::iterate() stays alive between two batches, e.g. "1m". Long enough for the slowest consumer of one batch.')
+            ->cannotBeEmpty()
+            ->defaultValue('1m')
+            ->validate()
+                ->ifTrue(static fn (mixed $v) => !\is_string($v) || preg_match('/^\d+(d|h|m|s|ms|micros|nanos)$/', $v) !== 1)
+                ->thenInvalid('%s is not an Elasticsearch time value (e.g. "30s", "1m", "2h").');
+    }
+
+    private static function redact(ArrayNodeDefinition $redact): void
+    {
+        $redact
+            ->info('Fields whose values are replaced before a record is written — passwords, tokens, personal data you must not keep.')
+            ->addDefaultsIfNotSet();
+
+        $children = $redact->children();
+
+        $children->arrayNode('fields')
+            ->info('Field names, plainly ("password") or per object type ("user.email").')
+            ->defaultValue([])
+            ->scalarPrototype()->cannotBeEmpty();
+
+        $children->scalarNode('placeholder')
+            ->info('What the value is replaced with. A side that was null or empty is left as it was.')
+            ->cannotBeEmpty()
+            ->defaultValue('***');
+    }
+
+    private static function coalescing(ArrayNodeDefinition $coalescing): void
+    {
+        $coalescing
+            ->info('Merging the records one business operation produces across several saves into one per object (AuditFrame).')
+            ->addDefaultsIfNotSet();
+
+        $children = $coalescing->children();
+
+        $children->booleanNode('enabled')
+            ->info('false: frames still open and close, but hold nothing — every save is its own record again.')
+            ->defaultTrue();
+
+        $children->arrayNode('object_types')
+            ->info('Object types held while a frame is open; empty means every type.')
+            ->defaultValue([])
+            ->scalarPrototype()->cannotBeEmpty();
+
+        $children->arrayNode('numeric_fields')
+            ->info('Fields for which null, "" and 0 count as the same value when deciding whether anything changed. "quantity" for every object type, "stock.quantity" for one.')
+            ->defaultValue([])
+            ->scalarPrototype()->cannotBeEmpty();
+
+        $children->integerNode('max_held')
+            ->info('Objects a frame may hold before it releases what it has (a safety valve for runaway frames).')
+            ->min(1)
+            ->defaultValue(10000);
+    }
+
+    private static function doctrine(ArrayNodeDefinition $doctrine): void
+    {
+        $doctrine
+            ->info('Automatic auditing of entities implementing AuditableInterface or marked #[Auditable]. Needs doctrine/orm.')
+            ->addDefaultsIfNotSet();
+
+        $children = $doctrine->children();
+
+        $children->booleanNode('enabled')->defaultTrue();
+
+        $children->booleanNode('skip_empty_updates')
+            ->info('Do not record an update whose audited fields did not change.')
+            ->defaultTrue();
+
+        $children->scalarNode('connection')
+            ->info('Doctrine connection name the listener is attached to.')
+            ->defaultValue('default');
     }
 
     /**
