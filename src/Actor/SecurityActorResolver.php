@@ -16,6 +16,8 @@ use Symfony\Component\Security\Core\Authentication\Token\SwitchUserToken;
  * acting is the one who switched — that is who the record names. An audit trail
  * that attributed an administrator's actions to the account they were looking at
  * would be worse than none.
+ *
+ * @internal registered when symfony/security-core is installed
  */
 final class SecurityActorResolver implements ActorResolverInterface
 {

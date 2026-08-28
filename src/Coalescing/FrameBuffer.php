@@ -28,6 +28,8 @@ use Borsche\ElasticsearchAuditBundle\Model\Change;
  *
  * Pure state and rules, no I/O — the writer holds records here while a frame is
  * open, AuditFrame opens and closes it, and both send what comes back.
+ *
+ * @internal the state behind AuditFrame; open and close frames through AuditFrame, not here
  */
 final class FrameBuffer
 {

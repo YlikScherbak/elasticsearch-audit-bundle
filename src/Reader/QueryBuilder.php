@@ -16,6 +16,8 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
  * second resolve in write order, and unlike _doc an id does not move when
  * segments merge — a cursor taken from one page stays valid for the next.
  * unmapped_type keeps reads working on an index created before ids existed.
+ *
+ * @internal the translation from AuditQuery to a request body; use AuditReader
  */
 final class QueryBuilder
 {

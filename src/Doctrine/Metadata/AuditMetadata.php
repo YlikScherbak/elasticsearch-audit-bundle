@@ -7,6 +7,8 @@ namespace Borsche\ElasticsearchAuditBundle\Doctrine\Metadata;
 /**
  * What to record for one entity class — the common form both AuditableInterface
  * and the attributes are reduced to.
+ *
+ * @internal what AuditMetadataFactory reads out of a declaration
  */
 final class AuditMetadata
 {

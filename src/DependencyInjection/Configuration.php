@@ -9,6 +9,9 @@ use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
+/**
+ * @internal the configuration tree; the settings themselves are documented in the README
+ */
 final class Configuration implements ConfigurationInterface
 {
     public const ROOT = 'borsche_elasticsearch_audit';

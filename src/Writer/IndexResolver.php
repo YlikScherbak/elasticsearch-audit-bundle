@@ -8,6 +8,8 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
  * Decides which index a record goes to: a per-object-type route when configured,
  * the default index otherwise. Lets a chatty type (stock movements, logins) live
  * in its own index without the application knowing about indices at all.
+ *
+ * @internal routing comes from the indices configuration
  */
 final class IndexResolver
 {

@@ -818,6 +818,36 @@ Honest list, so nothing surprises you in production:
 - **A mapping is forever.** `object_id_type`, and any enricher field type, can only be changed by
   reindexing.
 
+## What counts as the public API
+
+The bundle is on the `0.x` line, where every minor may change the API — but the surface is
+already settled, and this is the part that will carry a stability promise at 1.0:
+
+**Call these**
+`AuditWriter::record()`, `write()`, `writeAll()` · `AuditReader::find()`, `iterate()` ·
+`AuditFrame::coalesce()`, `begin()`, `end()`, `reset()`, `release()` · the models you build and
+receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditQuery`, `AuditEntry`, `AuditPage`,
+`BulkResult` · `FailurePolicy` · every exception under `AuditException` · the two PSR-14 events.
+
+**Implement these**
+`AuditableInterface` · `AuditEnricherInterface` · `ActorResolverInterface` ·
+`QueryExtensionInterface` · `RecordDecoratorInterface` · `ValueComparatorInterface` ·
+`TransportInterface` / `BatchTransportInterface` · `GatewayInterface`, if you have a reason to
+speak to Elasticsearch differently.
+
+**Declare with these**
+`#[Auditable]`, `#[AuditField]`, and the configuration tree.
+
+**Route these**
+`IndexAuditRecord` and `IndexAuditRecords`, the Messenger messages.
+
+Everything else — `FrameBuffer`, `ChangeSetBuilder`, `AuditMetadataFactory`, `QueryBuilder`,
+`IndexResolver`, `RecordId`, `ClientFactory`, the actor chain, the commands, the message
+handlers, the DI classes — is machinery, marked `@internal`, and may change in any release. The
+same goes for the handful of `AuditWriter` methods marked `@internal`: `writeCompleted()`,
+`writeManyCompleted()`, `complete()` and `reportFailure()` are how the frame and the Doctrine
+listener talk to the writer, and they skip steps a caller would want.
+
 ## Contributing
 
 ```bash

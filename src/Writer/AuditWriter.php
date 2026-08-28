@@ -25,11 +25,14 @@ use Psr\Log\NullLogger;
  * The one entry point for writing history.
  *
  * Completes the record (timestamp, actor, id), lets the application's enrichers
- * add their attributes, redacts what must not be stored, routes it to an index
- * and hands it to the transport. What
- * happens when that fails is decided by the FailurePolicy — by default the
- * failure is logged and swallowed, because an audit log that can take the
- * business operation down is worse than a gap in the history.
+ * add their attributes, redacts what must not be stored, routes it to an index and
+ * hands it to the transport. What happens when that fails is decided by the
+ * FailurePolicy — by default the failure is logged and swallowed, because an audit
+ * log that can take the business operation down is worse than a gap in the history.
+ *
+ * record() and write() take one record, writeAll() a batch that goes out in one
+ * request. The rest of the public methods are seams for the bundle's own listener
+ * and frame, and are marked as such.
  */
 final class AuditWriter
 {
@@ -107,15 +110,14 @@ final class AuditWriter
      * it closes. The completion pass is skipped on purpose: the timestamp, the actor, the
      * id and the enrichers' attributes were settled when the record entered the frame, and
      * running the enrichers again would repeat their queries and whatever else they do.
+     *
+     * @internal the seam AuditFrame writes through; use write() or writeAll(), which complete a record first
      */
     public function writeCompleted(AuditRecord $record): void
     {
         $this->dispatch($record, false);
     }
 
-    /**
-     * The completed record's way out: the RecordCreated event, the index, the transport.
-     */
     /**
      * Writes several records as one batch — what a flush or a closing frame produces.
      * Each record is completed and held or released by the frame exactly as write()
@@ -152,6 +154,8 @@ final class AuditWriter
     /**
      * The batch form of writeCompleted(): records that already went through the
      * completion pass, sent together.
+     *
+     * @internal the seam AuditFrame writes through; use writeAll().
      *
      * @param list<AuditRecord> $records
      */
@@ -283,6 +287,8 @@ final class AuditWriter
 
     /**
      * Fills in what the caller left out and runs the enrichers.
+     *
+     * @internal write() and writeAll() complete a record on the way through
      */
     public function complete(AuditRecord $record): AuditRecord
     {
@@ -314,6 +320,8 @@ final class AuditWriter
      * WriteFailedException.
      *
      * @throws WriteFailedException
+     *
+     * @internal the seam AuditSubscriber reports through when it cannot even build a record
      */
     public function reportFailure(\Throwable $e, ?AuditRecord $record = null): void
     {

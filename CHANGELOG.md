@@ -8,6 +8,25 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Changed
+- **The public surface is drawn.** Everything that is machinery rather than API is marked
+  `@internal` — `FrameBuffer`, `ChangeSetBuilder`, `AuditMetadataFactory` and `AuditMetadata`,
+  `QueryBuilder`, `IndexResolver`, `RecordId`, `SystemClock`, `ClientFactory`, both actor
+  resolvers, both value-comparator implementations, the two commands, the two Messenger handlers
+  and the DI `Configuration`. On `AuditWriter`, `writeCompleted()`, `writeManyCompleted()`,
+  `complete()` and `reportFailure()` are seams for the bundle's own frame and Doctrine listener;
+  `record()`, `write()` and `writeAll()` are the API. Nothing moved and nothing was removed —
+  this says which parts will carry a promise at 1.0, and which may change in any release
+- README: a **«What counts as the public API»** section — what to call, what to implement, what
+  to declare with, what to route, and what is machinery
+
+### Added
+- Unit tests for the `_bulk` and point-in-time requests, scripted through the PSR-18 client
+  underneath the real Elasticsearch client: the ndjson body with an action line per document,
+  one existence check per distinct index and no `_bulk` when one is missing, refusals by
+  position with the value preview cut, and the point-in-time calls carrying the pit in the body
+  with no index in the path. Coverage 94.87% → 96.81%, the gateway 62% → 89%
+
 ## [0.6.0] - 2026-08-28
 
 A flush is one request, and an export is a frozen view. Writes go out in batches, and

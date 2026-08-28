@@ -13,6 +13,8 @@ use Psr\Log\LoggerInterface;
  * Builds the client from the bundle's own configuration (client.hosts).
  * Applications that already have a client register it as client.service instead
  * and this factory is never used.
+ *
+ * @internal builds the client from client.hosts; configure client.service to bring your own
  */
 final class ClientFactory
 {

@@ -15,6 +15,8 @@ use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
  * A value that is neither a number nor "no value" is nobody's quantity, so the
  * comparator defers instead of calling it zero — otherwise two different words
  * would look equal and a real change would disappear.
+ *
+ * @internal registered from coalescing.numeric_fields
  */
 final class NumericNullAsZeroComparator implements ValueComparatorInterface
 {

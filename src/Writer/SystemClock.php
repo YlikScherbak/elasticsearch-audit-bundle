@@ -9,6 +9,8 @@ use Psr\Clock\ClockInterface;
 /**
  * The default clock. Alias borsche_elasticsearch_audit.clock to your own
  * (symfony/clock's MockClock in tests, for example) to control timestamps.
+ *
+ * @internal the default clock; alias the borsche_elasticsearch_audit.clock service to replace it
  */
 final class SystemClock implements ClockInterface
 {

@@ -13,6 +13,8 @@ use Borsche\ElasticsearchAuditBundle\Contract\AuditableInterface;
  * class implements it, from #[Auditable]/#[AuditField] otherwise — and caches the
  * attribute form per class. The interface form is not cached: its field list may
  * depend on the instance.
+ *
+ * @internal used by AuditSubscriber; declare auditing with AuditableInterface or #[Auditable]
  */
 final class AuditMetadataFactory
 {

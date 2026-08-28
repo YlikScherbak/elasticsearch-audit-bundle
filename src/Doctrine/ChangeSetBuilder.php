@@ -21,6 +21,8 @@ use Doctrine\ORM\PersistentCollection;
  * - an "always recorded" field appears as old == new when it did not change
  *
  * Values are read through ClassMetadata, so entities need no getters.
+ *
+ * @internal used by AuditSubscriber while a flush is running
  */
 final class ChangeSetBuilder
 {

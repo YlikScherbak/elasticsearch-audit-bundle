@@ -18,6 +18,8 @@ use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
  * reasons, with the bundle's RequestRejectedException underneath: Messenger sends
  * the message to the failure transport at once, and the accepted items of the same
  * batch are already written.
+ *
+ * @internal invoked by Messenger
  */
 final class IndexAuditRecordsHandler
 {

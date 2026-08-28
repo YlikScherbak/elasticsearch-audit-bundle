@@ -9,6 +9,8 @@ use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 /**
  * Asks the application's comparators in order and falls back to a strict
  * comparison: dates by instant, arrays by value, everything else by identity.
+ *
+ * @internal the chain behind the comparators; implement ValueComparatorInterface to take part in it
  */
 final class ValueComparator
 {

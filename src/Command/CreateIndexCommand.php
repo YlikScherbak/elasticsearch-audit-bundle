@@ -20,6 +20,8 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  * Creates every index the configuration routes to, with the bundle's mapping plus
  * the fields the application's enrichers declare. Existing indices are left alone —
  * changing a live mapping is a reindex, not something a command should do quietly.
+ *
+ * @internal run as audit:index:create
  */
 #[AsCommand(name: 'audit:index:create', description: 'Create the Elasticsearch audit indices with their mapping')]
 final class CreateIndexCommand extends Command

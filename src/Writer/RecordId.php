@@ -11,6 +11,8 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
  * loggedAt for cursor paging. And known before the write, so a retried write
  * (Messenger redelivering after a timeout) overwrites its own document instead
  * of adding a second one.
+ *
+ * @internal the writer assigns record ids; set one yourself with AuditRecord::withId() if you have a natural one
  */
 final class RecordId
 {

@@ -22,6 +22,8 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  * usual reason a filter silently returns nothing, and a field of another type
  * (loggedAt as text, say) is what an index Elasticsearch created on its own
  * looks like: reads fail, and the fix is a reindex.
+ *
+ * @internal run as audit:check
  */
 #[AsCommand(name: 'audit:check', description: 'Check the Elasticsearch connection and the audit indices')]
 final class CheckCommand extends Command

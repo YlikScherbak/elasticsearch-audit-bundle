@@ -9,6 +9,8 @@ use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 /**
  * Asks each resolver in turn and takes the first answer; falls back to a fixed
  * identifier ("system" by default) so a record always says who — or what — did it.
+ *
+ * @internal the chain behind the actor resolvers; implement ActorResolverInterface to take part in it
  */
 final class ChainActorResolver implements ActorResolverInterface
 {
