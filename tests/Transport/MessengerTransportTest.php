@@ -11,7 +11,9 @@ use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Exception\UnrecoverableExceptionInterface;
 use Symfony\Component\Messenger\MessageBusInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 
 final class MessengerTransportTest extends TestCase
 {
@@ -71,6 +73,20 @@ final class MessengerTransportTest extends TestCase
         $handler($message); // Messenger retried after a timeout on a write that had in fact succeeded
 
         self::assertCount(1, $gateway->documents['audit_log']);
+    }
+
+    public function testADocumentTheMappingRefusesIsNotRetried(): void
+    {
+        $gateway = new InMemoryGateway();
+        $gateway->failOn = ['index' => RequestRejectedException::because(400, 'failed to parse field [objectId]', new \RuntimeException())];
+
+        try {
+            (new IndexAuditRecordHandler($gateway))(new IndexAuditRecord('audit_log', ['objectId' => 'x'], 'rec-1'));
+            self::fail('expected the message to fail');
+        } catch (UnrecoverableExceptionInterface $e) {
+            self::assertStringContainsString('failed to parse field [objectId]', $e->getMessage());
+            self::assertInstanceOf(RequestRejectedException::class, $e->getPrevious());
+        }
     }
 
     public function testAMessageFromBeforeIdsExistedIsStillHandled(): void

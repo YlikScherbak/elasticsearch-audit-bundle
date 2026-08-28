@@ -25,7 +25,7 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
   goes to the failure transport at once instead of around the retry loop — Messenger retries every
   other exception, and a document the mapping refuses would be refused again. An unreachable
   cluster still propagates as `TransportUnavailableException` and is retried; the ids make that
-  harmless.
+  harmless. The same holds for the single-record `IndexAuditRecordHandler`
 - The value preview Elasticsearch appends to a parsing error (`Preview of field's value: '...'`)
   is cut from every reason the bundle reports — in the log, in `RecordFailedEvent`, in
   `WriteFailedException` and in a failed message. A refused value may be a person's data, and
