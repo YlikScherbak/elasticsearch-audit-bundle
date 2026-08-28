@@ -92,3 +92,5 @@ jobs:
           gh release create "v${{ inputs.version }}" \
             --title "$TITLE" \
             --notes-file release-notes.md
+
+# Dispatched by hand from the Actions tab; see CONTRIBUTING.md, "Releasing".
