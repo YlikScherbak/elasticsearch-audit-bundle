@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
@@ -13,8 +14,9 @@ use Doctrine\ORM\PersistentCollection;
 /**
  * Turns Doctrine's change set into the Changes an audit record stores.
  *
- * - a scalar field is recorded when the unit of work says it changed; two dates
- *   equal to the second are not a change (Doctrine compares objects by identity)
+ * - a scalar field is recorded when the unit of work says it changed, unless the
+ *   comparators call the two sides the same value — Doctrine compares objects by
+ *   identity, so two dates for the same instant look changed to it
  * - a to-one association is recorded through its representer: old from the change
  *   set, new from the current value
  * - a to-many association is recorded when the collection is dirty, as the
@@ -29,7 +31,7 @@ final class ChangeSetBuilder
 {
     public function __construct(
         private readonly EntityManagerInterface $em,
-        private readonly ?ValueComparatorInterface $comparator = null,
+        private readonly ValueComparatorInterface $comparator = new ValueComparator(),
     ) {
     }
 
@@ -172,20 +174,11 @@ final class ChangeSetBuilder
      */
     private function unchanged(string $objectType, string $field, mixed $old, mixed $new): bool
     {
-        return $this->comparator?->equals($objectType, $field, $old, $new) ?? self::same($old, $new);
-    }
-
-    /**
-     * Doctrine reports a "change" for every field on insert (null → value, including
-     * null → null) and compares objects by identity, so two dates for the same
-     * instant look changed to it. Neither is a change worth recording.
-     */
-    private static function same(mixed $old, mixed $new): bool
-    {
-        if ($old instanceof \DateTimeInterface && $new instanceof \DateTimeInterface) {
-            return $old->getTimestamp() === $new->getTimestamp();
-        }
-
-        return $old === $new;
+        // The fallback is the chain's own, not a second opinion written here: two answers
+        // to "did this move" is one too many, and they had drifted apart — an array
+        // holding two dates for the same instant was unchanged to one and changed to the
+        // other, so a collection snapshot said different things depending on whether a
+        // comparator had been injected.
+        return $this->comparator->equals($objectType, $field, $old, $new) ?? ValueComparator::same($old, $new);
     }
 }

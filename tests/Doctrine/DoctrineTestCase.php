@@ -83,7 +83,9 @@ abstract class DoctrineTestCase extends TestCase
      */
     protected function attachListener(FailurePolicy $policy, ?ValueComparatorInterface $comparator = null, iterable $enrichers = []): void
     {
-        $listener = new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator);
+        $listener = $comparator === null
+            ? new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true)
+            : new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator);
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, $listener);
     }
 

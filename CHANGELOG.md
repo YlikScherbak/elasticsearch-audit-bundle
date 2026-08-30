@@ -8,6 +8,21 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Changed
+- **One answer to "did this move".** `ChangeSetBuilder` kept a strict comparison of its own beside
+  the comparator chain's, and the two had drifted: an array holding two dates for the same instant
+  — a collection snapshot whose representer returns dates — was a change to one and not to the
+  other, so what a record said depended on whether a comparator had been injected. The builder now
+  takes a comparator that is never null (the chain by default) and falls back to the chain's own
+  comparison; its copy is gone. `AuditSubscriber` likewise. Both are `@internal`; nothing an
+  application implements or configures changes
+- **This is not a no-op on array fields**, and it is worth knowing before the records change
+  under you: a `json` column whose keys come back in another order, and an array holding dates
+  for the same instant, are no longer recorded as changes — the merged comparison goes key by
+  key and compares dates by instant, where the builder compared arrays with `===`. Lists still
+  compare by position. Expect **fewer** records on such fields, not different ones; a permissions
+  map rewritten in another order used to produce a record saying nothing had changed
+
 ## [0.9.1] - 2026-08-30
 
 The Doctrine listener can be built again.

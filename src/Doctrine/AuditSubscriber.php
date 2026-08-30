@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
@@ -67,7 +68,7 @@ final class AuditSubscriber
         private readonly AuditWriter $writer,
         private readonly AuditMetadataFactory $metadataFactory,
         private readonly bool $skipEmptyUpdates = true,
-        private readonly ?ValueComparatorInterface $comparator = null,
+        private readonly ValueComparatorInterface $comparator = new ValueComparator(),
     ) {
     }
 

@@ -24,6 +24,10 @@ class Shipment
     #[ORM\Column, AuditField]
     public string $reference;
 
+    /** @var array<string, mixed> a json column, the shape "permissions" usually has */
+    #[ORM\Column(type: 'json'), AuditField]
+    public array $meta = [];
+
     /** @var Collection<int, ShipmentLine> */
     #[ORM\OneToMany(mappedBy: 'shipment', targetEntity: ShipmentLine::class, cascade: ['persist'])]
     #[AuditField(represent: 'getLabel', trackElements: ['quantity'])]
