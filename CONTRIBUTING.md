@@ -46,6 +46,10 @@ CI runs the same tests against live Elasticsearch 8.19 and 9.1, each with its ma
 - **A test that fails without it.** For a bug, the test comes first and reproduces the report.
 - **Green on the whole matrix**: PHP 8.1–8.4 × Symfony 6.4/7/8, plus the lowest-dependencies job.
   Watch out for `psr/log` 1, where `LoggerInterface::log()` has no type on `$message`.
+- **A boot, if you touched the bundle or its extension.** `BundleBootTest` puts the bundle in a
+  real kernel and builds every service it defines. Running the configuration tree through a
+  `Processor` proves the tree and nothing around it — that is how a bundle that could not be
+  registered in any application shipped twice.
 - **A CHANGELOG entry** under `[Unreleased]`, saying what changes for someone using the bundle —
   not what changed in the code.
 - **Nothing suppressed.** No `@phpstan-ignore`, no baseline: if the analyser complains, the code

@@ -8,6 +8,17 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Fixed
+- **The bundle can be registered in an application at all.** `Bundle::getContainerExtension()`
+  refuses an extension whose alias is not the underscored bundle name, and this one's alias is
+  vendor-prefixed — `borsche_elasticsearch_audit` — so every kernel boot ended in
+  *Users will expect the alias of the default extension of a bundle to be the underscored version
+  of the bundle name*, before a single line of application code ran. The bundle hands over its
+  extension itself now. The alias, and with it your configuration key, is unchanged
+- The suite boots a real kernel with the bundle in it, which is the only place any of this is
+  checked: an extension loaded through a `Processor` proves the configuration tree and nothing
+  about the bundle around it. That gap is why 0.7.0 and 0.8.0 shipped unbootable
+
 ## [0.8.0] - 2026-08-30
 
 The read path is a deployment's to configure, and a page now says whether anything follows it.

@@ -4,6 +4,13 @@ On the `0.x` line every minor may change the API, and Composer does not treat `0
 compatible: `^0.4` will not pull in `0.5`. Pin the minor you tested against and read this file
 when you move.
 
+## 0.8.0 → 0.8.1
+
+Upgrade. 0.7.0 and 0.8.0 could not be registered in a Symfony application at all — every kernel
+boot threw *Users will expect the alias of the default extension of a bundle to be the underscored
+version of the bundle name*. Nothing to change on your side: the configuration key stays
+`borsche_elasticsearch_audit`.
+
 ## 0.7 → 0.8
 
 Nothing to do unless you referenced the constants or relied on the query object refusing a large
