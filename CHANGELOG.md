@@ -8,6 +8,10 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-30
+
+The bundle can be registered in an application.
+
 ### Fixed
 - **The bundle can be registered in an application at all.** `Bundle::getContainerExtension()`
   refuses an extension whose alias is not the underscored bundle name, and this one's alias is
