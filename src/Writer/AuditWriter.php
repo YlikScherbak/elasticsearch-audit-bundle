@@ -99,7 +99,7 @@ final class AuditWriter
             // the same object; the frame writes the result when it closes. A remove or
             // a full buffer hands back records that have to go out right now.
             if (!$immediately && $this->frame !== null && $this->frame->accepts($record->objectType)) {
-                $released = iterator_to_array($this->frame->hold($record), false);
+                $released = $this->frame->hold($record);
             }
         } catch (\Throwable $e) {
             $this->reportFailure($e, $record);
