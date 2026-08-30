@@ -70,6 +70,7 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_INDEX_DEFINITION = 'borsche_elasticsearch_audit.index_definition';
     public const SERVICE_ACTOR_RESOLVER = 'borsche_elasticsearch_audit.actor_resolver';
     public const SERVICE_CLOCK = 'borsche_elasticsearch_audit.clock';
+    public const SERVICE_VALUE_COMPARATOR = 'borsche_elasticsearch_audit.value_comparator.chain';
     public const SERVICE_WRITER = 'borsche_elasticsearch_audit.writer';
     public const SERVICE_METADATA_FACTORY = 'borsche_elasticsearch_audit.doctrine.metadata_factory';
     public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
@@ -130,8 +131,10 @@ final class ElasticsearchAuditExtension extends Extension
                 ->addTag(self::TAG_VALUE_COMPARATOR, ['priority' => -100]));
         }
 
+        $container->setDefinition(self::SERVICE_VALUE_COMPARATOR, new Definition(ValueComparator::class, [new TaggedIteratorArgument(self::TAG_VALUE_COMPARATOR)]));
+
         $container->setDefinition(self::SERVICE_FRAME_BUFFER, new Definition(FrameBuffer::class, [
-            new Definition(ValueComparator::class, [new TaggedIteratorArgument(self::TAG_VALUE_COMPARATOR)]),
+            new Reference(self::SERVICE_VALUE_COMPARATOR),
             $coalescing['object_types'],
             $coalescing['max_held'],
             $coalescing['enabled'],
@@ -183,6 +186,7 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(self::SERVICE_WRITER),
             new Reference(self::SERVICE_METADATA_FACTORY),
             $doctrine['skip_empty_updates'],
+            new Reference(self::SERVICE_VALUE_COMPARATOR),
         ]);
 
         foreach (AuditSubscriber::EVENTS as $event) {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Coalescing;
 
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
+use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 
@@ -233,9 +234,15 @@ final class FrameBuffer
                 : new Change($previous->old, $incoming->new);
         }
 
+        // One merged record cannot honestly claim a single origin when the steps came
+        // from different places: a listener's insert followed by the application's own
+        // correction is both, and saying "doctrine" would be a lie an enricher acts on.
+        $origin = $first->origin === $next->origin ? $first->origin : AuditOrigin::Mixed;
+
         return $first
             ->withChanges($changes)
-            ->withAttributes($next->attributes);
+            ->withAttributes($next->attributes)
+            ->withOrigin($origin);
     }
 
     /**

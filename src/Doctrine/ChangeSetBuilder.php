@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Doctrine\ORM\EntityManagerInterface;
@@ -26,8 +27,10 @@ use Doctrine\ORM\PersistentCollection;
  */
 final class ChangeSetBuilder
 {
-    public function __construct(private readonly EntityManagerInterface $em)
-    {
+    public function __construct(
+        private readonly EntityManagerInterface $em,
+        private readonly ?ValueComparatorInterface $comparator = null,
+    ) {
     }
 
     /**
@@ -47,10 +50,15 @@ final class ChangeSetBuilder
                     ? new Change(self::represent($changeSet[$field][0] ?? null, $represent), self::represent($classMetadata->getFieldValue($entity, $field), $represent))
                     : null;
             } elseif (\array_key_exists($field, $changeSet) && \is_array($changeSet[$field])) {
-                $old = $changeSet[$field][0] ?? null;
-                $new = $changeSet[$field][1] ?? null;
-                $change = self::same($old, $new) ? null : new Change($old, $new);
+                $change = new Change($changeSet[$field][0] ?? null, $changeSet[$field][1] ?? null);
             } else {
+                $change = null;
+            }
+
+            // One decision, whatever kind of field it was: a scalar, an association and
+            // a collection all answer "did this change" the same way, and the
+            // application can override that answer for any of them.
+            if ($change !== null && $this->unchanged($metadata->objectType, $field, $change->old, $change->new)) {
                 $change = null;
             }
 
@@ -68,6 +76,45 @@ final class ChangeSetBuilder
                     $changes[$field] = new Change($value, $value);
                 }
             }
+        }
+
+        return $changes;
+    }
+
+    /**
+     * What changed inside one element of a tracked collection, keyed
+     * "collection.elementId.field" — "lines.42.quantity".
+     *
+     * Associations of the element are left out: representing one needs a callable, and
+     * an element has nowhere to declare it. The comparator is asked about
+     * "collection.field", without the id, because a rule about quantities is about
+     * quantities and not about element 42.
+     *
+     * @param bool|list<string> $wanted true for every field of the element that changed
+     *
+     * @return array<string, Change>
+     */
+    public function elementChanges(string $objectType, string $collectionField, object $element, int|string $elementId, bool|array $wanted): array
+    {
+        $classMetadata = $this->em->getClassMetadata($element::class);
+        $changes = [];
+
+        foreach ($this->em->getUnitOfWork()->getEntityChangeSet($element) as $field => $sides) {
+            if (!\is_array($sides) || $classMetadata->hasAssociation($field)) {
+                continue;
+            }
+
+            if (\is_array($wanted) && !\in_array($field, $wanted, true)) {
+                continue;
+            }
+
+            $change = new Change($sides[0] ?? null, $sides[1] ?? null);
+
+            if ($this->unchanged($objectType, $collectionField.'.'.$field, $change->old, $change->new)) {
+                continue;
+            }
+
+            $changes[$collectionField.'.'.$elementId.'.'.$field] = $change;
         }
 
         return $changes;
@@ -111,6 +158,21 @@ final class ChangeSetBuilder
         }
 
         return $represent($related);
+    }
+
+    /**
+     * Whether the two sides count as the same value, and so as no change at all.
+     *
+     * The application answers first: what "unchanged" means is a property of the data,
+     * not of Doctrine. A datetime_timezone column compared by instant reports a change
+     * whenever the zone moves, and the record then shows two timestamps that read
+     * identically — a comparator says "by wall clock here" and the record is not
+     * written. The same comparators decide what a frame drops when it closes, so a rule
+     * is expressed once and holds on both paths.
+     */
+    private function unchanged(string $objectType, string $field, mixed $old, mixed $new): bool
+    {
+        return $this->comparator?->equals($objectType, $field, $old, $new) ?? self::same($old, $new);
     }
 
     /**

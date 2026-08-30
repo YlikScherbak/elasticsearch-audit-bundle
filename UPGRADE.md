@@ -4,6 +4,26 @@ On the `0.x` line every minor may change the API, and Composer does not treat `0
 compatible: `^0.4` will not pull in `0.5`. Pin the minor you tested against and read this file
 when you move.
 
+## 0.8 → 0.9
+
+Nothing to change unless you relied on `limit()` resetting a cursor.
+
+- **`AuditQuery::limit()` keeps the cursor** now. Code that used it to *drop* one — which nothing
+  in the documentation ever suggested — should call `page(1, $limit)` instead. Code that wrote
+  `afterToken($token)->limit(50)` and quietly got the first page starts working.
+- **`AuditRecord` has a new last constructor parameter**, `$origin`, after `$id`. It has a
+  default, so `new AuditRecord(...)` is unaffected; only a subclass or a positional call passing
+  something after `$id` could notice, and there is nothing after `$id` to pass.
+- **Enrichers still run where they ran.** If you have one whose attribute describes the outcome
+  rather than the step — "did this field change" — it belongs on
+  `MergedRecordEnricherInterface` now; see the README. Nothing forces the move.
+- **A comparator you registered for coalescing now also decides what the Doctrine listener
+  records.** That is the point of the change, and it is worth re-reading the ones you have: a
+  comparator that answers `true` for a field stops that field from being recorded at all, where
+  before it only merged away. Answer `null` to defer, as before.
+- Tracking the elements of a collection is opt-in; nothing changes for a collection you do not
+  mark.
+
 ## 0.8.0 → 0.8.1
 
 Upgrade. 0.7.0 and 0.8.0 could not be registered in a Symfony application at all — every kernel

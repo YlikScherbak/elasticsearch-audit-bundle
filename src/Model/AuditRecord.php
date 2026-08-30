@@ -19,6 +19,7 @@ final class AuditRecord
      * @param array<string, Change|mixed> $changes    field => Change, or any JSON-able value
      * @param array<string, mixed>        $attributes extra top-level, filterable fields
      * @param string|null                 $id         the document id; the writer assigns a UUID v7 when left out
+     * @param AuditOrigin                 $origin     which part of the application produced this; the bundle sets it
      */
     public function __construct(
         public readonly string $objectType,
@@ -29,6 +30,7 @@ final class AuditRecord
         public readonly array $changes = [],
         public readonly array $attributes = [],
         public readonly ?string $id = null,
+        public readonly AuditOrigin $origin = AuditOrigin::Manual,
     ) {
         if ($objectType === '') {
             throw new \InvalidArgumentException('An audit record needs a non-empty object type.');
@@ -41,7 +43,7 @@ final class AuditRecord
 
     public function withLoggedAt(\DateTimeImmutable $loggedAt): self
     {
-        return new self($this->objectType, $this->objectId, $this->event, $loggedAt, $this->actor, $this->changes, $this->attributes, $this->id);
+        return new self($this->objectType, $this->objectId, $this->event, $loggedAt, $this->actor, $this->changes, $this->attributes, $this->id, $this->origin);
     }
 
     /**
@@ -54,12 +56,12 @@ final class AuditRecord
             throw new \InvalidArgumentException('An audit record id cannot be empty.');
         }
 
-        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $this->attributes, $id);
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $this->attributes, $id, $this->origin);
     }
 
     public function withActor(?string $actor): self
     {
-        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $actor, $this->changes, $this->attributes, $this->id);
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $actor, $this->changes, $this->attributes, $this->id, $this->origin);
     }
 
     /**
@@ -67,7 +69,7 @@ final class AuditRecord
      */
     public function withChanges(array $changes): self
     {
-        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $changes, $this->attributes, $this->id);
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $changes, $this->attributes, $this->id, $this->origin);
     }
 
     public function withChange(string $field, mixed $old, mixed $new): self
@@ -81,6 +83,23 @@ final class AuditRecord
      *
      * @param array<string, mixed> $attributes
      */
+    /**
+     * The same, for values that must not overwrite what is already there: an enricher
+     * filling in a default the caller may have set itself, or a second enricher that
+     * defers to the first. Reserved field names are refused either way.
+     *
+     * @param array<string, mixed> $attributes
+     */
+    public function withAddedAttributes(array $attributes): self
+    {
+        return $this->withAttributes(array_diff_key($attributes, $this->attributes));
+    }
+
+    /**
+     * The record with these attributes set, replacing any of the same name.
+     *
+     * @param array<string, mixed> $attributes
+     */
     public function withAttributes(array $attributes): self
     {
         foreach (array_keys($attributes) as $name) {
@@ -89,7 +108,16 @@ final class AuditRecord
             }
         }
 
-        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, array_replace($this->attributes, $attributes), $this->id);
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, array_replace($this->attributes, $attributes), $this->id, $this->origin);
+    }
+
+    /**
+     * Where this record came from. The bundle sets it: the Doctrine listener marks what
+     * it builds, everything handed to the writer is the application's own.
+     */
+    public function withOrigin(AuditOrigin $origin): self
+    {
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $this->attributes, $this->id, $origin);
     }
 
     public function hasChanges(): bool

@@ -65,7 +65,16 @@ final class ChangeRedactor
 
     private function redacts(string $objectType, string $field): bool
     {
-        return \in_array($field, $this->fields, true) || \in_array($objectType.'.'.$field, $this->fields, true);
+        if (\in_array($field, $this->fields, true) || \in_array($objectType.'.'.$field, $this->fields, true)) {
+            return true;
+        }
+
+        // A change inside a tracked collection element is named for the path that reached
+        // it — "lines.42.password". The rule names a field, not a path, and a secret is
+        // no less a secret for sitting one level down.
+        $last = strrchr($field, '.');
+
+        return $last !== false && $last !== '.' && $this->redacts($objectType, substr($last, 1));
     }
 
     private function redactValue(mixed $change): mixed

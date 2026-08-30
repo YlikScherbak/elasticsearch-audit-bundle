@@ -53,6 +53,22 @@ final class AuditEntry
     }
 
     /**
+     * The entry with its changes replaced — what a decorator returns when it makes the
+     * change itself readable rather than adding something beside it: a permission name
+     * in place of its key, a status label in place of its code. extra() is for what the
+     * record does not have; this is for what it has in a form nobody wants to read.
+     *
+     * @param array<string, mixed> $changes
+     */
+    public function withChanges(array $changes): self
+    {
+        return new self($this->id, $this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $changes, $this->attributes, $this->extra, $this->sort);
+    }
+
+    /**
+     * The entry with something added beside its own fields — a name looked up for the
+     * actor, a title for the object — under "extra", which is never stored.
+     *
      * @param array<string, mixed> $extra
      */
     public function withExtra(array $extra): self
@@ -63,6 +79,27 @@ final class AuditEntry
     public function attribute(string $name, mixed $default = null): mixed
     {
         return $this->attributes[$name] ?? $default;
+    }
+
+    /**
+     * The entry in the shape it has in Elasticsearch — "source" for the actor and the
+     * stored timestamp format — for an endpoint that has to keep answering the way the
+     * documents themselves read. toArray() is the other one: "actor", ISO 8601, and
+     * whatever the decorators added under extra.
+     *
+     * @return array<string, mixed>
+     */
+    public function toDocument(): array
+    {
+        return [
+            'id' => $this->id,
+            'objectType' => $this->objectType,
+            'objectId' => $this->objectId,
+            'event' => $this->event,
+            'loggedAt' => $this->loggedAt->setTimezone(new \DateTimeZone('UTC'))->format(AuditRecord::DATE_FORMAT),
+            'source' => $this->actor,
+            'changes' => $this->changes,
+        ] + $this->attributes;
     }
 
     /**

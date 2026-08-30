@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
 
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\MergedRecordEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
@@ -238,6 +239,14 @@ final class AuditWriter
      */
     private function prepare(AuditRecord $record): ?AuditRecord
     {
+        // Whatever a frame merged is what these see, and they run before redaction so
+        // that what they add is redacted like the rest.
+        foreach ($this->enrichers as $enricher) {
+            if ($enricher instanceof MergedRecordEnricherInterface && $enricher->supports($record)) {
+                $record = $enricher->enrich($record);
+            }
+        }
+
         // Redaction happens here, on the way out, and not in complete(): a frame has to
         // see the real values to know that a field moved, and the event below is the
         // first place a record is seen outside the writer.
@@ -305,6 +314,12 @@ final class AuditWriter
         }
 
         foreach ($this->enrichers as $enricher) {
+            // The merged ones wait for prepare(): what they say is about the record that
+            // will be stored, not about the step that is being recorded right now.
+            if ($enricher instanceof MergedRecordEnricherInterface) {
+                continue;
+            }
+
             if ($enricher->supports($record)) {
                 $record = $enricher->enrich($record);
             }

@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Doctrine\Metadata;
 use Borsche\ElasticsearchAuditBundle\Attribute\Auditable;
 use Borsche\ElasticsearchAuditBundle\Attribute\AuditField;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditableInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\TracksCollectionElementsInterface;
 
 /**
  * Reads the audit declaration of an entity — from AuditableInterface when the
@@ -27,7 +28,9 @@ final class AuditMetadataFactory
     public function for(object $entity): ?AuditMetadata
     {
         if ($entity instanceof AuditableInterface) {
-            return new AuditMetadata($entity->getAuditObjectType(), $entity->getAuditedFields(), $entity->getAlwaysRecordedFields());
+            $tracked = $entity instanceof TracksCollectionElementsInterface ? $entity->getTrackedCollections() : [];
+
+            return new AuditMetadata($entity->getAuditObjectType(), $entity->getAuditedFields(), $entity->getAlwaysRecordedFields(), $tracked);
         }
 
         $class = $entity::class;
@@ -56,6 +59,8 @@ final class AuditMetadataFactory
         }
 
         $fields = [];
+        /** @var array<string, bool|list<string>> $tracked */
+        $tracked = [];
 
         for ($current = $class; $current !== false; $current = $current->getParentClass()) {
             foreach ($current->getProperties() as $property) {
@@ -65,12 +70,16 @@ final class AuditMetadataFactory
                     continue;
                 }
 
-                $represent = $attributes[0]->newInstance()->represent;
-                $fields[$property->getName()] = $represent === null ? null : self::representer($represent, $current->getName().'::$'.$property->getName());
+                $field = $attributes[0]->newInstance();
+                $fields[$property->getName()] = $field->represent === null ? null : self::representer($field->represent, $current->getName().'::$'.$property->getName());
+
+                if ($field->trackElements !== false) {
+                    $tracked[$property->getName()] = $field->trackElements;
+                }
             }
         }
 
-        return new AuditMetadata($auditable->type, $fields, $auditable->alwaysRecord);
+        return new AuditMetadata($auditable->type, $fields, $auditable->alwaysRecord, $tracked);
     }
 
     /**

@@ -143,14 +143,14 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertSame('Me, Myself', $page->entries[0]->extra['actorName']);
     }
 
-    public function testTheDoctrineListenerIsAttachedToTheFourLifecycleEvents(): void
+    public function testTheDoctrineListenerIsAttachedToEveryEventItNeeds(): void
     {
         $definition = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['connection' => 'audit']])
             ->getDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER);
 
         $events = array_column($definition->getTag('doctrine.event_listener'), 'event');
 
-        self::assertSame(['postPersist', 'postUpdate', 'preRemove', 'postRemove', 'postFlush', 'onClear'], $events);
+        self::assertSame(['onFlush', 'postPersist', 'postUpdate', 'preRemove', 'postRemove', 'postFlush', 'onClear'], $events);
         self::assertSame('audit', $definition->getTag('doctrine.event_listener')[0]['connection']);
     }
 

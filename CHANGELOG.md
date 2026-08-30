@@ -8,6 +8,52 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Added
+- **`AuditRecord::$origin`** — `AuditOrigin::Doctrine` for what the entity listener built,
+  `Manual` for what the application handed to the writer, `Mixed` for a record a frame merged out
+  of both. An enricher that should only touch one kind can ask instead of inferring it from the
+  actor. Not stored: it is a fact about the write, not about the history
+- **`MergedRecordEnricherInterface`** — an enricher that runs once per record immediately before
+  it is written, on whatever a frame merged (and on the record itself when no frame was open).
+  An ordinary enricher runs per step, so an attribute it computes describes the last save rather
+  than the outcome: 1000 → 1040 → 1000 is no change at all, and only an enricher running here
+  can say so
+- **Changes inside the elements of a collection**, on request:
+  `#[AuditField(trackElements: ['quantity'])]`, or `TracksCollectionElementsInterface` beside
+  `AuditableInterface`. A record then carries `lines.42.quantity` for a field that changed and
+  `lines.42` for an element that appeared or went. It costs a query only when something actually
+  changed — the unit of work is asked which entities this flush touches, so an untouched
+  collection is never loaded — and an owner Doctrine raised no event for still gets its record.
+  It is also how a **inverse** collection reports gaining or losing an element at all
+- **`ValueComparatorInterface` now decides what counts as a change on the write path too**, not
+  only what a frame drops when it closes. A `datetime_timezone` column compared by instant
+  reported a change whenever the zone moved, and the record showed two timestamps that read
+  identically; a comparator says "by wall clock here" and no record is written
+- `AuditEntry::withChanges()` — for a decorator that makes the change itself readable (a
+  permission key as its name), which until now had to be done outside the decorator
+- `AuditEntry::toDocument()` — the entry in the shape it has in Elasticsearch (`source`, stored
+  timestamp format), symmetric with `AuditRecord::toDocument()`. `toArray()` is unchanged
+- `AuditRecord::withAddedAttributes()` — fills gaps without overwriting, for an enricher that
+  defers to whatever set the value first
+- README: which version a feature arrived in, the tag names behind autoconfiguration, and why an
+  `iterable` of them does not autowire into a service of your own
+
+### Fixed
+- **`limit()` no longer throws a cursor away.** `after($cursor)->limit(50)` returned the first
+  page instead of continuing — silently, because `limit()` went through `page()`, which resets
+  the cursor on purpose. Reaching for a page number still does; asking for a different batch size
+  does not
+- Redaction understands the keys element tracking produces: a rule for `password` covers
+  `lines.42.password`, so tracking elements is not a way around it — and so does
+  `coalescing.numeric_fields`: a rule for `quantity` covers `lines.quantity`
+- **What `onFlush` collected about collection elements is dropped with the rest when a flush
+  fails.** The listener kept it across the rollback, so the next flush of the same owner reported
+  a line as added that the database never had — the same phantom 0.3 removed for plain records,
+  found again on the new path before it shipped
+- An owner removed together with its tracked elements gets its `remove` and nothing after it.
+  The elements going with it used to be collected as "lost", and an owner whose identifier
+  survives the DELETE (assigned, not generated) received an `update` after its own `remove`
+
 ## [0.8.1] - 2026-08-30
 
 The bundle can be registered in an application.

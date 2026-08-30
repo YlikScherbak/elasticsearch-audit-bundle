@@ -65,8 +65,14 @@ final class AuditQueryTest extends TestCase
         self::assertSame(1, $withCursor->page);
         self::assertSame(['2026-08-26 10:00:00', 17], $withCursor->searchAfter);
 
-        self::assertFalse($withCursor->page(2)->usesCursor());
-        self::assertTrue($withCursor->limit(50)->usesCursor() === false, 'limit() goes through page() and resets the cursor');
+        self::assertFalse($withCursor->page(2)->usesCursor(), 'a page number and a cursor cannot both say where the next entries start');
+
+        $bigger = $withCursor->limit(50);
+
+        self::assertTrue($bigger->usesCursor(), 'the size of a batch says nothing about where it starts');
+        self::assertSame(['2026-08-26 10:00:00', 17], $bigger->searchAfter);
+        self::assertSame(50, $bigger->limit);
+
         self::assertTrue($withCursor->withEvents('x')->usesCursor(), 'other withers keep the cursor');
     }
 

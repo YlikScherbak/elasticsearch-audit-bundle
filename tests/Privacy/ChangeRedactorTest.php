@@ -76,4 +76,22 @@ final class ChangeRedactorTest extends TestCase
     {
         return new AuditRecord($objectType, 1, AuditEvent::UPDATE, new \DateTimeImmutable('2026-08-27 10:00:00', new \DateTimeZone('UTC')), 'admin', $changes);
     }
+
+    public function testASecretOneLevelDownIsStillASecret(): void
+    {
+        // What a tracked collection records is named for the path that reached it, and a
+        // rule names a field: "password" has to cover "lines.42.password" or element
+        // tracking becomes a way around redaction.
+        $redactor = new ChangeRedactor(['password'], '***');
+
+        $record = (new AuditRecord('order', 1, 'update'))->withChanges([
+            'lines.42.password' => new Change('hunter2', 'hunter3'),
+            'lines.42.quantity' => new Change(1, 2),
+        ]);
+
+        $changes = $redactor->redact($record)->changes;
+
+        self::assertEquals(new Change('***', '***'), $changes['lines.42.password']);
+        self::assertEquals(new Change(1, 2), $changes['lines.42.quantity']);
+    }
 }

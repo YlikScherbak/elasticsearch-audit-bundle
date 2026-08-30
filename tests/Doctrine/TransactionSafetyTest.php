@@ -67,6 +67,42 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertCount(1, $this->documents());
     }
 
+    public function testAFailedFlushDoesNotLeakAnElementItNeverInsertedIntoTheNextOne(): void
+    {
+        $shipment = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment('SH-9');
+        $this->em->persist($shipment);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $poison = new class {
+            public bool $armed = true;
+
+            public function postPersist(LifecycleEventArgs $args): void
+            {
+                if ($this->armed) {
+                    throw new \RuntimeException('boom');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postPersist], $poison);
+
+        try {
+            $shipment->add(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine('nut', 1)); // the INSERT is rolled back
+            $this->em->flush();
+        } catch (\RuntimeException) {
+        }
+
+        $this->reopen();
+        $poison->armed = false;
+
+        $again = $this->em->find(\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment::class, $shipment->id);
+        $again->reference = 'SH-9b';
+        $this->em->flush();
+
+        self::assertCount(1, $this->documents());
+        self::assertSame(['reference'], array_keys($this->documents()[0]['changes']), 'a line the database never had must not appear as added');
+    }
+
     public function testAFailedFlushDoesNotLeakIntoTheNextOne(): void
     {
         $poison = new class {

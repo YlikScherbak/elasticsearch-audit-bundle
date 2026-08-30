@@ -250,6 +250,51 @@ association without a representer — is handled by the same policy: logged and 
 default, fatal to the flush with `throw`. Composite identifiers are joined with `|`; an
 identifier that is itself an entity is represented by that entity's identifier.
 
+### Changes inside the elements of a collection
+
+A to-many field records which elements it has. What changes *inside* an element — a line's
+quantity — is a change to the element, and Doctrine reports it as such: the collection is not
+dirty, and the owner's history never mentions it. Ask for it and it is recorded (**since 0.9**):
+
+```php
+#[ORM\OneToMany(mappedBy: 'shipment', targetEntity: ShipmentLine::class)]
+#[AuditField(represent: 'getLabel', trackElements: ['quantity'])]   // or trackElements: true
+private Collection $lines;
+```
+
+```php
+class Shipment implements AuditableInterface, TracksCollectionElementsInterface
+{
+    public function getTrackedCollections(): array { return ['lines' => ['quantity']]; }
+}
+```
+
+The record then carries one entry per element, keyed by its identifier:
+
+```json
+"changes": {
+  "lines.42.quantity": { "old": 1, "new": 7 },
+  "lines.51":          { "old": null, "new": "bolt" },
+  "lines.17":          { "old": "gadget", "new": null }
+}
+```
+
+— a field that changed, an element that appeared, an element that went. Which is also how a
+tracked **inverse** collection reports what it gained and lost at all: the inverse side is never
+dirty, so without tracking a line added to it leaves no trace (see Limitations).
+
+Three things worth knowing:
+
+- **It costs a query only when something changed.** The unit of work already knows which entities
+  this flush touches; a collection whose elements nobody touched is never loaded, and never asked
+  about.
+- **An owner nobody touched still gets a record.** Doctrine raises no event for an entity it has
+  nothing to `UPDATE`, so that record is built after the flush from what was collected during it.
+- **`trackElements: true` takes every field of the element that changed**, so name the fields
+  unless you mean all of them. Redaction understands these keys: a rule for `password` covers
+  `lines.42.password`. Associations of an element are left out — representing one needs a
+  callable, and an element has nowhere to declare it.
+
 ## One operation, one record
 
 Some operations save several times on their way to their result. A stock movement in the CRM
@@ -318,6 +363,12 @@ look equal — so `numeric_fields` is safe on a column that sometimes holds text
 
 Anything else — case-insensitive strings, rounding — is a `ValueComparatorInterface` you
 register; it is asked first and may defer with `null`.
+
+**Since 0.9 the same comparators answer the first question too**, so a rule is written once and
+holds wherever it matters. The case that made this necessary: a `datetime_timezone` column
+compared by instant reports a change whenever the zone moves, and the record then shows two
+timestamps that read identically — a comparator that compares by wall clock stops the record
+from being written at all, instead of leaving it to be filtered out afterwards.
 
 ### Frames in workers
 
@@ -490,8 +541,16 @@ final class ActorNames implements RecordDecoratorInterface
 }
 ```
 
-`extra` is never stored — it is computed on read, so a renamed user shows the current name.
-Both extensions and decorators are picked up automatically when they are registered as services.
+`extra` is never stored — it is computed on read, so a renamed user shows the current name. When
+what needs to be readable is the change itself — a permission key that should read as its name, a
+status code as its label — `withChanges()` replaces them (**since 0.9**); `withExtra()` is for
+what the record does not have, `withChanges()` for what it has in a form nobody wants to read.
+
+Both extensions and decorators are picked up automatically when they are registered as services,
+through autoconfiguration. A service that is not autoconfigured needs the tag by hand:
+`borsche_elasticsearch_audit.enricher`, `.decorator`, `.query_extension`, `.actor_resolver`,
+`.value_comparator`. Autowiring an `iterable` of them into a service of your own is not something
+Symfony does on its own — ask for the tag: `#[TaggedIterator('borsche_elasticsearch_audit.decorator')]`.
 
 ### An endpoint
 
@@ -619,6 +678,38 @@ final class OrderAttributesEnricher implements AuditEnricherInterface
     }
 }
 ```
+
+**When an enricher runs matters.** An `AuditEnricherInterface` runs the moment a record is
+created — before a frame merges it with the other saves of the same operation. That is right for
+a fact about the step (which request, who was authenticated) and wrong for a fact about the
+outcome: a quantity that goes 1000 → 1040 → 1000 ends up as no change at all, while an enricher
+that ran on the last step has already written `quantityChanged: true`, and the record then
+contradicts itself. For those, implement `MergedRecordEnricherInterface` (**since 0.9**) — the
+same three methods, run once per record immediately before it is written, on whatever the frame
+merged, and on the record itself when no frame was open:
+
+```php
+final class QuantityChanged implements MergedRecordEnricherInterface
+{
+    public function supports(AuditRecord $record): bool { return $record->objectType === 'stock'; }
+
+    public function enrich(AuditRecord $record): AuditRecord
+    {
+        return $record->withAttributes(['quantityChanged' => array_key_exists('quantity', $record->changes)]);
+    }
+
+    public function mapping(): array { return ['quantityChanged' => ['type' => 'boolean']]; }
+}
+```
+
+`withAttributes()` replaces what is already there; `withAddedAttributes()` (**since 0.9**) fills
+gaps only, for an enricher that defers to whatever set the value first.
+
+**Where the record came from.** `$record->origin` (**since 0.9**) is `AuditOrigin::Doctrine` for
+what the listener built, `Manual` for what the application handed to the writer, and `Mixed` for a
+record a frame merged out of both — so an enricher that should only touch one of them can ask
+instead of guessing from the actor. It is not stored: it is a fact about the write, not about the
+history.
 
 Attributes land beside `objectType`, `event`, ... at the top level of the document, which is
 what makes them filterable. `changes` is deliberately **not indexed** (`enabled: false`): its
@@ -867,7 +958,10 @@ Honest list, so nothing surprises you in production:
 - **Embeddables are not audited** as fields of their owner; audit the owning entity's scalar
   fields, or record the change yourself.
 - **Only the owning side of an association is dirty-tracked.** A `OneToMany` inverse collection
-  never reports changes; declare the owning side (`ManyToOne`, or the owning `ManyToMany`).
+  never reports changes of its own; declare the owning side (`ManyToOne`, or the owning
+  `ManyToMany`) — or track its elements (**since 0.9**), which is answered from the unit of work
+  and so does not depend on which side is dirty. An element moved from one owner to another is
+  seen through its new owner only: the old one's history does not mention losing it.
 - **A point in time costs the cluster memory while it is open.** `iterate()` holds one for the
   duration of the export; an export that is abandoned without the generator being destroyed keeps
   it until `reader.point_in_time_keep_alive` runs out. Iterate to the end, or let the generator go.
@@ -890,11 +984,12 @@ already settled, and this is the part that will carry a stability promise at 1.0
 **Call these**
 `AuditWriter::record()`, `write()`, `writeAll()` · `AuditReader::find()`, `iterate()` ·
 `AuditFrame::coalesce()`, `begin()`, `end()`, `reset()`, `release()` · the models you build and
-receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditQuery`, `AuditEntry`, `AuditPage`,
+receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditOrigin`, `AuditQuery`, `AuditEntry`, `AuditPage`,
 `Cursor`, `BulkResult` · `FailurePolicy` · every exception under `AuditException` · the two PSR-14 events.
 
 **Implement these**
-`AuditableInterface` · `AuditEnricherInterface` · `ActorResolverInterface` ·
+`AuditableInterface` · `TracksCollectionElementsInterface` · `AuditEnricherInterface` ·
+`MergedRecordEnricherInterface` · `ActorResolverInterface` ·
 `QueryExtensionInterface` · `RecordDecoratorInterface` · `ValueComparatorInterface` ·
 `TransportInterface` / `BatchTransportInterface` · `GatewayInterface`, if you have a reason to
 speak to Elasticsearch differently.

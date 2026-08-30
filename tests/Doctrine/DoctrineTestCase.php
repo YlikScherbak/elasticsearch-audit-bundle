@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
+use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
@@ -76,13 +78,19 @@ abstract class DoctrineTestCase extends TestCase
         $this->em = new EntityManager($this->connection, $this->ormConfig, $this->em->getEventManager());
     }
 
-    protected function attachListener(FailurePolicy $policy): void
+    /**
+     * @param iterable<AuditEnricherInterface> $enrichers
+     */
+    protected function attachListener(FailurePolicy $policy, ?ValueComparatorInterface $comparator = null, iterable $enrichers = []): void
     {
-        $listener = new AuditSubscriber($this->writer($policy), new AuditMetadataFactory(), skipEmptyUpdates: true);
+        $listener = new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator);
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, $listener);
     }
 
-    protected function writer(FailurePolicy $policy): AuditWriter
+    /**
+     * @param iterable<AuditEnricherInterface> $enrichers
+     */
+    protected function writer(FailurePolicy $policy, iterable $enrichers = []): AuditWriter
     {
         $transport = new SyncTransport($this->gateway);
         $logs = &$this->logs;
@@ -99,7 +107,7 @@ abstract class DoctrineTestCase extends TestCase
             }
         };
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), [], $policy, $logger);
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $logger);
     }
 
     /**

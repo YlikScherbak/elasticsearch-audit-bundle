@@ -194,9 +194,19 @@ final class AuditQuery
         return $this->with(page: $page, limit: $limit, searchAfter: null);
     }
 
+    /**
+     * How many entries one page or one cursor batch holds. Unlike page(), this keeps a
+     * cursor: after($c)->limit(50) continues where the cursor left off, fifty at a time.
+     * Reaching for a page number is what abandons the cursor, because a row number and a
+     * position in a sorted stream cannot both be where the next entries come from.
+     */
     public function limit(int $limit): self
     {
-        return $this->page($this->page, $limit);
+        if ($limit < 1) {
+            throw new InvalidQueryException(sprintf('The page size must be at least 1, %d given.', $limit));
+        }
+
+        return $this->with(limit: $limit);
     }
 
     /**

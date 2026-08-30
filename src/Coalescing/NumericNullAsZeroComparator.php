@@ -10,7 +10,8 @@ use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
  * For quantity-like fields, "no value" (null, '', '-') and 0 mean the same thing,
  * so a stock line going from null to 0 is not a change. Configured with
  * coalescing.numeric_fields, as "quantity" for every object type or "stock.quantity"
- * for one; fields not listed are left to the default comparison.
+ * for one; a rule also reaches that field inside a tracked collection element
+ * ("lines.quantity"). Fields not listed are left to the default comparison.
  *
  * A value that is neither a number nor "no value" is nobody's quantity, so the
  * comparator defers instead of calling it zero — otherwise two different words
@@ -29,7 +30,7 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
 
     public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
     {
-        if (!\in_array($field, $this->fields, true) && !\in_array($objectType.'.'.$field, $this->fields, true)) {
+        if (!$this->covers($objectType, $field)) {
             return null;
         }
 
@@ -37,6 +38,22 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
         $after = self::toNumber($new);
 
         return $before === null || $after === null ? null : $before === $after;
+    }
+
+    /**
+     * Named plainly or scoped — and, for a field inside a tracked collection element
+     * ("lines.quantity"), by its last segment: a rule about quantities is about quantities
+     * wherever they sit, the way a redaction rule for "password" covers "lines.42.password".
+     */
+    private function covers(string $objectType, string $field): bool
+    {
+        if (\in_array($field, $this->fields, true) || \in_array($objectType.'.'.$field, $this->fields, true)) {
+            return true;
+        }
+
+        $last = strrchr($field, '.');
+
+        return $last !== false && $last !== '.' && $this->covers($objectType, substr($last, 1));
     }
 
     /**
