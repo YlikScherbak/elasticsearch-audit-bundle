@@ -107,6 +107,35 @@ final class ReaderLimitsTest extends TestCase
         $this->reader(extensions: [$greedy])->find(AuditQuery::for('order')->page(1, 20));
     }
 
+    public function testThePageKnowsHowFarPageNumbersReach(): void
+    {
+        $this->gateway->respondToSearch = static fn () => [
+            'hits' => ['total' => ['value' => 1_000_000], 'hits' => []],
+        ];
+
+        $page = $this->reader(maxLimit: 10_000, maxWindow: 50_000)->find(AuditQuery::for('order')->page(1, 10_000));
+
+        self::assertSame(100, $page->totalPages(), 'a hundred pages exist');
+        self::assertSame(5, $page->maxReachablePage(), 'five of them can be asked for by number');
+    }
+
+    public function testAPageReadByCursorSaysSo(): void
+    {
+        $this->gateway->respondToSearch = static fn () => [
+            'hits' => [
+                'total' => ['value' => 1_000_000],
+                'hits' => [['_id' => 'a', '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-30 10:00:00'], 'sort' => ['2026-08-30 10:00:00', 'a']]],
+            ],
+        ];
+
+        $page = $this->reader()->find(AuditQuery::for('order')->page(1, 1)->after(['2026-08-30 09:00:00', 'x']));
+
+        self::assertTrue($page->usesCursor);
+        self::assertTrue($page->hasMore(), 'a full batch: there may be more');
+        self::assertSame(['2026-08-30 10:00:00', 'a'], $page->nextCursor());
+        self::assertNotNull($page->nextCursorToken());
+    }
+
     /**
      * @param iterable<QueryExtensionInterface> $extensions
      */

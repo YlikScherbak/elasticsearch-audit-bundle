@@ -19,6 +19,18 @@ page.
 - To show more rows per page, raise `reader.max_limit`; to page deeper, raise
   `reader.max_result_window` **and** the cluster's `index.max_result_window` to match. Remember
   that a decorator then receives that many entries in one call — chunk its lookups.
+- **`AuditPage::nextCursor()` now returns null when nothing follows** — an empty page, the last
+  page of a numbered run, or a short cursor batch. It used to hand out the last entry's sort
+  values regardless, so a "load more" built on it led to an empty page at the end. `hasMore()`
+  answers the same question directly.
+- **`toArray()['pagination']['nextCursor']` is a string, not an array.** It is the token form
+  (`nextCursorToken()`), which is what a client should carry: base64url, safe in a query string,
+  and opaque. Read it back with `AuditQuery::afterToken($token)`; `after($array)` is unchanged for
+  callers that stay inside PHP. If your frontend stored the old JSON array, its stored cursors
+  stop working — they were the sort values of a different response shape anyway; start from page
+  one or from a fresh token.
+- `pagination` gained `maxReachablePage` and `hasMore`. Nothing was removed, so a client that
+  ignores them keeps working.
 
 ## 0.5 → 0.6
 

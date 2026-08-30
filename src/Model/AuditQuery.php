@@ -213,6 +213,16 @@ final class AuditQuery
         return $this->with(page: 1, searchAfter: array_values($cursor));
     }
 
+    /**
+     * The same, from the string form a client was given (AuditPage::nextCursorToken()).
+     *
+     * @throws InvalidQueryException the token is not one the reader handed out
+     */
+    public function afterToken(string $token): self
+    {
+        return $this->after(Cursor::decode($token));
+    }
+
     public function usesCursor(): bool
     {
         return $this->searchAfter !== null;

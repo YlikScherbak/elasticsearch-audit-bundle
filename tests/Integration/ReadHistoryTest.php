@@ -119,6 +119,64 @@ final class ReadHistoryTest extends ElasticsearchTestCase
         self::assertSame(range(100, 124), array_merge(...$byOffset));
     }
 
+    public function testAClientWalksWithTokensAndStopsWhereTheDataDoes(): void
+    {
+        [$ids, $requests, $last] = $this->walkWithTokens(AuditQuery::for('order')->withEvents('update')->oldestFirst()->page(1, 10));
+
+        self::assertSame(range(100, 124), $ids);
+        self::assertSame(3, $requests, 'ten, ten, five — and no empty request at the end');
+        self::assertFalse($last->hasMore());
+    }
+
+    public function testTheSameWalkNewestFirst(): void
+    {
+        // The tie-breaker has to hold in both directions, or a boundary row is dropped
+        // or served twice — which only a real cluster can prove.
+        [$ids, $requests, $last] = $this->walkWithTokens(AuditQuery::for('order')->withEvents('update')->newestFirst()->page(1, 10));
+
+        self::assertSame(array_reverse(range(100, 124)), $ids);
+        self::assertSame(3, $requests);
+        self::assertFalse($last->hasMore());
+    }
+
+    public function testAQueryThatMatchesNothingIsOneRequestAndNoCursor(): void
+    {
+        [$ids, $requests, $last] = $this->walkWithTokens(AuditQuery::for('order')->withActors('nobody')->page(1, 10));
+
+        self::assertSame([], $ids);
+        self::assertSame(1, $requests);
+        self::assertSame(0, $last->total);
+        self::assertSame(0, $last->totalPages());
+        self::assertSame(0, $last->maxReachablePage());
+        self::assertFalse($last->hasMore());
+        self::assertNull($last->toArray()['pagination']['nextCursor']);
+    }
+
+    /**
+     * Exactly what a browser does: send back the string it was given, nothing else.
+     *
+     * @return array{0: list<int|string>, 1: int, 2: \Borsche\ElasticsearchAuditBundle\Model\AuditPage}
+     */
+    private function walkWithTokens(AuditQuery $query): array
+    {
+        $ids = [];
+        $requests = 0;
+        $token = null;
+
+        do {
+            $page = $this->reader->find($token === null ? $query : $query->afterToken($token));
+            ++$requests;
+
+            foreach ($page->entries as $entry) {
+                $ids[] = $entry->objectId;
+            }
+
+            $token = $page->toArray()['pagination']['nextCursor'];
+        } while ($token !== null);
+
+        return [$ids, $requests, $page];
+    }
+
     public function testIterateStreamsEverythingInOrder(): void
     {
         $ids = [];

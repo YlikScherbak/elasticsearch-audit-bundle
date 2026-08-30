@@ -53,10 +53,24 @@ final class AuditReader
 
         $response = $this->gateway->search($this->indexFor($query), $this->queryBuilder->build($query));
 
-        $entries = array_map(AuditEntry::fromHit(...), array_values($response['hits']['hits'] ?? []));
+        $hits = array_values($response['hits']['hits'] ?? []);
+        $entries = array_map(AuditEntry::fromHit(...), $hits);
         $total = $response['hits']['total']['value'] ?? \count($entries);
 
-        return new AuditPage($this->decorate($entries), (int) $total, $query->page, $query->limit);
+        // Whether more follows, and where to continue, follow what Elasticsearch returned —
+        // a decorator that hides entries must not end a "load more" early or skip past them.
+        $lastSort = $hits === [] ? [] : ($hits[array_key_last($hits)]['sort'] ?? []);
+
+        return new AuditPage(
+            $this->decorate($entries),
+            (int) $total,
+            $query->page,
+            $query->limit,
+            $query->usesCursor(),
+            $this->maxResultWindow,
+            fetched: \count($hits),
+            cursor: \is_array($lastSort) ? array_values($lastSort) : [],
+        );
     }
 
     /**

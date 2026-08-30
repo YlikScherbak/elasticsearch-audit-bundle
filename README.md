@@ -56,6 +56,8 @@ Borsche\ElasticsearchAuditBundle\ElasticsearchAuditBundle::class => ['all' => tr
 
 ## Configuration
 
+This file describes `main`. A setting the latest release does not have yet is marked **(since 0.8)** — on an older tag Symfony answers an unknown key with *Unrecognized options … under "borsche_elasticsearch_audit"*, so check the tag you actually installed.
+
 ```yaml
 # config/packages/borsche_elasticsearch_audit.yaml
 borsche_elasticsearch_audit:
@@ -72,7 +74,7 @@ borsche_elasticsearch_audit:
     fallback: system                      # recorded when nobody is authenticated
   redact:
     fields: [password, token]             # values replaced before anything is written
-  reader:
+  reader:                                 # both keys since 0.8
     max_limit: 1000                       # largest page; raise for screens showing thousands of rows
     max_result_window: 10000              # how deep page/limit may reach; match index.max_result_window
 ```
@@ -372,7 +374,9 @@ uses its named method, an attribute uses `where()`.
 
 `page(n, limit)` is the familiar one, and it is bounded twice: by how large a page may be
 (`reader.max_limit`, default 1000) and by how deep `from + size` may reach
-(`reader.max_result_window`, default 10 000 — Elasticsearch's own default). The reader refuses a
+(`reader.max_result_window`, default 10 000 — Elasticsearch's own default). Both settings exist
+**since 0.8**; before that the same two numbers were constants on `AuditQuery`, and a page past
+them was refused with no way to say otherwise. The reader refuses a
 query beyond either with an `InvalidQueryException` naming the setting, rather than letting the
 cluster answer 400.
 
@@ -388,6 +392,11 @@ borsche_elasticsearch_audit:
     max_result_window: 50000  # five such pages; raise index.max_result_window to match
 ```
 
+A page says how far the numbers go, so a screen can tell "pages there are" from "pages you can
+ask for": `$page->totalPages()` and `$page->maxReachablePage()` (**since 0.8**), the second bounded
+by the window. `$page->hasMore()` answers whether to draw a "next" at all — by arithmetic when the
+page came from `page()`, and from a full batch when it came from a cursor.
+
 For deep paging, "load more" buttons and exports, page by cursor instead — it has no ceiling:
 
 ```php
@@ -395,6 +404,13 @@ $page = $this->reader->find($query->page(1, 100));
 // ... later, for the next page:
 $next = $this->reader->find($query->after($page->nextCursor()));
 ```
+
+`nextCursor()` is null once nothing follows, so a "load more" never leads to an empty page. Across
+an HTTP boundary hand out the string form instead — `$page->nextCursorToken()` (**since 0.8**), which
+is what `toArray()` puts in `pagination.nextCursor` — and continue with `$query->afterToken($token)`.
+The token is base64url, so it needs no escaping in a query string, and it is opaque on purpose: a
+client hands it back unread, which leaves what is inside it free to change. A token that comes back
+damaged is an `InvalidQueryException`, not a silently wrong page.
 
 The cursor is the sort value of the last entry: `loggedAt` plus the record's id, a time-ordered
 UUID (millisecond precision), which breaks ties in time order and — unlike Elasticsearch's `_doc` — does not move when
@@ -488,6 +504,10 @@ public function history(Request $request, AuditReader $reader): JsonResponse
 
     if ($id = $request->query->get('objectId')) {
         $query = $query->withObjectId($id);
+    }
+
+    if ($cursor = $request->query->getString('cursor')) {
+        $query = $query->afterToken($cursor); // page numbers no longer apply
     }
 
     try {
@@ -871,7 +891,7 @@ already settled, and this is the part that will carry a stability promise at 1.0
 `AuditWriter::record()`, `write()`, `writeAll()` · `AuditReader::find()`, `iterate()` ·
 `AuditFrame::coalesce()`, `begin()`, `end()`, `reset()`, `release()` · the models you build and
 receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditQuery`, `AuditEntry`, `AuditPage`,
-`BulkResult` · `FailurePolicy` · every exception under `AuditException` · the two PSR-14 events.
+`Cursor`, `BulkResult` · `FailurePolicy` · every exception under `AuditException` · the two PSR-14 events.
 
 **Implement these**
 `AuditableInterface` · `AuditEnricherInterface` · `ActorResolverInterface` ·

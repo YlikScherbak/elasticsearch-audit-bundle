@@ -31,7 +31,28 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
   holds, and an `IN (...)` of ten thousand ids makes MySQL's range optimizer give up and scan the
   table — worth knowing before raising `max_limit`
 
+- **A page now says whether anything follows it and how far page numbers reach.**
+  `AuditPage::hasMore()` is arithmetic for a numbered page (`(page-1) * limit + count < total`)
+  and a full batch for a cursor one; `maxReachablePage()` is `min(totalPages, window / limit)`,
+  which is the difference between the pages that exist and the pages a client may ask for. Both
+  are in `toArray()`, so a screen can draw its pager without knowing the settings. Both follow what
+  Elasticsearch returned, not what the decorators left: a decorator that hides entries from a page
+  changes what is shown, never whether more follows or where the next page starts
+- **A cursor as one opaque string.** `AuditPage::nextCursorToken()` and
+  `AuditQuery::afterToken()` carry a page boundary across HTTP: base64url, so it survives a query
+  string unescaped, and unread by the client, so what is inside it stays the bundle's business.
+  A damaged token is an `InvalidQueryException` naming what it is, not a silently wrong page
+- `AuditPage` refuses a limit below 1 at construction. The reader cannot produce one —
+  `AuditQuery::page()` refuses it first — but a page assembled by hand used to divide by it and
+  fail somewhere far from the mistake
+- **«Result window is too large» now says where to raise it.** `reader.max_result_window` is
+  checked before the request; the index's own window is not, and an index created before the
+  setting was raised refuses the page the reader allowed. The exception carries both halves now
+
 ### Changed
+- **`AuditPage::nextCursor()` returns null once nothing follows**, and
+  `toArray()['pagination']['nextCursor']` is the token string rather than the raw sort array.
+  A "load more" built on the old behaviour ended on an empty page; see UPGRADE.md
 - **The page-size and window checks moved from `AuditQuery` to `AuditReader`**, where the
   configuration lives; the exception now names the setting to raise. `AuditQuery::page()` still
   refuses a page number or size below 1. `AuditQuery::MAX_LIMIT` and `MAX_WINDOW` are now

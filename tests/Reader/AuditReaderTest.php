@@ -144,6 +144,35 @@ final class AuditReaderTest extends TestCase
         self::assertSame(['2026-08-26 10:00:00', 4], $this->gateway->searches[2]['body']['search_after']);
     }
 
+    public function testADecoratorThatDropsEntriesDoesNotDecideWhetherMoreFollows(): void
+    {
+        // A full cursor page of three, one of which the decorator hides: the client still
+        // has to be told there is more, and continued from the third hit, not the second.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 30], 'hits' => [
+            self::hit('a', '1', 1),
+            self::hit('b', '1', 2),
+            self::hit('c', '1', 3),
+        ]]];
+
+        $dropsC = new class implements RecordDecoratorInterface {
+            public function decorate(array $entries): array
+            {
+                return array_values(array_filter($entries, static fn (AuditEntry $e) => $e->id !== 'c'));
+            }
+        };
+        $reader = $this->reader(decorators: [$dropsC]);
+
+        $cursorPage = $reader->find(AuditQuery::for('order')->page(1, 3)->after(['2026-08-26 10:00:00', 0]));
+
+        self::assertCount(2, $cursorPage->entries, 'the decorator\'s word on what is shown stands');
+        self::assertTrue($cursorPage->hasMore(), 'Elasticsearch returned a full page: more may follow');
+        self::assertSame(['2026-08-26 10:00:00', 3], $cursorPage->nextCursor(), 'the cursor is the last hit\'s, or the hidden entry\'s successors are skipped');
+
+        $lastNumberedPage = $reader->find(AuditQuery::for('order')->page(10, 3));
+
+        self::assertFalse($lastNumberedPage->hasMore(), 'rows 28-30 of 30: nothing follows, whatever the decorator kept');
+    }
+
     public function testIterateFollowsTheHitsEvenWhenADecoratorDropsEntries(): void
     {
         $this->gateway->respondToSearch = static function (string $index, array $body): array {

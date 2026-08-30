@@ -207,7 +207,7 @@ final class ElasticsearchGateway implements GatewayInterface
                 $reason = self::reason($e);
 
                 throw $query
-                    ? new InvalidQueryException('Elasticsearch rejected the query: '.$reason, $status, $e)
+                    ? new InvalidQueryException('Elasticsearch rejected the query: '.self::actionable($reason), $status, $e)
                     : RequestRejectedException::because($status, $reason, $e);
             }
 
@@ -215,6 +215,21 @@ final class ElasticsearchGateway implements GatewayInterface
         } catch (\Throwable $e) {
             throw TransportUnavailableException::because($e);
         }
+    }
+
+    /**
+     * Elasticsearch's own words, and what to do about them when the answer is not in the
+     * query but in the cluster. reader.max_result_window is checked before the request;
+     * the index's own window is not, and an index created before the setting was raised
+     * (or on a contour where nobody raised it) refuses the page the reader allowed.
+     */
+    private static function actionable(string $reason): string
+    {
+        if (!str_contains($reason, 'Result window is too large')) {
+            return $reason;
+        }
+
+        return $reason.' — index.max_result_window on this index is lower than reader.max_result_window: raise it on the index, lower the setting to match, or page with a cursor, which has no ceiling.';
     }
 
     /**

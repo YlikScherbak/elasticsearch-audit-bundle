@@ -44,6 +44,22 @@ final class ElasticsearchGatewayTest extends TestCase
         $gateway->search('audit_log', ['search_after' => ['garbage']]);
     }
 
+    public function testAWindowTheIndexRefusesSaysWhereToRaiseIt(): void
+    {
+        // reader.max_result_window is checked before the request; the index's own window
+        // is only discovered here, and the two can disagree on a contour nobody updated.
+        $gateway = $this->gateway(static fn () => self::response(400, ['error' => ['type' => 'illegal_argument_exception', 'root_cause' => [['type' => 'illegal_argument_exception', 'reason' => 'Result window is too large, from + size must be less than or equal to: [10000] but was [50000]']]]]));
+
+        try {
+            $gateway->search('audit_log', ['from' => 40_000, 'size' => 10_000]);
+            self::fail('expected InvalidQueryException');
+        } catch (InvalidQueryException $e) {
+            self::assertStringContainsString('Result window is too large', $e->getMessage());
+            self::assertStringContainsString('index.max_result_window', $e->getMessage(), 'the fix is on the index; the message names it');
+            self::assertStringContainsString('cursor', $e->getMessage(), 'and the way around it');
+        }
+    }
+
     public function testAWriteElasticsearchRejectsIsNotAnUnreachableCluster(): void
     {
         $gateway = $this->gateway(static fn (RequestInterface $request) => $request->getMethod() === 'HEAD'
