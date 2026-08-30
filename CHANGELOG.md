@@ -8,6 +8,10 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-30
+
+The read path is a deployment's to configure, and a page now says whether anything follows it.
+
 ### Added
 - **`reader.max_limit` and `reader.max_result_window`** — how large a page may be and how deep
   `page(n, limit)` may reach are now configuration, not constants. Both keep Elasticsearch's own
