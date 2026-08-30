@@ -53,7 +53,11 @@ final class Configuration implements ConfigurationInterface
 
         $children->scalarNode('message_bus')
             ->info('Service id of the bus to dispatch to when transport is "messenger".')
-            ->defaultValue('messenger.default_bus');
+            ->defaultValue('messenger.default_bus')
+            ->validate()
+                ->ifTrue(static fn (mixed $v) => !\is_string($v) || $v === '')
+                ->thenInvalid('message_bus must be the id of a bus, not %s.')
+            ->end();
 
         $children->enumNode('on_failure')
             ->info('"log" (default): a failed write is logged and ignored. "throw": it raises WriteFailedException.')
@@ -83,7 +87,14 @@ final class Configuration implements ConfigurationInterface
 
         $children->scalarNode('service')
             ->info('Service id of an existing Elastic\Elasticsearch\Client. Takes precedence over hosts.')
-            ->defaultNull();
+            ->defaultNull()
+            ->validate()
+                // Not just a bad value: the root rule asks whether this is null, so an
+                // empty string counted as "a client is configured" and a configuration
+                // with neither hosts nor a usable service passed as valid.
+                ->ifTrue(static fn (mixed $v) => $v !== null && (!\is_string($v) || $v === ''))
+                ->thenInvalid('client.service must be the id of a service, not %s.')
+            ->end();
 
         $children->booleanNode('ssl_verification')->defaultTrue();
     }
@@ -104,7 +115,12 @@ final class Configuration implements ConfigurationInterface
 
         $routing = $children->arrayNode('routing');
         $routing
-            ->info('Per object type index, e.g. { auth: audit_auth_log, warehouse_stock: audit_stock_log }.')
+            ->info('Per object type index, e.g. { auth: audit_auth_log, warehouse-stock: audit_stock_log }.')
+            // An object type is a name the application chose, not a configuration key to
+            // tidy up: without this a dash becomes an underscore here and the writer,
+            // arriving with the name it was given, finds no route and writes to the
+            // default index without a word.
+            ->normalizeKeys(false)
             ->useAttributeAsKey('object_type')
             ->defaultValue([]);
         $routing->scalarPrototype()
@@ -114,8 +130,8 @@ final class Configuration implements ConfigurationInterface
                 ->thenInvalid(self::INVALID_INDEX_NAME);
 
         $children->enumNode('object_id_type')
-            ->info('How objectId is mapped: "keyword" fits any identifier (UUIDs, external ids); "integer" allows range queries on numeric ids.')
-            ->values([IndexDefinition::OBJECT_ID_KEYWORD, IndexDefinition::OBJECT_ID_INTEGER])
+            ->info('How objectId is mapped: "keyword" fits any identifier (UUIDs, external ids); "long" allows range queries on numeric ids; "integer" does too but stops at 2147483647, which a bigint key outgrows.')
+            ->values([IndexDefinition::OBJECT_ID_KEYWORD, IndexDefinition::OBJECT_ID_INTEGER, IndexDefinition::OBJECT_ID_LONG])
             ->defaultValue(IndexDefinition::OBJECT_ID_KEYWORD);
 
         $children->arrayNode('settings')
@@ -222,7 +238,11 @@ final class Configuration implements ConfigurationInterface
 
         $children->scalarNode('connection')
             ->info('Doctrine connection name the listener is attached to.')
-            ->defaultValue('default');
+            ->defaultValue('default')
+            ->validate()
+                ->ifTrue(static fn (mixed $v) => !\is_string($v) || $v === '')
+                ->thenInvalid('doctrine.connection must be a connection name, not %s.')
+            ->end();
     }
 
     /**

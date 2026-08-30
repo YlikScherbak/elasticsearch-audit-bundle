@@ -60,7 +60,17 @@ final class ChangeRedactor
             $changes[$field] = $change;
         }
 
-        return $touched ? $record->withChanges($changes) : $record;
+        $record = $touched ? $record->withChanges($changes) : $record;
+
+        // Attributes are the indexed half of a record, so leaving them out of this would
+        // protect what cannot be searched and expose what can. They are dropped rather
+        // than masked: see AuditRecord::withoutAttributes().
+        $secret = array_values(array_filter(
+            array_keys($record->attributes),
+            fn (string $name): bool => $this->redacts($record->objectType, $name),
+        ));
+
+        return $secret === [] ? $record : $record->withoutAttributes(...$secret);
     }
 
     private function redacts(string $objectType, string $field): bool

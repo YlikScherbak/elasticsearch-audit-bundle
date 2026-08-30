@@ -55,11 +55,16 @@ final class CursorTest extends TestCase
         yield 'nothing at all' => [''];
     }
 
+    /**
+     * What decode() checks is the token's shape, not its provenance — which is what the
+     * message now says. A token a client made up moves it inside its own authorised
+     * query and nowhere else; the extensions still decide what that query may see.
+     */
     #[DataProvider('damagedTokens')]
     public function testADamagedTokenIsRefusedByName(string $token): void
     {
         $this->expectException(InvalidQueryException::class);
-        $this->expectExceptionMessage('not a cursor the reader handed out');
+        $this->expectExceptionMessage('The cursor token is malformed');
 
         Cursor::decode($token);
     }

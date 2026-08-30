@@ -98,8 +98,10 @@ final class AuditReader
         try {
             while (true) {
                 $response = $pit === null
-                    ? $this->gateway->search($index, $this->queryBuilder->build($query))
-                    : $this->gateway->searchPointInTime($pit, $this->pointInTimeKeepAlive, $this->queryBuilder->build($query, pointInTime: true));
+                    // No total: iterate() never reads one, and an exact count of the whole
+                    // result set on every batch is a full pass over the index per page.
+                    ? $this->gateway->search($index, $this->queryBuilder->build($query, trackTotalHits: false))
+                    : $this->gateway->searchPointInTime($pit, $this->pointInTimeKeepAlive, $this->queryBuilder->build($query, pointInTime: true, trackTotalHits: false));
 
                 // Elasticsearch may hand back a renewed id; the next search must use it.
                 if ($pit !== null && \is_string($response['pit_id'] ?? null) && $response['pit_id'] !== '') {

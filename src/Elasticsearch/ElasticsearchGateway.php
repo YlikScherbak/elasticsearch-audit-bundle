@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Elasticsearch;
 
+use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
@@ -129,8 +130,13 @@ final class ElasticsearchGateway implements GatewayInterface
     {
         try {
             $this->call(fn () => $this->client->closePointInTime(['body' => ['id' => $pitId]]));
-        } catch (RequestRejectedException) {
-            // Already expired or unknown: the cluster answers 404, and there is nothing to release.
+        } catch (RequestRejectedException $e) {
+            // Already expired or unknown: the cluster answers 404, and there is nothing to
+            // release. Anything else — no permission, for one — means the view is still
+            // open and holding memory, which is not something to pass over in silence.
+            if ($e->getCode() !== 404) {
+                throw $e;
+            }
         }
     }
 
@@ -155,10 +161,31 @@ final class ElasticsearchGateway implements GatewayInterface
     {
         $response = $this->call(fn () => self::answer($this->client->indices()->getMapping(['index' => $index]))->asArray(), $index);
 
-        // The response is keyed by the concrete index name, which differs from $index when it is an alias.
-        $first = reset($response);
+        // The response is keyed by concrete index name, and an alias can stand for
+        // several of them. A field counts as mapped only where every one of them maps it
+        // the same way: audit:check exists to catch an index that was left behind, and
+        // reading whichever came first would have hidden exactly that.
+        $shared = null;
 
-        return \is_array($first) ? ($first['mappings']['properties'] ?? []) : [];
+        foreach ($response as $concrete) {
+            $properties = \is_array($concrete) && \is_array($concrete['mappings']['properties'] ?? null)
+                ? $concrete['mappings']['properties']
+                : [];
+
+            if ($shared === null) {
+                $shared = $properties;
+
+                continue;
+            }
+
+            foreach ($shared as $field => $definition) {
+                if (!\array_key_exists($field, $properties) || $properties[$field] !== $definition) {
+                    unset($shared[$field]);
+                }
+            }
+        }
+
+        return $shared ?? [];
     }
 
     public function info(): array
@@ -203,6 +230,13 @@ final class ElasticsearchGateway implements GatewayInterface
                 throw IndexNotFoundException::forIndex($index, $e);
             }
 
+            // 429 is the cluster asking for the same request in a moment, not refusing it.
+            // Classified with the unreachable cluster because that is the class the bundle
+            // retries: an audit record must not be dropped for arriving during a busy hour.
+            if ($status === 429) {
+                throw TransportUnavailableException::because($e);
+            }
+
             if ($status >= 400 && $status < 500) {
                 $reason = self::reason($e);
 
@@ -212,6 +246,11 @@ final class ElasticsearchGateway implements GatewayInterface
             }
 
             throw TransportUnavailableException::because($e);
+        } catch (AuditException $e) {
+            // Raised inside the closure by the bundle itself — a client built for
+            // asynchronous responses, say. It already says what is wrong; wrapping it as
+            // an unreachable cluster would send whoever reads it to the network.
+            throw $e;
         } catch (\Throwable $e) {
             throw TransportUnavailableException::because($e);
         }

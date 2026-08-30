@@ -121,4 +121,28 @@ final class ValueComparatorTest extends TestCase
         self::assertFalse($comparator->equals('order', 'ids', ['1'], [1]), 'the recursion ends in ===, so a string that became an int is a change');
         self::assertFalse($comparator->equals('order', 'ids', [1], [1, 2]), 'and a different length is a different value');
     }
+
+    public function testDatesAreComparedToTheMicrosecond(): void
+    {
+        // Until 0.9.3 this was getTimestamp(), whole seconds, so a change made inside one
+        // second was recorded as no change at all.
+        $comparator = new ValueComparator();
+
+        $early = new \DateTimeImmutable('2026-08-30 10:00:00.100000', new \DateTimeZone('UTC'));
+        $late = new \DateTimeImmutable('2026-08-30 10:00:00.900000', new \DateTimeZone('UTC'));
+
+        self::assertFalse($comparator->equals('order', 'at', $early, $late));
+        self::assertTrue($comparator->equals('order', 'at', $early, new \DateTimeImmutable('2026-08-30 12:00:00.100000', new \DateTimeZone('+02:00'))), 'the same instant, written from another zone');
+    }
+
+    public function testTheCornersOfDateComparison(): void
+    {
+        $comparator = new ValueComparator();
+
+        $beforeEpoch = new \DateTimeImmutable('1969-07-20 20:17:40.000000', new \DateTimeZone('UTC'));
+
+        self::assertTrue($comparator->equals('order', 'at', $beforeEpoch, new \DateTimeImmutable('1969-07-20 20:17:40.000000', new \DateTimeZone('UTC'))));
+        self::assertFalse($comparator->equals('order', 'at', $beforeEpoch, new \DateTimeImmutable('1969-07-20 20:17:40.000001', new \DateTimeZone('UTC'))));
+        self::assertTrue($comparator->equals('order', 'at', $beforeEpoch, new \DateTime('1969-07-20 20:17:40.000000', new \DateTimeZone('UTC'))), 'mutable against immutable is still an instant');
+    }
 }

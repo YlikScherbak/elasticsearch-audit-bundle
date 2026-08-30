@@ -34,8 +34,8 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
             return null;
         }
 
-        $before = self::toNumber($old);
-        $after = self::toNumber($new);
+        $before = self::canonical($old);
+        $after = self::canonical($new);
 
         return $before === null || $after === null ? null : $before === $after;
     }
@@ -59,16 +59,56 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
     /**
      * The value as a number, or null when it is not one — "nothing" counting as zero.
      */
-    private static function toNumber(mixed $value): ?float
+    private static function canonical(mixed $value): ?string
     {
         if ($value === null || $value === '' || $value === '-') {
-            return 0.0;
+            return '0';
         }
 
-        if (\is_int($value) || \is_float($value) || (\is_string($value) && is_numeric($value))) {
-            return (float) $value;
+        if (\is_int($value)) {
+            return (string) $value;
+        }
+
+        if (\is_float($value)) {
+            return self::trim(sprintf('%.14F', $value));
+        }
+
+        if (\is_string($value) && is_numeric($value)) {
+            // As text, digit by digit. Through a float, 9007199254740993 and its
+            // neighbour become the same double and a real change disappears from the
+            // trail — and a comparator that answers "equal" wrongly deletes history,
+            // where one that answers "different" wrongly only adds a record.
+            return str_contains($value, 'e') || str_contains($value, 'E')
+                ? self::trim(sprintf('%.14F', (float) $value))
+                : self::trim($value);
         }
 
         return null;
+    }
+
+    /**
+     * One spelling per value: "00012.00", "12.000" and "12" are the same quantity, and
+     * so are "-0" and "0".
+     */
+    private static function trim(string $number): string
+    {
+        $negative = str_starts_with($number, '-');
+        $number = ltrim($number, '+-');
+
+        if (str_contains($number, '.')) {
+            $number = rtrim(rtrim($number, '0'), '.');
+        }
+
+        $number = ltrim($number, '0');
+
+        if ($number === '' || $number === '.') {
+            return '0';
+        }
+
+        if (str_starts_with($number, '.')) {
+            $number = '0'.$number;
+        }
+
+        return $negative ? '-'.$number : $number;
     }
 }

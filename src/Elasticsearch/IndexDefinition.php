@@ -22,6 +22,8 @@ final class IndexDefinition
 {
     public const OBJECT_ID_KEYWORD = 'keyword';
     public const OBJECT_ID_INTEGER = 'integer';
+    /** Elasticsearch's "integer" is 32 bits; a bigint primary key needs this one. */
+    public const OBJECT_ID_LONG = 'long';
 
     /**
      * @param array<string, array<string, mixed>> $properties additional mapping properties
@@ -32,8 +34,8 @@ final class IndexDefinition
         private readonly array $properties = [],
         private readonly array $settings = ['number_of_shards' => 1, 'number_of_replicas' => 0],
     ) {
-        if (!\in_array($objectIdType, [self::OBJECT_ID_KEYWORD, self::OBJECT_ID_INTEGER], true)) {
-            throw new \InvalidArgumentException(sprintf('objectId can be mapped as "keyword" or "integer", not "%s".', $objectIdType));
+        if (!\in_array($objectIdType, [self::OBJECT_ID_KEYWORD, self::OBJECT_ID_INTEGER, self::OBJECT_ID_LONG], true)) {
+            throw new \InvalidArgumentException(sprintf('objectId can be mapped as "keyword", "integer" or "long", not "%s".', $objectIdType));
         }
     }
 

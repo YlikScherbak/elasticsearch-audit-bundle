@@ -86,6 +86,12 @@ final class AuditWriter
      */
     public function write(AuditRecord $record, bool $immediately = false): void
     {
+        $released = null;
+
+        // Building the record is this record's business, so a failure here is reported
+        // against it. Delivering is each released record's own business, and reported
+        // against that one — which is also why delivery happens outside this try: two
+        // catch blocks around one failure reported it twice and buried the cause.
         try {
             $record = $this->complete($record);
 
@@ -93,17 +99,23 @@ final class AuditWriter
             // the same object; the frame writes the result when it closes. A remove or
             // a full buffer hands back records that have to go out right now.
             if (!$immediately && $this->frame !== null && $this->frame->accepts($record->objectType)) {
-                foreach ($this->frame->hold($record) as $released) {
-                    $this->dispatch($released, false);
-                }
-
-                return;
+                $released = iterator_to_array($this->frame->hold($record), false);
             }
-
-            $this->dispatch($record, $immediately);
         } catch (\Throwable $e) {
             $this->reportFailure($e, $record);
+
+            return;
         }
+
+        if ($released !== null) {
+            foreach ($released as $one) {
+                $this->deliver($one, false);
+            }
+
+            return;
+        }
+
+        $this->deliver($record, $immediately);
     }
 
     /**
@@ -116,7 +128,7 @@ final class AuditWriter
      */
     public function writeCompleted(AuditRecord $record): void
     {
-        $this->dispatch($record, false);
+        $this->deliver($record, false);
     }
 
     /**
@@ -168,7 +180,7 @@ final class AuditWriter
 
         if (!$this->transport instanceof BatchTransportInterface) {
             foreach ($records as $record) {
-                $this->dispatch($record, false);
+                $this->deliver($record, false);
             }
 
             return;
@@ -215,22 +227,37 @@ final class AuditWriter
         $this->reportEach($failures);
     }
 
-    private function dispatch(AuditRecord $record, bool $immediately): void
+    /**
+     * One record, one failure: whatever goes wrong on its way out is reported once,
+     * against the record it happened to.
+     */
+    private function deliver(AuditRecord $record, bool $immediately): void
     {
         try {
-            $record = $this->prepare($record);
-
-            if ($record === null) {
-                return; // vetoed
-            }
-
-            $index = $this->indexResolver->resolve($record->objectType);
-            $transport = $immediately ? $this->immediateTransport : $this->transport;
-
-            $transport->send($index, $record->toDocument(), $record->id);
+            $this->dispatch($record, $immediately);
         } catch (\Throwable $e) {
             $this->reportFailure($e, $record);
         }
+    }
+
+    /**
+     * Sends the record, or nothing when a listener vetoed it. It does not catch: the
+     * failure policy belongs to the callers above, and applying it here as well turned
+     * one transport error into two RecordFailedEvents and an exception whose cause was
+     * another exception of the same kind.
+     */
+    private function dispatch(AuditRecord $record, bool $immediately): void
+    {
+        $prepared = $this->prepare($record);
+
+        if ($prepared === null) {
+            return; // vetoed
+        }
+
+        $index = $this->indexResolver->resolve($prepared->objectType);
+        $transport = $immediately ? $this->immediateTransport : $this->transport;
+
+        $transport->send($index, $prepared->toDocument(), $prepared->id);
     }
 
     /**
@@ -259,7 +286,15 @@ final class AuditWriter
         $event = new RecordCreatedEvent($record);
         $this->events->dispatch($event);
 
-        return $event->isVetoed() ? null : $event->getRecord();
+        if ($event->isVetoed()) {
+            return null;
+        }
+
+        // Redacted once more, and this is not belt and braces: a listener may replace the
+        // record wholesale, and one that reaches for the entity again to add something
+        // would hand back the value the first pass removed. The redactor is the last word
+        // before the transport, or it is not a policy.
+        return $this->redactor?->redact($event->getRecord()) ?? $event->getRecord();
     }
 
     /**

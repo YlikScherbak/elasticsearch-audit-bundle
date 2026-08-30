@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\DependencyInjection;
 
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\Configuration;
+use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
@@ -115,5 +116,48 @@ final class ConfigurationTest extends TestCase
     private function process(array $config): array
     {
         return (new Processor())->processConfiguration(new Configuration(), [$config]);
+    }
+
+    public function testAnObjectTypeReachesTheLookupAsItWasWritten(): void
+    {
+        // The configuration tree used to tidy a dash into an underscore, and the writer
+        // then arrived with the name the application gave, found no route, and wrote to
+        // the default index without a word.
+        $config = $this->process(['client' => ['hosts' => ['http://es:9200']], 'indices' => ['routing' => [
+            'warehouse-stock' => 'audit_stock_log',
+            'external-order-v2' => 'audit_orders_log',
+        ]]]);
+
+        self::assertSame([
+            'warehouse-stock' => 'audit_stock_log',
+            'external-order-v2' => 'audit_orders_log',
+        ], $config['indices']['routing']);
+
+        $resolver = new IndexResolver($config['indices']['default'], $config['indices']['routing']);
+
+        self::assertSame('audit_stock_log', $resolver->resolve('warehouse-stock'), 'and it still routes at lookup time');
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function emptyIdentifiers(): iterable
+    {
+        yield 'a client service that is not one' => [['client' => ['service' => '']]];
+        yield 'a bus that is not one' => [['client' => ['hosts' => ['http://es:9200']], 'message_bus' => '']];
+        yield 'a connection that is not one' => [['client' => ['hosts' => ['http://es:9200']], 'doctrine' => ['connection' => '']]];
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    #[DataProvider('emptyIdentifiers')]
+    public function testAnEmptyStringIsNotAnIdentifier(array $config): void
+    {
+        // client.service is the worst of the three: the root rule asks whether it is
+        // null, so an empty string passed as "a client is configured".
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process($config);
     }
 }

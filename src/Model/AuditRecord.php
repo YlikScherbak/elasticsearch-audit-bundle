@@ -120,6 +120,23 @@ final class AuditRecord
         return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $this->attributes, $this->id, $origin);
     }
 
+    /**
+     * The record without those attributes. Redaction uses it: an attribute is a mapped,
+     * filterable field, so a masked one would be indexed as the placeholder and refused
+     * outright where the mapping says integer — a value that must not be kept is not
+     * kept, rather than kept as three asterisks.
+     */
+    public function withoutAttributes(string ...$names): self
+    {
+        $attributes = array_diff_key($this->attributes, array_fill_keys($names, true));
+
+        if ($attributes === $this->attributes) {
+            return $this;
+        }
+
+        return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $attributes, $this->id, $this->origin);
+    }
+
     public function hasChanges(): bool
     {
         return $this->changes !== [];

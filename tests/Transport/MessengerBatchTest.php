@@ -91,7 +91,7 @@ final class MessengerBatchTest extends TestCase
             // Messenger retries everything except this: a document the mapping refuses will be
             // refused again, so the message goes to the failure transport straight away.
             self::assertStringContainsString('1 of 2 audit records were refused', $e->getMessage());
-            self::assertStringContainsString('#1 audit_log/b: rejected by the test', $e->getMessage());
+            self::assertStringContainsString('#1 audit_log/b (HTTP 400): rejected by the test', $e->getMessage());
             self::assertInstanceOf(RequestRejectedException::class, $e->getPrevious(), 'the bundle\'s own exception travels along for whoever inspects the failed message');
         }
 
@@ -108,6 +108,49 @@ final class MessengerBatchTest extends TestCase
             self::fail('expected TransportUnavailableException');
         } catch (TransportUnavailableException $e) {
             self::assertNotInstanceOf(UnrecoverableExceptionInterface::class, $e, 'a cluster that is down may be up on the next try');
+        }
+    }
+
+    public function testAThrottledItemRetriesTheBatchInsteadOfLosingIt(): void
+    {
+        // Elasticsearch answered 200 and refused one document with 429: the write queue
+        // was full, not the document wrong. Sending the batch again writes the accepted
+        // ones over themselves — every document carries its id — and gives the refused
+        // one another chance, which is the whole reason the trail is worth keeping.
+        $gateway = new InMemoryGateway();
+        $gateway->rejectInBulkStatus = 429;
+        $gateway->rejectInBulk = static fn (array $document) => $document['objectId'] === 2;
+
+        try {
+            (new IndexAuditRecordsHandler($gateway))(new IndexAuditRecords([
+                ['index' => 'audit_log', 'document' => ['objectId' => 1], 'id' => 'a'],
+                ['index' => 'audit_log', 'document' => ['objectId' => 2], 'id' => 'b'],
+            ]));
+            self::fail('expected the message to fail');
+        } catch (\Throwable $e) {
+            self::assertNotInstanceOf(UnrecoverableExceptionInterface::class, $e, 'Messenger has to retry this one');
+            self::assertInstanceOf(TransportUnavailableException::class, $e);
+            self::assertStringContainsString('(HTTP 429)', $e->getMessage(), 'the status the cluster actually gave');
+        }
+    }
+
+    public function testAMixedBatchIsRetriedForTheSakeOfTheThrottledOne(): void
+    {
+        // One document the mapping will never accept, one the cluster could not take now.
+        // Retrying costs a doomed attempt for the first; not retrying loses the second.
+        $gateway = new InMemoryGateway();
+        $gateway->rejectInBulkStatus = 429;
+        $gateway->rejectInBulk = static fn (array $document) => \in_array($document['objectId'], [2, 3], true);
+
+        try {
+            (new IndexAuditRecordsHandler($gateway))(new IndexAuditRecords([
+                ['index' => 'audit_log', 'document' => ['objectId' => 1], 'id' => 'a'],
+                ['index' => 'audit_log', 'document' => ['objectId' => 2], 'id' => 'b'],
+                ['index' => 'audit_log', 'document' => ['objectId' => 3], 'id' => 'c'],
+            ]));
+            self::fail('expected the message to fail');
+        } catch (\Throwable $e) {
+            self::assertNotInstanceOf(UnrecoverableExceptionInterface::class, $e);
         }
     }
 }

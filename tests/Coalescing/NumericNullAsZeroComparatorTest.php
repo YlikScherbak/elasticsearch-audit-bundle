@@ -53,4 +53,26 @@ final class NumericNullAsZeroComparatorTest extends TestCase
         self::assertTrue($comparator->equals('stock', 'fact', 'abc', 'abc'));
         self::assertTrue($comparator->equals('stock', 'fact', null, 0), 'the comparator still has the last word on numbers');
     }
+
+    public function testTwoBigIntegersThatDifferByOneStillDiffer(): void
+    {
+        // Through a float these two are one double, and a real change disappears. A
+        // comparator that says "equal" wrongly deletes history; one that says
+        // "different" wrongly only adds a record.
+        $comparator = new NumericNullAsZeroComparator(['quantity']);
+
+        self::assertFalse($comparator->equals('stock', 'quantity', '9007199254740992', '9007199254740993'));
+        self::assertFalse($comparator->equals('stock', 'quantity', 9007199254740992, 9007199254740993));
+    }
+
+    public function testTheSameQuantitySpelledDifferently(): void
+    {
+        $comparator = new NumericNullAsZeroComparator(['quantity']);
+
+        self::assertTrue($comparator->equals('stock', 'quantity', '00012.00', '12.000'));
+        self::assertTrue($comparator->equals('stock', 'quantity', '-0', '0'));
+        self::assertTrue($comparator->equals('stock', 'quantity', '12', 12));
+        self::assertTrue($comparator->equals('stock', 'quantity', '.5', '0.50'));
+        self::assertFalse($comparator->equals('stock', 'quantity', '12.01', '12.1'));
+    }
 }

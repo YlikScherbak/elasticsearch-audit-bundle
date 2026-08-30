@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Elasticsearch;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\BulkResult;
+use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use PHPUnit\Framework\TestCase;
 
 final class BulkResultTest extends TestCase
@@ -49,12 +50,13 @@ final class BulkResultTest extends TestCase
         self::assertSame("[1:13] failed to parse field [email] of type [integer] in document with id 'abc'", $result->failures[0]['reason'], 'the refused value is exactly what must not end up in a log or an event');
     }
 
-    public function testAMalformedResponseIsNotAFailureOfEveryItem(): void
+    public function testAResponseThatCannotBeReadIsNotFiveSuccesses(): void
     {
-        $result = BulkResult::fromResponse(['took' => 3], 5);
+        // It used to answer "all five written", which is the one thing nobody knows here.
+        $this->expectException(TransportUnavailableException::class);
+        $this->expectExceptionMessage('with 0 item(s), expected 5');
 
-        self::assertFalse($result->hasFailures(), 'without per-item errors nothing is known to have failed');
-        self::assertSame(5, $result->succeeded());
+        BulkResult::fromResponse(['took' => 3], 5);
     }
 
     public function testEmptyAndAllSucceeded(): void

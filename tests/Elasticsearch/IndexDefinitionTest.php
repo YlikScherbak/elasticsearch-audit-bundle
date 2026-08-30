@@ -55,6 +55,15 @@ final class IndexDefinitionTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
 
-        new IndexDefinition('long');
+        new IndexDefinition('text');
+    }
+
+    public function testANumericIdentifierCanBeSixtyFourBits(): void
+    {
+        // Elasticsearch's integer stops at 2147483647, which a bigint primary key
+        // outgrows; long is the type to reach for and integer the one to regret.
+        $mapping = (new IndexDefinition(IndexDefinition::OBJECT_ID_LONG))->toArray();
+
+        self::assertSame(['type' => 'long'], $mapping['mappings']['properties']['objectId']);
     }
 }

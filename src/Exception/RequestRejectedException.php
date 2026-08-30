@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Exception;
 
 /**
- * Elasticsearch answered, but refused the request: a document that does not fit
- * the mapping, an index name it does not accept, missing permissions, a rate limit.
- * Retrying will not help; the request itself has to change.
+ * Elasticsearch answered, but refused the request: a document that does not fit the
+ * mapping, an index name it does not accept, missing permissions. Retrying will not
+ * help; the request itself has to change.
+ *
+ * Backpressure is not here. A cluster answering 429 is asking for the same request in
+ * a moment, so that is a TransportUnavailableException, which the bundle retries.
  */
 final class RequestRejectedException extends \RuntimeException implements AuditException
 {

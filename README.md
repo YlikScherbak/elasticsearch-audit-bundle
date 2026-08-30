@@ -67,7 +67,7 @@ borsche_elasticsearch_audit:
     default: audit_log                    # every record goes here...
     routing:                              # ...unless its object type is routed elsewhere
       auth: audit_auth_log
-    object_id_type: keyword               # or "integer" — only if EVERY audited type has numeric ids
+    object_id_type: keyword               # or "long" — only if EVERY audited type has numeric ids
   transport: sync                         # or "messenger" (see below)
   on_failure: log                         # or "throw"
   actor:
@@ -755,8 +755,9 @@ Set `on_failure: throw` when the opposite holds (compliance logs): the failure s
 
 Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Exception\AuditException`:
 `NotConfiguredException`, `IndexNotFoundException`, `TransportUnavailableException` (the cluster
-did not answer), `RequestRejectedException` (it answered and refused — a document that does not
-fit the mapping, missing permissions, a rate limit; retrying will not help), `InvalidQueryException`
+did not answer, or answered 429 or 503 — backpressure is not a refusal, and a write that met it is
+retried), `RequestRejectedException` (it answered and refused — a document that does not
+fit the mapping, missing permissions; retrying will not help), `InvalidQueryException`
 (a query the bundle or Elasticsearch rejected), `WriteFailedException`.
 
 ## The document
@@ -814,8 +815,12 @@ moment a record leaves the writer — after your enrichers, after a frame has me
 on the failure path — so it also covers what enrichers put into `changes`, a frame still sees the
 real values and records a password change as a change, and neither `RecordCreatedEvent`,
 `RecordFailedEvent` nor `WriteFailedException` carries the value. It covers the **top-level fields
-of `changes`** by name: a secret inside a free-form array, or in an attribute, has to be kept out by
-the code that puts it there. For anything conditional — redact only for this tenant, only outside
+of `changes`** and the **attributes** by name (**since 0.9.3**; a redacted attribute is not written
+at all rather than masked, because an attribute is a mapped field and `'***'` where the mapping says
+integer would have Elasticsearch refuse the whole document). A secret inside a free-form array still
+has to be kept out by the code that puts it there. A listener may replace the record on
+`RecordCreatedEvent`, and what it hands back is redacted again, so a listener that reaches for the
+entity a second time cannot undo the policy. For anything conditional — redact only for this tenant, only outside
 the office — listen to `RecordCreatedEvent` and rewrite or `veto()` the record there.
 
 **Who the actor is, is a choice.** By default the actor is `getUserIdentifier()`, and in many
@@ -900,8 +905,9 @@ alias, reads cover every index behind it, and `audit:check` verifies the mapping
 
 Two things to keep in mind. `audit:check` compares the mapping of the index the alias resolves to,
 so run it after a rollover if you changed an enricher. And `object_id_type` is a mapping decision
-you cannot revise in place: switching between `keyword` and `integer` needs a reindex, so decide
-once, at the start.
+you cannot revise in place: switching between `keyword`, `long` and `integer` needs a reindex, so
+decide once, at the start. For numeric identifiers reach for **`long`** (**since 0.9.3**):
+`integer` is 32 bits and stops at 2 147 483 647, which a `BIGINT` key eventually walks past.
 
 ## Performance
 
@@ -960,8 +966,9 @@ Honest list, so nothing surprises you in production:
 - **Only the owning side of an association is dirty-tracked.** A `OneToMany` inverse collection
   never reports changes of its own; declare the owning side (`ManyToOne`, or the owning
   `ManyToMany`) — or track its elements (**since 0.9**), which is answered from the unit of work
-  and so does not depend on which side is dirty. An element moved from one owner to another is
-  seen through its new owner only: the old one's history does not mention losing it.
+  and so does not depend on which side is dirty. An element that moves from one owner to another is
+  recorded on both sides (**since 0.9.3**) — the one it left and the one it joined — read from the
+  owning association's change set, which is where Doctrine keeps it.
 - **A point in time costs the cluster memory while it is open.** `iterate()` holds one for the
   duration of the export; an export that is abandoned without the generator being destroyed keeps
   it until `reader.point_in_time_keep_alive` runs out. Iterate to the end, or let the generator go.

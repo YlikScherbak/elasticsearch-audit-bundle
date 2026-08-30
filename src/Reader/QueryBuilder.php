@@ -28,7 +28,7 @@ final class QueryBuilder
      *
      * @return array<string, mixed>
      */
-    public function build(AuditQuery $query, bool $pointInTime = false): array
+    public function build(AuditQuery $query, bool $pointInTime = false, bool $trackTotalHits = true): array
     {
         $filter = [];
 
@@ -72,7 +72,7 @@ final class QueryBuilder
                 $pointInTime ? ['_shard_doc' => $query->sort] : null,
             ])),
             'size' => $query->limit,
-            'track_total_hits' => true,
+            'track_total_hits' => $trackTotalHits,
         ];
 
         if ($query->usesCursor()) {

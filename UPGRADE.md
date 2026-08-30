@@ -4,6 +4,29 @@ On the `0.x` line every minor may change the API, and Composer does not treat `0
 compatible: `^0.4` will not pull in `0.5`. Pin the minor you tested against and read this file
 when you move.
 
+## 0.9.2 → 0.9.3
+
+Bug fixes, and three of them change what ends up in the index. Nothing to edit in your
+configuration.
+
+- **A redacted attribute is no longer written.** Until now `redact.fields` covered `changes` only,
+  and an attribute of the same name went to Elasticsearch untouched — into an *indexed* field.
+  Such an attribute is now dropped from the document (not masked: `'***'` where the mapping says
+  integer would make the cluster refuse the whole record). If you named a field in `redact.fields`
+  that you also add as an attribute and want kept, rename one of them.
+- **Fewer records disappear, so expect a few more.** A change made inside one second, and a change
+  between two integers past 2^53 on a `numeric_fields` field, used to be recorded as no change.
+  They are changes again.
+- **A line moved between owners now writes two records** — one for the owner it left, one for the
+  owner it joined — where it wrote none. A new owner created together with its tracked children
+  writes one `create` where it wrote a `create` and a phantom `update`; if you counted records,
+  count again.
+- **`warehouse-stock` stays `warehouse-stock`.** If an object type of yours contains a dash and you
+  routed it in `indices.routing`, its records were going to the default index. They are going to
+  the routed one now, and the ones already written are where they were written.
+- With `transport: messenger`, a batch Elasticsearch throttles is retried instead of going to the
+  failure transport. If you monitor that transport, its traffic should fall.
+
 ## 0.9.0 → 0.9.1
 
 Upgrade, and nothing else. In 0.9.0 the Doctrine listener raised a `TypeError` the first time it

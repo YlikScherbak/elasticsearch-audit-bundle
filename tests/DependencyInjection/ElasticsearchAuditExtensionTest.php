@@ -255,6 +255,18 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
         return $container;
     }
+
+    public function testTheComparatorChainIsNotTaggedIntoItsOwnIterator(): void
+    {
+        // It implements the interface the autoconfiguration tags, and a chain that is
+        // asked to include itself recurses until the stack gives out. It is defined
+        // explicitly and never autoconfigured, which is what keeps it out.
+        $chain = $this->load(['client' => ['hosts' => ['http://localhost:9200']]])
+            ->getDefinition(ElasticsearchAuditExtension::SERVICE_VALUE_COMPARATOR);
+
+        self::assertFalse($chain->isAutoconfigured());
+        self::assertSame([], $chain->getTag(ElasticsearchAuditExtension::TAG_VALUE_COMPARATOR));
+    }
 }
 
 final class TenantEnricher implements AuditEnricherInterface
@@ -298,15 +310,4 @@ final class ActorNameDecorator implements RecordDecoratorInterface
         return array_map(static fn (AuditEntry $e) => $e->withExtra(['actorName' => 'Me, Myself']), $entries);
     }
 
-    public function testTheComparatorChainIsNotTaggedIntoItsOwnIterator(): void
-    {
-        // It implements the interface the autoconfiguration tags, and a chain that is
-        // asked to include itself recurses until the stack gives out. It is defined
-        // explicitly and never autoconfigured, which is what keeps it out.
-        $chain = $this->load(['client' => ['hosts' => ['http://localhost:9200']]])
-            ->getDefinition(ElasticsearchAuditExtension::SERVICE_VALUE_COMPARATOR);
-
-        self::assertFalse($chain->isAutoconfigured());
-        self::assertSame([], $chain->getTag(ElasticsearchAuditExtension::TAG_VALUE_COMPARATOR));
-    }
 }

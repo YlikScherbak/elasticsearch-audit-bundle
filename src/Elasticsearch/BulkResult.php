@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Elasticsearch;
 
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
+use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 
 /**
  * What came back from one _bulk request. Elasticsearch answers 200 for the request
@@ -14,6 +15,9 @@ use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
  */
 final class BulkResult
 {
+    /** Statuses that mean "not now" rather than "not ever": a full write queue, an unavailable shard. */
+    public const TRANSIENT = [429, 503];
+
     /**
      * @param int                                                    $attempted how many items were sent
      * @param array<int, array{status: int, reason: string}>          $failures  keyed by the item's position in the batch
@@ -45,25 +49,37 @@ final class BulkResult
      */
     public static function fromResponse(array $response, int $attempted): self
     {
+        $items = $response['items'] ?? null;
+
+        // One entry per item, in the order they were sent. Anything else — a truncated
+        // body, an answer belonging to another request — leaves no way to tell which
+        // documents were written, and counting the missing ones as written is the one
+        // answer an audit trail must not give.
+        if (!\is_array($items) || \count($items) !== $attempted) {
+            throw TransportUnavailableException::because(new \UnexpectedValueException(sprintf(
+                'Elasticsearch answered a bulk request of %d document(s) with %d item(s), expected %d.',
+                $attempted,
+                \is_array($items) ? \count($items) : 0,
+                $attempted,
+            )));
+        }
+
         $failures = [];
-        $items = $response['items'] ?? [];
 
-        if (\is_array($items)) {
-            foreach (array_values($items) as $position => $item) {
-                $action = \is_array($item) ? reset($item) : null;
+        foreach (array_values($items) as $position => $item) {
+            $action = \is_array($item) ? reset($item) : null;
 
-                if (!\is_array($action) || !isset($action['error'])) {
-                    continue;
-                }
-
-                $error = \is_array($action['error']) ? $action['error'] : ['reason' => (string) $action['error']];
-                $reason = \is_string($error['reason'] ?? null) && $error['reason'] !== '' ? $error['reason'] : ($error['type'] ?? 'rejected');
-
-                $failures[$position] = [
-                    'status' => (int) ($action['status'] ?? 400),
-                    'reason' => RequestRejectedException::withoutValuePreview((string) $reason),
-                ];
+            if (!\is_array($action) || !isset($action['error'])) {
+                continue;
             }
+
+            $error = \is_array($action['error']) ? $action['error'] : ['reason' => (string) $action['error']];
+            $reason = \is_string($error['reason'] ?? null) && $error['reason'] !== '' ? $error['reason'] : ($error['type'] ?? 'rejected');
+
+            $failures[$position] = [
+                'status' => (int) ($action['status'] ?? 400),
+                'reason' => RequestRejectedException::withoutValuePreview((string) $reason),
+            ];
         }
 
         return new self($attempted, $failures);
@@ -82,5 +98,25 @@ final class BulkResult
     public function failed(int $position): bool
     {
         return isset($this->failures[$position]);
+    }
+
+    /**
+     * Whether any of the refusals was the cluster asking for that document again rather
+     * than refusing it: a full write queue (429) or a shard that was not available (503).
+     *
+     * A batch holding one of these has to be sent again as a whole. Re-sending what was
+     * already written costs nothing — every document travels with its id and overwrites
+     * itself — while dropping a record because the cluster was busy costs the trail the
+     * hour it most needed to describe.
+     */
+    public function hasTransientFailures(): bool
+    {
+        foreach ($this->failures as $failure) {
+            if (\in_array($failure['status'], self::TRANSIENT, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

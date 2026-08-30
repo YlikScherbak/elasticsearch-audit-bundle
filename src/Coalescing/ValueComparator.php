@@ -42,7 +42,10 @@ final class ValueComparator implements ValueComparatorInterface
     public static function same(mixed $old, mixed $new): bool
     {
         if ($old instanceof \DateTimeInterface && $new instanceof \DateTimeInterface) {
-            return $old->getTimestamp() === $new->getTimestamp();
+            // With microseconds: getTimestamp() answers in whole seconds, so two moments
+            // 800 ms apart were "the same instant" and a change inside one second was
+            // never recorded at all.
+            return $old->format('U.u') === $new->format('U.u');
         }
 
         if (\is_array($old) && \is_array($new)) {

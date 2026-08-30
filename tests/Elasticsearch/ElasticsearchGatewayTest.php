@@ -196,6 +196,30 @@ final class ElasticsearchGatewayTest extends TestCase
         self::assertSame(1, $gateway->search('audit_log', [])['hits']['total']['value']);
     }
 
+    public function testAnAliasIsOnlyAsMappedAsItsStalestIndex(): void
+    {
+        // Two indices behind one alias, one of them created before an enricher declared
+        // its field. Reading whichever came back first would call the alias healthy.
+        $gateway = $this->gateway(static fn () => self::response(200, [
+            'audit_log-000001' => ['mappings' => ['properties' => ['objectType' => ['type' => 'keyword'], 'salesType' => ['type' => 'integer']]]],
+            'audit_log-000002' => ['mappings' => ['properties' => ['objectType' => ['type' => 'keyword']]]],
+        ]));
+
+        $mapping = $gateway->mapping('audit_log');
+
+        self::assertSame(['objectType' => ['type' => 'keyword']], $mapping, 'the field one index is missing is not mapped');
+    }
+
+    public function testFieldsMappedWithDifferentTypesBehindAnAliasCountAsUnmapped(): void
+    {
+        $gateway = $this->gateway(static fn () => self::response(200, [
+            'audit_log-000001' => ['mappings' => ['properties' => ['objectId' => ['type' => 'keyword']]]],
+            'audit_log-000002' => ['mappings' => ['properties' => ['objectId' => ['type' => 'long']]]],
+        ]));
+
+        self::assertSame([], $gateway->mapping('audit_log'));
+    }
+
     /**
      * @param callable(RequestInterface): ResponseInterface $respond
      */

@@ -33,7 +33,8 @@ final class Cursor
     /**
      * @return list<mixed> the sort values, ready for AuditQuery::after()
      *
-     * @throws InvalidQueryException the token was not produced by encode(), or was cut in transit
+     * @throws InvalidQueryException the token is not a valid encoded cursor — what it says
+     *                               is checked, where it came from is not
      */
     public static function decode(string $token): array
     {
@@ -60,6 +61,6 @@ final class Cursor
 
     private static function invalid(): InvalidQueryException
     {
-        return new InvalidQueryException('This is not a cursor the reader handed out. Pass AuditPage::nextCursorToken() back unchanged, or start from the first page.');
+        return new InvalidQueryException('The cursor token is malformed. Pass AuditPage::nextCursorToken() back unchanged, or start from the first page.');
     }
 }

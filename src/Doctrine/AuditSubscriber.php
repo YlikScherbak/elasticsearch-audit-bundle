@@ -61,8 +61,8 @@ final class AuditSubscriber
     /** @var array<int, array{0: object, 1: array<string, array{element: object, added: bool, field: string, value: mixed, id: int|string|null}>}> elements a tracked collection gained or lost, keyed by the owner's object id */
     private array $elementMembership = [];
 
-    /** @var array<int, int> which pending record belongs to which owner, so element changes can be folded into it */
-    private array $pendingByOwner = [];
+    /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
+    private array $pendingIndexByEntity = [];
 
     public function __construct(
         private readonly AuditWriter $writer,
@@ -112,6 +112,10 @@ final class AuditSubscriber
 
         if ($record !== null) {
             $this->pending[] = $record;
+            // Registered like an update's: an owner created with its lines has one
+            // record, and what the lines did belongs in it. Without this the membership
+            // found no record to join and invented a second, phantom update.
+            $this->pendingIndexByEntity[spl_object_id($args->getObject())] = array_key_last($this->pending);
         }
     }
 
@@ -133,7 +137,7 @@ final class AuditSubscriber
         }
 
         $this->pending[] = $record;
-        $this->pendingByOwner[spl_object_id($entity)] = array_key_last($this->pending);
+        $this->pendingIndexByEntity[spl_object_id($entity)] = array_key_last($this->pending);
     }
 
     public function preRemove(PreRemoveEventArgs $args): void
@@ -169,7 +173,7 @@ final class AuditSubscriber
         // not change gets no postUpdate from Doctrine, there being nothing to UPDATE on
         // it, so that record is built here or nowhere.
         foreach ($this->elementsByOwner($args->getObjectManager()) as [$owner, $changes]) {
-            $index = $this->pendingByOwner[spl_object_id($owner)] ?? null;
+            $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
 
             if ($index !== null && isset($records[$index])) {
                 $records[$index] = $records[$index]->withChanges(array_replace($records[$index]->changes, $changes));
@@ -186,7 +190,7 @@ final class AuditSubscriber
 
         $this->pending = [];
         $this->pendingRemovals = [];
-        $this->pendingByOwner = [];
+        $this->pendingIndexByEntity = [];
         $this->elementChanges = [];
         $this->elementMembership = [];
 
@@ -215,7 +219,7 @@ final class AuditSubscriber
         // with the rest, and would otherwise surface in the next flush as history.
         $this->pending = [];
         $this->pendingRemovals = [];
-        $this->pendingByOwner = [];
+        $this->pendingIndexByEntity = [];
         $this->elementChanges = [];
         $this->elementMembership = [];
     }
@@ -262,35 +266,57 @@ final class AuditSubscriber
     {
         try {
             $elementMetadata = $em->getClassMetadata($element::class);
+            $changeSet = $added === null ? $em->getUnitOfWork()->getEntityChangeSet($element) : [];
 
             foreach ($elementMetadata->getAssociationNames() as $association) {
                 if (!$elementMetadata->isSingleValuedAssociation($association) || $elementMetadata->isAssociationInverseSide($association)) {
                     continue;
                 }
 
-                $owner = $elementMetadata->getFieldValue($element, $association);
+                $current = $elementMetadata->getFieldValue($element, $association);
 
-                if (!\is_object($owner)) {
+                // The element changed hands. Doctrine keeps that on the owning side — the
+                // element's own reference — so neither collection is dirty and, without
+                // reading the change set, both owners stay silent about it.
+                if (\array_key_exists($association, $changeSet) && \is_array($changeSet[$association])) {
+                    $this->holdMembership($em, $element, $changeSet[$association][0] ?? null, $association, added: false);
+                    $this->holdMembership($em, $element, $current, $association, added: true);
+
+                    // Its own fields are left out of this flush on purpose: the owner it
+                    // arrived at never held the value it is arriving from.
                     continue;
                 }
 
-                $metadata = $this->metadataFactory->for($owner);
-
-                if ($metadata === null) {
-                    continue;
-                }
-
-                // An owner on its way out gets its remove; the lines going with it are not a
-                // second event, and an update after a remove would be one.
-                if ($em->getUnitOfWork()->isScheduledForDelete($owner)) {
-                    continue;
-                }
-
-                $this->holdElementChanges($em, $element, $owner, $metadata, $association, $added);
+                $this->holdMembership($em, $element, $current, $association, $added);
             }
         } catch (\Throwable $e) {
             $this->writer->reportFailure($e, null);
         }
+    }
+
+    /**
+     * Holds what this element did against one owner, if that owner is audited and tracks
+     * the collection this element belongs to.
+     */
+    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, ?bool $added): void
+    {
+        if (!\is_object($owner)) {
+            return; // no owner on that side: nothing to write a history against
+        }
+
+        $metadata = $this->metadataFactory->for($owner);
+
+        if ($metadata === null) {
+            return;
+        }
+
+        // An owner on its way out gets its remove; the lines going with it are not a
+        // second event, and an update after a remove would be one.
+        if ($em->getUnitOfWork()->isScheduledForDelete($owner)) {
+            return;
+        }
+
+        $this->holdElementChanges($em, $element, $owner, $metadata, $association, $added);
     }
 
     private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, ?bool $added = null): void

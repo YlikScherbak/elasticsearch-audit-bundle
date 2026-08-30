@@ -88,6 +88,9 @@ final class InMemoryGateway implements GatewayInterface
     /** @var (callable(array<string, mixed>, int): bool)|null decides per item whether the cluster rejects it */
     public $rejectInBulk = null;
 
+    /** Status the scripted rejection carries: 400 refuses the document, 429 asks for it again later. */
+    public int $rejectInBulkStatus = 400;
+
     /** @var array<string, array{index: string, snapshot: list<array<string, mixed>>, closed: bool, searches: int}> open and closed points in time */
     public array $pointsInTime = [];
 
@@ -100,7 +103,7 @@ final class InMemoryGateway implements GatewayInterface
 
         foreach ($items as $position => $item) {
             if ($this->rejectInBulk !== null && ($this->rejectInBulk)($item['document'], $position)) {
-                $failures[$position] = ['status' => 400, 'reason' => 'rejected by the test'];
+                $failures[$position] = ['status' => $this->rejectInBulkStatus, 'reason' => 'rejected by the test'];
                 continue;
             }
 

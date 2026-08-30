@@ -8,6 +8,64 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Fixed
+- **Backpressure no longer deletes audit records.** A cluster answering 429 is asking for the same
+  write in a moment; the bundle called it a permanent refusal, so an asynchronous record met by a
+  full write queue went to the failure transport and was never retried — precisely when the trail
+  is busiest. 429 and 503 are now the retried kind, on the request as a whole and **per item** of
+  a `_bulk`, where backpressure usually arrives: a batch holding one transient failure is retried
+  whole (every document carries its id and overwrites itself), a batch refused only for good goes
+  to the failure transport as before, and the message now names the status Elasticsearch actually
+  gave instead of a hard-coded 400
+- **A `_bulk` answer that cannot be read is no longer counted as complete success.** Missing or
+  truncated `items` made `succeeded()` report every document as written; the response must now
+  hold exactly as many items as were sent
+- **One failure is reported once.** With `on_failure: throw`, a transport error passed through two
+  catch blocks: two `RecordFailedEvent`s, and an exception whose cause was another exception of
+  the same kind with the real one buried beneath. Delivery has a single failure boundary now
+- **A misconfigured client is not an unreachable cluster.** `NotConfiguredException` raised while
+  the bundle talked to Elasticsearch was wrapped as "Elasticsearch is unreachable", sending
+  whoever read it to the network instead of the configuration
+- **A point in time that could not be closed says so.** Every 4xx was swallowed as "already
+  expired"; a 403 or a 429 means the view is still open and holding memory. Only 404 is silence
+- **Redaction covers attributes, and cannot be undone by a listener.** Attributes are the indexed
+  half of a record, so redacting `changes` alone protected what cannot be searched and left open
+  what can. A redacted attribute is now dropped rather than masked — `'***'` in a field the
+  mapping calls an integer would have Elasticsearch refuse the whole document. And the record is
+  redacted once more after `RecordCreatedEvent`, so a listener that replaces it cannot hand back
+  what was removed
+- **Two timestamps in the same second are no longer "the same instant".** The comparison used
+  whole seconds, so a change made 100 ms after another was recorded as no change at all
+- **Two large integers that differ by one no longer compare equal.** `numeric_fields` compared
+  through floats, and past 2^53 a real change disappeared. Numbers are compared as canonical
+  decimals: `"00012.00"` and `"12.000"` are still one value, `9007199254740992` and its neighbour
+  are two
+- **A tracked element that changes owner is recorded on both sides.** Moving a line from one
+  order to another left no trace at all when none of the line's own fields changed — the
+  collections are not dirty and the change lives on the owning association. The owner it left
+  records the loss, the owner it joined the arrival; the element's own field delta is left out of
+  that flush, because the new owner never held the old value. The Limitations entry that said a
+  move "is seen through its new owner only" was describing behaviour the bundle did not have
+- **A new owner with tracked children produces one `create`.** The membership found no record to
+  join and invented a second, phantom `update` of an owner nobody had updated
+- **An object type keeps the name you gave it.** `indices.routing` normalised its keys, so
+  `warehouse-stock` became `warehouse_stock` and the writer — arriving with the name the
+  application uses — found no route and wrote to the default index without a word
+- An empty string is no longer accepted as `client.service`, `message_bus` or
+  `doctrine.connection`. The first also defeated the rule that one of `client.hosts` or
+  `client.service` must be set
+- `audit:check` reads **every** index behind an alias. It took whichever came back first, so a
+  member left behind by a rollover could keep an alias looking healthy
+- `iterate()` no longer asks for an exact total on every batch — an export paid for a full count
+  of the result set per page and never read one
+- The cursor's exception says what the code checks: the token is malformed. It never verified
+  where a token came from, and said it did
+
+### Added
+- **`object_id_type: long`** — Elasticsearch's `integer` is 32 bits and stops at 2 147 483 647,
+  which a `BIGINT` primary key outgrows. For numeric identifiers this is the one to choose
+- `AuditRecord::withoutAttributes()`, which is how redaction drops what must not be stored
+
 ## [0.9.2] - 2026-08-30
 
 One answer to whether a value moved, instead of two that had drifted apart.
