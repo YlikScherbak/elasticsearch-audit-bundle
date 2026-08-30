@@ -12,6 +12,9 @@ use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Loader\LoaderInterface;
+use Symfony\Component\DependencyInjection\Compiler\CheckTypeDeclarationsPass;
+use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
+use Symfony\Component\DependencyInjection\Compiler\PassConfig;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\HttpKernel\Kernel;
@@ -47,6 +50,31 @@ final class BundleBootTest extends TestCase
         self::assertInstanceOf(AuditWriter::class, $container->get(AuditWriter::class));
         self::assertInstanceOf(AuditReader::class, $container->get(AuditReader::class));
         self::assertInstanceOf(AuditFrame::class, $container->get(AuditFrame::class));
+
+        $kernel->shutdown();
+    }
+
+    public function testEveryServiceTheExtensionDefinesCanActuallyBeBuilt(): void
+    {
+        // Compiling proves the wiring; building proves the types. A service an
+        // application never fetches itself — the Doctrine listener is reached through
+        // event tags — is otherwise first constructed in production.
+        $kernel = new AuditKernel($this->cacheDir);
+        $kernel->boot();
+
+        $container = $kernel->getContainer();
+        $built = 0;
+
+        foreach ($container->getServiceIds() as $id) {
+            if (!str_starts_with($id, Configuration::ROOT.'.')) {
+                continue;
+            }
+
+            self::assertIsObject($container->get($id), $id.' could not be built');
+            ++$built;
+        }
+
+        self::assertGreaterThan(10, $built, 'the whole of the bundle, not a corner of it');
 
         $kernel->shutdown();
     }
@@ -98,6 +126,29 @@ final class AuditKernel extends Kernel
                 'redact' => ['fields' => ['password']],
             ]);
         });
+    }
+
+    /**
+     * The check a framework kernel runs in debug: every argument of every definition
+     * against the constructor it is passed to. Without it a service nobody fetches is
+     * never built, and a type that does not fit waits until an application builds it.
+     */
+    protected function build(ContainerBuilder $container): void
+    {
+        // Before removal, not after: a private service nobody in this container refers to
+        // — the Doctrine listener, which a real application reaches through event tags —
+        // is dropped first and would be checked never.
+        $container->addCompilerPass(new CheckTypeDeclarationsPass(true), PassConfig::TYPE_BEFORE_REMOVING);
+        $container->addCompilerPass(new class implements CompilerPassInterface {
+            public function process(ContainerBuilder $container): void
+            {
+                foreach ($container->getDefinitions() as $id => $definition) {
+                    if (str_starts_with($id, Configuration::ROOT.'.')) {
+                        $definition->setPublic(true);
+                    }
+                }
+            }
+        }, PassConfig::TYPE_BEFORE_OPTIMIZATION);
     }
 
     public function getCacheDir(): string

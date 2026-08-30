@@ -4,6 +4,13 @@ On the `0.x` line every minor may change the API, and Composer does not treat `0
 compatible: `^0.4` will not pull in `0.5`. Pin the minor you tested against and read this file
 when you move.
 
+## 0.9.0 → 0.9.1
+
+Upgrade, and nothing else. In 0.9.0 the Doctrine listener raised a `TypeError` the first time it
+was built — that is, on the first flush of any application with `doctrine.enabled` (the default)
+— because the comparator chain it receives did not implement the interface it asks for. Records
+written by hand through `AuditWriter` were unaffected.
+
 ## 0.8 → 0.9
 
 Nothing to change unless you relied on `limit()` resetting a cursor.

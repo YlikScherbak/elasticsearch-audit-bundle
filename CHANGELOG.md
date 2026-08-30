@@ -8,6 +8,17 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Fixed
+- **The Doctrine listener could not be built in 0.9.0.** The comparator chain the listener was
+  wired to is a `ValueComparator`, and the listener asks for a `ValueComparatorInterface`, which
+  that class did not implement — so the first flush in any application with entity auditing on
+  ended in a `TypeError`. It implements the interface now; nothing else changes, and no
+  configuration is affected
+- The suite builds **every service the extension defines**, in a kernel, and type-checks every
+  definition before unused ones are removed. Compiling proved the wiring and nothing about the
+  types: a private service an application reaches through event tags — which is exactly what the
+  listener is — was first constructed in production
+
 ## [0.9.0] - 2026-08-30
 
 What a day of real use asked for: a record that says where it came from, changes inside the

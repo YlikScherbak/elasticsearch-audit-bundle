@@ -10,9 +10,14 @@ use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
  * Asks the application's comparators in order and falls back to a strict
  * comparison: dates by instant, arrays by value, everything else by identity.
  *
+ * It is a comparator itself, so it fits wherever one is asked for — the frame that
+ * merges records and the listener that builds them both take this one. It is the only
+ * comparator that always has an opinion: the fallback is its own, so it never defers,
+ * which is why equals() returns bool where the interface allows null.
+ *
  * @internal the chain behind the comparators; implement ValueComparatorInterface to take part in it
  */
-final class ValueComparator
+final class ValueComparator implements ValueComparatorInterface
 {
     /**
      * @param iterable<ValueComparatorInterface> $comparators
