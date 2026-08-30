@@ -8,6 +8,10 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-30
+
+The Doctrine listener can be built again.
+
 ### Fixed
 - **The Doctrine listener could not be built in 0.9.0.** The comparator chain the listener was
   wired to is a `ValueComparator`, and the listener asks for a `ValueComparatorInterface`, which
