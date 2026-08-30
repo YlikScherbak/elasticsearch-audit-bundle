@@ -8,6 +8,10 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-30
+
+One answer to whether a value moved, instead of two that had drifted apart.
+
 ### Changed
 - **One answer to "did this move".** `ChangeSetBuilder` kept a strict comparison of its own beside
   the comparator chain's, and the two had drifted: an array holding two dates for the same instant
