@@ -8,6 +8,11 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-30
+
+What a day of real use asked for: a record that says where it came from, changes inside the
+elements of a collection, and an enricher that sees what was actually written.
+
 ### Added
 - **`AuditRecord::$origin`** — `AuditOrigin::Doctrine` for what the entity listener built,
   `Manual` for what the application handed to the writer, `Mixed` for a record a frame merged out
