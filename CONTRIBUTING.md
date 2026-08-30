@@ -55,6 +55,16 @@ CI runs the same tests against live Elasticsearch 8.19 and 9.1, each with its ma
 - **Nothing suppressed.** No `@phpstan-ignore`, no baseline: if the analyser complains, the code
   or the types are wrong.
 
+## Reviewing with a model
+
+`tools/pack-for-review.sh` writes one file per review axis into `review/` — a subsystem with its
+own tests beside it, small enough to be read rather than skimmed. `tools/review-prompts.md` has
+the prompt for each: the promises that axis makes, and rules that ask for a failing scenario
+instead of a list of naming suggestions. One axis per conversation.
+
+Whatever comes back is a claim, not a finding. It becomes a finding when a test fails without the
+fix and passes with it — the same rule as any bug report here.
+
 ## Releasing
 
 **`git tag` is not part of releasing.** A tag is a promise that cannot be withdrawn, and a tag

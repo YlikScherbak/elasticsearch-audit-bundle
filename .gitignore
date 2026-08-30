@@ -8,3 +8,6 @@ coverage.xml
 
 # Internal working notes (not part of the bundle)
 /docs/
+
+# Code packed for a review conversation (tools/pack-for-review.sh)
+/review/
