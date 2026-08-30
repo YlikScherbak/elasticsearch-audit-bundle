@@ -8,6 +8,11 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-08-30
+
+Backpressure is not a refusal, an unreadable answer is not a success, and redaction covers the
+half of a record that is actually searchable.
+
 ### Fixed
 - **Backpressure no longer deletes audit records.** A cluster answering 429 is asking for the same
   write in a moment; the bundle called it a permanent refusal, so an asynchronous record met by a
