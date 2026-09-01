@@ -74,6 +74,8 @@ final class AuditQueryTest extends TestCase
         self::assertSame(50, $bigger->limit);
 
         self::assertTrue($withCursor->withEvents('x')->usesCursor(), 'other withers keep the cursor');
+        self::assertFalse($withCursor->oldestFirst()->usesCursor(), 'a cursor belongs to the ordering that made it: flipping the direction abandons it');
+        self::assertTrue($withCursor->newestFirst()->usesCursor(), 'restating the direction it already has changes nothing');
     }
 
     public function testDateRangeCanBeOpenOnEitherSide(): void
@@ -111,5 +113,15 @@ final class AuditQueryTest extends TestCase
         yield 'page zero' => [static fn (AuditQuery $q) => $q->page(0), 'starts at 1'];
         yield 'page size below one' => [static fn (AuditQuery $q) => $q->page(1, 0), 'at least 1'];
         yield 'empty cursor' => [static fn (AuditQuery $q) => $q->after([]), 'cursor is empty'];
+    }
+
+    public function testAFilterValueThatIsNotScalarIsRefusedHere(): void
+    {
+        // where() has always refused one through its signature; whereIn() let it travel
+        // to Elasticsearch and came back with the cluster's opinion instead.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('A value to filter "salesType" by is a array');
+
+        AuditQuery::for('order')->whereIn('salesType', [1, ['nested']]);
     }
 }

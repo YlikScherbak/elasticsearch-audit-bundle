@@ -70,7 +70,9 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
         }
 
         if (\is_float($value)) {
-            return self::trim(sprintf('%.14F', $value));
+            // INF and NAN have no quantity to compare: defer, or '1e400' and '9e999'
+            // become the same value and a real change disappears from the trail.
+            return is_finite($value) ? self::trim(sprintf('%.14F', $value)) : null;
         }
 
         if (\is_string($value) && is_numeric($value)) {
@@ -78,9 +80,13 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
             // neighbour become the same double and a real change disappears from the
             // trail — and a comparator that answers "equal" wrongly deletes history,
             // where one that answers "different" wrongly only adds a record.
-            return str_contains($value, 'e') || str_contains($value, 'E')
-                ? self::trim(sprintf('%.14F', (float) $value))
-                : self::trim($value);
+            if (str_contains($value, 'e') || str_contains($value, 'E')) {
+                $asFloat = (float) $value;
+
+                return is_finite($asFloat) ? self::trim(sprintf('%.14F', $asFloat)) : null;
+            }
+
+            return self::trim($value);
         }
 
         return null;

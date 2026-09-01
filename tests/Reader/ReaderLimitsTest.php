@@ -136,6 +136,25 @@ final class ReaderLimitsTest extends TestCase
         self::assertNotNull($page->nextCursorToken());
     }
 
+    public function testAnExportCannotBeResumedFromACursor(): void
+    {
+        // It used to reset the cursor without a word and start from the beginning, so an
+        // export that thought it was resuming quietly did the first batch again. Resuming
+        // is not a matter of keeping the cursor either: the point in time iterate() opens
+        // is not the one those sort values came from.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('cannot continue from a page or a cursor');
+
+        iterator_to_array($this->reader()->iterate(AuditQuery::for('order')->after(['2026-08-30 10:00:00', 'x'])));
+    }
+
+    public function testNorFromAPageNumber(): void
+    {
+        $this->expectException(InvalidQueryException::class);
+
+        iterator_to_array($this->reader()->iterate(AuditQuery::for('order')->page(3, 100)));
+    }
+
     /**
      * @param iterable<QueryExtensionInterface> $extensions
      */

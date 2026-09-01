@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Elasticsearch;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClientFactory;
+use Borsche\ElasticsearchAuditBundle\Elasticsearch\UserinfoRedactingLogger;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Elastic\Elasticsearch\Client;
 use PHPUnit\Framework\TestCase;
@@ -37,5 +38,32 @@ final class ClientFactoryTest extends TestCase
         $this->expectExceptionMessage('client.hosts or client.service');
 
         ClientFactory::create([]);
+    }
+
+    public function testTheLoggerNeverSeesThePassword(): void
+    {
+        // The client logs every request URL, and http://user:secret@host is a documented
+        // way to configure it — probed live: the password appeared once per call.
+        $lines = [];
+        $logger = new class($lines) extends \Psr\Log\AbstractLogger {
+            /** @param list<string> $lines */
+            public function __construct(private array &$lines)
+            {
+            }
+
+            /** @param mixed $level */
+            public function log($level, $message, array $context = []): void // untyped $message: psr/log 1.x
+            {
+                $this->lines[] = (string) $message.' '.json_encode($context);
+            }
+        };
+
+        $wrapped = new UserinfoRedactingLogger($logger);
+        $wrapped->info('Request: GET http://elastic:s3cr3t@es:9209/_bulk', ['uri' => 'http://elastic:s3cr3t@es:9209/']);
+
+        $observable = implode("\n", $lines);
+
+        self::assertStringNotContainsString('s3cr3t', $observable);
+        self::assertStringContainsString('//elastic:***@', $observable, 'the user stays, the password goes');
     }
 }

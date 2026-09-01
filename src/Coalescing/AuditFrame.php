@@ -49,6 +49,7 @@ final class AuditFrame
     public function end(): void
     {
         $this->writer->writeManyCompleted($this->buffer->close() ?? []);
+        $this->reportFinalizeFailures();
     }
 
     /**
@@ -90,6 +91,7 @@ final class AuditFrame
         $this->logger->warning('An audit frame was left open; its {held} held record(s) have been written and the frame closed. Pair begin() with end() in a try/finally, or use coalesce().', ['held' => $held]);
 
         $this->writer->writeManyCompleted($records);
+        $this->reportFinalizeFailures();
 
         return true;
     }
@@ -118,5 +120,28 @@ final class AuditFrame
     public function isOpen(): bool
     {
         return $this->buffer->isOpen();
+    }
+
+    /**
+     * A comparator that threw while the frame closed: its record went out unfinalized,
+     * so nothing is lost — and the mistake travels the failure policy like the same
+     * mistake on the hold() path, after every record was written. With "throw" the
+     * first one raises; the others were reported before it did.
+     */
+    private function reportFinalizeFailures(): void
+    {
+        $thrown = null;
+
+        foreach ($this->buffer->takeFinalizeFailures() as [$record, $e]) {
+            try {
+                $this->writer->reportFailure($e, $record);
+            } catch (\Throwable $raised) {
+                $thrown ??= $raised;
+            }
+        }
+
+        if ($thrown !== null) {
+            throw $thrown;
+        }
     }
 }

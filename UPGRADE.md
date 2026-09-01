@@ -4,6 +4,36 @@ On the `0.x` line every minor may change the API, and Composer does not treat `0
 compatible: `^0.4` will not pull in `0.5`. Pin the minor you tested against and read this file
 when you move.
 
+## 0.9 → 0.10
+
+Four changes need a moment of your attention; nothing needs editing unless you are named below.
+
+- **Cursors in flight stop working for `any()`.** A cross-index query now sorts by three values
+  where it sorted by two, and Elasticsearch refuses a `search_after` of the wrong length outright
+  (*"search_after has 2 value(s) but sort has 3"*), which reaches you as an `InvalidQueryException`
+  rather than a wrong page. Anything holding a token from before the upgrade — an open "load more",
+  a paused export — starts again from the first page. Cursors for a single object type are
+  unaffected.
+- **`objectId` changes shape for composite keys whose parts contain `|` or `\`.** Those parts are
+  escaped now, so such an entity is addressed differently from today: its older records keep the
+  old, ambiguous id. Find them with a prefix query on `objectId` if you need to reconcile them; a
+  composite key without those characters is written exactly as before.
+- **`iterate()` refuses a query with a page or a cursor.** If you passed one — it was ignored, and
+  the export silently began at the beginning — the call now throws. Pass an unpaged query.
+- **A `trackElements` declaration on a `ManyToMany`, on an owning collection, or on a field that is
+  not an association is now an error** rather than a silent no-op. With `on_failure: log` it
+  appears in the log at the first flush that touches such an entity; with `throw` it stops that
+  flush. If one of these has been quietly recording nothing, this is where you find out.
+
+New settings, both optional: `batch_size` (default 500) splits a large flush into several requests,
+and `coalescing.on_overflow: throw` refuses an operation that would exceed `max_held` instead of
+releasing early.
+
+Two more changes of note: a batch whose items answered 404 is now **retried** instead of going to
+the failure transport — with rollover that is an index mid-rotation, and the single-record path
+always retried it — so that transport's traffic may fall further; and the `psr/log` floor rose to
+1.1.4 (2021), whose docblocks are correct — composer resolves this on its own.
+
 ## 0.9.2 → 0.9.3
 
 Bug fixes, and three of them change what ends up in the index. Nothing to edit in your

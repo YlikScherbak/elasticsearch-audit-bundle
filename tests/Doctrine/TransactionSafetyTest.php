@@ -187,8 +187,21 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $document = $this->lastDocument();
 
         self::assertSame('reaction', $document['objectType']);
-        self::assertSame($article->id.'|like', $document['objectId']);
+        self::assertSame($article->id.'|like', $document['objectId'], 'a part holding no delimiter is written as it always was');
         self::assertSame(['old' => null, 'new' => 1], $document['changes']['count']);
+    }
+
+    public function testTwoCompositeKeysThatUsedToShareOneIdentityNoLongerDo(): void
+    {
+        // ["a|b", "c"] and ["a", "b|c"] both joined to a|b|c, so two entities answered to
+        // one objectId and their histories were one history.
+        $article = $this->persisted(new Article('Hello'));
+        $this->gateway->documents = [];
+
+        $this->em->persist(new Reaction($article, 'a|b'));
+        $this->em->flush();
+
+        self::assertSame($article->id.'|a\|b', $this->lastDocument()['objectId']);
     }
 
     public function testAMistakeInTheAuditDeclarationIsLoggedNotFatal(): void

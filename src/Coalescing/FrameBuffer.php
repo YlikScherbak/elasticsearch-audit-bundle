@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Coalescing;
 
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
@@ -42,16 +43,21 @@ final class FrameBuffer
     /** @var array<string, array<string, true>> held key => fields whose sides differed in some step */
     private array $moved = [];
 
+    /** @var list<array{AuditRecord, \Throwable}> comparator failures while closing, awaiting the writer's failure policy */
+    private array $finalizeFailures = [];
+
     /**
      * @param list<string> $objectTypes object types to coalesce; [] means every type
      * @param int          $maxHeld     safety valve: past this many objects the buffer releases what it has
      * @param bool         $enabled     false: frames still open and close, but hold nothing
+     * @param bool         $throwOnOverflow  refuse the operation instead of releasing early
      */
     public function __construct(
         private readonly ValueComparator $comparator = new ValueComparator(),
         private readonly array $objectTypes = [],
         private readonly int $maxHeld = 10_000,
         private readonly bool $enabled = true,
+        private readonly bool $throwOnOverflow = false,
     ) {
         if ($maxHeld < 1) {
             throw new \InvalidArgumentException('max_held must be at least 1.');
@@ -158,6 +164,13 @@ final class FrameBuffer
         }
 
         if (!isset($this->held[$key])) {
+            // Releasing keeps every record and gives up the promise: an object let go
+            // early can produce a second record for an operation whose net effect was
+            // nothing. A deployment that reads the trail for that promise says so.
+            if (\count($this->held) >= $this->maxHeld && $this->throwOnOverflow) {
+                throw FrameOverflowException::past($this->maxHeld);
+            }
+
             $out = \count($this->held) >= $this->maxHeld ? $this->release() : [];
             $this->held[$key] = $record;
             $this->markMoved($key, $record);
@@ -184,7 +197,17 @@ final class FrameBuffer
         $released = [];
 
         foreach ($held as $key => $record) {
-            $final = $this->finalize($record, $moved[$key] ?? []);
+            // Per record: held was already emptied above, so a comparator that throws
+            // here used to take every record of the frame with it — raw, past the
+            // failure policy, out of an end() or a finally. The record whose comparator
+            // failed goes out unfinalized (noisier, never lost), and the mistake is
+            // reported through the writer like the same mistake on the hold() path is.
+            try {
+                $final = $this->finalize($record, $moved[$key] ?? []);
+            } catch (\Throwable $e) {
+                $this->finalizeFailures[] = [$record, $e];
+                $final = $record;
+            }
 
             if ($final !== null) {
                 $released[] = $final;
@@ -192,6 +215,20 @@ final class FrameBuffer
         }
 
         return $released;
+    }
+
+    /**
+     * Comparator exceptions collected while a frame closed, for the caller that owns a
+     * writer to report; reading them empties the list.
+     *
+     * @return list<array{AuditRecord, \Throwable}>
+     */
+    public function takeFinalizeFailures(): array
+    {
+        $failures = $this->finalizeFailures;
+        $this->finalizeFailures = [];
+
+        return $failures;
     }
 
     /**

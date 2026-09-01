@@ -69,6 +69,7 @@ borsche_elasticsearch_audit:
       auth: audit_auth_log
     object_id_type: keyword               # or "long" — only if EVERY audited type has numeric ids
   transport: sync                         # or "messenger" (see below)
+  batch_size: 500                         # records per _bulk request or Messenger message (since 0.10)
   on_failure: log                         # or "throw"
   actor:
     fallback: system                      # recorded when nobody is authenticated
@@ -356,6 +357,7 @@ borsche_elasticsearch_audit:
     numeric_fields: [quantity, reserve, 'stock.onWay']   # a field on every type, or on one
     object_types: []          # hold every type while a frame is open; or list the ones to coalesce
     max_held: 10000           # safety valve: a frame holding more objects releases what it has
+    on_overflow: release      # or "throw" (since 0.10): refuse the operation instead of coalescing less
 ```
 
 A value that is neither a number nor "nothing" is left alone — two different words must not
@@ -443,6 +445,10 @@ borsche_elasticsearch_audit:
     max_result_window: 50000  # five such pages; raise index.max_result_window to match
 ```
 
+Reading across object types with `any()` and a cursor also sorts by the index name (**since
+0.10**), because a timestamp and a record id are unique inside one index and not between several
+— two records sharing both used to make `search_after` step over one of them.
+
 A page says how far the numbers go, so a screen can tell "pages there are" from "pages you can
 ask for": `$page->totalPages()` and `$page->maxReachablePage()` (**since 0.8**), the second bounded
 by the window. `$page->hasMore()` answers whether to draw a "next" at all — by arithmetic when the
@@ -473,6 +479,11 @@ foreach ($this->reader->iterate(AuditQuery::for('order')->since($start)->oldestF
     $sheet->addRow([$entry->loggedAt->format('Y-m-d H:i'), $entry->actor, $entry->event, json_encode($entry->changes)]);
 }
 ```
+
+`iterate()` starts a traversal of its own and refuses a query that carries a page or a cursor
+(**since 0.10**): the point in time it opens is not the one those sort values came from, and
+`_shard_doc` means nothing inside another view. To resume where an export stopped, narrow the
+query — by `since()`, say — and start again.
 
 `iterate()` reads from a **point in time**: the index as it was when the export started. Records
 written while it runs are not in it, and no record shows up twice because a segment merged

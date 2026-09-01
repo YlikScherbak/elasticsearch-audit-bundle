@@ -75,4 +75,14 @@ final class NumericNullAsZeroComparatorTest extends TestCase
         self::assertTrue($comparator->equals('stock', 'quantity', '.5', '0.50'));
         self::assertFalse($comparator->equals('stock', 'quantity', '12.01', '12.1'));
     }
+
+    public function testAnOverflowingNumberIsNobodysQuantity(): void
+    {
+        // Through a float both are INF, and 'INF' === 'INF' deleted a real change from
+        // the trail. No opinion is the honest answer.
+        $comparator = new NumericNullAsZeroComparator(['quantity']);
+
+        self::assertNull($comparator->equals('stock', 'quantity', '1e400', '9e999'));
+        self::assertNull($comparator->equals('stock', 'quantity', INF, INF));
+    }
 }

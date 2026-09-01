@@ -69,14 +69,32 @@ final class ChangeSetBuilder
             }
         }
 
-        // Always-recorded fields give context to a change; they do not make one.
-        // An update that touched no audited field stays empty and is skipped.
-        if ($changes !== []) {
-            foreach ($metadata->alwaysRecorded as $field) {
-                if (!isset($changes[$field]) && !$classMetadata->hasAssociation($field)) {
-                    $value = $classMetadata->getFieldValue($entity, $field);
-                    $changes[$field] = new Change($value, $value);
-                }
+        return $this->withAlwaysRecorded($entity, $metadata, $changes);
+    }
+
+    /**
+     * Always-recorded fields give context to a change; they do not make one. An update
+     * that touched no audited field stays empty and is skipped — which is why this runs
+     * only on a non-empty set, and why the listener calls it again for a record whose
+     * only changes arrived from tracked elements after the flush: "every history line
+     * reads on its own" has to hold for those too.
+     *
+     * @param array<string, Change|mixed> $changes
+     *
+     * @return array<string, Change|mixed>
+     */
+    public function withAlwaysRecorded(object $entity, AuditMetadata $metadata, array $changes): array
+    {
+        if ($changes === [] || $metadata->alwaysRecorded === []) {
+            return $changes;
+        }
+
+        $classMetadata = $this->em->getClassMetadata($entity::class);
+
+        foreach ($metadata->alwaysRecorded as $field) {
+            if (!isset($changes[$field]) && !$classMetadata->hasAssociation($field)) {
+                $value = $classMetadata->getFieldValue($entity, $field);
+                $changes[$field] = new Change($value, $value);
             }
         }
 

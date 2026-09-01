@@ -59,6 +59,11 @@ final class Configuration implements ConfigurationInterface
                 ->thenInvalid('message_bus must be the id of a bus, not %s.')
             ->end();
 
+        $children->integerNode('batch_size')
+            ->info('How many records travel in one _bulk request or one Messenger message. A flush that produced more is split; a batch refused whole for being too large would lose every record in it.')
+            ->min(1)
+            ->defaultValue(500);
+
         $children->enumNode('on_failure')
             ->info('"log" (default): a failed write is logged and ignored. "throw": it raises WriteFailedException.')
             ->values(array_map(static fn (FailurePolicy $p) => $p->value, FailurePolicy::cases()))
@@ -217,9 +222,14 @@ final class Configuration implements ConfigurationInterface
             ->scalarPrototype()->cannotBeEmpty();
 
         $children->integerNode('max_held')
-            ->info('Objects a frame may hold before it releases what it has (a safety valve for runaway frames).')
+            ->info('Objects a frame may hold before the valve opens (a safety valve for runaway frames).')
             ->min(1)
             ->defaultValue(10000);
+
+        $children->enumNode('on_overflow')
+            ->info('What the valve does: "release" (default) writes what the frame holds and carries on, which keeps every record but ends the promise of one record per object; "throw" refuses the operation instead, for a trail that is read for that promise.')
+            ->values(['release', 'throw'])
+            ->defaultValue('release');
     }
 
     private static function doctrine(ArrayNodeDefinition $doctrine): void

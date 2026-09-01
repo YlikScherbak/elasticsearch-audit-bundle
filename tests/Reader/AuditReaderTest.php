@@ -173,6 +173,28 @@ final class AuditReaderTest extends TestCase
         self::assertFalse($lastNumberedPage->hasMore(), 'rows 28-30 of 30: nothing follows, whatever the decorator kept');
     }
 
+    public function testAnExportSurvivesIteratorToArray(): void
+    {
+        // yield from kept the inner array's keys, every batch yielded 0..n again, and
+        // iterator_to_array() without false overwrites colliding keys: of a five-record
+        // export only the last batch survived — probed live at 5 documents in, 2 out.
+        $this->gateway->respondToSearch = static function (string $index, array $body): array {
+            $batch = match ($body['search_after'][1] ?? null) {
+                null => [self::hit('a', '1', 1), self::hit('b', '2', 2)],
+                2 => [self::hit('c', '3', 3), self::hit('d', '4', 4)],
+                4 => [self::hit('e', '5', 5)],
+                default => [],
+            };
+
+            return ['hits' => ['total' => ['value' => 5], 'hits' => $batch]];
+        };
+
+        $entries = iterator_to_array($this->reader()->iterate(AuditQuery::for('order'), batchSize: 2, consistent: false));
+
+        self::assertCount(5, $entries, 'every batch, not the last one');
+        self::assertSame(['a', 'b', 'c', 'd', 'e'], array_map(static fn (AuditEntry $e) => $e->id, $entries));
+    }
+
     public function testIterateFollowsTheHitsEvenWhenADecoratorDropsEntries(): void
     {
         $this->gateway->respondToSearch = static function (string $index, array $body): array {

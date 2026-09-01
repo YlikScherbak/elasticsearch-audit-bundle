@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Coalescing;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Coalescing\NumericNullAsZeroComparator;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
@@ -227,5 +228,22 @@ final class FrameBufferTest extends TestCase
     private static function at(): \DateTimeImmutable
     {
         return new \DateTimeImmutable('2026-08-27 10:00:00', new \DateTimeZone('UTC'));
+    }
+
+    public function testAFrameCanRefuseToOverflowInsteadOfReleasingEarly(): void
+    {
+        // Releasing loses no record, but it ends the promise: an object let go early can
+        // produce a second record for an operation whose net effect was nothing. A trail
+        // read for that promise would rather be told.
+        $buffer = new FrameBuffer(new ValueComparator(), maxHeld: 2, throwOnOverflow: true);
+        $buffer->open();
+
+        $buffer->hold(new AuditRecord('order', 1, 'update', changes: ['a' => new Change(1, 2)]));
+        $buffer->hold(new AuditRecord('order', 2, 'update', changes: ['a' => new Change(1, 2)]));
+
+        $this->expectException(FrameOverflowException::class);
+        $this->expectExceptionMessage('coalescing.max_held');
+
+        $buffer->hold(new AuditRecord('order', 3, 'update', changes: ['a' => new Change(1, 2)]));
     }
 }

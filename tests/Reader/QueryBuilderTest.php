@@ -20,7 +20,7 @@ final class QueryBuilderTest extends TestCase
         $body = (new QueryBuilder())->build(AuditQuery::any());
 
         self::assertEquals(['match_all' => new \stdClass()], $body['query']);
-        self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']]], $body['sort'], 'the record id breaks ties: unlike _doc it does not move between refreshes; unmapped_type keeps reads working on an index created before ids existed');
+        self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']], ['_index' => 'desc']], $body['sort'], 'the record id breaks ties: unlike _doc it does not move between refreshes; unmapped_type keeps reads working on an index created before ids existed. Across indices the pair is not unique, so the index name joins them');
         self::assertSame(0, $body['from']);
         self::assertSame(20, $body['size']);
         self::assertTrue($body['track_total_hits']);
@@ -65,7 +65,7 @@ final class QueryBuilderTest extends TestCase
 
         self::assertSame(100, $body['from']);
         self::assertSame(50, $body['size']);
-        self::assertSame([['loggedAt' => 'asc'], ['id' => ['order' => 'asc', 'unmapped_type' => 'keyword']]], $body['sort']);
+        self::assertSame([['loggedAt' => 'asc'], ['id' => ['order' => 'asc', 'unmapped_type' => 'keyword']], ['_index' => 'asc']], $body['sort']);
     }
 
     public function testPagingByCursorSendsSearchAfterInsteadOfFrom(): void
@@ -81,5 +81,14 @@ final class QueryBuilderTest extends TestCase
         $body = (new QueryBuilder())->build(AuditQuery::for('order')->withOption('country', 'UA'));
 
         self::assertStringNotContainsString('country', json_encode($body, \JSON_THROW_ON_ERROR));
+    }
+
+    public function testOneObjectTypeIsOneIndexAndNeedsNoIndexTiebreaker(): void
+    {
+        // The pair is unique inside an index; the third value is the price of reading
+        // across several, and a query that does not is not asked to pay it.
+        $body = (new QueryBuilder())->build(AuditQuery::for('order'));
+
+        self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']]], $body['sort']);
     }
 }

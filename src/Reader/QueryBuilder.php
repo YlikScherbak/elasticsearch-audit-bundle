@@ -69,6 +69,12 @@ final class QueryBuilder
             'sort' => array_values(array_filter([
                 ['loggedAt' => $query->sort],
                 ['id' => ['order' => $query->sort, 'unmapped_type' => 'keyword']],
+                // A timestamp and an id are unique inside one index. A query across
+                // several — any(), which reads every routed index — can meet the same
+                // pair twice, since an application may choose its own record ids, and
+                // search_after then steps over one of the two: on a live cluster the
+                // second document simply never came back. The index name settles it.
+                !$pointInTime && $query->objectType === null ? ['_index' => $query->sort] : null,
                 $pointInTime ? ['_shard_doc' => $query->sort] : null,
             ])),
             'size' => $query->limit,

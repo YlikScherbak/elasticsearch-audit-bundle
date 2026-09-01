@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
+use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
@@ -175,6 +176,28 @@ final class ReadHistoryTest extends ElasticsearchTestCase
         } while ($token !== null);
 
         return [$ids, $requests, $page];
+    }
+
+    public function testACursorAcrossIndicesDoesNotStepOverARecord(): void
+    {
+        // Two records with the same second and the same id, in two routed indices —
+        // which is what an application invites the moment it chooses its own record ids.
+        // Sorted by loggedAt and id alone the pair is not unique, and search_after walks
+        // past one of them: on a real cluster the second document never came back.
+        $at = new \DateTimeImmutable('2026-08-26 11:00:00', new \DateTimeZone('UTC'));
+
+        $this->gateway->index($this->index, (new AuditRecord('order', 'twin', 'update', $at, 'alice', [], [], 'same-id'))->toDocument(), 'same-id');
+        $this->gateway->index($this->userIndex, (new AuditRecord('user', 'twin', 'update', $at, 'alice', [], [], 'same-id'))->toDocument(), 'same-id');
+        self::client()->indices()->refresh(['index' => $this->index.','.$this->userIndex]);
+
+        $query = AuditQuery::any()->between($at, $at)->page(1, 1);
+
+        $first = $this->reader->find($query);
+        $second = $this->reader->find($query->after($first->nextCursor() ?? []));
+
+        self::assertCount(1, $first->entries);
+        self::assertCount(1, $second->entries, 'the twin in the other index is still there');
+        self::assertNotSame($first->entries[0]->objectType, $second->entries[0]->objectType, 'and it is the other one');
     }
 
     public function testIterateStreamsEverythingInOrder(): void

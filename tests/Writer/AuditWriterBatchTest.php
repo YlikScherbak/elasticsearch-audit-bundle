@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -169,7 +170,92 @@ final class AuditWriterBatchTest extends TestCase
     /**
      * @param (callable(object): void)|null $listener
      */
-    private function writer(FailurePolicy $policy = FailurePolicy::Log, ?callable $listener = null, ?FrameBuffer $buffer = null): AuditWriter
+    public function testEveryChunkIsReportedBeforeTheFirstFailureIsThrown(): void
+    {
+        // The promise of the unchunked days holds across chunks: with "throw" the
+        // exception comes after every record's failure was logged and dispatched.
+        $this->gateway->failWith = new \RuntimeException('down');
+        $records = [];
+
+        for ($i = 0; $i < 5; ++$i) {
+            $records[] = new AuditRecord('order', $i, 'update', changes: ['status' => new Change('a', 'b')]);
+        }
+
+        try {
+            $this->writer(FailurePolicy::Throw, batchSize: 2)->writeAll($records);
+            self::fail('expected WriteFailedException');
+        } catch (WriteFailedException $e) {
+            self::assertSame(0, $e->record?->objectId, 'the first failure is the one thrown');
+        }
+
+        $failed = array_filter($this->events, static fn (object $e) => $e instanceof RecordFailedEvent);
+
+        self::assertCount(5, $failed, 'the chunks after the first failure were still tried and their records reported');
+    }
+
+    public function testAnOverflowingFrameRefusesTheOperationWhateverTheFailurePolicy(): void
+    {
+        // on_overflow: throw is a deliberate refusal, not a failed write: it must reach
+        // the operation even under on_failure: log, and the records must not be
+        // reported as failures — nothing was tried.
+        $buffer = new FrameBuffer(maxHeld: 2, throwOnOverflow: true);
+        $writer = $this->writer(buffer: $buffer);
+        $frame = new AuditFrame($buffer, $writer);
+
+        $records = [];
+
+        for ($i = 1; $i <= 4; ++$i) {
+            $records[] = new AuditRecord('stock', $i, 'update', changes: ['q' => new Change(1, 2)]);
+        }
+
+        $frame->begin();
+
+        try {
+            $writer->writeAll($records);
+            self::fail('expected FrameOverflowException');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertSame([], array_filter($this->events, static fn (object $e) => $e instanceof RecordFailedEvent), 'a refusal is not a failure of any one record');
+
+        $frame->reset();
+    }
+
+    public function testAnOverflowReachesASingleWriteToo(): void
+    {
+        $buffer = new FrameBuffer(maxHeld: 1, throwOnOverflow: true);
+        $writer = $this->writer(buffer: $buffer);
+        $frame = new AuditFrame($buffer, $writer);
+
+        $frame->begin();
+        $writer->record('stock', 1, AuditEvent::UPDATE, ['q' => new Change(1, 2)]);
+
+        $this->expectException(FrameOverflowException::class);
+
+        try {
+            $writer->record('stock', 2, AuditEvent::UPDATE, ['q' => new Change(1, 2)]);
+        } finally {
+            $frame->reset();
+        }
+    }
+
+    public function testAFlushLargerThanTheBatchSizeIsSplit(): void
+    {
+        // One _bulk body and one Messenger payload both have a size somebody has to
+        // choose, and a request refused for being too large loses every record in it.
+        $records = [];
+
+        for ($i = 0; $i < 5; ++$i) {
+            $records[] = new AuditRecord('order', $i, 'update', changes: ['status' => new Change('a', 'b')]);
+        }
+
+        $this->writer(batchSize: 2)->writeAll($records);
+
+        self::assertSame([2, 2, 1], array_map('count', $this->gateway->bulks), 'three requests, in the order the records were made');
+        self::assertCount(5, $this->gateway->documents['audit_log'], 'and every record went');
+    }
+
+    private function writer(FailurePolicy $policy = FailurePolicy::Log, ?callable $listener = null, ?FrameBuffer $buffer = null, int $batchSize = 500): AuditWriter
     {
         $events = &$this->events;
         $dispatcher = new class($events, $listener) implements EventDispatcherInterface {
@@ -195,6 +281,6 @@ final class AuditWriterBatchTest extends TestCase
 
         $transport = new SyncTransport($this->gateway);
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log', ['auth' => 'audit_auth']), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $dispatcher, $buffer);
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log', ['auth' => 'audit_auth']), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $dispatcher, $buffer, null, $batchSize);
     }
 }

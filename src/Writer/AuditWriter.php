@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\MergedRecordEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -39,6 +40,7 @@ final class AuditWriter
 {
     /**
      * @param iterable<AuditEnricherInterface> $enrichers
+     * @param positive-int                     $batchSize how many records go out in one batch
      */
     public function __construct(
         private readonly TransportInterface $transport,
@@ -52,7 +54,12 @@ final class AuditWriter
         private readonly ?EventDispatcherInterface $events = null,
         private readonly ?FrameBuffer $frame = null,
         private readonly ?ChangeRedactor $redactor = null,
+        private readonly int $batchSize = 500,
     ) {
+        if ($batchSize < 1) {
+            throw new \InvalidArgumentException(sprintf('A batch holds at least one record, %d given.', $batchSize));
+        }
+
         $this->logger = $logger ?? new NullLogger();
     }
 
@@ -101,6 +108,11 @@ final class AuditWriter
             if (!$immediately && $this->frame !== null && $this->frame->accepts($record->objectType)) {
                 $released = $this->frame->hold($record);
             }
+        } catch (FrameOverflowException $e) {
+            // A deliberate refusal (coalescing.on_overflow: throw), not a failed write:
+            // it reaches the caller whatever on_failure says, and nothing is reported —
+            // nothing was tried.
+            throw $e;
         } catch (\Throwable $e) {
             $this->reportFailure($e, $record);
 
@@ -108,9 +120,10 @@ final class AuditWriter
         }
 
         if ($released !== null) {
-            foreach ($released as $one) {
-                $this->deliver($one, false);
-            }
+            // As a batch: an overflowing frame can hand back up to max_held records, and
+            // the Doctrine path already batches them — one by one this was ten thousand
+            // requests where writeAll() makes a handful.
+            $this->writeManyCompleted($released);
 
             return;
         }
@@ -142,6 +155,7 @@ final class AuditWriter
     public function writeAll(array $records): void
     {
         $outgoing = [];
+        $overflow = null;
 
         foreach ($records as $record) {
             try {
@@ -156,12 +170,22 @@ final class AuditWriter
                 }
 
                 $outgoing[] = $record;
+            } catch (FrameOverflowException $e) {
+                // The frame refused to grow (coalescing.on_overflow: throw): the rest of
+                // the batch is refused with it. What it released before this — a remove's
+                // held record, say — still describes writes that happened, and goes out.
+                $overflow = $e;
+                break;
             } catch (\Throwable $e) {
                 $this->reportFailure($e, $record);
             }
         }
 
         $this->writeManyCompleted($outgoing);
+
+        if ($overflow !== null) {
+            throw $overflow;
+        }
     }
 
     /**
@@ -186,6 +210,32 @@ final class AuditWriter
             return;
         }
 
+        // A flush of ten thousand records is not one request: an Elasticsearch _bulk body
+        // and a Messenger payload both have a size somebody has to choose, and a batch
+        // that is refused whole for being too large loses every record in it.
+        // Every chunk is tried and its failures reported; with "throw" the first
+        // failure is raised only after the last chunk — the promise of the unchunked
+        // days, kept across chunks.
+        $first = null;
+
+        foreach (array_chunk($records, $this->batchSize) as $chunk) {
+            try {
+                $this->sendBatch($this->transport, $chunk);
+            } catch (WriteFailedException $e) {
+                $first ??= $e;
+            }
+        }
+
+        if ($first !== null) {
+            throw $first;
+        }
+    }
+
+    /**
+     * @param list<AuditRecord> $records
+     */
+    private function sendBatch(BatchTransportInterface $transport, array $records): void
+    {
         $items = [];
         $sent = [];
 
@@ -209,7 +259,7 @@ final class AuditWriter
         }
 
         try {
-            $result = $this->transport->sendMany($items);
+            $result = $transport->sendMany($items);
         } catch (\Throwable $e) {
             // The whole batch did not go: every record failed, and with "throw" the
             // exception carries the first of them — the others are still logged.

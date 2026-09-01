@@ -153,4 +153,23 @@ final class MessengerBatchTest extends TestCase
             self::assertNotInstanceOf(UnrecoverableExceptionInterface::class, $e);
         }
     }
+
+    public function testAnIndexMidRotationRetriesTheBatchLikeTheSinglePathDoes(): void
+    {
+        // The single handler lets IndexNotFoundException propagate and Messenger retries
+        // it; the batch used to call the same moment unrecoverable and demand a manual
+        // replay for the whole rotation window.
+        $gateway = new InMemoryGateway();
+        $gateway->rejectInBulkStatus = 404;
+        $gateway->rejectInBulk = static fn (array $document) => true;
+
+        try {
+            (new IndexAuditRecordsHandler($gateway))(new IndexAuditRecords([
+                ['index' => 'audit_log', 'document' => ['objectId' => 1], 'id' => 'a'],
+            ]));
+            self::fail('expected the message to fail');
+        } catch (\Throwable $e) {
+            self::assertNotInstanceOf(UnrecoverableExceptionInterface::class, $e, 'the index is back a moment later; retry');
+        }
+    }
 }

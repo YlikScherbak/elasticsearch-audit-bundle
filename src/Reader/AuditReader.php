@@ -85,7 +85,17 @@ final class AuditReader
      */
     public function iterate(AuditQuery $query, int $batchSize = 500, bool $consistent = true): \Generator
     {
-        $query = $this->extend($query)->page(1, $batchSize);
+        $query = $this->extend($query);
+
+        // Not a silent restart, which hid the caller's mistake: a consistent traversal
+        // opens its own point in time, and the sort values of an earlier one carry
+        // _shard_doc, which means nothing inside a different view — and is a third
+        // value where a plain search has two.
+        if ($query->usesCursor() || $query->page !== 1) {
+            throw new InvalidQueryException('iterate() starts a traversal of its own and cannot continue from a page or a cursor: the point in time it opens is not the one those values came from. Pass an unpaged query, and narrow it if you need to resume where an export stopped.');
+        }
+
+        $query = $query->page(1, $batchSize);
         $this->assertWithinLimits($query);
 
         $index = $this->indexFor($query);
@@ -116,7 +126,12 @@ final class AuditReader
 
                 // The cursor and the stop condition follow what Elasticsearch returned, so
                 // a decorator that drops entries from the page cannot end the export early.
-                yield from $this->decorate(array_map(AuditEntry::fromHit(...), $hits));
+                // One by one, not yield from: that keeps the batch's own 0..n keys, and
+                // iterator_to_array() without false then overwrites every batch with the
+                // next — of a five-record export, two survived.
+                foreach ($this->decorate(array_map(AuditEntry::fromHit(...), $hits)) as $entry) {
+                    yield $entry;
+                }
 
                 $cursor = $hits[array_key_last($hits)]['sort'] ?? [];
 

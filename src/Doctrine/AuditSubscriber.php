@@ -49,6 +49,9 @@ final class AuditSubscriber
 {
     public const EVENTS = [Events::onFlush, Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear];
 
+    /** @var array<class-string, true> classes whose tracked collections were checked against Doctrine's mapping */
+    private array $checkedTracking = [];
+
     /** @var list<AuditRecord> records built during the current flush, written after its commit */
     private array $pending = [];
 
@@ -172,11 +175,14 @@ final class AuditSubscriber
         // be named and folded into its owner's record. An owner whose own columns did
         // not change gets no postUpdate from Doctrine, there being nothing to UPDATE on
         // it, so that record is built here or nowhere.
+        $em = self::entityManagerOf($args->getObjectManager());
+
         foreach ($this->elementsByOwner($args->getObjectManager()) as [$owner, $changes]) {
             $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
 
             if ($index !== null && isset($records[$index])) {
-                $records[$index] = $records[$index]->withChanges(array_replace($records[$index]->changes, $changes));
+                $merged = array_replace($records[$index]->changes, $changes);
+                $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged));
 
                 continue;
             }
@@ -287,11 +293,74 @@ final class AuditSubscriber
                     continue;
                 }
 
+                // A deletion answers to the owner the database row had, not to whatever
+                // the object points at in memory: a line re-pointed at B and removed in
+                // the same flush was deleted from A's rows, and a back-ref nulled before
+                // an orphanRemoval left the removal recorded nowhere at all. The change
+                // set is asked first — computing it refreshes the "original" data to the
+                // current values, so for a nulled back-ref the old owner survives only
+                // there — then the original data, then the object itself.
+                if ($added === false) {
+                    $deletedChangeSet = $em->getUnitOfWork()->getEntityChangeSet($element);
+                    $owner = \array_key_exists($association, $deletedChangeSet) && \is_array($deletedChangeSet[$association])
+                        ? $deletedChangeSet[$association][0] ?? null
+                        : ($em->getUnitOfWork()->getOriginalEntityData($element)[$association] ?? $current);
+
+                    $this->holdMembership($em, $element, $owner, $association, added: false);
+
+                    continue;
+                }
+
                 $this->holdMembership($em, $element, $current, $association, $added);
             }
         } catch (\Throwable $e) {
             $this->writer->reportFailure($e, null);
         }
+    }
+
+    /**
+     * A tracked collection has to be one this listener can watch: the inverse side of a
+     * OneToMany, whose elements point back through a single-valued owning association.
+     * That is where the unit of work reports what they did.
+     *
+     * A ManyToMany, the owning side, or a field that is no association at all used to be
+     * accepted and then silently record nothing, which is the worst answer an audit
+     * library can give. It is a mistake in a declaration, so it travels the way the other
+     * declaration mistakes do: logged, or raised with the "throw" policy.
+     *
+     * Asked once per class — a mapping does not change while the process runs.
+     */
+    private function assertTrackedCollectionsAreServable(EntityManagerInterface $em, object $entity, AuditMetadata $metadata): void
+    {
+        $class = $entity::class;
+
+        if (isset($this->checkedTracking[$class]) || $metadata->trackedCollections() === []) {
+            return;
+        }
+
+        $classMetadata = $em->getClassMetadata($class);
+
+        foreach ($metadata->trackedCollections() as $field) {
+            $reason = match (true) {
+                !$classMetadata->hasAssociation($field) => 'is not an association',
+                !$classMetadata->isCollectionValuedAssociation($field) => 'is a to-one association',
+                !$classMetadata->isAssociationInverseSide($field) => 'is the owning side — a ManyToMany, or a collection mapped here instead of on its elements',
+                $classMetadata->getAssociationMappedByTargetField($field) === '' => 'has no mappedBy to reach its elements through',
+                // The inverse side of a ManyToMany has a mappedBy and passed everything
+                // above — but its elements reach back through a collection, which the
+                // unit of work never reports element-by-element to this side.
+                !$em->getClassMetadata($classMetadata->getAssociationTargetClass($field))
+                    ->isSingleValuedAssociation($classMetadata->getAssociationMappedByTargetField($field))
+                    => 'is mapped by a collection on its elements (a ManyToMany), and no element points back through a single-valued association',
+                default => null,
+            };
+
+            if ($reason !== null) {
+                throw new \LogicException(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $class, $field, $reason));
+            }
+        }
+
+        $this->checkedTracking[$class] = true;
     }
 
     /**
@@ -429,6 +498,27 @@ final class AuditSubscriber
     }
 
     /**
+     * Always-recorded context for a record whose changes arrived from tracked elements:
+     * build() adds it for a record built during the flush, and a record assembled in
+     * postFlush — or amended there — has to keep the same promise, that every history
+     * line reads on its own.
+     *
+     * @param array<string, Change|mixed> $changes
+     *
+     * @return array<string, Change|mixed>
+     */
+    private function withContext(?EntityManagerInterface $em, object $owner, array $changes): array
+    {
+        $metadata = $em === null ? null : $this->metadataFactory->for($owner);
+
+        if ($em === null || $metadata === null) {
+            return $changes;
+        }
+
+        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes);
+    }
+
+    /**
      * The record for an owner that Doctrine never raised an event for, built after the
      * commit from what onFlush collected. The entity is still managed and its
      * identifier is settled, which is all this needs.
@@ -453,7 +543,8 @@ final class AuditSubscriber
                 return null;
             }
 
-            return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))->withChanges($changes);
+            return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
+                ->withChanges($this->withContext($em, $owner, $changes));
         } catch (\Throwable $e) {
             $this->writer->reportFailure($e, $record);
 
@@ -478,6 +569,8 @@ final class AuditSubscriber
             if ($em === null) {
                 return null;
             }
+
+            $this->assertTrackedCollectionsAreServable($em, $entity, $metadata);
 
             $id = $this->identifierOf($em, $entity);
 
@@ -519,7 +612,14 @@ final class AuditSubscriber
             return \is_int($only) ? $only : $parts[0];
         }
 
-        return implode('|', $parts); // composite key
+        // A composite key, joined — and each part escaped first, or the join is ambiguous:
+        // ["a|b", "c"] and ["a", "b|c"] both read as a|b|c, which is two entities sharing
+        // one identity in the history. A part that holds neither "|" nor "\" is untouched,
+        // so the usual "42|like" is written exactly as it always was.
+        return implode('|', array_map(
+            static fn (string $part): string => str_replace(['\\', '|'], ['\\\\', '\\|'], $part),
+            $parts,
+        ));
     }
 
     private function stringify(EntityManagerInterface $em, mixed $value): string

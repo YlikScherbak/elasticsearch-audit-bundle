@@ -96,7 +96,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerActor($config['actor'], $container);
         $this->registerRedaction($config['redact'], $container);
         $this->registerCoalescing($config['coalescing'], $container);
-        $this->registerWriter($config['on_failure'], $container);
+        $this->registerWriter($config['on_failure'], $config['batch_size'], $container);
         $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
         $this->registerCommands($container);
@@ -117,7 +117,7 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{enabled: bool, object_types: list<string>, numeric_fields: list<string>, max_held: int} $coalescing
+     * @param array{enabled: bool, object_types: list<string>, numeric_fields: list<string>, max_held: int, on_overflow: string} $coalescing
      */
     private function registerCoalescing(array $coalescing, ContainerBuilder $container): void
     {
@@ -138,6 +138,7 @@ final class ElasticsearchAuditExtension extends Extension
             $coalescing['object_types'],
             $coalescing['max_held'],
             $coalescing['enabled'],
+            $coalescing['on_overflow'] === 'throw',
         ]));
 
         $container->setDefinition(self::SERVICE_FRAME, new Definition(AuditFrame::class, [
@@ -272,7 +273,7 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(ActorResolverInterface::class, self::SERVICE_ACTOR_RESOLVER);
     }
 
-    private function registerWriter(string $onFailure, ContainerBuilder $container): void
+    private function registerWriter(string $onFailure, int $batchSize, ContainerBuilder $container): void
     {
         // Override the alias (e.g. with symfony/clock's service) to control time in tests.
         $container->setDefinition(self::SERVICE_CLOCK, new Definition(SystemClock::class));
@@ -289,6 +290,7 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(EventDispatcherInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             new Reference(self::SERVICE_FRAME_BUFFER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             new Reference(ChangeRedactor::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            $batchSize,
         ]));
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }

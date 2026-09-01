@@ -8,6 +8,81 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Fixed
+- **A cursor across object types no longer steps over a record.** `any()` reads every routed
+  index, and a timestamp with a record id is unique inside one index but not between several: two
+  records sharing both — which an application invites the moment it chooses its own record ids —
+  made `search_after` walk past one of them. Proven on a live cluster, where the second document
+  simply never came back. The index name joins the sort when a query spans indices
+- **A composite `objectId` cannot be two entities at once.** The parts were joined with `|` and
+  nothing escaped it, so `["a|b", "c"]` and `["a", "b|c"]` both read as `a|b|c` and two histories
+  became one. The delimiter and the escape are escaped now; a part containing neither is written
+  exactly as before
+- **`iterate()` says what it cannot do** instead of silently starting over. A query carrying a
+  page or a cursor is refused: the point in time an export opens is not the one those sort values
+  came from, and `_shard_doc` belongs to the view that issued it
+- **A `trackElements` declaration the listener cannot serve is a mistake, not a silence.** A
+  `ManyToMany`, the owning side of a collection, or a field that is no association at all used to
+  be accepted and then record nothing. It travels through the failure policy now, like every other
+  declaration mistake
+- **The invariants hold whichever way an entity declares itself.** `#[Auditable('')]` was refused
+  and `getAuditObjectType(): ''` was not; the same for a collection tracking an empty list of
+  fields. Both declarations end in `AuditMetadata`, which is where the rules now live
+- `whereIn()` refuses a value that is not scalar at the boundary, as `where()` always has, rather
+  than letting Elasticsearch report it a round trip later
+
+- **An export survives `iterator_to_array()`.** `yield from` kept each batch's own 0..n keys, and
+  without the second argument `iterator_to_array()` overwrites colliding keys: of a five-record
+  export, two survived — probed live. Entries yield one by one now
+- **A dispatch from inside an open frame no longer ends it.** The reset middleware runs on
+  dispatch too, so with the messenger transport the writer's own send — or any message a handler
+  dispatched — released the frame mid-operation: phantom intermediate states, and a warning
+  blaming a try/finally nobody omitted. It now acts only when a consumed message finishes, and
+  only at the outermost one
+- **A deleted element answers to the owner its database row had.** Reading the owner from memory
+  wrote "removed from B" for a line that was re-pointed and removed in one flush — B never held
+  it — and recorded nothing at all for the maker-style `removeItem()` that nulls the back-ref
+  before `orphanRemoval` deletes. The old owner is read from the element's change set, where
+  Doctrine keeps it
+- **A record made only of element changes carries its `alwaysRecord` context**, whether it was
+  assembled after the flush or amended there — every history line reads on its own, including the
+  ones that say `lines.42.quantity`
+- **The inverse side of a ManyToMany is refused as a tracked collection.** It has a `mappedBy`, so
+  it passed the shape check and then silently recorded nothing — its elements reach back through a
+  collection the unit of work never reports to this side
+- **A comparator that throws while a frame closes cannot take the frame with it.** The held
+  records had already been taken off the buffer, so one broken comparator lost all of them, raw,
+  past the failure policy. The record whose comparator failed goes out unfinalized — noisier,
+  never lost — and the mistake is reported the way the same mistake on the way in always was
+- **A per-item 404 in a batch is retried**, as the single-record path always did: with rollover
+  and the recommended `auto_create_index` guard, a missing index is an index mid-rotation. The
+  gateway also forgets such an index in its existence cache, as `index()` already did
+- **The password in `client.hosts` stays out of the log.** The Elasticsearch client logs every
+  request URL, and hosts with inline credentials — a documented pattern — put the secret in the
+  application log once per call, probed live. The logger the bundle hands to the client now blanks
+  the userinfo first
+- A frame-released overflow batch goes out through the batch transport instead of one request per
+  record, a flipped sort direction abandons a cursor the query holds (its values belong to the
+  ordering that made them), and numeric strings that overflow a float are nobody's quantity
+  instead of all being `INF`
+
+### Added
+- **`batch_size`** (default 500) — how many records travel in one `_bulk` request or one Messenger
+  message. A flush that produced more is split; before this a flush of ten thousand records was
+  one request, and one refused for being too large lost every record in it. Every chunk is tried
+  and its failures reported even when an earlier one failed; with `on_failure: throw` the first
+  failure is raised after the last chunk, as it always was for one batch
+- **`coalescing.on_overflow`** — `release` (what it always did: write what the frame holds and
+  carry on) or `throw`, which raises `FrameOverflowException` **past the failure policy**: a
+  refusal to grow is the operation's to hear, not a failed write to log, so it reaches the caller
+  under `on_failure: log` too, and no record is reported as failed — nothing was tried. What the
+  frame had already released before the refusal is still written; in the Doctrine path the
+  exception surfaces from `flush()`, after the commit, like everything raised in `postFlush`.
+  Releasing loses no record but ends
+  the promise of one record per object: an object let go early can produce a second record for an
+  operation whose net effect was nothing. Where the trail is read for that promise, being told is
+  better than being blurred
+
 ## [0.9.3] - 2026-08-30
 
 Backpressure is not a refusal, an unreadable answer is not a success, and redaction covers the

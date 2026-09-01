@@ -15,8 +15,14 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
  */
 final class BulkResult
 {
-    /** Statuses that mean "not now" rather than "not ever": a full write queue, an unavailable shard. */
-    public const TRANSIENT = [429, 503];
+    /**
+     * Statuses that mean "not now" rather than "not ever": a full write queue, an
+     * unavailable shard — and a missing index, which with rollover and the recommended
+     * auto_create_index guard is an index mid-rotation, back a moment later. The single
+     * write path already retries a 404; a batch must not answer the same moment with
+     * the failure transport.
+     */
+    public const TRANSIENT = [404, 429, 503];
 
     /**
      * @param int                                                    $attempted how many items were sent

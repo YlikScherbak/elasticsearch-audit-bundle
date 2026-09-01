@@ -23,6 +23,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Log\AbstractLogger;
 use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 use Symfony\Component\Messenger\Middleware\StackMiddleware;
 
 final class AuditFrameTest extends TestCase
@@ -138,7 +139,7 @@ final class AuditFrameTest extends TestCase
         };
 
         try {
-            $middleware->handle(new Envelope(new \stdClass()), new StackMiddleware(new HandlerMiddleware($handler)));
+            $middleware->handle(self::consumed(new \stdClass()), new StackMiddleware(new HandlerMiddleware($handler)));
         } catch (\RuntimeException) {
         }
 
@@ -149,6 +150,91 @@ final class AuditFrameTest extends TestCase
         // The next message is not affected.
         $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
         self::assertCount(2, $this->gateway->documents['audit_log']);
+    }
+
+    public function testADispatchFromInsideAFrameDoesNotEndIt(): void
+    {
+        // The middleware runs on dispatch too — it sits before SendMessageMiddleware —
+        // so with the messenger transport, sending anything from inside an open frame
+        // used to release the frame mid-operation: phantom intermediate states, and a
+        // warning blaming a try/finally the user never omitted.
+        $middleware = new FrameResetMiddleware($this->frame);
+
+        $this->frame->begin();
+        $this->writer->record('stock', 7, AuditEvent::UPDATE, ['fact' => new Change(1000, 1040)]);
+
+        // What MessengerTransport::send() does: a dispatch, no ReceivedStamp.
+        $middleware->handle(new Envelope(new \stdClass()), new StackMiddleware(new HandlerMiddleware(static function (): void {})));
+
+        self::assertTrue($this->frame->isOpen(), 'sending a message is not the end of the operation');
+        self::assertSame([], $this->gateway->documents, 'and nothing was written early');
+        self::assertSame([], $this->warnings);
+
+        $this->writer->record('stock', 7, AuditEvent::UPDATE, ['fact' => new Change(1040, 995)]);
+        $this->frame->end();
+
+        $documents = $this->gateway->documents['audit_log'];
+
+        self::assertCount(1, $documents, 'one operation, one record');
+        self::assertSame(['old' => 1000, 'new' => 995], $documents[0]['changes']['fact'], 'coalesced across the dispatch');
+    }
+
+    public function testANestedConsumeReleasesOnlyAtTheOutermostBoundary(): void
+    {
+        // A handler consuming one message can consume another synchronously; the frame
+        // it opened belongs to the outer handler and ends when the outer handler does.
+        $middleware = new FrameResetMiddleware($this->frame);
+
+        $inner = new HandlerMiddleware(static function (): void {
+            // unrelated work; the point is the boundary it creates on the way out
+        });
+
+        $outer = new HandlerMiddleware(function () use ($middleware, $inner): void {
+            $this->frame->begin();
+            $this->writer->record('stock', 7, AuditEvent::UPDATE, ['fact' => new Change(1000, 1040)]);
+            $middleware->handle(self::consumed(new \stdClass()), new StackMiddleware($inner));
+            // the frame must still be open here, or the next step starts a record of its own
+            $this->writer->record('stock', 7, AuditEvent::UPDATE, ['fact' => new Change(1040, 995)]);
+            // no end(): the middleware closes what the handler left open — once, here.
+        });
+
+        $middleware->handle(self::consumed(new \stdClass()), new StackMiddleware($outer));
+
+        $documents = $this->gateway->documents['audit_log'];
+
+        self::assertCount(1, $documents, 'the nested consume did not cut the operation in two');
+        self::assertSame(['old' => 1000, 'new' => 995], $documents[0]['changes']['fact']);
+    }
+
+    private static function consumed(object $message): Envelope
+    {
+        return new Envelope($message, [new ReceivedStamp('test')]);
+    }
+
+    public function testAComparatorThatThrowsAtCloseDoesNotTakeTheFrameWithIt(): void
+    {
+        // held was emptied before finalize ran, so one broken comparator used to lose
+        // every record of the frame — raw, past the failure policy, out of end().
+        $broken = new class implements \Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                throw new \RuntimeException('the comparator is broken');
+            }
+        };
+
+        $this->buffer = new FrameBuffer(new \Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator([$broken]));
+        $this->writer = $this->writer(FailurePolicy::Log);
+        $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
+
+        $this->frame->begin();
+        $this->writer->record('stock', 7, AuditEvent::UPDATE, ['fact' => new Change(1000, 1040)]);
+        $this->frame->end();
+
+        self::assertCount(1, $this->gateway->documents['audit_log'], 'the record went out, unfinalized rather than gone');
+
+        $failed = array_filter($this->events, static fn (object $e) => $e instanceof \Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent);
+
+        self::assertCount(1, $failed, 'and the broken comparator travels the failure policy, like on the hold() path');
     }
 
     public function testEnrichersRunOncePerStepAndNotAgainWhenTheFrameCloses(): void

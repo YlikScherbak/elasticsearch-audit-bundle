@@ -150,6 +150,14 @@ final class AuditQuery
     {
         self::attributeName($attribute);
 
+        foreach ($values as $value) {
+            // where() refuses one at the boundary; this used to let an array through to
+            // Elasticsearch and report the mistake in its words, one round trip later.
+            if (!\is_scalar($value)) {
+                throw new InvalidQueryException(sprintf('A value to filter "%s" by is a %s; only strings, numbers and booleans can be.', $attribute, get_debug_type($value)));
+            }
+        }
+
         return $this->with(filters: array_replace($this->filters, [$attribute => self::nonEmpty(array_values($values), sprintf('values for "%s"', $attribute))]));
     }
 
@@ -171,6 +179,11 @@ final class AuditQuery
         return \array_key_exists($name, $this->options);
     }
 
+    /**
+     * Oldest entries first. Reaching for a direction abandons a cursor the query holds
+     * (unless it already points that way): its sort values belong to the ordering that
+     * produced them, and continuing against the other one skips or repeats records.
+     */
     public function oldestFirst(): self
     {
         return $this->with(sort: self::SORT_ASC);
@@ -307,8 +320,11 @@ final class AuditQuery
             $sort ?? $this->sort,
             $page ?? $this->page,
             $limit ?? $this->limit,
-            // page() resets the cursor; after() sets it; everything else keeps it.
-            $searchAfter ?? ($page !== null ? null : $this->searchAfter),
+            // page() resets the cursor, and so does a change of direction: the sort
+            // values a cursor is made of belong to the ordering that produced them, and
+            // Elasticsearch would accept the stale pair and quietly skip or repeat.
+            // after() sets it; everything else keeps it.
+            $searchAfter ?? ($page !== null || ($sort !== null && $sort !== $this->sort) ? null : $this->searchAfter),
         );
     }
 }

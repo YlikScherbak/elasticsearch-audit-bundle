@@ -32,7 +32,10 @@ final class ClientFactory
             ->setSSLVerification($sslVerification);
 
         if ($logger !== null) {
-            $builder->setLogger($logger);
+            // Never the application's logger directly: the client logs each request with
+            // its URL, and hosts carrying inline credentials would put the password in
+            // the log once per call.
+            $builder->setLogger(new UserinfoRedactingLogger($logger));
         }
 
         return $builder->build();

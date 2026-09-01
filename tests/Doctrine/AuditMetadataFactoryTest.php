@@ -99,4 +99,23 @@ final class Misrepresented
 {
     #[AuditField(represent: 'getNope')]
     public ?Author $author = null;
+
+    public function testTheInvariantsHoldWhicheverWayAnEntityDeclaresItself(): void
+    {
+        // The attribute refused these and the interface did not, though both claim to
+        // describe the same thing. AuditMetadata is where both arrive, so it is where the
+        // rules belong.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('non-empty object type');
+
+        new AuditMetadata('', ['title' => null]);
+    }
+
+    public function testACollectionThatTracksNoFieldOfItsElements(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('tracks no field of its elements');
+
+        new AuditMetadata('shipment', ['lines' => null], [], ['lines' => []]);
+    }
 }

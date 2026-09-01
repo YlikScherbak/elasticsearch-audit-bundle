@@ -93,8 +93,18 @@ final class ElasticsearchGateway implements GatewayInterface
         }
 
         $response = $this->call(fn () => self::answer($this->client->bulk(['body' => $body]))->asArray());
+        $result = BulkResult::fromResponse($response, \count($items));
 
-        return BulkResult::fromResponse($response, \count($items));
+        // The same forgetting index() does on its 404: an index that answered "not
+        // found" per item is gone, and a long-lived worker's cache must not keep
+        // skipping the existence check until a restart.
+        foreach ($result->failures as $position => $failure) {
+            if ($failure['status'] === 404) {
+                unset($this->known[$items[$position]['index']]);
+            }
+        }
+
+        return $result;
     }
 
     public function openPointInTime(string $index, string $keepAlive): string

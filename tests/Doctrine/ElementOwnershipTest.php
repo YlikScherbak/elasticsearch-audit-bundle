@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
+use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredTracking;
+use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Doctrine\ORM\Events;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
 
@@ -108,6 +113,123 @@ final class ElementOwnershipTest extends DoctrineTestCase
 
         self::assertSame(['old' => null, 'new' => 'SH-NEW'], $changes['reference'], 'the create still describes the shipment itself');
         self::assertSame(['old' => null, 'new' => 'widget'], $changes['lines.'.$line->id], 'and the lines it arrived with');
+    }
+
+    public function testAMoveAndARemoveInOneFlushBlameTheRightOwner(): void
+    {
+        // The database row said shipment A; the in-memory back-ref said B. Reading the
+        // owner from memory wrote "removed from B" — a shipment that never held it —
+        // and said nothing to A, whose line actually went.
+        [$a, $b] = $this->twoShipments();
+        $line = $a->lines->first();
+        $lineId = $line->id;
+
+        $line->shipment = $b;
+        $a->lines->removeElement($line);
+        $b->lines->add($line);
+        $this->em->remove($line);
+        $this->em->flush();
+
+        $changes = $this->changesByObjectId();
+
+        self::assertSame(['old' => 'widget', 'new' => null], $changes[(string) $a->id]['lines.'.$lineId], 'the owner that had it in the database');
+        self::assertArrayNotHasKey((string) $b->id, $changes, 'no phantom on the owner that never did');
+    }
+
+    public function testAnOrphanedItemIsStillRecorded(): void
+    {
+        // Maker-style removeItem() nulls the back-ref, orphanRemoval schedules the
+        // delete: the current owner is null, and the removal used to be recorded
+        // nowhere at all.
+        $crate = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('CR-9');
+        $item = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem('bolt');
+        $crate->add($item);
+        $this->em->persist($crate);
+        $this->em->flush();
+        $itemId = $item->id;
+        $this->gateway->documents = [];
+
+        $item->crate = null;
+        $crate->items->removeElement($item);
+        $this->em->flush();
+
+        self::assertSame(['old' => 'bolt', 'new' => null], $this->changesByObjectId()['CR-9']['items.'.$itemId]);
+    }
+
+    public function testTheInverseSideOfAManyToManyIsRefusedToo(): void
+    {
+        // It has a mappedBy, so the first four checks pass — and the listener still
+        // cannot serve it: its elements reach back through a collection.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('is mapped by a collection on its elements');
+
+        $this->em->persist(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredInverseTracking());
+        $this->em->flush();
+    }
+
+    public function testARecordMadeOnlyOfElementChangesStillCarriesItsContext(): void
+    {
+        // alwaysRecord promises that every history line reads on its own. A record
+        // assembled after the flush from what the elements did used to skip it.
+        $crate = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('CR-CTX');
+        $item = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem('bolt');
+        $crate->add($item);
+        $this->em->persist($crate);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $item->quantity = 7;   // the crate itself is untouched
+        $this->em->flush();
+
+        $changes = $this->changesByObjectId()['CR-CTX'];
+
+        self::assertSame(['old' => 1, 'new' => 7], $changes['items.'.$item->id.'.quantity']);
+        self::assertSame(['old' => 'packed', 'new' => 'packed'], $changes['status'], 'the context that lets the line read on its own');
+    }
+
+    public function testAnAmendedRecordWithNoChangesOfItsOwnCarriesItToo(): void
+    {
+        // The owner got its postUpdate — a non-audited column moved — but none of its
+        // audited fields did: the record enters postFlush empty and is amended there.
+        $crate = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('CR-AMD');
+        $item = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem('bolt');
+        $crate->add($item);
+        $this->em->persist($crate);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $crate->internalNote = 'moved to bay 4';
+        $item->quantity = 9;
+        $this->em->flush();
+
+        $changes = $this->changesByObjectId()['CR-AMD'];
+
+        self::assertArrayHasKey('items.'.$item->id.'.quantity', $changes);
+        self::assertSame(['old' => 'packed', 'new' => 'packed'], $changes['status']);
+    }
+
+    public function testACollectionTheListenerCannotWatchIsADeclarationMistake(): void
+    {
+        // A ManyToMany used to accept trackElements and then record nothing at all.
+        // Silence is the worst answer here, so it travels the way other declaration
+        // mistakes do: through the failure policy.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('tracks its elements, but it is the owning side');
+
+        $this->em->persist(new MisdeclaredTracking());
+        $this->em->flush();
     }
 
     /**
