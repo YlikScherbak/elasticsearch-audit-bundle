@@ -269,6 +269,12 @@ final class AuditQuery
             throw new InvalidQueryException(sprintf('The list of %s cannot be empty — leave the filter out to not filter.', $what));
         }
 
+        // Elasticsearch's own ceiling for one terms query (index.max_terms_count);
+        // past it the cluster refuses the whole search, one round trip later.
+        if (\count($values) > 65536) {
+            throw new InvalidQueryException(sprintf('%d %s is past what one terms query accepts (65536, Elasticsearch\'s index.max_terms_count) — filter tighter, or query in batches.', \count($values), $what));
+        }
+
         return $values;
     }
 

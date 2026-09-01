@@ -106,6 +106,67 @@ final class CommandsTest extends TestCase
         self::assertStringContainsString('audit_auth exists but lacks mapping for: salesType', $tester->getDisplay());
     }
 
+    public function testCheckFlagsADateWhoseFormatDrifted(): void
+    {
+        // The type is right and the format is not: "date" without our format expects ISO
+        // strings, so an index that passes a type-only check refuses every record the
+        // writer sends. This is exactly the drift the command exists to see coming.
+        $bare = (new IndexDefinition())->toArray();
+        $bare['mappings']['properties']['loggedAt'] = ['type' => 'date'];
+        $this->gateway->indices['audit_log'] = $bare;
+
+        $other = (new IndexDefinition())->toArray();
+        $other['mappings']['properties']['loggedAt'] = ['type' => 'date', 'format' => 'epoch_millis'];
+        $this->gateway->indices['audit_auth'] = $other;
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('loggedAt format is not set, expected "yyyy-MM-dd HH:mm:ss"', $tester->getDisplay());
+        self::assertStringContainsString('loggedAt format is "epoch_millis", expected "yyyy-MM-dd HH:mm:ss"', $tester->getDisplay());
+    }
+
+    public function testCheckFlagsChangesThatBecameIndexed(): void
+    {
+        // What auto-creation guesses for "changes": a plain object, indexed — every
+        // changed field of every entity becomes a mapping entry until the mapping
+        // itself overflows. The type matches; the lost "enabled: false" is the drift.
+        $guessed = (new IndexDefinition())->toArray();
+        $guessed['mappings']['properties']['changes'] = ['properties' => ['title' => ['type' => 'text']]];
+        $this->gateway->indices['audit_log'] = $guessed;
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('changes enabled is not set, expected false', $tester->getDisplay());
+        self::assertStringContainsString('audit_auth ok', $tester->getDisplay());
+    }
+
+    public function testCheckLooksInsideNestedProperties(): void
+    {
+        // The enricher grew a field and another changed its mind about the type; both
+        // live inside an object, where a top-level comparison never looks.
+        $actual = (new IndexDefinition())->withProperties(['context' => ['properties' => ['ip' => ['type' => 'keyword']]]])->toArray();
+        $this->gateway->indices['audit_log'] = $actual;
+        $this->gateway->indices['audit_auth'] = $actual;
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->nestedEnricher()]));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('context.ip is keyword, expected ip', $tester->getDisplay());
+        self::assertStringContainsString('lacks mapping for: context.city', $tester->getDisplay());
+    }
+
+    public function testCheckAcceptsANestedMappingItCreatedItself(): void
+    {
+        (new CommandTester(new CreateIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->nestedEnricher()])))->execute([]);
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->nestedEnricher()]));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]), $tester->getDisplay());
+    }
+
     public function testCheckReportsAFailureOnOneIndexAndGoesOn(): void
     {
         $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
@@ -127,6 +188,26 @@ final class CommandsTest extends TestCase
 
         self::assertSame(Command::FAILURE, $tester->execute([]));
         self::assertStringContainsString('unreachable', $tester->getDisplay());
+    }
+
+    private function nestedEnricher(): AuditEnricherInterface
+    {
+        return new class implements AuditEnricherInterface {
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                return $record;
+            }
+
+            public function mapping(): array
+            {
+                return ['context' => ['properties' => ['ip' => ['type' => 'ip'], 'city' => ['type' => 'keyword']]]];
+            }
+        };
     }
 
     private function enricher(): AuditEnricherInterface

@@ -75,6 +75,17 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_METADATA_FACTORY = 'borsche_elasticsearch_audit.doctrine.metadata_factory';
     public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
 
+    private readonly bool $ormInstalled;
+
+    /**
+     * Whether doctrine/orm is there is a fact about the vendor directory, but a
+     * parameter here so a test can build the container both ways.
+     */
+    public function __construct(?bool $ormInstalled = null)
+    {
+        $this->ormInstalled = $ormInstalled ?? interface_exists(EntityManagerInterface::class);
+    }
+
     public function getAlias(): string
     {
         return Configuration::ROOT;
@@ -172,11 +183,22 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{enabled: bool, skip_empty_updates: bool, connection: string} $doctrine
+     * @param array{enabled: bool|'auto', skip_empty_updates: bool, connection: string} $doctrine
      */
     private function registerDoctrine(array $doctrine, ContainerBuilder $container): void
     {
-        if (!$doctrine['enabled'] || !interface_exists(EntityManagerInterface::class)) {
+        if ($doctrine['enabled'] === false) {
+            return;
+        }
+
+        if (!$this->ormInstalled) {
+            // An explicit true is a promise the container cannot keep — the same
+            // failure the messenger transport gives without symfony/messenger. The
+            // default ("auto") made no promise and skips without a word.
+            if ($doctrine['enabled'] === true) {
+                throw new NotConfiguredException('doctrine.enabled is true but doctrine/orm is not installed: composer require doctrine/orm, or drop the option.');
+            }
+
             return;
         }
 

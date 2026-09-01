@@ -97,7 +97,11 @@ Elasticsearch, which would create the index on the fly with a guessed mapping �
 over type conflicts. The check costs one `HEAD` per index per process. The mapping the bundle
 creates is `dynamic: false`: a field nobody declared is stored with the document but not
 indexed, and `audit:check` reports it, as it does a field mapped with another type than the one
-declared (the sign of an index Elasticsearch created on its own — the fix is a reindex).
+declared (the sign of an index Elasticsearch created on its own — the fix is a reindex). The
+comparison goes past the type (**since 0.11**): the options behind it and the fields inside an
+object are checked too, so a `date` whose `format` drifted — an index that refuses every record
+the writer sends — or an enricher's nested field that was never mapped is reported by its path
+(`context.ip is keyword, expected ip`) instead of passing as healthy.
 
 An index dropped *under* a running worker is the one case that per-process check cannot see.
 Close that gap on the cluster, where it belongs, by keeping Elasticsearch from auto-creating
@@ -228,7 +232,9 @@ ints, strings, `Stringable` (Uuid, Ulid) or backed enums; composite keys are joi
 ```yaml
 borsche_elasticsearch_audit:
   doctrine:
-    enabled: true              # set false to keep the writer and drop the listener
+    enabled: auto              # auto (default): listen when doctrine/orm is installed;
+                               # false drops the listener and keeps the writer; true
+                               # requires doctrine/orm and fails the boot without it (since 0.11)
     skip_empty_updates: true
     connection: default        # the Doctrine connection the listener attaches to
 ```
@@ -422,6 +428,12 @@ $page->toArray();        // ['items' => [...], 'pagination' => [currentPage, lim
 multi-index search, so a type that lives in its own index is not left out. Every filter is an exact
 match on an indexed field, so queries stay fast at millions of records; a filter on a base field
 uses its named method, an attribute uses `where()`.
+
+Hydration is deliberately **lenient**: writing is strict — the mapping refuses what does not fit —
+but reading meets whatever the index actually holds (documents written by another tool, a mangling
+reindex, a legacy format), and one bad document must not turn a page of nineteen good ones into an
+exception. A missing field reads as its empty value; a `loggedAt` nobody can parse reads as the
+epoch (**since 0.11**) — present and visibly wrong rather than in the way.
 
 ### Two ways to page
 
@@ -829,7 +841,16 @@ real values and records a password change as a change, and neither `RecordCreate
 of `changes`** and the **attributes** by name (**since 0.9.3**; a redacted attribute is not written
 at all rather than masked, because an attribute is a mapped field and `'***'` where the mapping says
 integer would have Elasticsearch refuse the whole document). A secret inside a free-form array still
-has to be kept out by the code that puts it there. A listener may replace the record on
+has to be kept out by the code that puts it there.
+
+For **tracked collection elements** the rule names a field, not a path: `password` also covers
+`lines.42.password`, and a rule naming the collection covers everything reached through it —
+`lines` hides the membership keys (`lines.42`: an element came or went, but not what it was) and
+every field inside (**since 0.11**). Mind the scope: element changes are recorded **on the owner**,
+so a scoped rule names the owner's object type — `shipment.price` covers `lines.42.price` on a
+shipment's record; `line.price` covers nothing, because no record has `line` as its object type.
+
+A listener may replace the record on
 `RecordCreatedEvent`, and what it hands back is redacted again, so a listener that reaches for the
 entity a second time cannot undo the policy. For anything conditional — redact only for this tenant, only outside
 the office — listen to `RecordCreatedEvent` and rewrite or `veto()` the record there.

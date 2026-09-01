@@ -8,6 +8,71 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+### Fixed
+- **`audit:check` sees past the type.** A `date` whose `format` drifted refuses every record the
+  writer sends, and an enricher's nested field that was never mapped filters to nothing — both
+  passed a comparison that stopped at the top-level type. The check now holds the index to
+  everything the definition declares: the type, the options behind it (`format`,
+  `enabled: false`), and the fields inside an object, reported by path
+  (`context.ip is keyword, expected ip`). Proven against a live cluster: an index that passed the
+  old check refused every document
+- **One bad document no longer blocks the page it is on.** A `loggedAt` nobody can parse (written
+  by another tool, mangled by a reindex) made `AuditEntry::fromHit()` throw and took the whole
+  page with it. Hydration is lenient by policy — now stated on `fromHit()` — and a corrupt
+  timestamp reads as the epoch: present, visibly wrong, and not in the way
+- **`coalesce()` no longer masks the operation's own exception.** When the operation threw *and*
+  writing what the frame held threw too, the close's exception surfaced and the cause was demoted
+  to its `previous` — invisible to any `catch` keyed on the cause's type. The operation's
+  exception wins; the failed close is logged as an error
+- **A fire-and-forget call refuses an asynchronous client too.** `index()`, `createIndex()` and
+  `closePointInTime()` read nothing from the response and so never noticed being handed a
+  promise nobody waits on: the write may never have happened while the method returned as
+  success. They now pass the same guard as every reading call (`NotConfiguredException`)
+- **A record dated before 1970 gets a well-formed id.** UUID v7's timestamp field is unsigned,
+  and `dechex()` of a negative millisecond count bled a 16-digit two's complement into the id.
+  Pinned to the epoch, where the order of prehistory does not matter
+- **Reserved attributes are refused at the constructor door as well.** `withAttributes()` threw
+  while `new AuditRecord(..., attributes: ['source' => ...])` silently dropped the value from the
+  document: the caller believed it was set and the index never saw it
+
+### Changed
+- **`doctrine.enabled` defaults to `auto` and an explicit `true` is a promise.** `auto` attaches
+  the listener when doctrine/orm is installed and stays quiet when not — what the old default did.
+  But `enabled: true` written by hand now *requires* the ORM and fails the boot without it
+  (`NotConfiguredException`), the way the messenger transport fails without symfony/messenger: the
+  silent alternative is a history discovered missing months later
+- **A redaction rule naming a collection covers everything reached through it** (privacy).
+  `redact: [lines]` used to cover the collection's own change and not the tracked-element keys:
+  `lines.42` ends in an element id no rule can name. Now `lines` hides the membership keys (an
+  element came or went, but not what it was) and every field inside; scoped rules
+  (`shipment.lines`) scope the same way. Mind that element changes are recorded on the owner, so a
+  scoped rule names the owner's object type — documented in the README
+- **Boundaries on what a query and a cursor may carry.** A cursor token is capped at 4 KiB and
+  its sort values must be scalars or null (null stays legal — legacy indices sort with missing
+  values); a structure smuggled in is refused as malformed, as before, just now by rule. A filter
+  list (`whereIn()`, `withObjectIds()`, ...) past 65 536 values — Elasticsearch's own
+  `index.max_terms_count` — is refused at the boundary with the limit's name, instead of by the
+  cluster one round trip later
+
+### Added
+- **The whole slice under test against a live cluster**: real entities with their relations, a
+  real flush, the real listener, and the reader bringing the history back from a real index —
+  with the "throw" policy, so a document the mapping refuses fails the test instead of settling
+  into a log. The in-memory double accepts anything; the cluster is the only honest judge of what
+  the listener builds. Covers the life of an entity with to-one and to-many relations, element
+  tracking against `dynamic: false` (the mapping ends exactly as wide as it started), a frame
+  across several flushes landing as one document, a failed flush leaving the index empty, and a
+  line moved between owners appearing on both sides. CI runs it against Elasticsearch 8 and 9
+
+### Upgrading
+- `doctrine.enabled: true` written explicitly in a configuration without doctrine/orm installed
+  now fails the boot instead of silently skipping the listener. Remove the line (or set `auto`)
+  to keep the old behaviour; install doctrine/orm to get what the line was asking for
+- A redaction rule that names a tracked collection (`lines`, `shipment.lines`) now also covers
+  its element keys (`lines.42`, `lines.42.quantity`). If you relied on those staying readable
+  while the collection's own change was hidden, name the fields you redact instead of the
+  collection
+
 ## [0.10.0] - 2026-09-01
 
 A cursor that cannot step over a record, declarations that cannot be silently inert, and a frame

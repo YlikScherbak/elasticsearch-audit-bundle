@@ -39,6 +39,15 @@ final class AuditRecord
         if ($event === '') {
             throw new \InvalidArgumentException('An audit record needs a non-empty event.');
         }
+
+        // The same rule withAttributes() applies, at the other door: an attribute
+        // shadowing a base field would be silently dropped from the document, and the
+        // caller would believe it was set.
+        foreach (array_keys($attributes) as $name) {
+            if (\in_array($name, self::reservedFields(), true)) {
+                throw new \InvalidArgumentException(sprintf('"%s" is a reserved document field and cannot be used as an attribute.', $name));
+            }
+        }
     }
 
     public function withLoggedAt(\DateTimeImmutable $loggedAt): self
@@ -78,15 +87,9 @@ final class AuditRecord
     }
 
     /**
-     * Adds (or overrides) top-level attributes. These land beside objectType/event/...
-     * in the document and are therefore filterable, unlike anything inside "changes".
-     *
-     * @param array<string, mixed> $attributes
-     */
-    /**
-     * The same, for values that must not overwrite what is already there: an enricher
-     * filling in a default the caller may have set itself, or a second enricher that
-     * defers to the first. Reserved field names are refused either way.
+     * Like withAttributes(), for values that must not overwrite what is already there:
+     * an enricher filling in a default the caller may have set itself, or a second
+     * enricher that defers to the first. Reserved field names are refused either way.
      *
      * @param array<string, mixed> $attributes
      */
@@ -96,18 +99,15 @@ final class AuditRecord
     }
 
     /**
-     * The record with these attributes set, replacing any of the same name.
+     * The record with these attributes set, replacing any of the same name. These land
+     * beside objectType/event/... in the document and are therefore filterable, unlike
+     * anything inside "changes". A reserved field name is refused — by the constructor,
+     * where every path ends up.
      *
      * @param array<string, mixed> $attributes
      */
     public function withAttributes(array $attributes): self
     {
-        foreach (array_keys($attributes) as $name) {
-            if (\in_array($name, self::reservedFields(), true)) {
-                throw new \InvalidArgumentException(sprintf('"%s" is a reserved document field and cannot be used as an attribute.', $name));
-            }
-        }
-
         return new self($this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, array_replace($this->attributes, $attributes), $this->id, $this->origin);
     }
 

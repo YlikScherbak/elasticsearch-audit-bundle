@@ -47,6 +47,39 @@ final class AuditReaderTest extends TestCase
         self::assertSame(['status' => ['old' => 'a', 'new' => 'b']], $entry->changes);
     }
 
+    public function testACorruptTimestampDoesNotBlockThePageItIsOn(): void
+    {
+        // Written by another tool, mangled by a reindex — the document is bad, but the
+        // page holds nineteen good ones, and hydration is lenient by policy: the bad
+        // entry reads with the epoch standing for "no usable time" instead of the whole
+        // page becoming an exception.
+        $this->gateway->respondToSearch = static fn () => [
+            'hits' => ['total' => ['value' => 2], 'hits' => [
+                ['_id' => 'good', '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+                ['_id' => 'bad', '_source' => ['objectType' => 'order', 'objectId' => 2, 'event' => 'update', 'loggedAt' => 'not a date at all', 'source' => '7', 'changes' => []]],
+            ]],
+        ];
+
+        $page = $this->reader()->find(AuditQuery::for('order'));
+
+        self::assertCount(2, $page->entries);
+        self::assertSame('2026-08-26T10:00:00+00:00', $page->entries[0]->loggedAt->format(\DATE_ATOM));
+        self::assertSame('1970-01-01T00:00:00+00:00', $page->entries[1]->loggedAt->format(\DATE_ATOM));
+    }
+
+    public function testALoggedAtThatIsNotEvenAStringReadsTheSameWay(): void
+    {
+        $this->gateway->respondToSearch = static fn () => [
+            'hits' => ['total' => ['value' => 1], 'hits' => [
+                ['_id' => 'worse', '_source' => ['objectType' => 'order', 'objectId' => 3, 'event' => 'update', 'loggedAt' => ['gte' => 0], 'source' => '7', 'changes' => []]],
+            ]],
+        ];
+
+        $page = $this->reader()->find(AuditQuery::for('order'));
+
+        self::assertSame('1970-01-01T00:00:00+00:00', $page->entries[0]->loggedAt->format(\DATE_ATOM));
+    }
+
     public function testTheIndexFollowsTheObjectTypeRouting(): void
     {
         $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 0], 'hits' => []]];

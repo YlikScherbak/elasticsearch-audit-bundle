@@ -84,7 +84,27 @@ final class ChangeRedactor
         // no less a secret for sitting one level down.
         $last = strrchr($field, '.');
 
-        return $last !== false && $last !== '.' && $this->redacts($objectType, substr($last, 1));
+        if ($last !== false && $last !== '.' && $this->redacts($objectType, substr($last, 1))) {
+            return true;
+        }
+
+        // And a rule naming the collection covers everything reached through it: the
+        // membership key "lines.42" ends in an element id no rule can name, and "lines"
+        // clearly meant the whole collection — with or without an object type in front.
+        foreach ($this->fields as $rule) {
+            if (str_starts_with($field, $rule.'.')) {
+                return true;
+            }
+
+            // Only a scoped rule matches with the object type glued in front: a plain
+            // rule is fully served by the line above, and letting it match here would
+            // make "lines" cover every field of an object whose *type* is "lines".
+            if (str_contains($rule, '.') && str_starts_with($objectType.'.'.$field, $rule.'.')) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function redactValue(mixed $change): mixed

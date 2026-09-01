@@ -70,6 +70,28 @@ final class BackpressureTest extends TestCase
         $gateway->indexExists('audit_log');
     }
 
+    public function testACallWhoseAnswerIsIgnoredStillRefusesAnAsyncClient(): void
+    {
+        // createIndex() reads nothing from the response — but an asynchronous client
+        // hands back a promise nobody waits on, and dropping it means the call may
+        // never have completed while the method returns as if it had. The guard the
+        // reading calls have applies to the fire-and-forget ones too.
+        $gateway = $this->gatewayWithAsyncClient();
+
+        $this->expectException(NotConfiguredException::class);
+
+        $gateway->createIndex('audit_log', []);
+    }
+
+    public function testClosingAPointInTimeRefusesAnAsyncClientToo(): void
+    {
+        $gateway = $this->gatewayWithAsyncClient();
+
+        $this->expectException(NotConfiguredException::class);
+
+        $gateway->closePointInTime('pit-id');
+    }
+
     public function testAPointInTimeThatCouldNotBeClosedIsNotSilence(): void
     {
         $gateway = $this->gateway(static fn () => self::response(403, ['error' => ['type' => 'security_exception', 'reason' => 'action is unauthorized']]));

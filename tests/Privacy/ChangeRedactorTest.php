@@ -94,4 +94,47 @@ final class ChangeRedactorTest extends TestCase
         self::assertEquals(new Change('***', '***'), $changes['lines.42.password']);
         self::assertEquals(new Change(1, 2), $changes['lines.42.quantity']);
     }
+
+    public function testARuleNamingACollectionCoversEverythingReachedThroughIt(): void
+    {
+        // The membership key "lines.42" ends in an element id no rule can name, and a
+        // rule saying "lines" clearly meant the whole collection: what the element was
+        // ("widget") is hidden, the fact that one came or went stays.
+        $redactor = new ChangeRedactor(['lines'], '***');
+
+        $record = (new AuditRecord('shipment', 1, 'update'))->withChanges([
+            'lines.42' => new Change(null, 'widget'),
+            'lines.42.quantity' => new Change(1, 2),
+            'carrier' => new Change('a', 'b'),
+        ]);
+
+        $changes = $redactor->redact($record)->changes;
+
+        self::assertEquals(new Change(null, '***'), $changes['lines.42'], 'added, but not what');
+        self::assertEquals(new Change('***', '***'), $changes['lines.42.quantity']);
+        self::assertEquals(new Change('a', 'b'), $changes['carrier']);
+    }
+
+    public function testAPlainRuleIsNotAScopeForAnObjectTypeOfTheSameName(): void
+    {
+        // The rule "lines" names a field. An object whose *type* happens to be "lines"
+        // is a different thing entirely, and "lines.title" — objectType glued to the
+        // field for the scoped-rule check — must not read as a path under the rule.
+        $redactor = new ChangeRedactor(['lines'], '***');
+
+        $record = (new AuditRecord('lines', 1, 'update'))->withChanges(['title' => new Change('a', 'b')]);
+
+        self::assertSame($record, $redactor->redact($record), 'nothing here is named by the rule');
+    }
+
+    public function testAScopedCollectionRuleCoversTheSamePathsOnItsTypeOnly(): void
+    {
+        $redactor = new ChangeRedactor(['shipment.lines'], '***');
+
+        $shipment = $redactor->redact((new AuditRecord('shipment', 1, 'update'))->withChanges(['lines.42' => new Change('widget', null)]));
+        $order = (new AuditRecord('order', 1, 'update'))->withChanges(['lines.42' => new Change('widget', null)]);
+
+        self::assertEquals(new Change('***', null), $shipment->changes['lines.42']);
+        self::assertSame($order, $redactor->redact($order), 'an order\'s lines are not the ones that were named');
+    }
 }

@@ -34,6 +34,17 @@ final class RecordIdTest extends TestCase
         self::assertNotSame($earlier, $sameMs);
     }
 
+    public function testATimestampBeforeTheEpochStillGivesAWellFormedId(): void
+    {
+        // UUID v7 cannot say "before 1970" — its timestamp field is unsigned — and a
+        // record can (imported history, a corrupt source date read leniently). dechex()
+        // of the negative count used to bleed a 16-digit two's complement into the id.
+        $id = RecordId::v7(new \DateTimeImmutable('1969-12-31 23:59:59.999', new \DateTimeZone('UTC')));
+
+        self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $id);
+        self::assertStringStartsWith('00000000-0000', $id, 'pinned to the epoch, where the order of prehistory does not matter');
+    }
+
     public function testTheRandomBitsAreIndependent(): void
     {
         // The two variant bits and the first rand_b nibble come from different bytes: if they

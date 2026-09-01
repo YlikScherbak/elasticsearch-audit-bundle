@@ -50,7 +50,10 @@ final class ElasticsearchGateway implements GatewayInterface
         }
 
         try {
-            $this->call(fn () => $this->client->index($params), $index);
+            // The response body is not read, but answer() still guards it: an
+            // asynchronous client returns a promise nobody here waits on, and dropping
+            // it would report a write that may never have happened as success.
+            $this->call(fn () => self::answer($this->client->index($params)), $index);
         } catch (IndexNotFoundException $e) {
             // The index went away since we last saw it (dropped under a long-running
             // worker): forget it, so the next write checks again instead of trusting
@@ -139,7 +142,7 @@ final class ElasticsearchGateway implements GatewayInterface
     public function closePointInTime(string $pitId): void
     {
         try {
-            $this->call(fn () => $this->client->closePointInTime(['body' => ['id' => $pitId]]));
+            $this->call(fn () => self::answer($this->client->closePointInTime(['body' => ['id' => $pitId]])));
         } catch (RequestRejectedException $e) {
             // Already expired or unknown: the cluster answers 404, and there is nothing to
             // release. Anything else — no permission, for one — means the view is still
@@ -163,7 +166,7 @@ final class ElasticsearchGateway implements GatewayInterface
 
     public function createIndex(string $index, array $definition): void
     {
-        $this->call(fn () => $this->client->indices()->create(['index' => $index, 'body' => $definition]));
+        $this->call(fn () => self::answer($this->client->indices()->create(['index' => $index, 'body' => $definition])));
         $this->known[$index] = true;
     }
 

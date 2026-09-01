@@ -53,6 +53,11 @@ final class CursorTest extends TestCase
         yield 'an object, not sort values' => [rtrim(strtr(base64_encode('{"page":2}'), '+/', '-_'), '=')];
         yield 'an empty list' => [rtrim(strtr(base64_encode('[]'), '+/', '-_'), '=')];
         yield 'nothing at all' => [''];
+        yield 'a list inside the list' => [rtrim(strtr(base64_encode('[["a"],"b"]'), '+/', '-_'), '=')];
+        yield 'an object inside the list' => [rtrim(strtr(base64_encode('[{"gte":0},"b"]'), '+/', '-_'), '=')];
+        // Well-formed all the way through, just enormous: a cursor is a handful of short
+        // sort values, and the length boundary turns the rest away before decoding it.
+        yield 'far longer than any cursor' => [rtrim(strtr(base64_encode(json_encode(array_fill(0, 500, 'aaaaaaaaaaaaaaaa'), JSON_THROW_ON_ERROR)), '+/', '-_'), '=')];
     }
 
     /**
@@ -67,6 +72,15 @@ final class CursorTest extends TestCase
         $this->expectExceptionMessage('The cursor token is malformed');
 
         Cursor::decode($token);
+    }
+
+    public function testANullSortValueStaysLegal(): void
+    {
+        // Elasticsearch itself hands out null for a missing sort value on legacy
+        // documents; a boundary that refuses it would strand those pages.
+        $sort = ['2026-08-30 10:00:00', null, 42];
+
+        self::assertSame($sort, Cursor::decode(Cursor::encode($sort)));
     }
 
     public function testAQueryContinuesFromAToken(): void

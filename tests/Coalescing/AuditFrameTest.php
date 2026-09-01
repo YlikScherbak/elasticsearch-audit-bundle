@@ -283,6 +283,34 @@ final class AuditFrameTest extends TestCase
         self::assertStringContainsString('1 held record(s)', $this->warnings[0]);
     }
 
+    public function testTheOperationsOwnExceptionIsNotMaskedByAFailingClose(): void
+    {
+        // Both went wrong: the operation threw, and writing what the frame held threw
+        // too. The caller must see the first — their error handling keys off the cause
+        // of the failure, not off the audit trail's trouble reporting it — and the
+        // second belongs in the log, not in place of the cause.
+        $writer = $this->writer(FailurePolicy::Throw);
+        $frame = new AuditFrame($this->buffer, $writer, $this->logger());
+
+        $this->gateway->failWith = new \RuntimeException('cluster down');
+
+        try {
+            $frame->coalesce(static function () use ($writer): void {
+                $writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+                throw new \DomainException('the operation itself failed');
+            });
+            self::fail('the operation exception should have surfaced');
+        } catch (\DomainException $e) {
+            self::assertSame('the operation itself failed', $e->getMessage());
+        }
+
+        self::assertFalse($frame->isOpen(), 'the frame closed all the same');
+        self::assertNotEmpty(
+            array_filter($this->warnings, static fn (string $m) => str_contains($m, 'could not close cleanly')),
+            'and the failed write is in the log rather than gone',
+        );
+    }
+
     public function testWithTheThrowPolicyAFailedWriteSurfacesFromEnd(): void
     {
         $writer = $this->writer(FailurePolicy::Throw);

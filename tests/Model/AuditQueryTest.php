@@ -115,6 +115,19 @@ final class AuditQueryTest extends TestCase
         yield 'empty cursor' => [static fn (AuditQuery $q) => $q->after([]), 'cursor is empty'];
     }
 
+    public function testAListPastWhatATermsQueryAcceptsIsRefusedHere(): void
+    {
+        // Elasticsearch caps a terms query at index.max_terms_count (65 536 by default);
+        // past it the cluster refuses the whole search one round trip later. The
+        // boundary answers now, by name, and 65 536 itself still passes.
+        self::assertCount(65536, AuditQuery::for('order')->whereIn('salesType', range(1, 65536))->filters['salesType']);
+
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('65537 values for "salesType" is past what one terms query accepts');
+
+        AuditQuery::for('order')->whereIn('salesType', range(1, 65537));
+    }
+
     public function testAFilterValueThatIsNotScalarIsRefusedHere(): void
     {
         // where() has always refused one through its signature; whereIn() let it travel

@@ -40,6 +40,8 @@ AUDIT_ES_URL=http://localhost:9209 composer test:integration
 ```
 
 CI runs the same tests against live Elasticsearch 8.19 and 9.1, each with its matching client.
+`DoctrineOnLiveClusterTest` is the full slice — real entities through the real listener into a
+real index and back — and needs both `pdo_sqlite` and `AUDIT_ES_URL` at once.
 
 ## What a change needs
 

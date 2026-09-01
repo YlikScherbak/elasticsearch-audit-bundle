@@ -31,16 +31,29 @@ final class Cursor
     }
 
     /**
-     * @return list<mixed> the sort values, ready for AuditQuery::after()
+     * Far longer than any cursor the bundle issues — a sort tuple is a handful of short
+     * values, and there is room left for it to grow — but a boundary: the token comes
+     * from a query string, and this is what keeps a megabyte of it out of the decoder.
+     */
+    private const MAX_LENGTH = 4096;
+
+    /**
+     * @return non-empty-list<scalar|null> the sort values, ready for AuditQuery::after()
      *
      * @throws InvalidQueryException the token is not a valid encoded cursor — what it says
      *                               is checked, where it came from is not
      */
     public static function decode(string $token): array
     {
+        $token = trim($token);
+
+        if ($token === '' || \strlen($token) > self::MAX_LENGTH) {
+            throw self::invalid();
+        }
+
         // Padding is dropped when encoding and is not required to decode, but a client
         // that keeps it (or a "+" a URL turned into a space) still gets its page.
-        $binary = base64_decode(strtr(trim($token), '-_ ', '+/+'), true);
+        $binary = base64_decode(strtr($token, '-_ ', '+/+'), true);
 
         if ($binary === false) {
             throw self::invalid();
@@ -54,6 +67,14 @@ final class Cursor
 
         if (!\is_array($values) || $values === [] || !array_is_list($values)) {
             throw self::invalid();
+        }
+
+        // Sort values are scalars — and null, which legacy indices sort with. A token
+        // smuggling a structure in is not a cursor, whatever else it may be.
+        foreach ($values as $value) {
+            if ($value !== null && !\is_scalar($value)) {
+                throw self::invalid();
+            }
         }
 
         return $values;

@@ -18,7 +18,11 @@ final class RecordId
 {
     public static function v7(\DateTimeImmutable $at): string
     {
-        $ms = (int) $at->format('Uv');
+        // The timestamp field is 48 unsigned bits: a record dated before 1970 (imported
+        // history, a corrupt source date read leniently) pins to the epoch — the order
+        // of prehistory does not matter, a malformed id would. The far end matches: the
+        // field runs out in the year 10889 either way.
+        $ms = max(0, min((int) $at->format('Uv'), 2 ** 48 - 1));
         $random = random_bytes(10);
 
         // 48 bits of milliseconds, 4 bits of version, 12 random bits (hex 0-2), 2 bits of

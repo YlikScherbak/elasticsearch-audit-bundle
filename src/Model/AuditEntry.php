@@ -32,6 +32,13 @@ final class AuditEntry
     }
 
     /**
+     * Hydration is lenient by policy, and this is where the policy lives: writing is
+     * strict — the mapping refuses what does not fit — but reading meets whatever the
+     * index actually holds (documents from another tool, a mangling reindex, a legacy
+     * format), and one bad document must not turn a page of good ones into an
+     * exception. A missing field reads as its empty value, and a timestamp that cannot
+     * be parsed reads as the epoch — present, visibly wrong, and not in the way.
+     *
      * @param array<string, mixed> $hit one element of hits.hits
      */
     public static function fromHit(array $hit): self
@@ -44,12 +51,25 @@ final class AuditEntry
             objectType: (string) ($source['objectType'] ?? ''),
             objectId: \is_int($source['objectId'] ?? null) ? $source['objectId'] : (string) ($source['objectId'] ?? ''),
             event: (string) ($source['event'] ?? ''),
-            loggedAt: new \DateTimeImmutable((string) ($source['loggedAt'] ?? '1970-01-01 00:00:00'), new \DateTimeZone('UTC')),
+            loggedAt: self::loggedAt($source['loggedAt'] ?? null),
             actor: isset($source['source']) ? (string) $source['source'] : null,
             changes: \is_array($source['changes'] ?? null) ? $source['changes'] : [],
             attributes: array_diff_key($source, array_fill_keys($base, true)),
             sort: array_values(\is_array($hit['sort'] ?? null) ? $hit['sort'] : []),
         );
+    }
+
+    private static function loggedAt(mixed $stored): \DateTimeImmutable
+    {
+        if (\is_string($stored) && $stored !== '') {
+            try {
+                return new \DateTimeImmutable($stored, new \DateTimeZone('UTC'));
+            } catch (\Exception) {
+                // fall through: a value nobody can read is a value that is not there
+            }
+        }
+
+        return new \DateTimeImmutable('1970-01-01 00:00:00', new \DateTimeZone('UTC'));
     }
 
     /**

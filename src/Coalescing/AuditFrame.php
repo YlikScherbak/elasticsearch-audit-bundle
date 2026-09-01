@@ -64,10 +64,25 @@ final class AuditFrame
         $this->begin();
 
         try {
-            return $operation();
-        } finally {
-            $this->end();
+            $result = $operation();
+        } catch (\Throwable $failed) {
+            // The frame closes and writes what it held either way — those saves went
+            // through. But when that write fails too, it must not stand in place of
+            // the reason the operation died: the caller's error handling keys off the
+            // cause (a plain finally would surface the close's exception instead, the
+            // original demoted to its previous).
+            try {
+                $this->end();
+            } catch (\Throwable $close) {
+                $this->logger->error('The audit frame could not close cleanly after the operation had already failed: {reason}. The operation\'s own exception follows.', ['reason' => $close->getMessage(), 'exception' => $close]);
+            }
+
+            throw $failed;
         }
+
+        $this->end();
+
+        return $result;
     }
 
     /**

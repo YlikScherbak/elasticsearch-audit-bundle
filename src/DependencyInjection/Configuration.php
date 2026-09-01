@@ -240,7 +240,14 @@ final class Configuration implements ConfigurationInterface
 
         $children = $doctrine->children();
 
-        $children->booleanNode('enabled')->defaultTrue();
+        // "auto" and not a boolean default, so that an explicit true can be told apart:
+        // whoever wrote it is counting on entity auditing, and without doctrine/orm the
+        // honest answer is a boot failure — a silent skip surfaces months later, as the
+        // history that was never written.
+        $children->enumNode('enabled')
+            ->info('true requires doctrine/orm and fails the boot without it; "auto" (default) attaches the listener when doctrine/orm is installed and stays quiet when not.')
+            ->values(['auto', true, false])
+            ->defaultValue('auto');
 
         $children->booleanNode('skip_empty_updates')
             ->info('Do not record an update whose audited fields did not change.')

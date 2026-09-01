@@ -74,6 +74,17 @@ final class AuditRecordTest extends TestCase
         (new AuditRecord('user', 1, AuditEvent::CREATE))->withAttributes(['source' => 'x']);
     }
 
+    public function testTheConstructorRefusesReservedAttributesTheSameWay(): void
+    {
+        // The same mistake through the other door: withAttributes() refused it while
+        // the constructor silently dropped it from the document — the caller believed
+        // "source" was set and the index never saw it.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('"source" is a reserved document field');
+
+        new AuditRecord('user', 1, AuditEvent::CREATE, attributes: ['source' => 'x']);
+    }
+
     public function testLaterAttributesOverrideEarlierOnes(): void
     {
         $record = (new AuditRecord('user', 1, AuditEvent::CREATE))

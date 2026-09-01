@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -157,6 +158,29 @@ final class ElasticsearchAuditExtensionTest extends TestCase
     public function testDoctrineAuditingCanBeSwitchedOff(): void
     {
         $container = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['enabled' => false]]);
+
+        self::assertFalse($container->hasDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER));
+    }
+
+    public function testDoctrineExplicitlyOnWithoutTheOrmRefusesToBoot(): void
+    {
+        // Someone wrote doctrine: { enabled: true } and does not have doctrine/orm:
+        // they asked for entity auditing and are not getting it, and a silent skip is
+        // how that surfaces months later, as the history that was never written. It
+        // fails the way the messenger transport without symfony/messenger does — at
+        // boot, by name.
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessage('doctrine/orm');
+
+        (new ElasticsearchAuditExtension(ormInstalled: false))
+            ->load([['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['enabled' => true]]], new ContainerBuilder());
+    }
+
+    public function testWithoutTheOrmDoctrineAuditingQuietlyStaysOff(): void
+    {
+        // Nobody asked for it: the default means "when doctrine/orm is there", and it is not.
+        $container = new ContainerBuilder();
+        (new ElasticsearchAuditExtension(ormInstalled: false))->load([['client' => ['hosts' => ['http://localhost:9200']]]], $container);
 
         self::assertFalse($container->hasDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER));
     }
