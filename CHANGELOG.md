@@ -6,7 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
-## [Unreleased]
+## [0.11.0] - 2026-09-01
+
+A check that holds the index to everything the definition declares, boundaries that answer by
+name instead of one round trip later, and the whole slice proven against a live cluster.
 
 ### Fixed
 - **`audit:check` sees past the type.** A `date` whose `format` drifted refuses every record the
