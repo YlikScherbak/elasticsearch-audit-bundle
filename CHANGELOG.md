@@ -8,6 +8,11 @@ On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-01
+
+A cursor that cannot step over a record, declarations that cannot be silently inert, and a frame
+that survives its own transport.
+
 ### Fixed
 - **A cursor across object types no longer steps over a record.** `any()` reads every routed
   index, and a timestamp with a record id is unique inside one index but not between several: two
