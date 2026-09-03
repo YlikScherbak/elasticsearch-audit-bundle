@@ -6,7 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
-## [Unreleased]
+## [0.11.1] - 2026-09-03
+
+What the first day of field testing found: a change set that dies under a nested flush, and the
+three days it takes to see that without a log line.
 
 ### Fixed
 - **A flush inside somebody else's lifecycle listener no longer empties the record.** The
