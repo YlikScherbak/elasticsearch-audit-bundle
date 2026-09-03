@@ -36,12 +36,19 @@ final class ChangeSetBuilder
     }
 
     /**
+     * @param array<string, mixed>|null $changeSet Doctrine's change set, when the caller
+     *                                             already holds one; read from the unit of
+     *                                             work when null
+     *
      * @return array<string, Change>
      */
-    public function build(object $entity, AuditMetadata $metadata): array
+    public function build(object $entity, AuditMetadata $metadata, ?array $changeSet = null): array
     {
         $classMetadata = $this->em->getClassMetadata($entity::class);
-        $changeSet = $this->em->getUnitOfWork()->getEntityChangeSet($entity);
+
+        // The caller may hand in the change set it captured earlier: by postUpdate the
+        // unit of work may no longer have it. See AuditSubscriber::changeSetFor().
+        $changeSet ??= $this->em->getUnitOfWork()->getEntityChangeSet($entity);
         $changes = [];
 
         foreach ($metadata->fields as $field => $represent) {

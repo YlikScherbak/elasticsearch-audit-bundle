@@ -24,6 +24,7 @@ use Doctrine\ORM\Mapping\Driver\AttributeDriver;
 use Doctrine\ORM\Tools\SchemaTool;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\AbstractLogger;
+use Psr\Log\LoggerInterface;
 
 /**
  * A real EntityManager on an in-memory SQLite database with the audit listener
@@ -83,20 +84,34 @@ abstract class DoctrineTestCase extends TestCase
      */
     protected function attachListener(FailurePolicy $policy, ?ValueComparatorInterface $comparator = null, iterable $enrichers = []): void
     {
+        // setUp() already attached one, so attaching replaces rather than adds. Two
+        // listeners do not just double every record — the first can answer for the
+        // second: the nested-flush tests looked green without the fix because the
+        // setUp listener had read the change set before the sabotage, and its record
+        // was the one the assertion found.
+        $attached = array_values(array_filter(
+            $this->em->getEventManager()->getListeners(\Doctrine\ORM\Events::postFlush),
+            static fn (object $listener) => $listener instanceof AuditSubscriber,
+        ));
+
+        foreach ($attached as $previous) {
+            $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, $previous);
+        }
+
         $listener = $comparator === null
-            ? new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true)
-            : new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator);
+            ? new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, logger: $this->logger())
+            : new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator, logger: $this->logger());
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, $listener);
     }
 
     /**
      * @param iterable<AuditEnricherInterface> $enrichers
      */
-    protected function writer(FailurePolicy $policy, iterable $enrichers = []): AuditWriter
+    protected function logger(): LoggerInterface
     {
-        $transport = new SyncTransport($this->gateway);
         $logs = &$this->logs;
-        $logger = new class($logs) extends AbstractLogger {
+
+        return new class($logs) extends AbstractLogger {
             /** @param list<string> $logs */
             public function __construct(private array &$logs)
             {
@@ -105,11 +120,22 @@ abstract class DoctrineTestCase extends TestCase
             /** @param mixed $level */
             public function log($level, $message, array $context = []): void // untyped $message: psr/log 1.x
             {
-                $this->logs[] = strtr((string) $message, ['{reason}' => (string) ($context['reason'] ?? '')]);
+                $this->logs[] = strtr((string) $message, [
+                    '{reason}' => (string) ($context['reason'] ?? ''),
+                    '{entity}' => (string) ($context['entity'] ?? ''),
+                ]);
             }
         };
+    }
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $logger);
+    /**
+     * @param iterable<AuditEnricherInterface> $enrichers
+     */
+    protected function writer(FailurePolicy $policy, iterable $enrichers = []): AuditWriter
+    {
+        $transport = new SyncTransport($this->gateway);
+
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $this->logger());
     }
 
     /**

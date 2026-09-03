@@ -22,6 +22,8 @@ use Doctrine\ORM\Event\PostRemoveEventArgs;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
 use Doctrine\ORM\Event\PreRemoveEventArgs;
 use Doctrine\ORM\Events;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Doctrine\Persistence\ObjectManager;
 
 /**
@@ -67,13 +69,44 @@ final class AuditSubscriber
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
     private array $pendingIndexByEntity = [];
 
+    /**
+     * Doctrine's change sets as they stood in onFlush, keyed by object id.
+     *
+     * A record is built in postUpdate, and by then the unit of work may no longer hold
+     * the change set: a flush inside any lifecycle listener ends in
+     * postCommitCleanup(), which empties entityChangeSets — of the flush still running
+     * too. The listener that did it need not be ours, need not be aware of us, and
+     * leaves nothing in any log. Whoever reads the history simply finds an update whose
+     * "changes" are empty.
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private array $changeSets = [];
+
+    /** Reported once per flush: a hundred entities would otherwise say the same thing a hundred times. */
+    private bool $reportedLostChangeSets = false;
+
+    /**
+     * How many flushes are open right now.
+     *
+     * A flush called from inside a lifecycle listener dispatches onFlush and postFlush
+     * of its own, and the inner postFlush must not throw away what the outer flush
+     * captured — the outer one is still walking its entities and has yet to build their
+     * records. So the snapshot is dropped only when the outermost flush ends.
+     */
+    private int $openFlushes = 0;
+
     public function __construct(
         private readonly AuditWriter $writer,
         private readonly AuditMetadataFactory $metadataFactory,
         private readonly bool $skipEmptyUpdates = true,
         private readonly ValueComparatorInterface $comparator = new ValueComparator(),
+        ?LoggerInterface $logger = null,
     ) {
+        $this->logger = $logger ?? new NullLogger();
     }
+
+    private readonly LoggerInterface $logger;
 
     /**
      * The change sets are computed and nothing has been written yet: the only moment
@@ -85,6 +118,8 @@ final class AuditSubscriber
      */
     public function onFlush(OnFlushEventArgs $args): void
     {
+        ++$this->openFlushes;
+
         $em = self::entityManagerOf($args->getObjectManager());
 
         if ($em === null) {
@@ -94,6 +129,11 @@ final class AuditSubscriber
         $uow = $em->getUnitOfWork();
 
         foreach ($uow->getScheduledEntityUpdates() as $element) {
+            // Taken for every update, not only the audited ones: deciding that here
+            // would mean reading each entity's declaration twice per flush, and an
+            // array of scalars costs nothing to keep.
+            $this->changeSets[spl_object_id($element)] = $uow->getEntityChangeSet($element);
+
             $this->collectElementChanges($em, $element);
         }
 
@@ -101,6 +141,11 @@ final class AuditSubscriber
         // itself dirty — Doctrine tracks the owning side, which is the line's own
         // reference back. The unit of work knows about it all the same.
         foreach ($uow->getScheduledEntityInsertions() as $element) {
+            // An insertion's change set dies in the same cleanup as an update's: a
+            // create whose postPersist runs after somebody's nested flush would
+            // otherwise say an entity appeared with no values at all.
+            $this->changeSets[spl_object_id($element)] = $uow->getEntityChangeSet($element);
+
             $this->collectElementChanges($em, $element, added: true);
         }
 
@@ -200,6 +245,16 @@ final class AuditSubscriber
         $this->elementChanges = [];
         $this->elementMembership = [];
 
+        // Only the outermost flush may forget what it captured: an inner flush — the
+        // one a lifecycle listener started — reaches this line while the outer flush is
+        // still walking its entities, and dropping the snapshot here would take away
+        // exactly what it is about to need.
+        if (--$this->openFlushes <= 0) {
+            $this->openFlushes = 0;
+            $this->changeSets = [];
+            $this->reportedLostChangeSets = false;
+        }
+
         // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
         $this->writer->writeAll(array_values($records));
     }
@@ -228,6 +283,13 @@ final class AuditSubscriber
         $this->pendingIndexByEntity = [];
         $this->elementChanges = [];
         $this->elementMembership = [];
+
+        // Unconditionally here, and the depth with it: onClear is not paired with
+        // anything, so decrementing would leave the counter describing a flush that no
+        // longer exists.
+        $this->changeSets = [];
+        $this->reportedLostChangeSets = false;
+        $this->openFlushes = 0;
     }
 
     /**
@@ -552,6 +614,50 @@ final class AuditSubscriber
         }
     }
 
+    /**
+     * The change set to build a record from: what the unit of work still has, filled in
+     * from the snapshot taken in onFlush for whatever it lost.
+     *
+     * The unit of work wins wherever it still knows a field. A preUpdate listener may
+     * legitimately change the entity after the snapshot was taken — Doctrine then calls
+     * recomputeSingleEntityChangeSet() and merges that in — and the record has to
+     * reflect what was actually written, not what was planned.
+     *
+     * @return array<string, mixed>
+     */
+    private function changeSetFor(EntityManagerInterface $em, object $entity): array
+    {
+        $current = $em->getUnitOfWork()->getEntityChangeSet($entity);
+        $snapshot = $this->changeSets[spl_object_id($entity)] ?? [];
+
+        if ($current === [] && $snapshot !== []) {
+            $this->reportLostChangeSets($entity);
+        }
+
+        return $current + $snapshot;
+    }
+
+    /**
+     * Says out loud what used to be silent.
+     *
+     * Without this the symptom is an update whose "changes" are empty — no error, no
+     * failed write, nothing in any log — and the cause sits in a listener that has
+     * nothing to do with auditing. Finding it took three days once.
+     */
+    private function reportLostChangeSets(object $entity): void
+    {
+        if ($this->reportedLostChangeSets) {
+            return;
+        }
+
+        $this->reportedLostChangeSets = true;
+
+        $this->logger->warning(
+            'The unit of work had no change set left for {entity}; the audit record was built from the snapshot taken in onFlush. Something called flush() from inside a lifecycle listener of this flush: UnitOfWork::commit() ends in postCommitCleanup(), which empties entityChangeSets — and with them extraUpdates, collectionUpdates, orphanRemovals and collectionDeletions of the flush still running, so more than the history may be missing. Move that work to postFlush.',
+            ['entity' => $entity::class]
+        );
+    }
+
     private function recordFor(PostPersistEventArgs|PostUpdateEventArgs|PreRemoveEventArgs $args, string $event, bool $withChanges = true): ?AuditRecord
     {
         $entity = $args->getObject();
@@ -581,7 +687,7 @@ final class AuditSubscriber
             $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
 
             if ($withChanges) {
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata));
+                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity)));
             }
 
             return $record;

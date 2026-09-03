@@ -6,7 +6,10 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
+use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
+use Doctrine\ORM\Event\PreUpdateEventArgs;
 use Doctrine\ORM\Events;
 
 /**
@@ -59,6 +62,164 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame(['quantity' => [1, 4]], $this->lineChangeSet);
+    }
+
+    public function testAFlushInsideAnotherListenerDoesNotEmptyTheRecord(): void
+    {
+        $shipment = $this->shipmentWithTwoLines();
+
+        // A listener of somebody else's, minding its own business, that saves something
+        // of its own from postUpdate. UnitOfWork::commit() ends in postCommitCleanup(),
+        // which empties entityChangeSets — of THIS flush too, which is still running.
+        // Whatever reads a change set after this point finds nothing.
+        $this->flushFromPostUpdate();
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment->reference = 'SH-9';
+        $this->em->flush();
+
+        self::assertSame(
+            ['reference' => ['old' => 'SH-1', 'new' => 'SH-9']],
+            $this->lastDocument()['changes'],
+            'the change survives a nested flush: it was taken in onFlush, not read back in postUpdate'
+        );
+    }
+
+    public function testAFlushInsideAnotherListenerDoesNotEmptyACreateEither(): void
+    {
+        // The same wipe, one door over: postPersist instead of postUpdate. Without
+        // the insertions half of the snapshot the history said an entity appeared
+        // with no values at all — and a create has no skip_empty_updates to hide
+        // behind, so the empty record was written.
+        $this->flushFromPostPersist();
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment = new Shipment('SH-BORN');
+        $this->em->persist($shipment);
+        $this->em->flush();
+
+        $creates = array_values(array_filter(
+            $this->gateway->documents['audit_log'] ?? [],
+            static fn (array $d): bool => $d['event'] === 'create',
+        ));
+
+        self::assertCount(1, $creates, 'one entity, one create');
+        self::assertSame(['old' => null, 'new' => 'SH-BORN'], $creates[0]['changes']['reference'], 'born with its values, not empty-handed');
+    }
+
+    public function testTheLostChangeSetIsReportedOnce(): void
+    {
+        $shipment = $this->shipmentWithTwoLines();
+
+        $this->flushFromPostUpdate();
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment->reference = 'SH-10';
+        $shipment->lines->first()->quantity = 3;
+        $this->em->flush();
+
+        $lost = array_values(array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'had no change set left')
+        ));
+
+        self::assertCount(1, $lost, 'said once per flush, not once per entity');
+        self::assertStringContainsString('postCommitCleanup', $lost[0], 'names the mechanism');
+        self::assertStringContainsString('Move that work to postFlush', $lost[0], 'says what to do');
+    }
+
+    public function testNothingIsReportedWhenNobodyFlushes(): void
+    {
+        $shipment = $this->shipmentWithTwoLines();
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment->reference = 'SH-11';
+        $this->em->flush();
+
+        self::assertSame([], array_values(array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'had no change set left')
+        )), 'nothing lost, nothing to say');
+    }
+
+    /**
+     * A change set taken in onFlush must not hide what a preUpdate listener did after
+     * it: Doctrine merges such a change in through recomputeSingleEntityChangeSet(),
+     * and the record has to say what was actually written.
+     */
+    public function testAChangeMadeInPreUpdateStillReachesTheRecord(): void
+    {
+        $shipment = $this->shipmentWithTwoLines();
+
+        $listener = new class {
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof Shipment && $entity->reference !== 'SH-CORRECTED') {
+                    $entity->reference = 'SH-CORRECTED';
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], $listener);
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment->reference = 'SH-12';
+        $this->em->flush();
+
+        self::assertSame('SH-CORRECTED', $this->lastDocument()['changes']['reference']['new']);
+    }
+
+    private function flushFromPostPersist(): void
+    {
+        $em = $this->em;
+
+        $listener = new class($em) {
+            private bool $done = false;
+
+            public function __construct(private readonly EntityManagerInterface $em)
+            {
+            }
+
+            public function postPersist(\Doctrine\ORM\Event\PostPersistEventArgs $args): void
+            {
+                if ($this->done) {
+                    return;
+                }
+
+                $this->done = true;
+                $this->em->flush();
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::postPersist], $listener);
+    }
+
+    private function flushFromPostUpdate(): void
+    {
+        $em = $this->em;
+
+        $listener = new class($em) {
+            private bool $done = false;
+
+            public function __construct(private readonly EntityManagerInterface $em)
+            {
+            }
+
+            public function postUpdate(PostUpdateEventArgs $args): void
+            {
+                if ($this->done) {
+                    return;
+                }
+
+                $this->done = true;
+                $this->em->flush(); // the whole problem, in one line
+            }
+        };
+
+        // Before the audit listener: that is what makes it destructive.
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $listener);
     }
 
     /** @var array<string, mixed> */

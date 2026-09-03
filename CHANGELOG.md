@@ -6,6 +6,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
+## [Unreleased]
+
+### Fixed
+- **A flush inside somebody else's lifecycle listener no longer empties the record.** The
+  change set was read back in `postUpdate`, and by then it may be gone: `UnitOfWork::commit()`
+  ends in `postCommitCleanup()`, which empties `entityChangeSets` — of the flush still
+  running too. The listener that flushed need not know auditing exists, and the symptom is an
+  `update` whose `changes` are `{}`: no error, no failed write, nothing in any log. It is now
+  taken in `onFlush`, where Doctrine has just computed it, and the unit of work is still asked
+  first so that a `preUpdate` listener's own change (merged in through
+  `recomputeSingleEntityChangeSet()`) is not lost either. A flush nested inside a listener
+  keeps its own books: the snapshot survives until the OUTERMOST flush ends, because the inner
+  one reaches `postFlush` while the outer is still walking its entities. The snapshot covers
+  insertions as well as updates: the same wipe reaches `postPersist`, and a `create` has no
+  `skip_empty_updates` to hide behind — the history would have said an entity appeared with no
+  values at all
+
+### Added
+- **The lost change set is reported instead of passing in silence.** Once per flush, at
+  warning level, naming the class, the mechanism (`postCommitCleanup`) and the fix (move that
+  work to `postFlush`) — and noting that `extraUpdates`, `collectionUpdates`, `orphanRemovals`
+  and `collectionDeletions` of the running flush are emptied with it, so more than the history
+  may be missing. Finding this without the line took three days. `AuditSubscriber` takes an
+  optional `LoggerInterface` for it; the extension wires the one it already gives the writer
+
 ## [0.11.0] - 2026-09-01
 
 A check that holds the index to everything the definition declares, boundaries that answer by

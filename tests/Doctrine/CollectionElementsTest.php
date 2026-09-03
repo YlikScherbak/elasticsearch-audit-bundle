@@ -19,12 +19,7 @@ final class CollectionElementsTest extends DoctrineTestCase
 {
     private function useComparator(\Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface $comparator): void
     {
-        $attached = array_values(array_filter(
-            $this->em->getEventManager()->getListeners(\Doctrine\ORM\Events::postFlush),
-            static fn (object $l) => $l instanceof \Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber,
-        ));
-
-        $this->em->getEventManager()->removeEventListener(\Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber::EVENTS, ...$attached);
+        // attachListener() replaces the listener setUp() attached.
         $this->attachListener(\Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy::Log, $comparator);
     }
 

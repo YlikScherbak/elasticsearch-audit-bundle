@@ -210,6 +210,10 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(self::SERVICE_METADATA_FACTORY),
             $doctrine['skip_empty_updates'],
             new Reference(self::SERVICE_VALUE_COMPARATOR),
+            // Without this the listener falls back to a NullLogger, and the warning it
+            // raises when a nested flush emptied the change sets goes nowhere — which
+            // is precisely the silence this release is about.
+            new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]);
 
         foreach (AuditSubscriber::EVENTS as $event) {
