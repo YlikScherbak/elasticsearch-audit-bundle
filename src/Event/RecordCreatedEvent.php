@@ -15,7 +15,11 @@ final class RecordCreatedEvent
 {
     private bool $vetoed = false;
 
-    public function __construct(private AuditRecord $record)
+    /**
+     * @param (callable(AuditRecord): AuditRecord)|null $redact applied to whatever a listener
+     *                                                          hands back, before the next one sees it
+     */
+    public function __construct(private AuditRecord $record, private $redact = null)
     {
     }
 
@@ -24,9 +28,17 @@ final class RecordCreatedEvent
         return $this->record;
     }
 
+    /**
+     * Replaces the record. What comes back is redacted immediately, not once the whole
+     * dispatch is over, because the listener after this one reads it: one that reaches
+     * for the entity again to add something would otherwise hand the value the redactor
+     * had just removed to everyone behind it. The document was never at risk — the
+     * writer redacts again before the transport — but between listeners is still
+     * somewhere an application can see it.
+     */
     public function setRecord(AuditRecord $record): void
     {
-        $this->record = $record;
+        $this->record = $this->redact === null ? $record : ($this->redact)($record);
     }
 
     /**

@@ -29,6 +29,7 @@ final class AuditPage
         public readonly int $maxResultWindow = AuditQuery::DEFAULT_MAX_WINDOW,
         private readonly ?int $fetched = null,
         private readonly ?array $cursor = null,
+        private readonly ?string $query = null,
     ) {
         // The reader never builds one this way — AuditQuery::page() refuses a limit below 1 —
         // but a page assembled by hand (a test, a cache, a decorator that repacks a result)
@@ -112,7 +113,11 @@ final class AuditPage
     {
         $cursor = $this->nextCursor();
 
-        return $cursor === null ? null : Cursor::encode($cursor);
+        // The token carries which query produced it. Continuing it on another one is not
+        // a mistake Elasticsearch can see — the sort tuple has the right shape, so it
+        // answers with what follows that position in whatever set is being searched, and
+        // everything before it is quietly missing.
+        return $cursor === null ? null : Cursor::encode($cursor, $this->query);
     }
 
     /**

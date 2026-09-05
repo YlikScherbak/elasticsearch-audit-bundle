@@ -22,6 +22,33 @@ final class BulkResultTest extends TestCase
         self::assertSame(2, $result->attempted);
     }
 
+    public function testAnAnswerAboutAnotherDocumentIsNotReadByPosition(): void
+    {
+        // Everything after this point is keyed by position: which record the failure
+        // policy sees, which batch is retried, which index is forgotten from the cache.
+        // Position is the one thing in a bulk response that is promised rather than
+        // stated, so where the ids are known they are checked — an answer that cannot
+        // be matched to what was sent means the batch goes again, not that record #1
+        // is told about record #2's refusal.
+        $this->expectException(TransportUnavailableException::class);
+        $this->expectExceptionMessage('cannot be matched');
+
+        BulkResult::fromResponse(['errors' => true, 'items' => [
+            ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 201]],
+            ['index' => ['_index' => 'audit_log', '_id' => 'c', 'status' => 400, 'error' => ['reason' => 'mapping']]],
+        ]], 2, ['a', 'b']);
+    }
+
+    public function testAnAnswerAboutTheDocumentsThatWereSentIsRead(): void
+    {
+        $result = BulkResult::fromResponse(['errors' => true, 'items' => [
+            ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 201]],
+            ['index' => ['_index' => 'audit_log', '_id' => 'b', 'status' => 400, 'error' => ['reason' => 'mapping']]],
+        ]], 2, ['a', 'b']);
+
+        self::assertSame([1], array_keys($result->failures));
+    }
+
     public function testFailuresAreKeyedByPositionWithElasticsearchsReason(): void
     {
         $result = BulkResult::fromResponse(['errors' => true, 'items' => [

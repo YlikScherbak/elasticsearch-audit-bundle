@@ -462,4 +462,32 @@ final class AuditWriterBatchTest extends TestCase
 
         return new AuditWriter($transport, $transport, new IndexResolver('audit_log', ['auth' => 'audit_auth']), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, $policy, null, $dispatcher, $buffer, null, $batchSize);
     }
+
+    public function testARefusedBatchWritesNothingOfIt(): void
+    {
+        // The same contract writeAll() has to keep as coalesce(): on_overflow: throw
+        // refuses the operation, and a refused operation has no history. Writing the
+        // part that fit is what "release" does; doing it and raising as well would give
+        // the caller a fragmented trail and an exception, which is the worst of both.
+        $buffer = new FrameBuffer(maxHeld: 1, throwOnOverflow: true);
+        $writer = $this->writer(buffer: $buffer);
+
+        $buffer->open();
+
+        try {
+            $writer->writeAll([
+                // A remove closes its object and the frame hands that record straight
+                // back, so by the time the third one overflows there is already
+                // something in the batch waiting to go out. That is the case worth
+                // pinning: an empty batch would pass whatever the code did with it.
+                new AuditRecord('stock', 1, AuditEvent::REMOVE),
+                new AuditRecord('stock', 2, AuditEvent::UPDATE, changes: ['fact' => new Change(3, 4)]),
+                new AuditRecord('stock', 3, AuditEvent::UPDATE, changes: ['fact' => new Change(5, 6)]),
+            ]);
+            self::fail('the third object should have overflowed the frame');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertSame([], $this->gateway->documents, 'nothing of a refused operation reaches the index');
+    }
 }

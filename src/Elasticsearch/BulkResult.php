@@ -51,8 +51,16 @@ final class BulkResult
      * its action name ("index" here), with an "error" object when it failed.
      *
      * @param array<string, mixed> $response
+     * @param list<string>         $ids      the document ids that were sent, in the order they
+     *                                       were sent. Given them, each answer is checked against
+     *                                       the document it claims to be about; left empty, only
+     *                                       the count and the shape are. Everything downstream —
+     *                                       which record failed, which one to retry, which index
+     *                                       to forget — is keyed by position, and position is the
+     *                                       only thing in this response that is not stated but
+     *                                       assumed
      */
-    public static function fromResponse(array $response, int $attempted): self
+    public static function fromResponse(array $response, int $attempted, array $ids = []): self
     {
         $items = $response['items'] ?? null;
 
@@ -89,6 +97,29 @@ final class BulkResult
                 throw TransportUnavailableException::saying(sprintf(
                     'Elasticsearch answered position %d of a bulk request with something that could not be read as a result, so whether those documents were written is unknown.',
                     $position,
+                ));
+            }
+
+            // And the answer is about the document that was sent at this position. The
+            // order is Elasticsearch's promise, not an observation, and every decision
+            // made from here on — which record the failure policy sees, which one is
+            // retried, which index is forgotten — reads the batch by position. An answer
+            // naming a different document cannot be mapped back at all, so the batch is
+            // re-sent whole rather than reported wrongly; that is safe, because every
+            // document carries its id and overwrites itself.
+            //
+            // Only when it names one. An answer that states no id says nothing about the
+            // order either way, and turning "did not mention it" into a permanent write
+            // failure would be a new way for the trail to go silent, against a risk this
+            // check exists to catch rather than to invent.
+            $answeredAbout = \is_string($action['_id'] ?? null) && $action['_id'] !== '' ? $action['_id'] : null;
+
+            if ($ids !== [] && $answeredAbout !== null && $answeredAbout !== ($ids[$position] ?? null)) {
+                throw TransportUnavailableException::saying(sprintf(
+                    'Elasticsearch answered position %d of a bulk request with a result for document "%s", where "%s" was sent — the answer cannot be matched to the documents it is about.',
+                    $position,
+                    $answeredAbout,
+                    $ids[$position] ?? '',
                 ));
             }
 

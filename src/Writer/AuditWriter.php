@@ -156,7 +156,6 @@ final class AuditWriter
     public function writeAll(array $records): void
     {
         $outgoing = [];
-        $overflow = null;
         /** @var list<array{AuditRecord, \Throwable}> $failures */
         $failures = [];
 
@@ -174,11 +173,18 @@ final class AuditWriter
 
                 $outgoing[] = $record;
             } catch (FrameOverflowException $e) {
-                // The frame refused to grow (coalescing.on_overflow: throw): the rest of
-                // the batch is refused with it. What it released before this — a remove's
-                // held record, say — still describes writes that happened, and goes out.
-                $overflow = $e;
-                break;
+                // The frame refused to grow (coalescing.on_overflow: throw), and that
+                // setting means the operation is refused — not that the part which fit
+                // is kept. Nothing of this batch is written, what the frame had already
+                // handed back included: writing that part is what "release" does, and
+                // doing it *and* raising would leave the caller with a fragmented trail
+                // and an exception, which is the worst of both readings.
+                //
+                // The database is not undone by this. Those records exist because their
+                // saves committed; the transaction around the operation is what rolls
+                // them back, which is why the setting is only meaningful where there is
+                // one.
+                throw $e;
             } catch (\Throwable $e) {
                 // Held, not reported here: under "throw" reporting raises, and raising
                 // from inside this loop abandoned every record after this one — and
@@ -189,10 +195,6 @@ final class AuditWriter
         }
 
         $this->writeReleased($outgoing);
-
-        if ($overflow !== null) {
-            throw $overflow;
-        }
 
         // After the batch went out, so a completion failure cannot cost the records
         // that were fine — and still before returning, so "throw" reaches the caller.
@@ -427,7 +429,7 @@ final class AuditWriter
             return $record;
         }
 
-        $event = new RecordCreatedEvent($record);
+        $event = new RecordCreatedEvent($record, $this->redactor === null ? null : $this->redactor->redact(...));
         $this->events->dispatch($event);
 
         if ($event->isVetoed()) {

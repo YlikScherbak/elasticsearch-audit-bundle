@@ -52,7 +52,15 @@ final class AuditSubscriber
 {
     public const EVENTS = [Events::onFlush, Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear];
 
-    /** @var array<string, true> class + the collections it declared, once checked against Doctrine's mapping */
+    /**
+     * What has already been checked against Doctrine's mapping, keyed by the class
+     * **and the declaration itself** — the audited fields, or the tracked collections.
+     * The attribute form is fixed per class, but the interface form is answered by the
+     * instance, and two instances of one class may answer differently; keying on the
+     * class alone would let the second one's declaration through unchecked.
+     *
+     * @var array<string, true>
+     */
     private array $checkedTracking = [];
 
     /** @var list<AuditRecord> records built during the current flush, written after its commit */
@@ -104,6 +112,12 @@ final class AuditSubscriber
      * nothing anywhere says why. The level says what a counter cannot. An inner flush
      * runs inside the outer one's transaction, so it always starts deeper; a flush that
      * starts no deeper than the one above it on this stack proves that one is gone.
+     *
+     * All of which holds because every flush this listener sees runs on one connection:
+     * it is attached with `doctrine.event_listener` for the configured
+     * `doctrine.connection` and hears nothing from any other. Two entity managers
+     * sharing that connection share its nesting level too, so their flushes stack the
+     * same way; an entity manager on a different connection never reaches here at all.
      *
      * @var list<int>
      */
@@ -252,6 +266,24 @@ final class AuditSubscriber
             return;
         }
 
+        // Everything below runs application code — a deferred representer, withContext()
+        // reading a declaration — and under "throw" reporting one of those failures
+        // leaves this method through the exception. The state a flush collects has to go
+        // with the flush whichever way it ends: the depth stack is already unwound by
+        // then, so the next flush would not read it as abandoned either, and somebody
+        // else's operation would publish these records as its own.
+        try {
+            $this->publish($args, $em);
+        } finally {
+            $this->forgetThisFlush();
+        }
+    }
+
+    /**
+     * @param \Doctrine\ORM\EntityManagerInterface|null $em
+     */
+    private function publish(PostFlushEventArgs $args, ?EntityManagerInterface $em): void
+    {
         $records = $this->pending;
 
         // Now that the flush is over, every element has its identifier — including the
@@ -287,19 +319,23 @@ final class AuditSubscriber
             }
         }
 
+        // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
+        $this->writer->writeAll(array_values($records));
+    }
+
+    /**
+     * Everything the flush that is ending collected, dropped with it.
+     */
+    private function forgetThisFlush(): void
+    {
         $this->pending = [];
         $this->pendingRemovals = [];
         $this->pendingIndexByEntity = [];
         $this->elementChanges = [];
         $this->elementMembership = [];
-
-        // The outermost flush is ending, so everything it captured goes with it.
         $this->flushDepths = [];
         $this->changeSets = [];
         $this->reportedLostChangeSets = false;
-
-        // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
-        $this->writer->writeAll(array_values($records));
     }
 
     /**
@@ -493,6 +529,20 @@ final class AuditSubscriber
                 // never checked, and the membership path represented nothing at all and
                 // answered with null — "documents.42: null → null", a history line that
                 // exists, looks valid and means nothing.
+                // A collection nothing can report to this side. Doctrine persists the
+                // owning side of a ManyToMany, so ChangeSetBuilder skips the inverse one
+                // deliberately, and membership travels through the element's own
+                // single-valued reference back — which an element of a ManyToMany does
+                // not have. Refused with trackElements already; without it the
+                // declaration merely read as supported and recorded nothing at all.
+                if ($classMetadata->isCollectionValuedAssociation($field) && $classMetadata->isAssociationInverseSide($field)) {
+                    $mappedBy = $classMetadata->getAssociationMappedByTargetField($field);
+
+                    if ($mappedBy === '' || !$em->getClassMetadata($classMetadata->getAssociationTargetClass($field))->isSingleValuedAssociation($mappedBy)) {
+                        throw new DeclarationMistake(sprintf('%s::$%s is an audited collection whose elements reach back through a collection of their own (the inverse side of a ManyToMany), and nothing reports that to this side: neither what the collection holds nor what joins and leaves it would ever be recorded. Audit it on the owning side instead.', $entity::class, $field));
+                    }
+                }
+
                 if ($metadata->fields[$field] === null) {
                     throw new DeclarationMistake(sprintf('%s::$%s is an audited association and has no representer. Give the declaration a callable turning the related object into what the history should show (a name, a reference), or the record could only say that something changed and not what.', $entity::class, $field));
                 }

@@ -45,6 +45,9 @@ final class AuditReader
     /**
      * @throws InvalidQueryException          the query is invalid, or Elasticsearch rejected it (a stale cursor, say)
      * @throws IndexNotFoundException
+     * @throws PartialResultException         the cluster answered with less than it was asked for — a
+     *                                        timeout, a shard that failed, a search cut short. A page of
+     *                                        history that quietly leaves records out is worse than none
      * @throws TransportUnavailableException
      */
     public function find(AuditQuery $query): AuditPage
@@ -58,6 +61,8 @@ final class AuditReader
         if ($query->matchesNothing()) {
             return new AuditPage([], 0, $query->page, $query->limit, $query->usesCursor(), $this->maxResultWindow, fetched: 0, cursor: []);
         }
+
+        self::assertTheCursorBelongsHere($query);
 
         $response = $this->gateway->search($this->indexFor($query), $this->queryBuilder->build($query));
         self::assertNothingWasMissed($response);
@@ -79,6 +84,9 @@ final class AuditReader
             $this->maxResultWindow,
             fetched: \count($hits),
             cursor: \is_array($lastSort) ? array_values($lastSort) : [],
+            // The effective query, extensions included: the token belongs to what was
+            // actually searched, not to what the caller asked for before narrowing.
+            query: $query->fingerprint(),
         );
     }
 
@@ -90,6 +98,9 @@ final class AuditReader
      *
      * @throws InvalidQueryException
      * @throws IndexNotFoundException
+     * @throws PartialResultException         a batch came back incomplete; the entries already
+     *                                        yielded are sound, and the export stops rather than
+     *                                        finishing with a hole in it
      * @throws TransportUnavailableException
      */
     public function iterate(AuditQuery $query, int $batchSize = 500, bool $consistent = true): \Generator
@@ -195,6 +206,9 @@ final class AuditReader
      *
      * @throws InvalidQueryException
      * @throws IndexNotFoundException
+     * @throws PartialResultException         the cluster answered with less than it was asked for —
+     *                                        an aggregation over some of the shards is a number that
+     *                                        looks exact and is not
      * @throws TransportUnavailableException
      */
     public function raw(AuditQuery $query, array $body): array
@@ -212,7 +226,7 @@ final class AuditReader
             return ['hits' => ['total' => ['value' => 0, 'relation' => 'eq'], 'hits' => []]];
         }
 
-        $boundary = $this->queryBuilder->build($query)['query'];
+        $boundary = $this->queryBuilder->buildQuery($query);
 
         $body['query'] = isset($body['query'])
             ? ['bool' => ['filter' => [$boundary], 'must' => [$body['query']]]]
@@ -271,9 +285,15 @@ final class AuditReader
         }
 
         foreach (['aggs', 'aggregations'] as $key) {
-            if (\is_array($body[$key] ?? null)) {
-                self::refuseGlobalAggregations($body[$key], $key);
+            if (!\array_key_exists($key, $body)) {
+                continue;
             }
+
+            if (!\is_array($body[$key])) {
+                throw new InvalidQueryException(sprintf('raw() cannot vouch for "%s" given as %s: the aggregations are checked by reading them, so they have to be arrays.', $key, get_debug_type($body[$key])));
+            }
+
+            self::refuseGlobalAggregations($body[$key], $key);
         }
     }
 
@@ -288,6 +308,34 @@ final class AuditReader
      * @param array<string, mixed> $response
      *
      * @throws PartialResultException
+     */
+    /**
+     * A token continues the query it was issued for, and no other.
+     *
+     * The with*() family drops a cursor when the query changes underneath it, which
+     * covers `after($c)->withEvents(...)`. A token arrives the other way round —
+     * `withEvents(...)->afterToken($t)` — already detached from everything, and only
+     * what the token carries can say where it belongs. Elasticsearch cannot tell: the
+     * sort tuple has the right shape, so it answers with what follows that position in
+     * whatever set is being searched, and every matching record before it is missing
+     * without a word.
+     *
+     * Compared after the extensions have run, because what was searched is what the
+     * token belongs to.
+     *
+     * @throws InvalidQueryException
+     */
+    private static function assertTheCursorBelongsHere(AuditQuery $query): void
+    {
+        $issuedFor = $query->continuedQuery();
+
+        if ($issuedFor !== null && $issuedFor !== $query->fingerprint()) {
+            throw new InvalidQueryException('This cursor token was issued for a different query — different filters, dates, options or sort order — and continuing it here would answer with the page after that position in this result set, silently skipping everything before it. Read this query from the first page, or continue the token on the query it came from.');
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $response
      */
     private static function assertNothingWasMissed(array $response): void
     {
@@ -409,11 +457,15 @@ final class AuditReader
     private static function refuseGlobalAggregations(array $aggregations, string $path): void
     {
         foreach ($aggregations as $name => $aggregation) {
-            if (!\is_array($aggregation)) {
-                continue;
-            }
-
             $here = $path.'.'.(string) $name;
+
+            // A shape this cannot read is refused rather than waved past. Skipping
+            // everything that was not an array let the same tree through when it was
+            // built from stdClass — which json_encode turns into exactly the JSON
+            // Elasticsearch wants, `global` aggregations and all.
+            if (!\is_array($aggregation)) {
+                throw new InvalidQueryException(sprintf('raw() cannot vouch for the aggregation at "%s", which is %s rather than an array: the boundary is checked by reading it, so what cannot be read is refused. Build the body with arrays, keeping new \stdClass() for the empty objects Elasticsearch expects.', $here, get_debug_type($aggregation)));
+            }
 
             foreach (array_keys($aggregation) as $key) {
                 $key = (string) $key;
@@ -428,9 +480,15 @@ final class AuditReader
             }
 
             foreach (['aggs', 'aggregations'] as $key) {
-                if (\is_array($aggregation[$key] ?? null)) {
-                    self::refuseGlobalAggregations($aggregation[$key], $here.'.'.$key);
+                if (!\array_key_exists($key, $aggregation)) {
+                    continue;
                 }
+
+                if (!\is_array($aggregation[$key])) {
+                    throw new InvalidQueryException(sprintf('raw() cannot vouch for "%s.%s" given as %s: sub-aggregations have to be arrays for the boundary to be checked at all.', $here, $key, get_debug_type($aggregation[$key])));
+                }
+
+                self::refuseGlobalAggregations($aggregation[$key], $here.'.'.$key);
             }
         }
     }

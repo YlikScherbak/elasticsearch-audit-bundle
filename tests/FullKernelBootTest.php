@@ -75,11 +75,9 @@ final class FullKernelBootTest extends TestCase
 
     public function testMessengerActuallyRoutesBothMessagesToTheirHandlers(): void
     {
-        if (!\extension_loaded('pdo_sqlite')) {
-            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
-        }
-
-        $kernel = new FullKernel($this->cacheDir, messenger: true);
+        // Without DoctrineBundle: this is a question about the bus, and tying it to a
+        // database driver being compiled in is how a guard stops running.
+        $kernel = new FullKernel($this->cacheDir, messenger: true, withoutDoctrine: true);
         $kernel->boot();
 
         /** @var HandlersLocatorInterface $handlers */
@@ -110,6 +108,51 @@ final class FullKernelBootTest extends TestCase
         $kernel->shutdown();
     }
 
+    public function testAnApplicationThatNeverAskedForEntityAuditingStillBoots(): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
+        // doctrine.enabled defaults to "auto", which promises nothing: it attaches the
+        // listener where it can and stays quiet where it cannot. A DBAL-only application
+        // that happens to have doctrine/orm in its vendor directory asked for no entity
+        // auditing at all, and refusing to boot it is a worse answer than the silence
+        // "auto" exists to give. Only an explicit "true" is a promise worth failing over.
+        $kernel = new FullKernel($this->cacheDir, dbalOnly: true);
+        $kernel->boot();
+
+        // What the assertion is: it booted. The listener service is private, so asking
+        // the container whether it exists answers "no" either way and would prove
+        // nothing — while the writer, which is what an application without entity
+        // auditing still uses, has to be there and working.
+        self::assertInstanceOf(
+            \Borsche\ElasticsearchAuditBundle\Writer\AuditWriter::class,
+            $kernel->getContainer()->get(\Borsche\ElasticsearchAuditBundle\Writer\AuditWriter::class),
+        );
+
+        $kernel->shutdown();
+    }
+
+    public function testAnExplicitPromiseOfEntityAuditingIsStillKept(): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
+        // The other half. doctrine.enabled: true says "audit my entities", and a
+        // configuration with nothing to keep that promise has to say so rather than boot
+        // into silence.
+        $kernel = new FullKernel($this->cacheDir, dbalOnly: true, insistOnDoctrine: true);
+
+        try {
+            $kernel->boot();
+            self::fail('an explicit promise with nothing to keep it should not have booted');
+        } catch (\Throwable $refused) {
+            self::assertStringContainsString('no Doctrine entity manager', self::chainOf($refused));
+        }
+    }
+
     public function testAConnectionWithoutAnEntityManagerIsRefusedRatherThanListenedTo(): void
     {
         if (!\extension_loaded('pdo_sqlite')) {
@@ -121,28 +164,25 @@ final class FullKernelBootTest extends TestCase
         // container boots, the tag is collected, the services are all there, and not one
         // entity change is ever recorded. Only the compiler can see this — the extension
         // runs before DoctrineBundle has said which connections have entity managers.
-        $kernel = new FullKernel($this->cacheDir, reportingConnection: true);
+        $kernel = new FullKernel($this->cacheDir, reportingConnection: true, insistOnDoctrine: true);
 
         try {
             $kernel->boot();
             self::fail('a connection with no entity manager should not have booted');
         } catch (\Throwable $refused) {
-            self::assertStringContainsString('no entity manager uses it', self::chainOf($refused));
+            self::assertStringContainsString('which no entity manager uses', self::chainOf($refused));
             self::assertStringContainsString('reporting', self::chainOf($refused));
         }
     }
 
     public function testABusThatIsNotAMessengerBusIsRefusedRatherThanDispatchedTo(): void
     {
-        if (!\extension_loaded('pdo_sqlite')) {
-            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
-        }
-
         // A MessageBusInterface that FrameworkBundle did not build carries no
         // messenger.bus tag, so MessengerPass attaches no handler to it. Dispatching
         // then succeeds, returns an Envelope, and delivers the record nowhere — with
-        // nothing raised at any point along the way.
-        $kernel = new FullKernel($this->cacheDir, messenger: true, ownBus: true);
+        // nothing raised at any point along the way. No Doctrine here either: the
+        // refusal is about the bus.
+        $kernel = new FullKernel($this->cacheDir, messenger: true, ownBus: true, withoutDoctrine: true);
 
         try {
             $kernel->boot();
@@ -175,8 +215,11 @@ final class FullKernel extends Kernel
         private readonly bool $messenger = false,
         private readonly bool $reportingConnection = false,
         private readonly bool $ownBus = false,
+        private readonly bool $dbalOnly = false,
+        private readonly bool $insistOnDoctrine = false,
+        private readonly bool $withoutDoctrine = false,
     ) {
-        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : ''), true);
+        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : ''), true);
     }
 
     /**
@@ -185,7 +228,16 @@ final class FullKernel extends Kernel
     public function registerBundles(): iterable
     {
         yield new FrameworkBundle();
-        yield new DoctrineBundle();
+
+        // Left out for the questions that are about Messenger alone. DoctrineBundle
+        // needs a driver to boot a connection, and on a PHP without pdo_sqlite the whole
+        // test was skipped — so the boot guards around the bus, which have nothing to do
+        // with Doctrine, could not run at all on the very environment where a missing
+        // extension makes an unbootable container likeliest.
+        if (!$this->withoutDoctrine) {
+            yield new DoctrineBundle();
+        }
+
         yield new ElasticsearchAuditBundle();
     }
 
@@ -194,8 +246,11 @@ final class FullKernel extends Kernel
         $messenger = $this->messenger;
         $reporting = $this->reportingConnection;
         $ownBus = $this->ownBus;
+        $dbalOnly = $this->dbalOnly;
+        $insist = $this->insistOnDoctrine;
+        $noDoctrine = $this->withoutDoctrine;
 
-        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus): void {
+        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine): void {
             $container->loadFromExtension('framework', [
                 'test' => true,
                 'http_method_override' => false,
@@ -210,7 +265,13 @@ final class FullKernel extends Kernel
                 $container->setDefinition('app.bus', new \Symfony\Component\DependencyInjection\Definition(\Symfony\Component\Messenger\MessageBus::class));
             }
 
-            $container->loadFromExtension('doctrine', [
+            if (!$noDoctrine) {
+                $container->loadFromExtension('doctrine', $dbalOnly ? [
+                // No orm section at all, so DoctrineBundle registers no entity manager —
+                // the shape an application that uses DBAL alone has, and one where
+                // nothing about entity auditing was ever asked for.
+                'dbal' => ['driver' => 'pdo_sqlite', 'memory' => true],
+            ] : [
                 // A second connection with no entity manager on it — the DBAL-only
                 // setup Symfony documents, and the one an audit listener cannot hear.
                 'dbal' => $reporting
@@ -233,12 +294,14 @@ final class FullKernel extends Kernel
                         ],
                     ],
                 ],
-            ]);
+                ]);
+            }
 
             $container->loadFromExtension(Configuration::ROOT, [
                 'client' => ['hosts' => ['http://localhost:9200']],
                 'transport' => $messenger ? 'messenger' : 'sync',
-            ] + ($reporting ? ['doctrine' => ['connection' => 'reporting']] : []) + ($ownBus ? ['message_bus' => 'app.bus'] : []));
+                'doctrine' => ($reporting ? ['connection' => 'reporting'] : []) + ($insist ? ['enabled' => true] : []),
+            ] + ($ownBus ? ['message_bus' => 'app.bus'] : []));
 
             // What a test needs to look at: private by default, and the point of the
             // test is to ask the container what a worker would be handed.

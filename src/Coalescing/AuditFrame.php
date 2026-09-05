@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Coalescing;
 
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -76,6 +77,22 @@ final class AuditFrame
 
         try {
             $result = $operation();
+        } catch (FrameOverflowException $refused) {
+            // The one exception that is not a failed operation but a refused one.
+            // on_overflow: throw says the coalescing guarantee — one record per object
+            // for this operation — cannot be kept, so the operation is abandoned; and an
+            // operation that was abandoned has no history. Writing what the frame held
+            // would be what "release" already does, only with an exception on top: the
+            // trail is fragmented either way, and a setting that gives no different
+            // guarantee has no reason to exist.
+            //
+            // What this cannot undo is the database. Those records reached the frame
+            // because their saves committed, so the caller's own transaction is what
+            // rolls them back — which is why this setting is only meaningful where
+            // there is one.
+            $this->drop('An operation was refused because the audit frame could not hold it (coalescing.on_overflow: throw); its {held} held record(s) were dropped. The database changes behind them are not undone by this — the transaction around the operation is what rolls those back.');
+
+            throw $refused;
         } catch (\Throwable $failed) {
             // The frame closes and writes what it held either way — those saves went
             // through. But when that write fails too, it must not stand in place of
@@ -142,13 +159,23 @@ final class AuditFrame
      */
     public function reset(): bool
     {
+        return $this->drop('An audit frame was left open and has been reset; {held} held record(s) were dropped. Pair begin() with end() in a try/finally, or use coalesce().');
+    }
+
+    /**
+     * Drops the frame and says why in the caller's own words: "left open" and "refused
+     * because it overflowed" are different events, and a log line naming the wrong one
+     * sends whoever reads it looking for a missing try/finally that is not there.
+     */
+    private function drop(string $why): bool
+    {
         $held = $this->buffer->count();
 
         if (!$this->buffer->reset()) {
             return false;
         }
 
-        $this->logger->warning('An audit frame was left open and has been reset; {held} held record(s) were dropped. Pair begin() with end() in a try/finally, or use coalesce().', ['held' => $held]);
+        $this->logger->warning($why, ['held' => $held]);
 
         return true;
     }

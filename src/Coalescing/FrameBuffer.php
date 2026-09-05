@@ -191,7 +191,28 @@ final class FrameBuffer
             return $out;
         }
 
-        $this->held[$key] = self::merge($this->held[$key], $record);
+        $held = $this->held[$key];
+
+        // Two different hands on one object inside one operation. Coalescing folds the
+        // steps of an operation into the record that describes it, and it can do that
+        // because the steps are one person's — merging across actors would put the
+        // second one's change under the first one's name, and "who did this" is the
+        // question a history is kept to answer. It happens on purpose more often than
+        // by accident: a step recorded with an explicit `actor:` (a system correction
+        // beside a user's edit) is exactly this. Neither record is dropped and neither
+        // is misattributed — the held one goes out as it stands, and this one starts
+        // the next.
+        if ($held->actor !== $record->actor) {
+            $moved = $this->moved[$key] ?? [];
+            unset($this->moved[$key]);
+
+            $this->held[$key] = $record;
+            $this->markMoved($key, $record);
+
+            return array_values(array_filter([$this->finalizeSafely($held, $moved)]));
+        }
+
+        $this->held[$key] = self::merge($held, $record);
         $this->markMoved($key, $record);
 
         return [];
@@ -263,6 +284,10 @@ final class FrameBuffer
     /**
      * Earliest old, latest new; the event and identity of the first record — a
      * create followed by updates is still one create, with the final values.
+     *
+     * "Identity" includes the actor, which is why hold() never brings two actors here:
+     * the merged record keeps the first one's name, and that is only honest when both
+     * steps are the same one's.
      */
     private static function merge(AuditRecord $first, AuditRecord $next): AuditRecord
     {

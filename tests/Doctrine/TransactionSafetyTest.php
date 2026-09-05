@@ -10,6 +10,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\FolderDocument;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vault;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Misdeclared;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Reaction;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -133,6 +135,47 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertCount(1, $this->documents(), 'the outer flush committed, so its record is history');
+    }
+
+    public function testAThrowingRepresenterInPostFlushDoesNotLeakIntoTheNextFlush(): void
+    {
+        // postFlush runs application code — a representer deferred until the element has
+        // its generated id — and under "throw" reporting that failure leaves the method
+        // through the exception, past the cleanup that follows it. Everything the flush
+        // collected then stays: pending records, membership, change sets. The depth
+        // stack was already unwound, so the next flush does not read the state as
+        // abandoned either, and somebody else's operation publishes those records.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $vault = new Vault('Contracts');
+        $vault->add(new FolderDocument('lease.pdf'));
+
+        try {
+            $this->em->persist($vault);
+            $this->em->flush();
+            self::fail('the representer should have failed the report');
+        } catch (WriteFailedException) {
+        }
+
+        $this->gateway->documents = [];
+
+        // A different, perfectly ordinary operation. It has nothing to do with the vault
+        // and must not answer for it.
+        try {
+            $this->em->persist(new Article('Unrelated'));
+            $this->em->flush();
+        } catch (WriteFailedException $inherited) {
+            self::fail('the next flush inherited the failed one\'s state: '.$inherited->getMessage());
+        }
+
+        $documents = $this->documents();
+
+        self::assertCount(1, $documents, 'one operation, one record — not the leftovers of the one that failed');
+        self::assertSame('article', $documents[0]['objectType']);
     }
 
     public function testRecordsAreSentAfterTheCommit(): void

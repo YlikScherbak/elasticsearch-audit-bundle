@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Writer;
 
 use Borsche\ElasticsearchAuditBundle\Exception\FailureReason;
-use Borsche\ElasticsearchAuditBundle\Exception\SafeExceptionMessage;
+use Borsche\ElasticsearchAuditBundle\Exception\SafeMessage;
 
 /**
  * How much of a failure's cause the bundle repeats in what it emits — the log line,
@@ -34,7 +34,10 @@ enum FailureDetails: string
     /**
      * The cause is named by class, and only messages the bundle wrote itself are
      * repeated — those are built from class names, field names and statuses, never
-     * from a value. The original stays reachable through getPrevious().
+     * from a value. The cause itself does not travel with them: every exception logger
+     * an application has serialises a chain, so attaching it would be this policy being
+     * walked around one step later. `FailureReason::$causeClass` names what failed, for
+     * a listener that has to tell one refusal from another.
      */
     case Cause = 'cause';
 
@@ -47,7 +50,7 @@ enum FailureDetails: string
             return $e;
         }
 
-        if ($e instanceof SafeExceptionMessage) {
+        if (SafeMessage::vouchedFor($e)) {
             // The message is safe because the class says so. The chain hanging off it is
             // not covered by that promise and is walked by everything that serialises an
             // exception, so a safe sentence with somebody else's exception behind it is

@@ -76,6 +76,9 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_METADATA_FACTORY = 'borsche_elasticsearch_audit.doctrine.metadata_factory';
     public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
 
+    /** Whether doctrine.enabled was an explicit true — a promise — rather than "auto". */
+    public const PARAMETER_DOCTRINE_PROMISED = 'borsche_elasticsearch_audit.doctrine.promised';
+
     private readonly ?DoctrineSupport $doctrineSupport;
     private readonly ?MessengerSupport $messengerSupport;
 
@@ -231,6 +234,11 @@ final class ElasticsearchAuditExtension extends Extension
         }
 
         $container->setDefinition(self::SERVICE_DOCTRINE_LISTENER, $listener);
+
+        // Carried to the compiler, which is where the last question about entity
+        // auditing can be answered — and where the difference between "you promised
+        // this works" and "attach it if you can" decides between a refusal and silence.
+        $container->setParameter(self::PARAMETER_DOCTRINE_PROMISED, $doctrine['enabled'] === true);
     }
 
     /**

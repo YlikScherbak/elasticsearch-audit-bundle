@@ -87,6 +87,44 @@ final class AuditReaderTest extends TestCase
         self::assertTrue($page->isEmpty());
     }
 
+    public function testATokenFromOneQueryCannotBeContinuedOnAnother(): void
+    {
+        // Building the query in the other order gets past the rule that a cursor belongs
+        // to the query that produced it: after()->withEvents() drops it, and
+        // withEvents()->afterToken() simply attaches it. Elasticsearch takes any
+        // search_after whose sort has the right shape and answers with what follows that
+        // position in the new result set, so every matching record before it is skipped
+        // in silence. The token has to know which query it came from.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+        ]]];
+
+        $token = $this->reader()->find(AuditQuery::for('order')->withEvents('update'))->nextCursorToken();
+
+        self::assertIsString($token);
+
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('different query');
+
+        $this->reader()->find(AuditQuery::for('order')->withEvents('remove')->afterToken($token));
+    }
+
+    public function testATokenContinuesTheQueryItCameFrom(): void
+    {
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+        ]]];
+
+        $query = AuditQuery::for('order')->withEvents('update');
+        $token = $this->reader()->find($query)->nextCursorToken();
+
+        self::assertIsString($token);
+
+        $this->reader()->find($query->afterToken($token));
+
+        self::assertSame(['2026-08-26 10:00:00', 'a', 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
+    }
+
     public function testAVisibilityExtensionDoesNotThrowAwayTheCursorItIsPagingWith(): void
     {
         // A cursor belongs to the query that produced it, so anything narrowing that
@@ -177,6 +215,31 @@ final class AuditReaderTest extends TestCase
         $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'aggs' => [
             'everything' => ['global' => new \stdClass(), 'aggs' => ['actors' => ['terms' => ['field' => 'source']]]],
         ]]);
+    }
+
+    #[DataProvider('aggregationTreesThatAreNotArrays')]
+    public function testAnAggregationTreeTheValidatorCannotReadIsRefused(array $body): void
+    {
+        // The allow-list walks the tree with is_array() and skipped everything else, so
+        // the same aggregation expressed as objects went straight through — and
+        // json_encode turns a stdClass into exactly the JSON Elasticsearch wants. A
+        // `global` aggregation ignores the query, which is the one thing raw() promises
+        // cannot happen. A validator that cannot read a shape must refuse it, not wave
+        // it past.
+        $this->expectException(InvalidQueryException::class);
+
+        $this->reader()->raw(AuditQuery::for('order'), $body);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function aggregationTreesThatAreNotArrays(): iterable
+    {
+        yield 'aggs as an object' => [['size' => 0, 'aggs' => (object) ['everything' => ['global' => new \stdClass()]]]];
+        yield 'an aggregation as an object' => [['size' => 0, 'aggs' => ['everything' => (object) ['global' => new \stdClass()]]]];
+        yield 'nested aggs as an object' => [['size' => 0, 'aggs' => ['by_type' => ['terms' => ['field' => 'objectType'], 'aggs' => (object) ['everything' => ['global' => new \stdClass()]]]]]];
+        yield 'an aggregation that is a string' => [['size' => 0, 'aggs' => ['everything' => 'global']]];
     }
 
     public function testAGlobalAggregationIsFoundHoweverDeepItSits(): void

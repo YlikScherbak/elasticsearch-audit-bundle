@@ -37,7 +37,12 @@ final class CursorTest extends TestCase
     public function testAPaddedOrSpacedTokenIsStillRead(): void
     {
         $sort = ['2026-08-30 10:00:00', 'entry-19'];
-        $plain = base64_encode(json_encode($sort, JSON_THROW_ON_ERROR)); // padding, + and / included
+        // A payload picked so the plain encoding really carries all three: padding, + and /.
+        $plain = base64_encode(json_encode(['v' => 2, 's' => $sort, 'q' => '?>?a~~'], JSON_THROW_ON_ERROR));
+
+        self::assertMatchesRegularExpression('/[+]/', $plain);
+        self::assertMatchesRegularExpression('#[/]#', $plain);
+        self::assertStringEndsWith('=', $plain);
 
         self::assertSame($sort, Cursor::decode($plain), 'a client that kept the plain form still gets its page');
         self::assertSame($sort, Cursor::decode(strtr($plain, '+', ' ')), 'and one whose URL turned + into a space');
@@ -80,19 +85,35 @@ final class CursorTest extends TestCase
         // if the bundle can recognise its own older shapes. A version marker is the
         // difference between "this cursor is from the previous format" and a tuple
         // silently read as something it is not.
-        $payload = json_decode(base64_decode(strtr(Cursor::encode(['2026-08-30 10:00:00', 'entry-19']), '-_', '+/'), true) ?: '', true, 512, JSON_THROW_ON_ERROR);
+        $payload = json_decode(base64_decode(strtr(Cursor::encode(['2026-08-30 10:00:00', 'entry-19'], 'fingerprint'), '-_', '+/'), true) ?: '', true, 512, JSON_THROW_ON_ERROR);
 
-        self::assertSame(1, $payload['v']);
+        self::assertSame(2, $payload['v']);
         self::assertSame(['2026-08-30 10:00:00', 'entry-19'], $payload['s']);
+        self::assertSame('fingerprint', $payload['q']);
     }
 
-    public function testATokenFromBeforeVersioningIsStillRead(): void
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function tokensFromBeforeTheQueryWasCarried(): iterable
     {
-        // What clients are holding right now: the bare array. Refusing it would strand
-        // every open page at the moment of the upgrade.
-        $legacy = rtrim(strtr(base64_encode(json_encode(['2026-08-30 10:00:00', 'entry-19'], JSON_THROW_ON_ERROR)), '+/', '-_'), '=');
+        yield 'the bare array, before tokens were versioned' => [json_encode(['2026-08-30 10:00:00', 'entry-19'], JSON_THROW_ON_ERROR)];
+        yield 'version 1, versioned but unbound' => [json_encode(['v' => 1, 's' => ['2026-08-30 10:00:00', 'entry-19']], JSON_THROW_ON_ERROR)];
+    }
 
-        self::assertSame(['2026-08-30 10:00:00', 'entry-19'], Cursor::decode($legacy));
+    #[DataProvider('tokensFromBeforeTheQueryWasCarried')]
+    public function testATokenThatCannotSayWhichQueryItCameFromIsRefused(string $payload): void
+    {
+        // Both shapes decode into a perfectly usable sort tuple, which is the problem:
+        // read on a query they were not issued for, they answer with the page after
+        // that position in a different result set and skip everything before it in
+        // silence. 1.0 would rather cost one client the page it is holding.
+        $legacy = rtrim(strtr(base64_encode($payload), '+/', '-_'), '=');
+
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('older version');
+
+        Cursor::decode($legacy);
     }
 
     public function testATokenFromAFutureVersionIsRefusedRatherThanGuessed(): void

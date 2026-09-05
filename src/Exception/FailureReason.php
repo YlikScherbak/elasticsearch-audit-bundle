@@ -10,10 +10,13 @@ namespace Borsche\ElasticsearchAuditBundle\Exception;
  * neither a log processor walking the chain nor a listener reading `getPrevious()`
  * finds the text this exists to keep out of them.
  *
- * The original is not lost — whoever catches WriteFailedException still gets it as
- * that exception's previous, because a caller who catches is a caller who chose to
- * look. What changes is that the bundle stops putting it into channels the
- * application did not ask for: the log line, the PSR-3 context, the failure event.
+ * The original is not carried along either, and that is the point: getPrevious() reads
+ * like a private channel and is not one. An uncaught WriteFailedException reaches
+ * Symfony's error handler, Monolog's exception processor and Sentry, each of which
+ * serialises the whole chain — so attaching the cause would let the policy be walked
+ * around by a logger nobody configured for audit. Under `redact.failure_details: full`
+ * the cause travels intact, which is what that setting is for; under "cause" it does
+ * not travel at all, and $causeClass says what failed.
  */
 final class FailureReason extends \RuntimeException implements AuditException, SafeExceptionMessage
 {
@@ -29,7 +32,7 @@ final class FailureReason extends \RuntimeException implements AuditException, S
 
     public static function insteadOf(\Throwable $cause): self
     {
-        return new self(sprintf('%s (its message is not repeated here; catch WriteFailedException and read getPrevious() for the full cause)', $cause::class), $cause::class);
+        return new self(sprintf('%s (its message is not repeated: redact.failure_details is "cause", and a foreign message may quote a value the record was redacted of. Set it to "full" to have causes repeated in what the bundle logs, dispatches and raises.)', $cause::class), $cause::class);
     }
 
     /**

@@ -62,6 +62,15 @@ final class ChangeRedactor
                 throw new \InvalidArgumentException(sprintf('"%s" names no field to redact, so it would never match anything. A rule is a field ("password") or a field scoped to an object type ("user.password").', $rule));
             }
 
+            // And a rule that is merely padded. The check above trims before looking,
+            // while the matcher compares the rule exactly as written — so " password "
+            // was accepted, matched nothing, and the value it existed to remove was
+            // written in full. Trimming it here quietly would be the other way to hide
+            // the mistake; a privacy rule is better read back as refused.
+            if ($rule !== trim($rule) || $field !== trim($field)) {
+                throw new \InvalidArgumentException(sprintf('"%s" has whitespace around it, and a rule is matched exactly as written — so it would never match the field it names. Write it without the padding.', $rule));
+            }
+
             // A rule naming a base field could never do anything: redaction covers the
             // fields of "changes" and the attributes, and these are neither. Accepting
             // one and quietly ignoring it is how somebody believes an identifier is

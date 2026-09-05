@@ -55,18 +55,30 @@ final class CarriesRecordsPass implements CompilerPassInterface
         $managers = $container->hasParameter('doctrine.entity_managers')
             ? $container->getParameter('doctrine.entity_managers')
             : [];
+        $managers = \is_array($managers) ? $managers : [];
 
-        if (!\is_array($managers) || $managers === []) {
-            throw new NotConfiguredException('Entity auditing is enabled, but no Doctrine entity manager is configured — doctrine.orm is missing from the Doctrine configuration, so nothing ever calls flush() and no entity change would be recorded. Configure the ORM, or set borsche_elasticsearch_audit.doctrine.enabled to false.');
-        }
-
-        foreach ($managers as $name => $service) {
+        foreach ($managers as $service) {
             if (self::managerUses($container, (string) $service, $connection)) {
                 return;
             }
         }
 
-        throw new NotConfiguredException(sprintf('Entity auditing is attached to the Doctrine connection "%s", and no entity manager uses it: the listener would be registered, collected and never called, because a DBAL-only connection has no flush() to listen to. Point borsche_elasticsearch_audit.doctrine.connection at a connection an entity manager uses (%s), or set doctrine.enabled to false.', $connection, implode(', ', array_map(static fn (string $m): string => self::connectionOf($container, $m) ?? '?', array_map('strval', array_values($managers))))));
+        // Nothing here can carry an entity change. Whether that is a failure depends on
+        // what was asked for, exactly as it does in the extension: "auto" promised
+        // nothing and stays quiet — an application using DBAL alone, which happens to
+        // have doctrine/orm in its vendor directory, never asked for entity auditing,
+        // and refusing to boot it would be a worse answer than the silence "auto"
+        // exists to give. An explicit true is a promise, and a promise nothing can keep
+        // has to be said out loud.
+        if ($container->getParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_PROMISED) !== true) {
+            $container->removeDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER);
+
+            return;
+        }
+
+        throw new NotConfiguredException($managers === []
+            ? 'doctrine.enabled is true, and no Doctrine entity manager is configured — the orm section is missing from the Doctrine configuration, so nothing ever calls flush() and no entity change could be recorded. Configure the ORM, or leave doctrine.enabled at "auto" if this application does not audit entities.'
+            : sprintf('doctrine.enabled is true and the listener is attached to the Doctrine connection "%s", which no entity manager uses: it would be registered, collected and never called, because a DBAL-only connection has no flush() to listen to. Point borsche_elasticsearch_audit.doctrine.connection at a connection an entity manager uses (%s), or leave doctrine.enabled at "auto".', $connection, implode(', ', array_map(static fn (string $m): string => self::connectionOf($container, $m) ?? '?', array_map('strval', array_values($managers))))));
     }
 
     private function assertTheBusCarriesHandlers(ContainerBuilder $container): void

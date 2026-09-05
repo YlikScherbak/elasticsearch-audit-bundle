@@ -33,8 +33,17 @@ final class IndexAuditRecordHandler
 
     public function __invoke(IndexAuditRecord $message): void
     {
+        // The document carries the record's id too, and that copy is what makes a
+        // redelivery harmless: written under the same id, the same event is one
+        // document. A message reaches here without one only if it was queued before ids
+        // existed, or if a serializer dropped a property it had a default for — the
+        // second is recoverable, and reading the id out of the document is how. What is
+        // left after that is genuinely a message from before ids, which Elasticsearch
+        // stores under one of its own.
+        $id = $message->id ?? (\is_string($message->document['id'] ?? null) && $message->document['id'] !== '' ? $message->document['id'] : null);
+
         try {
-            $this->gateway->index($message->index, $message->document, $message->id);
+            $this->gateway->index($message->index, $message->document, $id);
         } catch (RequestRejectedException $e) {
             // The chain stops here. Symfony keeps a failed message's cause as an
             // ErrorDetailsStamp built from FlattenException, which walks getPrevious()

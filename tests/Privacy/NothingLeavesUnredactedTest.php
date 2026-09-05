@@ -77,6 +77,45 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, JSON_THROW_ON_ERROR));
     }
 
+    public function testOneListenerCannotHandTheSecretToTheNext(): void
+    {
+        // The record is redacted, dispatched, and redacted again — but the second pass
+        // runs after the whole dispatch, so between the two a listener could put a value
+        // back and every listener behind it would read it. The document stayed clean,
+        // which is why the existing test did not see this: it looks at what reached the
+        // gateway. The invariant is wider than that — "not anywhere an application can
+        // see it" — and another listener is the application.
+        $seen = [];
+        $events = new class($seen) implements EventDispatcherInterface {
+            /** @param list<string> $seen */
+            public function __construct(private array &$seen)
+            {
+            }
+
+            public function dispatch(object $event): object
+            {
+                if (!$event instanceof RecordCreatedEvent) {
+                    return $event;
+                }
+
+                // The listener that means well and reaches for the entity again.
+                $event->setRecord($event->getRecord()->withChanges(['password' => new Change(null, NothingLeavesUnredactedTest::secret())]));
+
+                // And the one registered after it, which simply reads what it was given.
+                $this->seen[] = json_encode($event->getRecord()->changes, JSON_THROW_ON_ERROR);
+
+                return $event;
+            }
+        };
+
+        $gateway = new InMemoryGateway();
+        $writer = $this->writer($gateway, ['password'], $events);
+        $writer->record('user', 7, 'update', ['name' => new Change('a', 'b')]);
+
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $seen), 'the next listener reads a redacted record, not the one the first handed back');
+        self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, JSON_THROW_ON_ERROR));
+    }
+
     public function testTheSecretIsInNothingThatCameOut(): void
     {
         $gateway = new InMemoryGateway();
@@ -291,6 +330,13 @@ final class NothingLeavesUnredactedTest extends TestCase
         yield 'blank' => ['   '];
         yield 'a scope with no field' => ['user.'];
         yield 'a field with no scope' => ['.password'];
+        // Accepted, because the check trimmed before looking — and then never matched,
+        // because the matcher compares the rule as written. A password recorded in full
+        // because a config line had a stray space is the failure this whole class is
+        // about, arrived at from the least interesting direction.
+        yield 'padded' => [' password '];
+        yield 'padded scope' => [' user.password'];
+        yield 'padded field' => ['user. password'];
     }
 
     public function testAListenerThatThrowsDoesNotGetToWriteItsMessageIntoTheLog(): void
@@ -317,6 +363,39 @@ final class NothingLeavesUnredactedTest extends TestCase
 
         self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
         self::assertNotEmpty(array_filter($logs, static fn (string $l) => str_contains($l, 'listener')), 'and the failure is still reported');
+    }
+
+    public function testApplicationCodeCannotDeclareItsOwnMessageSafe(): void
+    {
+        // SafeExceptionMessage is a promise the bundle makes about sentences it wrote
+        // itself. As a public empty interface it was also an offer: any class could
+        // implement it and have its message repeated in the log, the failure event and
+        // the exception — past the very policy that exists because an enricher's message
+        // may quote what was just redacted. The same enricher the suite already treats
+        // as untrusted, one `implements` away from being trusted.
+        $enricher = new class implements AuditEnricherInterface {
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                throw new SelfDeclaredSafeException('cannot enrich with token '.NothingLeavesUnredactedTest::secret());
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log, [$enricher]);
+        $writer->record('user', 7, 'update', ['name' => new Change('a', 'b')]);
+
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
     }
 
     public function testASafeExceptionDoesNotCarryAnUnsafeOneAlongWithIt(): void
@@ -488,3 +567,11 @@ final class NothingLeavesUnredactedTest extends TestCase
         return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $logger, $events, null, new ChangeRedactor($redact, '***'));
     }
 }
+
+/**
+ * What an application can write, and what the bundle must not take at face value.
+ */
+final class SelfDeclaredSafeException extends \RuntimeException implements \Borsche\ElasticsearchAuditBundle\Exception\SafeExceptionMessage
+{
+}
+

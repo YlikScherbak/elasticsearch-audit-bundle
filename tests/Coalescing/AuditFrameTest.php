@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Coalescing\Messenger\FrameResetMiddleware;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -376,6 +377,35 @@ final class AuditFrameTest extends TestCase
         $this->frame->end();
 
         self::assertCount(2, $this->gateway->documents['audit_log'], 'both are written, neither is lost');
+    }
+
+    public function testAnOverflowingOperationPublishesNothingAtAll(): void
+    {
+        // What on_overflow: throw means, said once here. The frame cannot keep its
+        // promise — one record per object for this operation — so the operation is
+        // refused, and an operation that was refused has no history. The alternative
+        // reading ("write what you have and raise anyway") is what "release" already
+        // does, only louder: the trail is fragmented either way, and an option that
+        // gives no different guarantee has no reason to exist.
+        //
+        // What it cannot undo is the database: the records reached the frame because
+        // their saves committed. The caller's own transaction is what rolls those back,
+        // which is why this setting is only meaningful where there is one.
+        $this->buffer = new FrameBuffer(maxHeld: 1, throwOnOverflow: true);
+        $this->writer = $this->writer(FailurePolicy::Log);
+        $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
+
+        try {
+            $this->frame->coalesce(function (): void {
+                $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+                $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(3, 4)]);
+            });
+            self::fail('the frame should have refused the second object');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertSame([], $this->gateway->documents, 'a refused operation leaves no history behind');
+        self::assertFalse($this->frame->isOpen(), 'and no frame either');
     }
 
     private static function consumed(object $message, string $transport = 'test'): Envelope

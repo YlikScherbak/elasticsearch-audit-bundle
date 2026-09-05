@@ -19,15 +19,19 @@ final class Cursor
     /**
      * The shape of what a token carries. A client never looks inside, but the bundle
      * has to recognise its own older tokens: without a marker, a payload from another
-     * format is read as though it were this one. Version 1 is {"v":1,"s":[...]}; a
-     * bare array is the unversioned form tokens had before, still accepted.
+     * format is read as though it were this one.
+     *
+     * Version 2 is {"v":2,"s":[...],"q":"<query fingerprint>"}. The earlier shapes —
+     * {"v":1,"s":[...]} and, before that, a bare array — carry no fingerprint, so a
+     * reader cannot tell whether they belong to the query being continued; 1.0 refuses
+     * them rather than answer from the middle of somebody else's result set.
      */
-    private const VERSION = 1;
+    private const VERSION = 2;
 
     /**
      * @param list<mixed> $sortValues
      */
-    public static function encode(array $sortValues): string
+    public static function encode(array $sortValues, ?string $query = null): string
     {
         // Held to what decode() accepts, on the way out as well as on the way in. It
         // checked only that json_encode could run, so the bundle could hand a client a
@@ -36,7 +40,7 @@ final class Cursor
         self::assertUsable($sortValues);
 
         try {
-            $json = json_encode(['v' => self::VERSION, 's' => $sortValues], JSON_THROW_ON_ERROR);
+            $json = json_encode(['v' => self::VERSION, 's' => $sortValues, 'q' => $query], JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
             throw new InvalidQueryException('The sort values of this page cannot be encoded as a cursor: '.$e->getMessage(), 0, $e);
         }
@@ -83,21 +87,26 @@ final class Cursor
             throw self::invalid();
         }
 
-        // The versioned envelope, or the bare array tokens had before it — a client
-        // holding one from yesterday keeps its page.
-        if (\array_key_exists('v', $values)) {
-            if ($values['v'] !== self::VERSION) {
-                throw new InvalidQueryException(sprintf('This cursor token was issued in a newer version (%s) than this bundle understands (%d). Start from the first page.', \is_scalar($values['v']) ? (string) $values['v'] : get_debug_type($values['v']), self::VERSION));
-            }
-
-            $values = $values['s'] ?? null;
-
-            if (!\is_array($values)) {
-                throw self::invalid();
-            }
+        // Only this version's envelope is read. A bare list is the shape tokens had
+        // before they were versioned — it decodes into a perfectly usable sort tuple,
+        // which is exactly why it has to be refused now: nothing in it says which query
+        // it belongs to. Anything else without an envelope is not a token at all, and
+        // saying "malformed" is more useful there than "old".
+        if (array_is_list($values)) {
+            throw self::looksLikeSortValues($values) ? self::fromAnotherVersion(null) : self::invalid();
         }
 
-        if ($values === [] || !array_is_list($values)) {
+        if (!\array_key_exists('v', $values)) {
+            throw self::invalid();
+        }
+
+        if ($values['v'] !== self::VERSION) {
+            throw self::fromAnotherVersion($values['v']);
+        }
+
+        $values = $values['s'] ?? null;
+
+        if (!\is_array($values) || $values === [] || !array_is_list($values)) {
             throw self::invalid();
         }
 
@@ -128,6 +137,68 @@ final class Cursor
                 throw new InvalidQueryException(sprintf('A sort value is a scalar or null; %s cannot travel in a cursor token.', get_debug_type($value)));
             }
         }
+    }
+
+    /**
+     * Which query the token was issued for, when it says so.
+     *
+     * A cursor is a position inside a result set, and the reader has to be able to tell
+     * that the set it is about to search is the one the token came from:
+     * `withEvents(...)->afterToken($t)` is otherwise a page of somebody else's results,
+     * silently missing everything before that position. Reading only — a malformed token
+     * is decode()'s to refuse, and it will.
+     */
+    public static function queryOf(string $token): ?string
+    {
+        $binary = base64_decode(strtr(trim($token), '-_ ', '+/+'), true);
+
+        if ($binary === false) {
+            return null;
+        }
+
+        try {
+            $values = json_decode($binary, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+
+        return \is_array($values) && \is_string($values['q'] ?? null) ? $values['q'] : null;
+    }
+
+    /**
+     * Whether a bare list is the sort tuple older tokens carried — a page somebody is
+     * holding — rather than something that merely decoded into an array.
+     *
+     * @param array<mixed> $values
+     */
+    private static function looksLikeSortValues(array $values): bool
+    {
+        if ($values === []) {
+            return false;
+        }
+
+        foreach ($values as $value) {
+            if ($value !== null && !\is_scalar($value)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * A token whose envelope is not this version's. Which direction it came from is
+     * worth saying: a newer one means the reader is behind, an older one means the
+     * token is from before the bundle bound a cursor to its query. Neither is the
+     * client's mistake, and in both cases the first page is the way out.
+     */
+    private static function fromAnotherVersion(mixed $version): InvalidQueryException
+    {
+        if (\is_int($version) && $version > self::VERSION) {
+            return new InvalidQueryException(sprintf('This cursor token was issued in a newer version (%d) than this bundle understands (%d). Start from the first page.', $version, self::VERSION));
+        }
+
+        return new InvalidQueryException(sprintf('This cursor token was issued in an older version (%s) of the audit bundle, before a token carried the query it belongs to — there is no way to tell whether continuing it here would answer from the middle of a different result set. Start from the first page.', $version === null ? 'before tokens were versioned' : (\is_scalar($version) ? (string) $version : get_debug_type($version))));
     }
 
     private static function invalid(): InvalidQueryException

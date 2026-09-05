@@ -30,8 +30,10 @@ final class WriteFailedException extends \RuntimeException implements AuditExcep
      * listener that failed) carries a message the bundle did not write and cannot
      * redact: it may name the very value just removed from the record, and copying it
      * here would put a secret in every place this exception is logged or shown. Such a
-     * cause is named by class only, and `getPrevious()` keeps the full diagnosis one
-     * step away for whoever is entitled to it.
+     * cause is named by class only. Whether the cause itself is attached is the same
+     * decision, made once in `redact.failure_details`: under "full" it is, and under
+     * "cause" the writer hands this exception a sanitized reason instead — because an
+     * uncaught exception is serialised, chain and all, by whatever ends up handling it.
      */
     public static function for(?AuditRecord $record, \Throwable $previous): self
     {
@@ -39,7 +41,7 @@ final class WriteFailedException extends \RuntimeException implements AuditExcep
         // wrote it" was the earlier guess, and it is false for every library that
         // throws directly — an enricher raising RuntimeException("cannot enrich with
         // token $token") has no previous either.
-        $cause = $previous instanceof SafeExceptionMessage
+        $cause = SafeMessage::vouchedFor($previous)
             ? $previous->getMessage()
             : $previous::class.' — see the previous exception';
 

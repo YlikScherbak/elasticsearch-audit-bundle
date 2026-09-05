@@ -71,7 +71,7 @@ final class ElasticsearchGatewayTest extends TestCase
             self::fail('expected an exception');
         } catch (RequestRejectedException $e) {
             self::assertStringContainsString('rejected', $e->getMessage());
-            self::assertStringContainsString('failed to parse field [objectId]', $e->getMessage());
+            self::assertStringContainsString('document_parsing_exception', $e->getMessage());
             self::assertStringNotContainsString('abc', $e->getMessage(), 'the refused value stays out of the exception');
             self::assertNotInstanceOf(TransportUnavailableException::class, $e);
         }

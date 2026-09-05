@@ -39,6 +39,32 @@ final class FrameBufferTest extends TestCase
         self::assertSame(['fact' => ['old' => 1000, 'new' => 995], 'reserve' => ['old' => 5, 'new' => 6]], $released[0]->toDocument()['changes']);
     }
 
+    public function testOneActorsStepIsNeverRecordedUnderAnothersName(): void
+    {
+        // A system correction beside a user's edit, in one operation, on one object:
+        // AuditWriter::record(..., actor: 'system') is how an application says so.
+        // Merged, the second change would be filed under whoever moved first — and an
+        // audit trail that names the wrong person is worse than two lines.
+        $buffer = new FrameBuffer();
+        $buffer->open();
+        $at = new \DateTimeImmutable('2026-09-05 10:00:00', new \DateTimeZone('UTC'));
+
+        $released = $buffer->hold(new AuditRecord('stock', 1, AuditEvent::UPDATE, $at, 'alice', ['fact' => new Change(1, 2)]));
+        self::assertSame([], $released);
+
+        $released = $buffer->hold(new AuditRecord('stock', 1, AuditEvent::UPDATE, $at, 'system', ['fact' => new Change(2, 3)]));
+
+        self::assertCount(1, $released, "alice's record goes out when somebody else touches the same object");
+        self::assertSame('alice', $released[0]->actor);
+        self::assertSame(['old' => 1, 'new' => 2], $released[0]->toDocument()['changes']['fact']);
+
+        $rest = $buffer->close();
+
+        self::assertCount(1, $rest);
+        self::assertSame('system', $rest[0]->actor);
+        self::assertSame(['old' => 2, 'new' => 3], $rest[0]->toDocument()['changes']['fact']);
+    }
+
     public function testTwoObjectsWhoseNamesCollideAreStillTwoObjects(): void
     {
         // record() takes free-form strings for both halves, and the frame's identity

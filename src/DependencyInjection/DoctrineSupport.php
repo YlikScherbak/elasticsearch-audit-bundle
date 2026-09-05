@@ -29,10 +29,11 @@ final class DoctrineSupport
     }
 
     /**
-     * What is really there. The kernel's bundle list is the reliable answer where it
-     * exists — a bundle can be installed and left out of the kernel — and the class
-     * being autoloadable is the fallback for a container built without a kernel
-     * (which is what the bundle's own unit tests do).
+     * What is really there. The kernel's bundle list is the only answer worth having —
+     * a bundle can be installed and left out of the kernel — so a container built
+     * without one (a unit test, a tool) is told "not registered" rather than asked
+     * about `vendor/`. A test that needs another answer injects `full()`, `none()` or
+     * `ormOnly()`.
      */
     public static function detect(ContainerBuilder $container): self
     {

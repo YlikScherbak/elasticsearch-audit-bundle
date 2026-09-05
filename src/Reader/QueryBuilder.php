@@ -33,49 +33,8 @@ final class QueryBuilder
      */
     public function build(AuditQuery $query, bool $pointInTime = false, bool $trackTotalHits = true): array
     {
-        $filter = [];
-
-        if ($query->objectType !== null) {
-            $filter[] = ['term' => ['objectType' => $query->objectType]];
-        }
-
-        foreach (['objectId' => $query->objectIds, 'event' => $query->events, 'source' => $query->actors] as $field => $values) {
-            if ($values !== []) {
-                $filter[] = self::termOrTerms($field, $values);
-            }
-        }
-
-        if ($query->ids !== []) {
-            $filter[] = ['ids' => ['values' => $query->ids]];
-        }
-
-        if ($query->from !== null || $query->to !== null) {
-            $range = [];
-
-            if ($query->from !== null) {
-                $range['gte'] = $query->from->setTimezone(new \DateTimeZone('UTC'))->format(AuditRecord::DATE_FORMAT);
-            }
-
-            if ($query->to !== null) {
-                $range['lte'] = $query->to->setTimezone(new \DateTimeZone('UTC'))->format(AuditRecord::DATE_FORMAT);
-            }
-
-            $filter[] = ['range' => ['loggedAt' => $range]];
-        }
-
-        foreach ($query->filters as $attribute => $condition) {
-            $filter[] = self::clause((string) $attribute, $condition);
-        }
-
         $body = [
-            // A query known to match nothing is answered by AuditReader without a
-            // request; anything else building the body (raw(), a future caller) still
-            // must not turn "known empty" back into a real search.
-            'query' => match (true) {
-                $query->matchesNothing() => ['match_none' => new \stdClass()],
-                $filter === [] => ['match_all' => new \stdClass()],
-                default => ['bool' => ['filter' => $filter]],
-            },
+            'query' => $this->buildQuery($query),
             'sort' => array_values(array_filter([
                 ['loggedAt' => $query->sort],
                 ['id' => ['order' => $query->sort, 'unmapped_type' => 'keyword']],
@@ -114,6 +73,63 @@ final class QueryBuilder
         }
 
         return $body;
+    }
+
+    /**
+     * What the query matches, and nothing about how it is paged or sorted.
+     *
+     * `raw()` needs exactly this — the visibility boundary it wraps a caller's body in —
+     * and used to take it as `build($query)['query']`, which builds a whole body to
+     * throw all but one key of it away. That is not only waste: the boundary is the one
+     * thing that must be there, and reaching for it by key means a `build()` that ever
+     * stops writing that key hands `null` to a caller wrapping nothing around nothing.
+     *
+     * @return array<string, mixed>
+     */
+    public function buildQuery(AuditQuery $query): array
+    {
+        $filter = [];
+
+        if ($query->objectType !== null) {
+            $filter[] = ['term' => ['objectType' => $query->objectType]];
+        }
+
+        foreach (['objectId' => $query->objectIds, 'event' => $query->events, 'source' => $query->actors] as $field => $values) {
+            if ($values !== []) {
+                $filter[] = self::termOrTerms($field, $values);
+            }
+        }
+
+        if ($query->ids !== []) {
+            $filter[] = ['ids' => ['values' => $query->ids]];
+        }
+
+        if ($query->from !== null || $query->to !== null) {
+            $range = [];
+
+            if ($query->from !== null) {
+                $range['gte'] = $query->from->setTimezone(new \DateTimeZone('UTC'))->format(AuditRecord::DATE_FORMAT);
+            }
+
+            if ($query->to !== null) {
+                $range['lte'] = $query->to->setTimezone(new \DateTimeZone('UTC'))->format(AuditRecord::DATE_FORMAT);
+            }
+
+            $filter[] = ['range' => ['loggedAt' => $range]];
+        }
+
+        foreach ($query->filters as $attribute => $condition) {
+            $filter[] = self::clause((string) $attribute, $condition);
+        }
+
+        // A query known to match nothing is answered by AuditReader without a request;
+        // anything else building the body (raw(), a future caller) still must not turn
+        // "known empty" back into a real search.
+        return match (true) {
+            $query->matchesNothing() => ['match_none' => new \stdClass()],
+            $filter === [] => ['match_all' => new \stdClass()],
+            default => ['bool' => ['filter' => $filter]],
+        };
     }
 
     /**

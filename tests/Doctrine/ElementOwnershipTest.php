@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\BasketItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Customer;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredTracking;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisspelledTracking;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\UntrackedInverseManyToMany;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Events;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
@@ -173,7 +174,10 @@ final class ElementOwnershipTest extends DoctrineTestCase
         $this->attachListener(FailurePolicy::Throw);
 
         $this->expectException(WriteFailedException::class);
-        $this->expectExceptionMessage('is mapped by a collection on its elements');
+        // The refusal comes from the wider rule now — an audited collection nothing can
+        // report to this side — which covers this shape with trackElements or without:
+        // one cause, one message.
+        $this->expectExceptionMessage('reach back through a collection of their own');
 
         $this->em->persist(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredInverseTracking());
         $this->em->flush();
@@ -280,6 +284,27 @@ final class ElementOwnershipTest extends DoctrineTestCase
         $this->expectExceptionMessage('representer');
 
         $basket->add(new BasketItem('apples'));
+        $this->em->flush();
+    }
+
+    public function testAnUntrackedInverseManyToManyIsRefusedRatherThanSilentlyIgnored(): void
+    {
+        // trackElements: true on this shape is already refused, and refusing only that
+        // left the quieter half open: without it the declaration reads as supported and
+        // records nothing either. ChangeSetBuilder skips inverse collections on purpose
+        // — Doctrine persists the owning side — and membership travels through an
+        // element's single-valued reference back, which a ManyToMany element does not
+        // have. Two roads, both closed, and no word about it.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('owning side');
+
+        $this->em->persist(new UntrackedInverseManyToMany());
         $this->em->flush();
     }
 

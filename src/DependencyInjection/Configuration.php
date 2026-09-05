@@ -248,7 +248,7 @@ final class Configuration implements ConfigurationInterface
             ->defaultValue(10000);
 
         $children->enumNode('on_overflow')
-            ->info('What the valve does: "release" (default) writes what the frame holds and carries on, which keeps every record but ends the promise of one record per object; "throw" refuses the operation instead, for a trail that is read for that promise.')
+            ->info('What the valve does. "release" (default) writes what the frame holds and carries on: every record is kept, and the promise of one record per object ends for this operation. "throw" refuses the operation instead — nothing of it is written, including what the frame had already handed back, because a refused operation has no history. It does not undo the database: those saves committed, so it is only meaningful where the caller has a transaction to roll back.')
             ->values(['release', 'throw'])
             ->defaultValue('release');
     }

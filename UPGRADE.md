@@ -25,12 +25,47 @@ cluster version too: this is the one requirement here that the client alone cann
 which answers with the indices behind a name whose mapping is not `dynamic: false`. Returning an
 empty array keeps the previous behaviour; `audit:check` then reports nothing about it.
 
-**A `doctrine.connection` that no entity manager uses fails the boot**, and so does a
-`message_bus` that is not a Messenger bus. Both used to boot and record nothing at all. The
-message names the connections that do have entity managers, or the buses that are tagged.
+**A redaction rule with spaces around it is refused at boot** — it never matched anything, so a
+value it named was being written in full. Trim the rule.
+
+**An exception class of your own that implements `SafeExceptionMessage` is no longer trusted.**
+The marker means "the bundle wrote this message"; only the bundle's own exceptions carry it now.
+To have your own messages repeated, set `redact.failure_details: full`.
+
+**`raw()` requires the aggregation tree to be arrays.** A body built with `stdClass` used to pass
+the boundary check unexamined. Keep `new \stdClass()` for the empty objects Elasticsearch expects,
+and build everything around them as arrays.
+
+**`coalescing.on_overflow: throw` writes nothing of the operation it refuses.** It used to write
+the part that had already been released and raise as well. If you relied on that, `release` is the
+setting that keeps every record; `throw` is for a caller that rolls the operation back.
+
+**With `doctrine.enabled: true`, a `doctrine.connection` that no entity manager uses fails the
+boot**, and so does a `message_bus` that is not a Messenger bus. Both used to boot and record
+nothing at all; the message names the connections that do have entity managers, or the buses that
+are tagged. Under the default `auto` nothing fails: the listener is dropped without a word, because
+`auto` promises to attach where it can rather than to work everywhere.
 
 **An association among `alwaysRecord` fields fails the boot too.** It was accepted and honoured
 nowhere; audit it as a field with a representer instead.
+
+**An audited *inverse* ManyToMany fails the boot as well.** The inverse side has no change set of
+its own, so it was validated as a real association and then never recorded. Track it from the
+owning side with `trackElements` — which is the path that always carried it — and take the field
+out of `fields`.
+
+**A coalesced operation whose steps have different actors now produces one record per actor.** If
+you record a step with an explicit `actor:` inside a frame — a system correction beside a user's
+edit — that step used to be merged into the record before it and take that record's actor. Nothing
+is lost; there is simply a second history line, under the name that belongs to it.
+
+**A cursor token is bound to the query that issued it, and tokens made before 1.0 are refused.**
+Two things to check. First, code that changes a filter, a date range or the sort order while
+keeping the token it already has: that used to answer from the middle of the new result set,
+skipping everything before that position without a word, and is now an `InvalidQueryException` —
+reset the cursor whenever the query changes. Second, a client holding a token across the deploy
+gets one refusal and has to start from the first page; nothing to change, but a "load more" that
+throws once at the moment of the upgrade is expected.
 
 **An audited association now needs its representer at the first flush**, whether or not a value
 was ever represented. If a collection or a to-one was declared without one, it recorded `null` on

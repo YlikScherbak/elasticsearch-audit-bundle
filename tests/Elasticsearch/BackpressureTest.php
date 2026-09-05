@@ -86,6 +86,43 @@ final class BackpressureTest extends TestCase
         }
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProvider('waysElasticsearchCanQuoteAValue')]
+    public function testTheClustersOwnWordingIsNotWhatKeepsAValueOut(string $reason): void
+    {
+        // The guarantee rested on a regex for one phrase — "Preview of field's value:"
+        // — and the live test from the round before proved that phrase is the only thing
+        // actually keeping a refused value out of the log, since include_source_on_error
+        // does not remove it. A human-readable reason is not an API: another parser, a
+        // plugin, the next version can word it differently, and the regex would carry
+        // the value through. So the reason is no longer repeated at all: the exception
+        // is built from the status and the error type, which are Elasticsearch's own
+        // machine-readable fields, and the full text stays in the previous exception
+        // where failure_details decides what happens to it.
+        $gateway = $this->gateway(static fn (RequestInterface $r) => $r->getMethod() === 'HEAD'
+            ? self::response(200, [])
+            : self::response(400, ['error' => ['type' => 'document_parsing_exception', 'reason' => $reason]]));
+
+        try {
+            $gateway->index('audit_log', ['total' => 'hunter2-the-actual-password']);
+            self::fail('the document should have been refused');
+        } catch (RequestRejectedException $e) {
+            self::assertStringNotContainsString('hunter2-the-actual-password', $e->getMessage());
+            self::assertStringContainsString('document_parsing_exception', $e->getMessage(), 'what went wrong is still named');
+            self::assertStringContainsString('400', $e->getMessage());
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function waysElasticsearchCanQuoteAValue(): iterable
+    {
+        yield 'the phrase we knew' => ["failed to parse field [total] of type [long]. Preview of field's value: 'hunter2-the-actual-password'"];
+        yield 'another parser' => ['failed to parse [total], received value [hunter2-the-actual-password]'];
+        yield 'a conversion error' => ['cannot convert "hunter2-the-actual-password" to long'];
+        yield 'a plugin' => ['value hunter2-the-actual-password rejected by pipeline [redact]'];
+    }
+
     public function testAnIndexNobodyIsAllowedToLookAtIsNotAnIndexThatIsMissing(): void
     {
         // The client does not throw on HEAD — it suppresses its own exception for that

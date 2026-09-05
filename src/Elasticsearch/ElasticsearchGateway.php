@@ -113,7 +113,7 @@ final class ElasticsearchGateway implements GatewayInterface
         }
 
         $response = $this->call(fn () => self::answer($this->client->bulk(['body' => $body, 'include_source_on_error' => false]))->asArray());
-        $result = BulkResult::fromResponse($response, \count($items));
+        $result = BulkResult::fromResponse($response, \count($items), array_map(strval(...), array_column($items, 'id')));
 
         // The same forgetting index() does on its 404: an index that answered "not
         // found" per item is gone, and a long-lived worker's cache must not keep
@@ -402,7 +402,7 @@ final class ElasticsearchGateway implements GatewayInterface
             }
 
             if ($status >= 400 && $status < 500) {
-                $reason = self::reason($e);
+                $reason = self::reason($e, aboutADocument: !$query);
 
                 throw $query
                     ? new InvalidQueryException('Elasticsearch rejected the query: '.self::actionable($reason), $status, $e)
@@ -436,24 +436,57 @@ final class ElasticsearchGateway implements GatewayInterface
     }
 
     /**
-     * The "reason" Elasticsearch gives in its error body, falling back to the client's message.
+     * What went wrong, said in Elasticsearch's fields rather than in its prose.
+     *
+     * The reason text is written for a person to read and is free to change between
+     * versions and parsers. It quotes a refused value — as `Preview of field's value:
+     * '…'`, which this used to cut with a regex, and just as easily as `received value
+     * [ … ]` or `cannot convert "…" to long`. A guarantee that depends on the cluster
+     * keeping one wording is not a guarantee; `type` is machine-readable and says what
+     * went wrong without saying what with.
+     *
+     * Nothing is lost by it: the full text stays on the previous exception, where
+     * redact.failure_details decides whether it travels any further. And never
+     * $e->getMessage() — the client builds that as "<status> <phrase>: <the whole
+     * response body>".
      */
-    private static function reason(ClientResponseException $e): string
+    private static function reason(ClientResponseException $e, bool $aboutADocument): string
     {
-        // Never $e->getMessage(), on either path. The client builds it as
-        // "<status> <phrase>: <the whole response body>", so an answer this cannot read —
-        // a proxy, a WAF, a gateway in front of the cluster — would travel in full
-        // through the one channel that exists to carry no payload at all.
-        $unreadable = sprintf('Elasticsearch answered HTTP %d without a reason anyone can read.', $e->getResponse()->getStatusCode());
+        $status = $e->getResponse()->getStatusCode();
 
         try {
             $body = json_decode((string) $e->getResponse()->getBody(), true, 512, \JSON_THROW_ON_ERROR);
         } catch (\JsonException) {
-            return $unreadable;
+            return sprintf('Elasticsearch answered HTTP %d with something that is not JSON.', $status);
         }
 
+        $type = \is_array($body) ? ($body['error']['root_cause'][0]['type'] ?? $body['error']['type'] ?? null) : null;
         $reason = \is_array($body) ? ($body['error']['root_cause'][0]['reason'] ?? $body['error']['reason'] ?? null) : null;
 
-        return \is_string($reason) && $reason !== '' ? RequestRejectedException::withoutValuePreview($reason) : $unreadable;
+        // Only a refusal of a *document* has the cluster quoting a value, and that is
+        // the one place the prose is dropped. A refused search saw no audited value —
+        // the bundle built the query — and its wording is the whole diagnostic there:
+        // "Result window is too large", "No search context found for id". Throwing that
+        // away would cost an operator the answer and protect nothing.
+        if (!$aboutADocument && \is_string($reason) && $reason !== '') {
+            return RequestRejectedException::withoutValuePreview($reason);
+        }
+
+        if (!\is_string($type) || $type === '') {
+            return 'the cluster gave no error type anyone can read';
+        }
+
+        // The field name is worth keeping and safe to keep: it is a name the application
+        // chose, not a value a record carried. Lifted out rather than left in — and that
+        // is the whole difference from the regex this replaced. That one cut a known
+        // phrase away and passed the rest on, so an unfamiliar wording carried the value
+        // through; this takes one recognised fragment and passes nothing else, so a
+        // wording it does not know costs a field name and leaks nothing.
+        $field = \is_string($reason) && preg_match('~\bfield \[([^\]]{1,128})\]~', $reason, $found) === 1 ? $found[1] : null;
+
+        // Without the status: the callers put that in front of this.
+        return $field === null
+            ? sprintf('%s. Its own wording is not repeated, because a refused document is quoted in it — read the previous exception, or set redact.failure_details to "full".', $type)
+            : sprintf('%s on field "%s". The cluster\'s own wording is not repeated, because a refused document is quoted in it — read the previous exception, or set redact.failure_details to "full".', $type, $field);
     }
 }

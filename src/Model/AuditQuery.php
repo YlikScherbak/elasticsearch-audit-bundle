@@ -379,7 +379,55 @@ final class AuditQuery
      */
     public function afterToken(string $token): self
     {
-        return $this->after(Cursor::decode($token));
+        $continued = $this->after(Cursor::decode($token));
+        $continued->continuing = Cursor::queryOf($token);
+
+        return $continued;
+    }
+
+    /**
+     * What this query matches and in what order, as one string.
+     *
+     * A cursor is a position inside a result set and means nothing in another one:
+     * Elasticsearch takes any search_after whose sort has the right shape and answers
+     * with what follows that position wherever it is used, so a token from "all events"
+     * continued into "remove events" skips every remove before it without a word. The
+     * with*() family drops a cursor when the query changes underneath it, which covers
+     * `after($c)->withEvents(...)`; a token arrives the other way round, already
+     * detached, and only what it carries can say where it belongs.
+     *
+     * Paging is deliberately not part of it: how large a page is, and how far into the
+     * result set a reader has got, do not change which records are in it.
+     */
+    public function fingerprint(): string
+    {
+        return hash('xxh128', serialize([
+            $this->objectType,
+            $this->objectIds,
+            $this->events,
+            $this->actors,
+            $this->ids,
+            $this->from?->format(\DATE_ATOM),
+            $this->to?->format(\DATE_ATOM),
+            array_map(static fn (Filter $filter): array => (array) $filter, $this->filters),
+            $this->options,
+            $this->sort,
+            $this->nothing,
+        ]));
+    }
+
+    /**
+     * The query a token being continued was taken from, when this query came from one.
+     *
+     * Not readonly and not in the constructor: it belongs to the act of continuing
+     * rather than to what the query matches, and it must not survive a with*() — which
+     * builds a different query, and therefore a different result set.
+     */
+    private ?string $continuing = null;
+
+    public function continuedQuery(): ?string
+    {
+        return $this->continuing;
     }
 
     public function usesCursor(): bool

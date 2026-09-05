@@ -154,6 +154,72 @@ the dependency range.
   cause` a safe cause with a chain is now repeated as its message without the chain, and
   `FailureReason` carries `causeClass`, so a listener can still tell a missing index from a refused
   document without reading any message
+- **`raw()` refuses an aggregation tree it cannot read.** The allow-list walked the tree with
+  `is_array()` and skipped whatever was not one — so the same aggregations built from `stdClass`,
+  which `json_encode` turns into exactly the JSON Elasticsearch wants, went through unexamined. A
+  `global` aggregation among them ignores the query, which is the one thing this method promises
+  cannot happen. A validator that cannot read a shape now refuses it
+- **A listener can no longer hand a redacted value to the listener behind it.** The record is
+  redacted, dispatched and redacted again — but the second pass ran after the whole dispatch, so
+  between the two a listener that reached for the entity again could put the value back and
+  everyone registered after it read it. The document was never at risk, which is why the existing
+  test did not see this: it looks at what reached the gateway, and the invariant is wider than
+  that. `setRecord()` redacts what it is given, there and then
+- **A redaction rule with whitespace around it is refused.** The check trimmed before looking and
+  the matcher compares the rule exactly as written, so `' password '` was accepted and matched
+  nothing — the value it existed to remove was written in full. Trimming it quietly would be the
+  other way to hide the mistake
+- **`SafeExceptionMessage` is the bundle's own promise, not an offer.** An empty public interface
+  let any class opt into having its message repeated in the log, the failure event and the
+  exception — the same enricher the tests treat as untrusted, one `implements` away from being
+  trusted. The marker now counts only on the bundle's own exceptions; an application that wants
+  foreign messages repeated says so once, in `redact.failure_details: full`, where it is a
+  decision somebody made rather than a capability a class granted itself
+- **`coalescing.on_overflow: throw` now means one thing.** The setting refuses an operation whose
+  coalescing guarantee cannot be kept, and the two paths that meet the refusal disagreed about
+  what that meant: `writeAll()` wrote the part of the batch that had already been released and then
+  raised, while `coalesce()` caught the exception, called `end()` and published everything the
+  frame held. Both now write nothing of that operation — the alternative reading is what `release`
+  already does, only with an exception on top, and a setting that gives no different guarantee has
+  no reason to exist. What it cannot do is undo the database: a record reaches the frame because
+  its save committed, so the rollback belongs to the transaction around the operation, which is why
+  the setting is only meaningful where the caller has one
+- **`doctrine.enabled: auto` no longer refuses to boot an application that never asked for entity
+  auditing.** The compiler check added for DBAL-only connections did not know the difference
+  between a promise and an offer: `auto` says "attach the listener where it can work and stay
+  quiet where it cannot", and it was made to fail exactly like an explicit `true`. An application
+  using DBAL alone, with doctrine/orm present in its vendor directory, stopped booting. The mode
+  travels to the compiler now — `auto` removes the listener and says nothing, `true` still refuses
+- **A flush whose postFlush threw no longer leaves its state to the next one.** postFlush runs
+  application code — a representer deferred until an inserted element has its id, `withContext()`
+  reading a declaration — and under `on_failure: throw` reporting one of those failures leaves the
+  method through the exception, past the cleanup below it. Everything the flush had collected then
+  stayed, and the depth stack was already unwound, so the next flush did not read it as abandoned
+  either: somebody else's operation published those records as its own. The cleanup is in a
+  `finally` now
+- **A cursor token belongs to the query that issued it.** A cursor is a position inside one
+  result set, and nothing said which: `withEvents(UPDATE)->afterToken($t)` with a token from the
+  unfiltered query is not an error Elasticsearch can see — the sort tuple has the right shape, so
+  it answers with what follows that position in the *new* set and everything before it is simply
+  missing from the results. A screen that changes a filter without resetting its cursor loses
+  records silently, which is the one thing a page of history may not do. The token now carries a
+  fingerprint of the query that made it (filters, dates, options and sort order — not the paging),
+  and `find()` refuses one raised on a different query, naming what to do instead
+- **A refused document no longer carries the cluster's wording out of the gateway.** The value
+  preview Elasticsearch appends to a mapping refusal was cut by matching its English (`Preview of
+  field's value`), so a cluster whose message is phrased differently — a version that rewords it, a
+  locale, a `caused_by` from a different parser — put the rejected value straight into the
+  exception, the log line and every listener behind them. The whole point of that cut is a value
+  nobody may see. A document refusal is now assembled from what the response *states* — the error
+  type, and the field name lifted structurally — and never from the cluster's prose. Searches are
+  unchanged: those messages carry no document value, and `Result window is too large` or `No search
+  context found` are exactly what makes them diagnosable
+- **An audited inverse ManyToMany is refused at boot rather than audited into silence.** The
+  inverse side has no change set of its own — Doctrine reports the collection, not the field — so
+  naming one under `fields` was accepted, validated as a real association and then never recorded:
+  every edit to it made a record that did not mention it. It reaches history through
+  `trackElements` on the owning side, and the boot check now says so instead
+
 - **An audited association without a representer is refused rather than recorded as nothing.**
   `ChangeSetBuilder` raised this while representing a value, which left two ways past it: an
   association that is null was never represented, and the membership path represented nothing at
@@ -334,6 +400,40 @@ the dependency range.
 - **`redact: [source]` is refused instead of quietly doing nothing.** The actor is a base field
   chosen when the record is built; a rule could never reach it, and accepting one let somebody
   believe their actor was redacted. The exception says where the choice really lives
+- **One actor's change is never recorded under another's name.** Coalescing folds an operation's
+  steps into one record and kept the first record's identity, the actor included — so a step
+  recorded with an explicit `actor:` (a system correction beside a user's edit, the ordinary way
+  an application says this) was merged into the user's record and filed under their name. "Who did
+  this" is the question a trail is kept to answer. Steps by different actors are no longer merged:
+  the held record goes out as it stands, the new one starts the next, and nothing is dropped or
+  misattributed
+- **A bulk answer is checked against the documents it is about.** Everything after the response is
+  keyed by position — which record the failure policy sees, which batch is retried, which index is
+  forgotten — and position was the one thing in that response taken on faith. Where the answer
+  names a document (`_id`), it now has to be the one sent at that position, and a batch that
+  cannot be matched is re-sent whole rather than reported against the wrong record. An answer that
+  names none is read as before: turning "did not mention it" into a permanent write failure would
+  be a new way for the trail to go silent
+- **A queued record that lost its id to a serializer is written under the one in its document.**
+  `IndexAuditRecord` carries the id twice — as the message's own property and inside the document —
+  and a redelivery is harmless only because of it. A serializer that drops a property with a
+  default left the handler writing under an id Elasticsearch invents, where a retry stores the same
+  event twice; the copy in the document closes that. What remains is a message queued before ids
+  existed at all, which has neither
+
+### Changed
+- **A cursor token from before 1.0 is refused rather than continued.** Both older shapes — the
+  bare array, and `{"v":1,"s":[…]}` — decode into a usable sort tuple and say nothing about which
+  query they came from, so the check that a cursor belongs to the query being read cannot be
+  applied to them. A client holding one across the upgrade is asked for the first page once; the
+  alternative is a page silently missing records, which is what the version marker exists for
+- **What `getPrevious()` promises is written down correctly.** Three docblocks and one exception
+  message said the full cause stays "one step away" under `redact.failure_details: cause` — it does
+  not, and must not: an uncaught exception is serialised chain and all by Symfony's error handler,
+  Monolog's processor and Sentry alike, so attaching the cause would be the policy walked around
+  one step later. Under `cause` the cause does not travel and `FailureReason::$causeClass` names
+  what failed; under `full` it travels intact. No behaviour changed — only the sentences that
+  described it, which were pointing readers at something that is not there
 
 ### Added
 - **The transaction boundary is stated once, with a test behind it.** A new README section says
@@ -348,9 +448,10 @@ the dependency range.
   that the tags the bundle declares are *collected* — not merely that its services can be
   built. The two levels are described in CONTRIBUTING, together with the rule that earned them:
   a guard nobody has watched fail is a guard of nothing
-- **A cursor token carries its version** (`{"v":1,"s":[…]}`). A token from an older, unversioned
-  build is still read; one from a newer version is refused by name instead of being read as
-  something it is not
+- **A cursor token carries its version and the query it was issued for**
+  (`{"v":2,"s":[…],"q":…}`). A token from another version — older or newer — is refused by name
+  instead of being read as something it is not, and one raised on a different query is refused
+  before it can answer from the middle of a result set it does not belong to
 - **`AuditQuery::DEFAULT_MAX_TERMS`** — the filter-list ceiling, named and documented as
   Elasticsearch's default `index.max_terms_count` rather than a bare number in a condition
 - **A tracked element inserted with a generated id is represented after the flush**, so a

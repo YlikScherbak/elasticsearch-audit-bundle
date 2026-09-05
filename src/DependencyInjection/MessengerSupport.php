@@ -29,8 +29,9 @@ final class MessengerSupport
 
     /**
      * The kernel's bundle list where there is one — a bundle can be installed and left
-     * out of the kernel — and the class being autoloadable as the fallback for a
-     * container built without a kernel, which is what the bundle's own unit tests do.
+     * out of the kernel — and "not registered" where there is none: `vendor/` cannot
+     * answer this question. A test that needs another answer injects `full()`,
+     * `componentOnly()` or `none()`.
      */
     public static function detect(ContainerBuilder $container): self
     {

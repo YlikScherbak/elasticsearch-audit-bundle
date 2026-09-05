@@ -419,6 +419,11 @@ The record keeps the timestamp, actor and id of the **first** step — the opera
 and the attributes of the last one. Enrichers run once per step, when the record enters the
 frame, not again when it leaves.
 
+Which is why steps by **different actors are not merged** (**since 1.0**): a step recorded with an
+explicit `actor:` — a system correction beside a user's edit — would otherwise be filed under
+whoever moved first, and "who did this" is the question a history is kept to answer. The held
+record goes out as it stands and the new actor starts the next one: two lines, each true.
+
 Frames nest — a product move inside an order status change — and only the outermost writes.
 `begin()`/`end()` are there for code that cannot wrap a closure; keep them in a `try`/`finally`.
 `write($record, immediately: true)` bypasses an open frame.
@@ -441,6 +446,15 @@ borsche_elasticsearch_audit:
     max_held: 10000           # safety valve: a frame holding more objects releases what it has
     on_overflow: release      # or "throw" (since 0.10): refuse the operation instead of coalescing less
 ```
+
+`on_overflow: throw` means the operation is refused, not that the part which fit is kept:
+**nothing of that operation is written**, what the frame had already handed back included. The
+alternative reading — write what there is and raise as well — is what `release` already does, only
+with an exception on top, and the trail is fragmented either way. What it cannot do is undo the
+database: a record reaches the frame because its save committed, so the rollback is the caller's,
+which is why this setting is only meaningful inside a transaction you own (see the recipe under
+[Frames in workers](#frames-in-workers)). Records written by *earlier* operations are untouched by
+it, and so are records an earlier flush of the same operation already sent.
 
 A value that is neither a number nor "nothing" is left alone — two different words must not
 look equal — so `numeric_fields` is safe on a column that sometimes holds text.
@@ -572,6 +586,13 @@ is what `toArray()` puts in `pagination.nextCursor` — and continue with `$quer
 The token is base64url, so it needs no escaping in a query string, and it is opaque on purpose: a
 client hands it back unread, which leaves what is inside it free to change. A token that comes back
 damaged is an `InvalidQueryException`, not a silently wrong page.
+
+A cursor is a position inside one result set, and the token knows which (**since 1.0**): continuing
+it on a query with different filters, dates, options or sort order is an `InvalidQueryException`
+rather than a page that quietly starts in the middle and leaves out everything before it. Paging
+is not part of that identity, so `page()`, `limit` and `after()` itself change freely — but a
+screen that lets somebody change a filter has to drop the cursor it was holding and read that
+query from the start.
 
 The cursor is the sort value of the last entry: `loggedAt` plus the record's id, a time-ordered
 UUID (millisecond precision), which breaks ties in time order and — unlike Elasticsearch's `_doc` — does not move when
