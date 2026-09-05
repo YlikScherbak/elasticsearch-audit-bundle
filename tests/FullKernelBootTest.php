@@ -148,7 +148,9 @@ final class FullKernel extends Kernel
             $container->loadFromExtension('doctrine', [
                 'dbal' => ['driver' => 'pdo_sqlite', 'memory' => true],
                 'orm' => [
-                    'auto_generate_proxy_classes' => true,
+                    // No auto_generate_proxy_classes: DoctrineBundle 3 removed it with
+                    // proxies themselves (PHP 8.4 lazy objects), and in 2.x it defaults
+                    // to kernel.debug, which this kernel sets anyway.
                     'controller_resolver' => ['auto_mapping' => false],
                     'mappings' => [
                         'Fixtures' => [
