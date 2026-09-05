@@ -135,7 +135,10 @@ final class AuditQuery
             throw new InvalidQueryException('The "from" date is after the "to" date.');
         }
 
-        return new self($this->objectType, $this->objectIds, $this->events, $this->actors, $this->ids, $from, $to, $this->filters, $this->options, $this->sort, $this->page, $this->limit, $this->searchAfter, $this->nothing);
+        // The cursor goes with it. A date bound decides what the query matches, exactly
+        // like a filter does, and a cursor taken before it was applied points into a
+        // result set that no longer exists.
+        return new self($this->objectType, $this->objectIds, $this->events, $this->actors, $this->ids, $from, $to, $this->filters, $this->options, $this->sort, $this->page, $this->limit, null, $this->nothing);
     }
 
     public function since(\DateTimeInterface $from): self
@@ -497,15 +500,46 @@ final class AuditQuery
             $sort ?? $this->sort,
             $page ?? $this->page,
             $limit ?? $this->limit,
-            // page() resets the cursor, and so does a change of direction: the sort
-            // values a cursor is made of belong to the ordering that produced them, and
-            // Elasticsearch would accept the stale pair and quietly skip or repeat.
-            // after() sets it; everything else keeps it.
-            $searchAfter ?? ($page !== null || ($sort !== null && $sort !== $this->sort) ? null : $this->searchAfter),
+            // A cursor belongs to the query that produced it, and only to that one.
+            // Elasticsearch accepts a search_after against anything whose sort has the
+            // right shape, and answers with what follows that position *in the new
+            // result set* — so a cursor from "all events" continued into "remove events"
+            // skips every remove before it and says nothing about having done so.
+            // after() sets it; a page number replaces it; changing the ordering, or
+            // anything that decides what the query matches — a filter, a date bound, an
+            // option a QueryExtension reads — abandons it.
+            $searchAfter ?? ($this->stillTheSameSearch($objectIds, $events, $actors, $ids, $filters, $options, $sort, $page, $nothing) ? $this->searchAfter : null),
             // Nothing is sticky: matchNothing() sets it, and nothing unsets it — a
             // later filter in an extension chain must not widen what an earlier
             // extension closed.
             $nothing ?? $this->nothing,
         );
+    }
+
+    /**
+     * Whether this change leaves the query matching the same records in the same order —
+     * the only case where a cursor may survive it.
+     *
+     * limit() says how many rows to take, not where from, and restating the direction
+     * the query already has changes nothing; both keep it.
+     *
+     * @param list<int|string>|null      $objectIds
+     * @param list<string>|null          $events
+     * @param list<string>|null          $actors
+     * @param list<string>|null          $ids
+     * @param array<string, Filter>|null $filters
+     * @param array<string, mixed>|null  $options
+     */
+    private function stillTheSameSearch(?array $objectIds, ?array $events, ?array $actors, ?array $ids, ?array $filters, ?array $options, ?string $sort, ?int $page, ?bool $nothing): bool
+    {
+        return $page === null
+            && $objectIds === null
+            && $events === null
+            && $actors === null
+            && $ids === null
+            && $filters === null
+            && $options === null
+            && $nothing === null
+            && ($sort === null || $sort === $this->sort);
     }
 }

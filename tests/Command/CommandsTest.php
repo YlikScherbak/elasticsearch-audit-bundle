@@ -259,8 +259,8 @@ final class CommandsTest extends TestCase
         $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
 
         self::assertSame(Command::FAILURE, $tester->execute([]));
-        self::assertStringContainsString('audit_log: Elasticsearch is unreachable: shard unavailable', $tester->getDisplay());
-        self::assertStringContainsString('audit_auth: Elasticsearch is unreachable: shard unavailable', $tester->getDisplay(), 'the second index is still checked');
+        self::assertStringContainsString('audit_log: Elasticsearch is unreachable (RuntimeException). — shard unavailable', $tester->getDisplay());
+        self::assertStringContainsString('audit_auth: Elasticsearch is unreachable (RuntimeException). — shard unavailable', $tester->getDisplay(), 'the second index is still checked');
     }
 
     public function testCheckFailsFastWhenTheClusterIsDown(): void
@@ -311,5 +311,20 @@ final class CommandsTest extends TestCase
                 return ['salesType' => ['type' => 'integer']];
             }
         };
+    }
+
+    public function testCheckReportsAnIndexThatWouldLetElasticsearchInventFields(): void
+    {
+        // Every declared field mapped exactly right, and the index still wide open —
+        // which is the shape this is easy to miss in: nothing about the properties is
+        // wrong, so a check that only compares them says "ok".
+        (new CommandTester(new CreateIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->enricher()])))->execute([]);
+        $this->gateway->dynamicIndices = ['audit_log-000002'];
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->enricher()]));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]), 'a mapping that can grow on its own is not "ok"');
+        self::assertStringContainsString('audit_log-000002', $tester->getDisplay());
+        self::assertStringContainsString('dynamic: false', $tester->getDisplay());
     }
 }

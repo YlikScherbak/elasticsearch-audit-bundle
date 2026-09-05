@@ -413,10 +413,15 @@ final class NothingLeavesUnredactedTest extends TestCase
             self::assertStringNotContainsString(self::SECRET, $e->getMessage(), 'what the bundle writes never carries the value');
             self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, JSON_THROW_ON_ERROR));
 
-            // And what it cannot scrub, stated rather than pretended away: the third
-            // party's own message travels as `previous`, which is where the README
-            // says to expect it.
-            self::assertStringContainsString(self::SECRET, (string) $e->getPrevious()?->getMessage(), 'the boundary is documented, not silently crossed');
+            // And the chain with it. getPrevious() is not a private debugging channel:
+            // an uncaught WriteFailedException reaches Symfony's error handler, Monolog's
+            // exception processor, Sentry — every one of which serialises the whole
+            // chain. The policy would then be walked around by another logger. So
+            // "cause" means cause everywhere, the thrown exception included; "full" is
+            // where a caller asks for the raw diagnostic.
+            for ($cause = $e; $cause !== null; $cause = $cause->getPrevious()) {
+                self::assertStringNotContainsString(self::SECRET, $cause->getMessage(), 'nothing in the chain repeats it either');
+            }
         }
     }
 

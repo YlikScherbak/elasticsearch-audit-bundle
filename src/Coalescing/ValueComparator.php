@@ -19,11 +19,20 @@ use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
  */
 final class ValueComparator implements ValueComparatorInterface
 {
+    /** @var list<ValueComparatorInterface> */
+    private readonly array $comparators;
+
     /**
      * @param iterable<ValueComparatorInterface> $comparators
      */
-    public function __construct(private readonly iterable $comparators = [])
+    public function __construct(iterable $comparators = [])
     {
+        // Read once, for the same reason the writer reads its enrichers once: the chain
+        // is walked again for every value compared, and a Generator would be exhausted
+        // after the first one — agreeing with nothing, silently, from then on. The
+        // parameter stays iterable because a tagged iterator is one; what the class
+        // supports and what its signature accepts are now the same thing.
+        $this->comparators = \is_array($comparators) ? array_values($comparators) : iterator_to_array($comparators, false);
     }
 
     public function equals(string $objectType, string $field, mixed $old, mixed $new): bool

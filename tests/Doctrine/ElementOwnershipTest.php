@@ -7,8 +7,12 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Address;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AlwaysRecordsAnAssociation;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Basket;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\BasketItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Customer;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredTracking;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisspelledTracking;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Events;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
@@ -231,6 +235,94 @@ final class ElementOwnershipTest extends DoctrineTestCase
         $this->expectExceptionMessage('tracks its elements, but it is the owning side');
 
         $this->em->persist(new MisdeclaredTracking());
+        $this->em->flush();
+    }
+
+    public function testATypoInTrackElementsIsRefusedRatherThanRecordingNothingForever(): void
+    {
+        // The declaration names the element fields to watch, and elementChanges() walks
+        // Doctrine's change set and skips anything not on that list — so "quanitity"
+        // watched nothing at all, for the life of the application, without a word. This
+        // is the exact class of mistake assertTrackedCollectionsAreServable() exists to
+        // refuse; it checked the collection and not the field names.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('quanitity');
+
+        $this->em->persist(new MisspelledTracking());
+        $this->em->flush();
+    }
+
+    public function testAnOwnerThatOnlyChangedThroughItsElementsStillHasItsDeclarationChecked(): void
+    {
+        // The case the checks exist for. An owner whose own columns did not change gets
+        // no postUpdate from Doctrine, so its record is assembled in postFlush — after
+        // the commit, where "throw" can only tell the caller. The declaration is
+        // therefore checked in onFlush, the moment membership first finds an audited
+        // owner, and the flush that relied on it is refused before it commits.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+
+        $basket = new Basket('weekly');
+        $this->em->persist($basket);
+        $this->em->flush();
+
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('representer');
+
+        $basket->add(new BasketItem('apples'));
+        $this->em->flush();
+    }
+
+    public function testAnAssociationCannotBeAlwaysRecorded(): void
+    {
+        // alwaysRecord names the context every history line carries — a status, an owner
+        // name — and it is read off the entity and stored as it is. withAlwaysRecorded()
+        // skips associations, so naming one was accepted at boot and then honoured
+        // nowhere: the promise of "every line reads on its own" quietly did not hold for
+        // that field.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('always recorded');
+
+        $this->em->persist(new AlwaysRecordsAnAssociation());
+        $this->em->flush();
+    }
+
+    public function testAnAuditedCollectionWithoutARepresenterIsRefusedRatherThanRecordedAsNothing(): void
+    {
+        // An audited association needs a callable saying what to store for a related
+        // object; ChangeSetBuilder enforces that. The membership path did not: it kept
+        // the (absent) representer and answered with null, so a folder that gained a
+        // document produced "documents.42: null → null" — a history line that exists,
+        // looks valid and means nothing. For an audit trail that is worse than an error.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('representer');
+
+        $basket = new Basket('weekly');
+        $basket->add(new BasketItem('apples'));
+
+        $this->em->persist($basket);
         $this->em->flush();
     }
 

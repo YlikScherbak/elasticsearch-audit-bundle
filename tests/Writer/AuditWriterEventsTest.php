@@ -78,7 +78,7 @@ final class AuditWriterEventsTest extends TestCase
 
         self::assertCount(1, $failed);
         self::assertSame('order', $failed[0]->record->objectType);
-        self::assertStringContainsString('down', $failed[0]->reason->getMessage());
+        self::assertStringContainsString('down', self::chainOf($failed[0]->reason));
     }
 
     private function writer(FailurePolicy $policy = FailurePolicy::Log): AuditWriter
@@ -107,5 +107,21 @@ final class AuditWriterEventsTest extends TestCase
         $transport = new SyncTransport($this->gateway);
 
         return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $dispatcher);
+    }
+
+    /**
+     * Every message in an exception chain, joined. The bundle names a foreign cause
+     * rather than quoting it, so a diagnostic that used to sit one getPrevious() away
+     * may now sit two or three; what matters is that it is still reachable.
+     */
+    private static function chainOf(?\Throwable $e): string
+    {
+        $said = [];
+
+        for (; $e !== null; $e = $e->getPrevious()) {
+            $said[] = $e->getMessage();
+        }
+
+        return implode(' | ', $said);
     }
 }

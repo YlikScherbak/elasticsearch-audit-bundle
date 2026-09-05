@@ -43,7 +43,10 @@ final class MessengerSupport
             return new self($component, \array_key_exists('FrameworkBundle', $bundles));
         }
 
-        return new self($component, class_exists(\Symfony\Bundle\FrameworkBundle\FrameworkBundle::class));
+        // As in DoctrineSupport: without kernel.bundles there is no kernel to have
+        // registered anything, and answering from vendor/ would be the same false
+        // positive this class was written against.
+        return new self($component, false);
     }
 
     public static function full(): self
@@ -75,6 +78,6 @@ final class MessengerSupport
             return 'symfony/messenger is not installed: composer require symfony/messenger, or set transport to "sync".';
         }
 
-        return 'FrameworkBundle is not registered in the kernel, and the handlers are registered with its messenger.message_handler tag — with the Messenger component alone nothing would collect the tag, the bus would have no handler for an audit record, and every record dispatched would fail in the worker. Register FrameworkBundle, wire the handlers to your own bus yourself, or set transport to "sync".';
+        return 'FrameworkBundle is not registered in the kernel, and the handlers are registered with its messenger.message_handler tag — with the Messenger component alone nothing would collect the tag, the bus would have no handler for an audit record, and every record dispatched would fail in the worker. Register FrameworkBundle, or set transport to "sync". (Wiring the handlers to a bus of your own is not a third option here: this refusal happens before they are registered, so there would be nothing to wire.)';
     }
 }

@@ -232,7 +232,21 @@ final class AuditSubscriber
         // has not committed, and writing them makes the history describe a state the
         // database may still roll back. Only the outermost flush publishes; the inner
         // one hands back what it collected and lets the outer one finish.
-        array_pop($this->flushDepths);
+        //
+        // Which flush this is, is asked of the transaction rather than assumed: by the
+        // time postFlush runs its own transaction is committed, so every level on the
+        // stack from here down belongs to this flush and to flushes that never came
+        // back. Popping the top of the stack instead was right until an inner flush was
+        // abandoned — a listener behind this one throwing in *its* onFlush, caught by
+        // the application — and then the outer flush saw a level left over, published
+        // nothing, and the next flush read the stack as abandoned and dropped
+        // everything the outer one had committed.
+        $em = self::entityManagerOf($args->getObjectManager());
+        $depth = $em?->getConnection()->getTransactionNestingLevel() ?? 0;
+
+        while ($this->flushDepths !== [] && $this->flushDepths[array_key_last($this->flushDepths)] >= $depth) {
+            array_pop($this->flushDepths);
+        }
 
         if ($this->flushDepths !== []) {
             return;
@@ -245,7 +259,6 @@ final class AuditSubscriber
         // be named and folded into its owner's record. An owner whose own columns did
         // not change gets no postUpdate from Doctrine, there being nothing to UPDATE on
         // it, so that record is built here or nowhere.
-        $em = self::entityManagerOf($args->getObjectManager());
 
         // The whole of this is inside the failure policy, not only the record building:
         // withContext() reads the declaration and Doctrine's metadata, and both can
@@ -461,11 +474,36 @@ final class AuditSubscriber
 
         $classMetadata = $em->getClassMetadata($entity::class);
 
+        // An always-recorded field is read straight off the entity and stored as it is,
+        // which only a scalar can be: withAlwaysRecorded() skips associations, so naming
+        // one read as a supported declaration and was honoured nowhere — and the promise
+        // it exists for, that every history line reads on its own, quietly did not hold
+        // for that field.
+        foreach ($metadata->alwaysRecorded as $always) {
+            if ($classMetadata->hasAssociation($always)) {
+                throw new DeclarationMistake(sprintf('%s::$%s is listed as always recorded, but it is an association. Always-recorded fields are stored as they are beside the changes, which a related object cannot be; audit it as a field with a representer, and it is recorded when it changes.', $entity::class, $always));
+            }
+        }
+
         foreach ($fields as $field) {
+            if ($classMetadata->hasAssociation($field)) {
+                // Once, here, for every path a related object can reach a record by.
+                // ChangeSetBuilder raised this when it represented a value, which left
+                // two holes: an association that is null was never represented and so
+                // never checked, and the membership path represented nothing at all and
+                // answered with null — "documents.42: null → null", a history line that
+                // exists, looks valid and means nothing.
+                if ($metadata->fields[$field] === null) {
+                    throw new DeclarationMistake(sprintf('%s::$%s is an audited association and has no representer. Give the declaration a callable turning the related object into what the history should show (a name, a reference), or the record could only say that something changed and not what.', $entity::class, $field));
+                }
+
+                continue;
+            }
+
             // getFieldNames() rather than hasField(): the latter says yes to an
             // embeddable's own name, which is exactly the name Doctrine never reports a
             // change under.
-            if (\in_array($field, $classMetadata->getFieldNames(), true) || $classMetadata->hasAssociation($field)) {
+            if (\in_array($field, $classMetadata->getFieldNames(), true)) {
                 continue;
             }
 
@@ -534,6 +572,29 @@ final class AuditSubscriber
             if ($reason !== null) {
                 throw new DeclarationMistake(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $entity::class, $field, $reason));
             }
+
+            // And the field names, when the declaration names them. elementChanges()
+            // walks Doctrine's change set and skips whatever is not on the list, so a
+            // misspelling watched nothing at all, for the life of the application,
+            // without a word — the same silence the checks above refuse, arrived at by a
+            // likelier accident. Associations are named separately because element
+            // changes deliberately do not cover them: an element has nowhere to declare
+            // a representer.
+            $wanted = $metadata->trackedElementFields($field);
+
+            if (!\is_array($wanted)) {
+                continue;
+            }
+
+            $element = $em->getClassMetadata($classMetadata->getAssociationTargetClass($field));
+
+            foreach ($wanted as $name) {
+                if (\in_array($name, $element->getFieldNames(), true)) {
+                    continue;
+                }
+
+                throw new DeclarationMistake(sprintf('%s::$%s tracks the element field "%s", which %s. Element tracking records what changed inside an element, and only its own scalar columns are reported that way.', $entity::class, $field, $name, $element->hasAssociation($name) ? 'is an association of '.$element->getName() : 'is not a field of '.$element->getName()));
+            }
         }
 
         $this->checkedTracking[$checked] = true;
@@ -560,6 +621,14 @@ final class AuditSubscriber
         if ($em->getUnitOfWork()->isScheduledForDelete($owner)) {
             return;
         }
+
+        // Here, and not only where a lifecycle event builds a record. An owner whose own
+        // columns did not change gets no postUpdate, so its record is assembled in
+        // postFlush by recordForOwner() — after the commit, where "throw" can tell the
+        // caller and nothing can stop the write. This is onFlush: a declaration that
+        // cannot be honoured still refuses the flush that would have relied on it.
+        $this->assertAuditedFieldsAreThere($em, $owner, $metadata);
+        $this->assertTrackedCollectionsAreServable($em, $owner, $metadata);
 
         $this->holdElementChanges($em, $element, $owner, $metadata, $association, $added);
     }

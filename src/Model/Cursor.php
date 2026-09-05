@@ -29,6 +29,12 @@ final class Cursor
      */
     public static function encode(array $sortValues): string
     {
+        // Held to what decode() accepts, on the way out as well as on the way in. It
+        // checked only that json_encode could run, so the bundle could hand a client a
+        // token and refuse the same token a moment later — and the complaint would name
+        // the request that carried it back rather than the page that produced it.
+        self::assertUsable($sortValues);
+
         try {
             $json = json_encode(['v' => self::VERSION, 's' => $sortValues], JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
@@ -104,6 +110,24 @@ final class Cursor
         }
 
         return $values;
+    }
+
+    /**
+     * The rules decode() applies, checked on the values before they are encoded.
+     *
+     * @param list<mixed> $sortValues
+     */
+    private static function assertUsable(array $sortValues): void
+    {
+        if ($sortValues === [] || !array_is_list($sortValues)) {
+            throw new InvalidQueryException('A cursor is built from the sort values of a page, as a list, and there has to be at least one of them.');
+        }
+
+        foreach ($sortValues as $value) {
+            if ($value !== null && !is_scalar($value)) {
+                throw new InvalidQueryException(sprintf('A sort value is a scalar or null; %s cannot travel in a cursor token.', get_debug_type($value)));
+            }
+        }
     }
 
     private static function invalid(): InvalidQueryException

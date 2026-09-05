@@ -48,6 +48,44 @@ final class BackpressureTest extends TestCase
         $gateway->index('audit_log', ['objectType' => 'order']);
     }
 
+    public function testAnAnswerNobodyCanParseIsNotQuotedBackAsTheReason(): void
+    {
+        // The sanitization has a fallback, and the fallback was $e->getMessage() — which
+        // the client builds as "400 Bad Request: <the whole response body>". So a
+        // well-formed Elasticsearch error was cleaned and anything else — a proxy, a WAF,
+        // a gateway in front of the cluster — went into the exception in full.
+        $gateway = $this->gateway(static fn (RequestInterface $r) => $r->getMethod() === 'HEAD'
+            ? self::response(200, [])
+            : new Response(400, ['Content-Type' => 'text/html', 'X-Elastic-Product' => 'Elasticsearch'], '<html>blocked: hunter2-the-actual-password</html>'));
+
+        try {
+            $gateway->index('audit_log', ['objectType' => 'order']);
+            self::fail('the write should have been refused');
+        } catch (RequestRejectedException $e) {
+            self::assertStringNotContainsString('hunter2-the-actual-password', $e->getMessage());
+            self::assertStringContainsString('400', $e->getMessage(), 'the status is the diagnostic that stays');
+        }
+    }
+
+    public function testAnUnreachableClusterIsNamedWithoutRepeatingWhatItSaid(): void
+    {
+        // TransportUnavailableException::because() interpolated the cause's message into
+        // its own — the same thing WriteFailedException stopped doing, for the same
+        // reason: a 429 arrives as a ClientResponseException whose message is the whole
+        // response body.
+        $gateway = $this->gateway(static fn (RequestInterface $r) => $r->getMethod() === 'HEAD'
+            ? self::response(200, [])
+            : self::response(429, ['error' => ['type' => 'circuit_breaking_exception', 'reason' => "too many requests. Preview of field's value: 'hunter2-the-actual-password'"]]));
+
+        try {
+            $gateway->index('audit_log', ['objectType' => 'order']);
+            self::fail('the write should have failed');
+        } catch (TransportUnavailableException $e) {
+            self::assertStringNotContainsString('hunter2-the-actual-password', $e->getMessage());
+            self::assertNotNull($e->getPrevious(), 'the original is still one getPrevious() away');
+        }
+    }
+
     public function testAnIndexNobodyIsAllowedToLookAtIsNotAnIndexThatIsMissing(): void
     {
         // The client does not throw on HEAD — it suppresses its own exception for that

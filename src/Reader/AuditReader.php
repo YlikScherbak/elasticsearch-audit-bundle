@@ -126,15 +126,19 @@ final class AuditReader
                     ? $this->gateway->search($index, $this->queryBuilder->build($query, trackTotalHits: false))
                     : $this->gateway->searchPointInTime($pit, $this->pointInTimeKeepAlive, $this->queryBuilder->build($query, pointInTime: true, trackTotalHits: false));
 
+                // Elasticsearch may hand back a renewed id, and from then on the view is
+                // known by that one — including to the close in the finally below. Read
+                // before the answer is judged: a partial or timed-out response carries
+                // the new id too, and stopping here holding the previous one would leave
+                // a view open, keeping its segments, until the keep-alive ran out.
+                if ($pit !== null && \is_string($response['pit_id'] ?? null) && $response['pit_id'] !== '') {
+                    $pit = $response['pit_id'];
+                }
+
                 // Before the hits are read and before the cursor moves: an incomplete
                 // batch would hand its last hit over as the place to continue from, and
                 // whatever the failed shard held earlier would never be read at all.
                 self::assertNothingWasMissed($response);
-
-                // Elasticsearch may hand back a renewed id; the next search must use it.
-                if ($pit !== null && \is_string($response['pit_id'] ?? null) && $response['pit_id'] !== '') {
-                    $pit = $response['pit_id'];
-                }
 
                 $hits = array_values($response['hits']['hits'] ?? []);
 
@@ -458,11 +462,21 @@ final class AuditReader
 
     private function extend(AuditQuery $query): AuditQuery
     {
+        $cursor = $query->searchAfter;
+
         foreach ($this->extensions as $extension) {
             $query = $extension->extend($query);
         }
 
-        return $query;
+        // Narrowing a query abandons its cursor, because a cursor points into the result
+        // set that produced it. An extension is the one case where that does not apply:
+        // it runs identically on every page, so the narrowed query *is* the one the
+        // cursor came from. Without this, an application with a visibility extension
+        // would find every "next page" quietly returning the first — and only that
+        // application, which is the worst way to find out.
+        return $cursor !== null && !$query->usesCursor() && !$query->matchesNothing()
+            ? $query->after($cursor)
+            : $query;
     }
 
     private function indexFor(AuditQuery $query): string

@@ -9,9 +9,17 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
  * timestamp. Ordered by the millisecond it carries, and **random within that
  * millisecond** — the bits after the timestamp are random, not a counter, so two
  * ids made in the same millisecond sort in no particular order. That is enough
- * for what it is used for: a stable, unique tiebreaker behind loggedAt, so a
- * cursor never sees the same pair twice and never steps over a record. It is not
- * a claim about write order inside a millisecond, and nothing here relies on one.
+ * for what it is used for: a stable, unique tiebreaker behind loggedAt, so no two
+ * records share a sort position and a cursor never sees the same pair twice. It is
+ * not a claim about write order inside a millisecond, and nothing here relies on one.
+ *
+ * What it does not promise is that a cursor over a *growing* index sees everything.
+ * A record written after a page was read, in a millisecond that page already covered,
+ * gets a random id that may sort before the cursor's position — and a reader paging
+ * forward will not meet it. That is a property of any (time, random) ordering, not of
+ * this one: paging is exact over a result set that is not moving, which is what
+ * `iterate(consistent: true)` gives, and near-exact over a live index, where the
+ * uncertainty is one millisecond wide at the boundary of a page.
  *
  * Known before the write, so a retried write (Messenger redelivering after a
  * timeout) overwrites its own document instead of adding a second one.

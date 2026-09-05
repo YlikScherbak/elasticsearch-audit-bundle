@@ -87,6 +87,30 @@ final class AuditReaderTest extends TestCase
         self::assertTrue($page->isEmpty());
     }
 
+    public function testAVisibilityExtensionDoesNotThrowAwayTheCursorItIsPagingWith(): void
+    {
+        // A cursor belongs to the query that produced it, so anything narrowing that
+        // query abandons it — but an extension is not a caller changing their mind. It
+        // runs identically on every page, so the result set it produces is the one the
+        // cursor came from. If extending dropped the cursor, every "next page" would
+        // quietly be the first, and only for applications that use extensions.
+        $visibility = new class implements QueryExtensionInterface {
+            public function extend(AuditQuery $query): AuditQuery
+            {
+                return $query->narrowActors('u1', 'u2');
+            }
+        };
+
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 9], 'hits' => []]];
+
+        $this->reader(extensions: [$visibility])->find(AuditQuery::for('order')->after(['2026-08-26 10:00:00', 'x', 'audit_log']));
+
+        $sent = $this->gateway->searches[0]['body'];
+
+        self::assertSame(['2026-08-26 10:00:00', 'x', 'audit_log'], $sent['search_after'] ?? null, 'the page after the cursor, not the first page again');
+        self::assertContains(['terms' => ['source' => ['u1', 'u2']]], $sent['query']['bool']['filter'], 'and the boundary is still on it');
+    }
+
     public function testIterateOverNothingYieldsNothingAndOpensNothing(): void
     {
         $entries = iterator_to_array($this->reader()->iterate(AuditQuery::for('order')->matchNothing()), false);

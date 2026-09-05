@@ -48,7 +48,7 @@ final class AuditWriter
         private readonly IndexResolver $indexResolver,
         private readonly ActorResolverInterface $actorResolver,
         private readonly ClockInterface $clock,
-        private readonly iterable $enrichers = [],
+        iterable $enrichers = [],
         private readonly FailurePolicy $failurePolicy = FailurePolicy::Log,
         ?LoggerInterface $logger = null,
         private readonly ?EventDispatcherInterface $events = null,
@@ -61,6 +61,12 @@ final class AuditWriter
             throw new \InvalidArgumentException(sprintf('A batch holds at least one record, %d given.', $batchSize));
         }
 
+        // Read once. The parameter says iterable because a tagged iterator is one, and
+        // that happens to be rewindable — but a plain Generator is iterable too, and this
+        // list is walked again for every record: the second walk would find it exhausted
+        // and quietly enrich nothing. What the signature accepts and what the class
+        // supports are now the same thing.
+        $this->enrichers = \is_array($enrichers) ? array_values($enrichers) : iterator_to_array($enrichers, false);
         $this->logger = $logger ?? new NullLogger();
         // Following the declaration the application already made: configuring
         // redaction is saying that some values must not be kept, and a cause's
@@ -68,6 +74,8 @@ final class AuditWriter
         $this->failureDetails = $failureDetails ?? ($redactor === null ? FailureDetails::Full : FailureDetails::Cause);
     }
 
+    /** @var list<AuditEnricherInterface> */
+    private readonly array $enrichers;
     private readonly LoggerInterface $logger;
     private readonly FailureDetails $failureDetails;
 
@@ -536,7 +544,13 @@ final class AuditWriter
         }
 
         if ($this->failurePolicy === FailurePolicy::Throw) {
-            throw WriteFailedException::for($record, $e);
+            // $reason, not $e: "cause" has to mean cause here too. getPrevious() reads
+            // like a private channel and is not one — an uncaught WriteFailedException
+            // reaches Symfony's error handler, Monolog's exception processor, Sentry,
+            // and every one of them serialises the whole chain. Leaving the raw cause
+            // attached let the policy be walked around by a logger nobody configured for
+            // audit. Under "full" $reason *is* $e, which is what that setting says.
+            throw WriteFailedException::for($record, $reason);
         }
 
         $this->logger->error('Audit record could not be written: {reason}', [

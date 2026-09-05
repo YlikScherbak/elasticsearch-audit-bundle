@@ -201,9 +201,27 @@ final class InMemoryGateway implements GatewayInterface
         return ['pit_id' => $pitId, 'hits' => ['total' => ['value' => \count($snapshot)], 'hits' => $hits]];
     }
 
+    /** @var list<string> every id closePointInTime() was called with, in order */
+    public array $closed = [];
+
+    /** @var list<string> concrete indices this fake reports as accepting unknown fields */
+    public array $dynamicIndices = [];
+
+    public function indicesAcceptingUnknownFields(string $index): array
+    {
+        $this->maybeFail();
+
+        if (!isset($this->documents[$index]) && !isset($this->indices[$index])) {
+            throw IndexNotFoundException::forIndex($index);
+        }
+
+        return $this->dynamicIndices;
+    }
+
     public function closePointInTime(string $pitId): void
     {
         $this->maybeFail();
+        $this->closed[] = $pitId;
 
         if (isset($this->pointsInTime[$pitId])) {
             $this->pointsInTime[$pitId]['closed'] = true;

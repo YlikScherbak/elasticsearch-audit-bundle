@@ -87,4 +87,28 @@ final class MappingSyncOnLiveClusterTest extends ElasticsearchTestCase
         $nothing = $this->gateway->search($this->index, $builder->build(AuditQuery::for('order')->matchNothing()));
         self::assertSame(0, $nothing['hits']['total']['value'], 'match_none is a body the cluster accepts');
     }
+
+    public function testAnIndexThatWouldLetElasticsearchInventFieldsIsReported(): void
+    {
+        // dynamic: false is stated as a guarantee — a field nobody declared is stored
+        // and not indexed — and until now nothing could check it: mapping() answers with
+        // the properties and drops everything around them, so an index created by hand,
+        // a changed template or a new member of an alias could be wide open with every
+        // declared field mapped exactly right.
+        $ours = $this->scratchIndex();
+        $theirs = $this->scratchIndex();
+
+        try {
+            self::client()->indices()->create(['index' => $ours, 'body' => ['mappings' => ['dynamic' => false, 'properties' => ['objectType' => ['type' => 'keyword']]]]]);
+            self::client()->indices()->create(['index' => $theirs, 'body' => ['mappings' => ['properties' => ['objectType' => ['type' => 'keyword']]]]]);
+
+            $gateway = new ElasticsearchGateway(self::client());
+
+            self::assertSame([], $gateway->indicesAcceptingUnknownFields($ours), 'the mapping this bundle creates is closed');
+            self::assertSame([$theirs], $gateway->indicesAcceptingUnknownFields($theirs), 'and an index without it is named');
+        } finally {
+            $this->dropIndex($ours);
+            $this->dropIndex($theirs);
+        }
+    }
 }

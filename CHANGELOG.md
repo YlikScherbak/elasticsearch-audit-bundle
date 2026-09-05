@@ -47,6 +47,47 @@ the dependency range.
   `'12'` was recorded as a quantity that moved from 12 to 12
 - **`bulk()` checks its ids before it asks the cluster anything.** A document without an id is a
   mistake in the caller and does not depend on what any HEAD request answers
+- **`audit:check` can see whether an index would let Elasticsearch invent a mapping.**
+  `dynamic: false` is stated as a guarantee — a field nobody declared is stored with the document
+  and not indexed — and nothing could check it: `mapping()` answers with the properties and drops
+  everything around them, so an index created by hand, a changed template or a new member of an
+  alias could be wide open with every declared field mapped exactly right. `GatewayInterface`
+  gained `indicesAcceptingUnknownFields()`, and the command names the ones that are
+- **A bulk item is read as the action the bundle sent.** The action was "whatever the first key
+  holds", so a response shaped like `{"something_else": {"status": 201}}` counted as a written
+  document — in the one class whose purpose is to refuse an answer it cannot account for
+- **A Generator of enrichers or comparators is no longer exhausted after the first use.** Both
+  constructors take `iterable` because a tagged iterator is one, and both lists are walked again
+  for every record and every comparison: a Generator would be empty on the second walk, quietly
+  enriching nothing and agreeing with nothing. They are read once now
+- **A configuration that claims auditing works cannot boot unless the path it names can carry a
+  record.** Two setups booted cleanly and recorded nothing. A Doctrine connection without an
+  entity manager — the DBAL-only shape Symfony documents — takes the listener, collects its tag
+  and never calls it, because nothing flushes through it. A `message_bus` that FrameworkBundle did
+  not build carries no `messenger.bus` tag, so `MessengerPass` attaches no handler: dispatching
+  succeeds, returns an Envelope and delivers the record nowhere. Neither is visible to the
+  extension, which runs while the other bundles are still being merged, so both are now checked in
+  a compiler pass, where the answers exist
+- **The support checks no longer guess from `vendor/`.** Without `kernel.bundles` they fell back
+  to `class_exists()`, which says "registered" for a package that is merely installed — the exact
+  confusion those classes were written to end. Without a kernel the answer is now "not
+  registered"; a test that needs another injects `full()`, `none()` or `ormOnly()`
+- **A cursor token cannot be built out of something the decoder would reject.** `encode()` checked
+  only that `json_encode` would run, so the bundle could hand a client a token and refuse the same
+  token on the way back — naming the request that carried it rather than the page that made it
+- **An association cannot be always recorded.** `alwaysRecord` stores a field as it is beside the
+  changes, and `withAlwaysRecorded()` skips associations, so naming one read as a supported
+  declaration and was honoured nowhere — with the promise it exists for, that every history line
+  reads on its own, quietly not holding for that field
+- **A range of two strings is left to Elasticsearch.** The crossed-range check compared them the
+  way PHP does, where `'10' > '9'`; a keyword field orders them as text, where it does not — so a
+  perfectly good range could be refused. Numbers are compared as numbers, dates as dates, and
+  strings are the cluster's business
+- **A point in time is closed under the id it was last known by.** Elasticsearch may renew the id
+  on any search inside the view, and the renewal was read *after* the answer was judged — so a
+  partial or timed-out batch stopped the export holding the previous id, and the close named a
+  view that was no longer the open one. Nothing was lost by it; a view simply stayed open, holding
+  its segments, until the keep-alive ran out
 - **`indexExists()` answers false only when the cluster said 404.** The client suppresses its own
   exception for `HEAD`, and the check was a plain "2xx", so a role without `view_index_metadata`
   (403), a name Elasticsearch will not take (400) and an unhealthy cluster (5xx) all came back as
@@ -79,6 +120,33 @@ the dependency range.
   passes nothing at debug, drops the PSR-7 request and response objects the info lines carry in
   their context (a formatter that serialises context reaches the body through them), and keeps
   method, URL, status and retry count
+- **`failure_details: cause` now means cause everywhere, the thrown exception included.**
+  `WriteFailedException` still carried the raw cause as its `previous`, and the tests pinned that
+  as a deliberate boundary — "a caller who catches is a caller who chose to look". Nobody has to
+  catch: an uncaught one reaches Symfony's error handler, Monolog's exception processor, Sentry,
+  and each of them serialises the whole chain, so the policy was walked around by a logger nobody
+  configured for audit. Under `full` the chain is intact, which is what that setting says
+- **A worker no longer stores a refused document's values in the failure transport.** Symfony
+  keeps a failed message's cause as an `ErrorDetailsStamp` built from `FlattenException`, which
+  walks `getPrevious()` and keeps every message it finds — durably, until somebody retries or
+  removes the message. Both handlers now hand it a cause with no chain. The batch handler also
+  catches a refusal of the whole `_bulk` request, which never reaches `BulkResult` and so was
+  retried three times before being stored
+- **The gateway no longer falls back to the client's own message.** `ClientResponseException` is
+  built as `"<status> <phrase>: <the whole response body>"`, and `reason()` returned it whenever
+  the answer was not JSON or carried no readable `error.reason` — a proxy, a WAF or a gateway in
+  front of the cluster went into the exception in full, through the one channel that exists to
+  carry no payload
+- **`TransportUnavailableException` names its cause instead of quoting it**, like
+  `WriteFailedException` already did — a 429 refusing a document arrives as the client's exception,
+  whose message is that document. The bundle's own sentences about an untrustworthy answer are
+  unaffected: they go through a separate factory that repeats them in full, because it wrote them
+- **`RequestRejectedException::because()` cuts the value preview itself.** Every call site passed
+  a reason that had already been cut, and a guarantee that holds because four places remembered to
+  is one merge away from not holding
+- **The console commands print the whole chain.** They are the other case: a person ran them to
+  find out what is wrong, the output goes to their terminal and nowhere else, and a class name
+  alone would leave them nowhere
 - **A safe exception no longer smuggles an unsafe one along with it.** `SafeExceptionMessage` is a
   promise about a *message*, and the failure path read it as a promise about the whole object:
   `IndexNotFoundException` names the index in the bundle's own words and carries the cluster's
@@ -86,6 +154,20 @@ the dependency range.
   cause` a safe cause with a chain is now repeated as its message without the chain, and
   `FailureReason` carries `causeClass`, so a listener can still tell a missing index from a refused
   document without reading any message
+- **An audited association without a representer is refused rather than recorded as nothing.**
+  `ChangeSetBuilder` raised this while representing a value, which left two ways past it: an
+  association that is null was never represented, and the membership path represented nothing at
+  all and answered with `null` — `documents.42: null → null`, a history line that exists, looks
+  valid and says nothing. The rule now lives with the other declaration checks, against Doctrine's
+  own metadata, so every path a related object reaches a record by is covered by it
+- **A misspelled field in `trackElements` is refused.** `elementChanges()` walks the change set
+  and skips whatever the declaration did not name, so `['quanitity']` watched nothing for the life
+  of the application without a word. The names are checked against the element's mapping, and an
+  association among them is named as such: element changes deliberately do not cover associations
+- **An owner that changed only through its elements has its declaration checked too**, in
+  `onFlush` where a refusal still stops the flush. Its record is assembled in `postFlush`, after
+  the commit, so a check made there could only tell the caller about a write that had already
+  happened
 - **A flush somebody else aborted no longer silences every flush after it.** `UnitOfWork::commit()`
   dispatches onFlush, *then* opens the transaction, and only then enters the try whose catch closes
   the manager — so a listener behind this one that throws in onFlush (a validation veto, the usual
@@ -93,7 +175,11 @@ the dependency range.
   later flush as nested and published nothing: the trail went silent for the rest of the process,
   with nothing anywhere saying why. Nesting is now decided by the transaction level each flush
   started at — an inner flush always starts deeper — so a flush that starts no deeper proves the
-  one above it is gone, drops what it had collected (rows the database never took) and says so
+  one above it is gone, drops what it had collected (rows the database never took) and says so.
+  The stack is unwound by transaction depth rather than by popping its top: an inner flush that
+  was itself abandoned left a level behind, and the outer flush — which had committed — then
+  published nothing at all, while the flush after it read the stack as abandoned and dropped
+  those records
 - **`FrameResetMiddleware` no longer cuts an open frame on a synchronously routed message.** The
   `ReceivedStamp` guard was meant to tell a consumed message from a dispatch, and it cannot:
   `SyncTransport::send()` re-dispatches through the bus with a stamp of its own. Routing
@@ -101,6 +187,15 @@ the dependency range.
   therefore released somebody else's frame mid-operation — phantom intermediate records, and a
   warning blaming a try/finally nobody omitted. A consume that starts with a frame already open
   now leaves it alone
+- **A cursor no longer survives a change to the query that made it.** It reset on `page()` and on
+  a change of direction, and kept going through everything else — so `afterToken($c)->withEvents(
+  'remove')` continued a cursor from one result set into another. Elasticsearch takes any
+  `search_after` whose sort has the right shape and answers with what follows that position *in
+  the new result set*, so every matching record before it is skipped, in silence. Any change to
+  what the query matches — a filter, a date bound, an option a QueryExtension reads — now abandons
+  the cursor; `limit()` and restating the direction keep it. A visibility extension is the one
+  exception, applied by the reader: it runs identically on every page, so the query it narrows is
+  the one the cursor came from
 - **A cursor could step over a record whenever the route was an alias.** The index name joined the
   sort tuple only for `any()`, on the reasoning that naming an object type means reading one index.
   It means reading one *route*, and an append-only trail rolls over, so the alias spans the series:
@@ -297,6 +392,22 @@ the dependency range.
   error rather than a guarantee — `action.auto_create_index` on the cluster is the guarantee, and
   the README now asks for it as part of installing the bundle
 
+- **Claims narrowed to what the code actually guarantees**: `RecordId` said a cursor "never steps
+  over a record", which holds over a result set that is not moving and not over a live index — a
+  record written into a millisecond a page already covered gets a random id that may sort before
+  the cursor. The README now says so, and points at `iterate(consistent: true)` for the cases
+  where exactness is the point. `doctrine.enabled` said `auto` and `true` depend on doctrine/orm;
+  they have needed DoctrineBundle too since that check was fixed. `MessengerSupport` offered
+  "wire the handlers to your own bus yourself" as a way out, which the bundle does not allow —
+  the refusal happens before the handlers are registered
+- **Claims narrowed to what the code actually guarantees.** `RecordId` said a cursor "never steps
+  over a record" — true over a result set that is not moving, and not over a live index: a record
+  written into a millisecond a page already covered gets a random id that may sort before the
+  cursor's position. The README says so now, and points at `iterate(consistent: true)` for the
+  cases where exactness is the point. `doctrine.enabled` said `auto` and `true` depend on
+  doctrine/orm; they have needed DoctrineBundle as well since that check was corrected.
+  `MessengerSupport` offered "wire the handlers to your own bus yourself" as a way out, which the
+  bundle does not allow — that refusal happens before the handlers are registered
 - **Docblocks that had drifted from the code they describe**: `BulkResult::hasTransientFailures()`
   said "429 or 503" while the constant is `[404, 429]` plus every 5xx; `InvalidQueryException`
   said it is raised while a query is built, and the gateway also raises it for a 4xx the cluster

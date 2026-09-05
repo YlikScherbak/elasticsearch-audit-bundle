@@ -66,11 +66,30 @@ final class CreateIndexCommand extends Command
                 $this->gateway->createIndex($index, $definition->toArray());
                 $io->text(sprintf('<info>%s</info> created', $index));
             } catch (AuditException $e) {
-                $io->error(sprintf('%s: %s', $index, $e->getMessage()));
+                $io->error(sprintf('%s: %s', $index, self::diagnostic($e)));
                 $failed = true;
             }
         }
 
         return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * What to show an operator: the bundle's sentence and the cause behind it.
+     *
+     * The bundle deliberately keeps a foreign exception's message out of its own, because
+     * those travel into logs, failure transports and listeners. A console command is the
+     * other case — a person ran it to find out what is wrong, the output goes to their
+     * terminal, and a class name alone would leave them nowhere.
+     */
+    private static function diagnostic(\Throwable $e): string
+    {
+        $said = [$e->getMessage()];
+
+        for ($cause = $e->getPrevious(); $cause !== null; $cause = $cause->getPrevious()) {
+            $said[] = $cause->getMessage();
+        }
+
+        return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));
     }
 }

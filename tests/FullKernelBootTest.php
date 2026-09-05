@@ -109,6 +109,59 @@ final class FullKernelBootTest extends TestCase
 
         $kernel->shutdown();
     }
+
+    public function testAConnectionWithoutAnEntityManagerIsRefusedRatherThanListenedTo(): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
+        // DoctrineBundle runs a DBAL-only connection perfectly well, and Symfony
+        // documents that setup. Attach the listener to one and it hears no flush: the
+        // container boots, the tag is collected, the services are all there, and not one
+        // entity change is ever recorded. Only the compiler can see this — the extension
+        // runs before DoctrineBundle has said which connections have entity managers.
+        $kernel = new FullKernel($this->cacheDir, reportingConnection: true);
+
+        try {
+            $kernel->boot();
+            self::fail('a connection with no entity manager should not have booted');
+        } catch (\Throwable $refused) {
+            self::assertStringContainsString('no entity manager uses it', self::chainOf($refused));
+            self::assertStringContainsString('reporting', self::chainOf($refused));
+        }
+    }
+
+    public function testABusThatIsNotAMessengerBusIsRefusedRatherThanDispatchedTo(): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
+        // A MessageBusInterface that FrameworkBundle did not build carries no
+        // messenger.bus tag, so MessengerPass attaches no handler to it. Dispatching
+        // then succeeds, returns an Envelope, and delivers the record nowhere — with
+        // nothing raised at any point along the way.
+        $kernel = new FullKernel($this->cacheDir, messenger: true, ownBus: true);
+
+        try {
+            $kernel->boot();
+            self::fail('a bus with no handlers should not have booted');
+        } catch (\Throwable $refused) {
+            self::assertStringContainsString('is not a Messenger bus', self::chainOf($refused));
+        }
+    }
+
+    private static function chainOf(?\Throwable $e): string
+    {
+        $said = [];
+
+        for (; $e !== null; $e = $e->getPrevious()) {
+            $said[] = $e->getMessage();
+        }
+
+        return implode(' | ', $said);
+    }
 }
 
 /**
@@ -117,9 +170,13 @@ final class FullKernelBootTest extends TestCase
  */
 final class FullKernel extends Kernel
 {
-    public function __construct(private readonly string $cacheDir, private readonly bool $messenger = false)
-    {
-        parent::__construct('test'.($messenger ? 'messenger' : ''), true);
+    public function __construct(
+        private readonly string $cacheDir,
+        private readonly bool $messenger = false,
+        private readonly bool $reportingConnection = false,
+        private readonly bool $ownBus = false,
+    ) {
+        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : ''), true);
     }
 
     /**
@@ -135,8 +192,10 @@ final class FullKernel extends Kernel
     public function registerContainerConfiguration(LoaderInterface $loader): void
     {
         $messenger = $this->messenger;
+        $reporting = $this->reportingConnection;
+        $ownBus = $this->ownBus;
 
-        $loader->load(static function (ContainerBuilder $container) use ($messenger): void {
+        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus): void {
             $container->loadFromExtension('framework', [
                 'test' => true,
                 'http_method_override' => false,
@@ -145,8 +204,21 @@ final class FullKernel extends Kernel
                 'messenger' => ['transports' => [], 'routing' => []],
             ]);
 
+            if ($ownBus) {
+                // A MessageBusInterface FrameworkBundle did not build: no messenger.bus
+                // tag, so MessengerPass attaches no handler to it.
+                $container->setDefinition('app.bus', new \Symfony\Component\DependencyInjection\Definition(\Symfony\Component\Messenger\MessageBus::class));
+            }
+
             $container->loadFromExtension('doctrine', [
-                'dbal' => ['driver' => 'pdo_sqlite', 'memory' => true],
+                // A second connection with no entity manager on it — the DBAL-only
+                // setup Symfony documents, and the one an audit listener cannot hear.
+                'dbal' => $reporting
+                    ? ['default_connection' => 'default', 'connections' => [
+                        'default' => ['driver' => 'pdo_sqlite', 'memory' => true],
+                        'reporting' => ['driver' => 'pdo_sqlite', 'memory' => true],
+                    ]]
+                    : ['driver' => 'pdo_sqlite', 'memory' => true],
                 'orm' => [
                     // No auto_generate_proxy_classes: DoctrineBundle 3 removed it with
                     // proxies themselves (PHP 8.4 lazy objects), and in 2.x it defaults
@@ -166,7 +238,7 @@ final class FullKernel extends Kernel
             $container->loadFromExtension(Configuration::ROOT, [
                 'client' => ['hosts' => ['http://localhost:9200']],
                 'transport' => $messenger ? 'messenger' : 'sync',
-            ]);
+            ] + ($reporting ? ['doctrine' => ['connection' => 'reporting']] : []) + ($ownBus ? ['message_bus' => 'app.bus'] : []));
 
             // What a test needs to look at: private by default, and the point of the
             // test is to ask the container what a worker would be handed.

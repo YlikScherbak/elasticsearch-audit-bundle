@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Transport\Messenger;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\BulkResult;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\FailureReason;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
@@ -45,7 +46,18 @@ final class IndexAuditRecordsHandler
 
     public function __invoke(IndexAuditRecords $message): void
     {
-        $result = $this->gateway->bulk($message->items);
+        try {
+            $result = $this->gateway->bulk($message->items);
+        } catch (RequestRejectedException $e) {
+            // A refusal of the whole request — a 400 or a 403 on the _bulk call itself —
+            // never reaches BulkResult, so the per-item road that sanitises reasons is
+            // not this one. Uncaught, it was also retried three times before Messenger
+            // stored the chain in the failure transport. See the single-record handler
+            // for why the chain must not travel.
+            $safe = FailureReason::keepingTheMessageOf($e);
+
+            throw new UnrecoverableMessageHandlingException($safe->getMessage(), 0, $safe);
+        }
 
         if (!$result->hasFailures()) {
             return;
@@ -68,7 +80,7 @@ final class IndexAuditRecordsHandler
         );
 
         if ($result->hasTransientFailures()) {
-            throw TransportUnavailableException::because(new \RuntimeException($summary.' — retrying the batch'));
+            throw TransportUnavailableException::saying($summary.' — retrying the batch');
         }
 
         // The status of the first refusal, not a guessed one: an operator reading the

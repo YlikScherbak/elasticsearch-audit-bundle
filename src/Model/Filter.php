@@ -88,35 +88,41 @@ final class Filter
             throw new InvalidQueryException('A range needs at least one bound — leave the filter out to not filter.');
         }
 
-        $lower = self::bound($from);
-        $upper = self::bound($to);
-
         // The same refusal AuditQuery::between() makes for dates. A crossed range cannot
         // match anything, and an empty page is the one answer an audit query must never
         // give by mistake: it reads as "nothing happened".
         //
-        // Only bounds of one kind are compared. A keyword field orders its values as
-        // text, so "10" against 9 is not a comparison this can make on the caller's
-        // behalf, and guessing would refuse queries that are perfectly good.
-        if (self::comparable($lower, $upper) && $lower > $upper) {
-            throw new InvalidQueryException(sprintf('The lower bound of this range (%s) is after the upper one (%s), so it can match nothing at all.', var_export($lower, true), var_export($upper, true)));
+        // Judged on the values as given, and only where the ordering is not the field's
+        // to decide. Two numbers order one way everywhere, and so do two dates. Two
+        // strings do not: PHP compares "10" and "9" numerically, an Elasticsearch keyword
+        // orders them as text — and nothing here knows which the field is, so refusing on
+        // PHP's reading would reject ranges that are perfectly good.
+        if (self::crossed($from, $to)) {
+            throw new InvalidQueryException(sprintf('The lower bound of this range (%s) is after the upper one (%s), so it can match nothing at all.', self::describe($from), self::describe($to)));
         }
 
-        return new self(FilterKind::Between, from: $lower, to: $upper);
+        return new self(FilterKind::Between, from: self::bound($from), to: self::bound($to));
     }
 
     /**
-     * Whether these two bounds can be put in order without guessing what the field is.
-     * Two numbers can; two strings can, since a date bound is formatted so that its text
-     * order is its chronological order. A number against a string cannot.
+     * Whether the range is impossible on a reading the field itself cannot contradict.
      */
-    private static function comparable(int|float|string|null $lower, int|float|string|null $upper): bool
+    private static function crossed(int|float|string|\DateTimeInterface|null $from, int|float|string|\DateTimeInterface|null $to): bool
     {
-        if ($lower === null || $upper === null) {
+        if ($from === null || $to === null) {
             return false;
         }
 
-        return \is_string($lower) === \is_string($upper);
+        if ((\is_int($from) || \is_float($from)) && (\is_int($to) || \is_float($to))) {
+            return $from > $to;
+        }
+
+        return $from instanceof \DateTimeInterface && $to instanceof \DateTimeInterface && $from > $to;
+    }
+
+    private static function describe(int|float|string|\DateTimeInterface|null $bound): string
+    {
+        return $bound instanceof \DateTimeInterface ? $bound->format(\DATE_ATOM) : var_export($bound, true);
     }
 
     private static function bound(int|float|string|\DateTimeInterface|null $bound): int|float|string|null

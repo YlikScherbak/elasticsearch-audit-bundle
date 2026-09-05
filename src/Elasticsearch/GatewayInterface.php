@@ -132,6 +132,24 @@ interface GatewayInterface
     public function mapping(string $index): array;
 
     /**
+     * Which of the indices behind this name would let Elasticsearch invent a mapping.
+     *
+     * The bundle creates its indices with `dynamic: false` and states that as a
+     * guarantee: a field nobody declared is stored with the document and not indexed,
+     * which is what keeps an enricher from growing the mapping until the cluster starts
+     * refusing documents over type conflicts. Only the index itself can say whether that
+     * still holds — a template changed, an index created by hand, an alias grown a new
+     * member — and `mapping()` cannot, because it answers with the properties and drops
+     * everything around them.
+     *
+     * @return list<string> the concrete indices whose mapping is not `dynamic: false`
+     *                      (or `strict`); empty when every one of them is
+     *
+     * @throws IndexNotFoundException the index does not exist
+     */
+    public function indicesAcceptingUnknownFields(string $index): array;
+
+    /**
      * Adds fields to an existing index's mapping. Additive by nature: Elasticsearch
      * itself refuses to change the type of a field that already exists, which is what
      * makes this safe to run against a live index — a changed type is a reindex, and

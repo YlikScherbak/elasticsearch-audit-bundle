@@ -270,7 +270,7 @@ ints, strings, `Stringable` (Uuid, Ulid) or backed enums; composite keys are joi
 ```yaml
 borsche_elasticsearch_audit:
   doctrine:
-    enabled: auto              # auto (default): listen when doctrine/orm is installed;
+    enabled: auto              # auto (default): listen when doctrine/orm AND DoctrineBundle
                                # false drops the listener and keeps the writer; true
                                # requires doctrine/orm and fails the boot without it (since 0.11)
     skip_empty_updates: true
@@ -714,6 +714,14 @@ what needs to be readable is the change itself — a permission key that should 
 status code as its label — `withChanges()` replaces them (**since 0.9**); `withExtra()` is for
 what the record does not have, `withChanges()` for what it has in a form nobody wants to read.
 
+> **A decorator changes what an entry says, not how many there are.** Returning fewer entries than
+> it received is allowed and is not a way to hide records: `total` and `totalPages()` are counted
+> from what Elasticsearch matched, before the decorators run, and so is the cursor — a page can
+> therefore read `entries: 18, total: 30`. That is deliberate (a decorator dropping entries must
+> not end a "load more" early or skip past what it hid), and it means a decorator is the wrong
+> place for visibility: what a viewer may not see belongs in a `QueryExtension`, where `narrow*()`
+> takes it out of the hits, the total and the paging together.
+
 Both extensions and decorators are picked up automatically when they are registered as services,
 through autoconfiguration. A service that is not autoconfigured needs the tag by hand:
 `borsche_elasticsearch_audit.enricher`, `.decorator`, `.query_extension`, `.actor_resolver`,
@@ -942,6 +950,38 @@ down with it — losing one history entry is better than losing the order that e
 
 Set `on_failure: throw` when the opposite holds (compliance logs): the failure surfaces as a
 `WriteFailedException` carrying the record.
+
+### How much of a failure is repeated
+
+A cause's own message is not the bundle's to vouch for. A cluster refusing a document quotes the
+field it refused; an enricher quotes what it was enriching from; a listener quotes whatever it
+read. `redact.failure_details` decides what happens to that text (**since 1.0**):
+
+```yaml
+borsche_elasticsearch_audit:
+  redact:
+    fields: [password]
+    failure_details: cause   # or "full"; unset follows redact.fields
+```
+
+- **`full`** — the cause travels intact: its message in the log line, the exception itself in the
+  PSR-3 context and in `RecordFailedEvent`, and as the `previous` of `WriteFailedException`. This
+  is the default when no redaction is configured, because an application that keeps every value
+  has said nothing about which ones must not be repeated.
+- **`cause`** — the cause is named by class and its message is not repeated *anywhere the bundle
+  emits*: not in the log, not in the event, and **not as the previous of what it throws**. That
+  last one matters more than it looks: an uncaught `WriteFailedException` reaches Symfony's error
+  handler, Monolog's exception processor and whatever else serialises exceptions, and every one of
+  them walks the chain — so leaving the raw cause attached would let the policy be walked around
+  by a logger nobody configured for audit. `RecordFailedEvent` receives a `FailureReason` whose
+  `causeClass` names what actually failed, so a listener can still tell a missing index from a
+  refused document. Configuring `redact.fields` selects this automatically.
+
+The same rule holds in the worker. When a handler throws, Symfony stores the cause on the message
+as an `ErrorDetailsStamp` built from `FlattenException` — which keeps every message in the chain,
+in the failure transport, until somebody retries or removes it. The handlers therefore hand it a
+cause with no chain regardless of `failure_details`: a durable copy of a refused document's values
+is not something a setting should be able to ask for by accident.
 
 Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Exception\AuditException`:
 `NotConfiguredException`, `IndexNotFoundException`, `TransportUnavailableException` (the cluster

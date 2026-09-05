@@ -130,4 +130,23 @@ final class CursorTest extends TestCase
 
         AuditQuery::for('order')->afterToken('nonsense');
     }
+
+    public function testEncodeRefusesWhatDecodeWouldCallMalformed(): void
+    {
+        // The two sides used to disagree: encode() checked only that json_encode could
+        // run, so the bundle could hand a client a token and then refuse it. Whatever
+        // decode() will not accept is not a cursor, and saying so where it is built
+        // names the page that produced it instead of the request that carried it back.
+        foreach ([[], [['nested']], [new \stdClass()]] as $unusable) {
+            try {
+                Cursor::encode($unusable);
+                self::fail('encode() accepted '.json_encode($unusable));
+            } catch (InvalidQueryException) {
+            }
+        }
+
+        // And what decode() does accept still round-trips, nulls included: a legacy
+        // document sorts with one.
+        self::assertSame(['2026-08-30 10:00:00', null, 'audit_log'], Cursor::decode(Cursor::encode(['2026-08-30 10:00:00', null, 'audit_log'])));
+    }
 }

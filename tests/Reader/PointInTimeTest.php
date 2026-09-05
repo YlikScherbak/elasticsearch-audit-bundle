@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Reader;
 
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
+use Borsche\ElasticsearchAuditBundle\Exception\PartialResultException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
@@ -120,5 +121,28 @@ final class PointInTimeTest extends TestCase
     private function reader(): AuditReader
     {
         return new AuditReader($this->gateway, new IndexResolver('audit_log'));
+    }
+
+    public function testAViewThatWasRenewedIsStillTheViewThatGetsClosed(): void
+    {
+        // Every search inside a view may hand back a new id, and the old one stops being
+        // the way to name it. The renewal was read after the answer was judged, so a
+        // partial or timed-out response — which still carries the new id — stopped the
+        // export with the previous one in hand, and the finally closed a view that was no
+        // longer the open one. Nothing is lost by it; a view simply stays open, holding
+        // segments, until its keep-alive runs out.
+        $this->gateway->respondToSearch = static fn () => [
+            'pit_id' => 'pit-renewed',
+            'timed_out' => true,
+            'hits' => ['total' => ['value' => 1], 'hits' => []],
+        ];
+
+        try {
+            iterator_to_array($this->reader()->iterate(AuditQuery::for('order'), batchSize: 1));
+            self::fail('a timed-out answer is not a batch');
+        } catch (PartialResultException) {
+        }
+
+        self::assertSame(['pit-renewed'], $this->gateway->closed, 'the view that was open is the view that was closed');
     }
 }

@@ -61,18 +61,22 @@ final class BulkResult
         // documents were written, and counting the missing ones as written is the one
         // answer an audit trail must not give.
         if (!\is_array($items) || \count($items) !== $attempted) {
-            throw TransportUnavailableException::because(new \UnexpectedValueException(sprintf(
+            throw TransportUnavailableException::saying(sprintf(
                 'Elasticsearch answered a bulk request of %d document(s) with %d item(s), expected %d.',
                 $attempted,
                 \is_array($items) ? \count($items) : 0,
                 $attempted,
-            )));
+            ));
         }
 
         $failures = [];
 
         foreach (array_values($items) as $position => $item) {
-            $action = \is_array($item) ? reset($item) : null;
+            // The action this bundle sent, by name. reset() took whatever the first key
+            // held, so an item shaped like {"something_else": {"status": 201}} read as a
+            // written document — and this class exists to refuse an answer it cannot
+            // account for, which has to include the ones that merely look right.
+            $action = \is_array($item) && \count($item) === 1 ? ($item['index'] ?? null) : null;
 
             // A position nobody can read is not a failed document — it is an answer
             // that cannot be trusted at all, and the difference decides what happens
@@ -82,10 +86,10 @@ final class BulkResult
             // the batch has to be sent again. Which is safe: every document carries
             // its own id and overwrites itself.
             if (!\is_array($action) || !is_numeric($action['status'] ?? null)) {
-                throw TransportUnavailableException::because(new \UnexpectedValueException(sprintf(
+                throw TransportUnavailableException::saying(sprintf(
                     'Elasticsearch answered position %d of a bulk request with something that could not be read as a result, so whether those documents were written is unknown.',
                     $position,
-                )));
+                ));
             }
 
             $status = (int) $action['status'];

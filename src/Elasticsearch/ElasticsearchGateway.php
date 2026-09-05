@@ -133,7 +133,7 @@ final class ElasticsearchGateway implements GatewayInterface
         $id = $response['id'] ?? null;
 
         if (!\is_string($id) || $id === '') {
-            throw TransportUnavailableException::because(new \UnexpectedValueException('Elasticsearch opened a point in time but returned no id.'));
+            throw TransportUnavailableException::saying('Elasticsearch opened a point in time but returned no id.');
         }
 
         return $id;
@@ -211,7 +211,7 @@ final class ElasticsearchGateway implements GatewayInterface
             : sprintf('Elasticsearch answered HTTP %d for "%s" without a reason anyone can read.', $status, $index);
 
         if ($status === 429 || $status >= 500) {
-            return TransportUnavailableException::because(new \RuntimeException($reason, $status));
+            return TransportUnavailableException::saying($reason);
         }
 
         return RequestRejectedException::because($status, $reason);
@@ -221,6 +221,26 @@ final class ElasticsearchGateway implements GatewayInterface
     {
         $this->call(fn () => self::answer($this->client->indices()->create(['index' => $index, 'body' => $definition])));
         $this->known[$index] = true;
+    }
+
+    public function indicesAcceptingUnknownFields(string $index): array
+    {
+        $response = $this->call(fn () => self::answer($this->client->indices()->getMapping(['index' => $index]))->asArray(), $index);
+        $open = [];
+
+        foreach ($response as $concrete => $mappings) {
+            // Absent means Elasticsearch's own default, which is dynamic: true — the
+            // guessed mapping this bundle exists to keep out. The value comes back as a
+            // bool or as a string depending on how it was set, so it is read as text.
+            $dynamic = \is_array($mappings) ? ($mappings['mappings']['dynamic'] ?? true) : true;
+            $dynamic = \is_bool($dynamic) ? ($dynamic ? 'true' : 'false') : (string) $dynamic;
+
+            if ($dynamic !== 'false' && $dynamic !== 'strict') {
+                $open[] = (string) $concrete;
+            }
+        }
+
+        return $open;
     }
 
     public function mapping(string $index): array
@@ -420,14 +440,20 @@ final class ElasticsearchGateway implements GatewayInterface
      */
     private static function reason(ClientResponseException $e): string
     {
+        // Never $e->getMessage(), on either path. The client builds it as
+        // "<status> <phrase>: <the whole response body>", so an answer this cannot read —
+        // a proxy, a WAF, a gateway in front of the cluster — would travel in full
+        // through the one channel that exists to carry no payload at all.
+        $unreadable = sprintf('Elasticsearch answered HTTP %d without a reason anyone can read.', $e->getResponse()->getStatusCode());
+
         try {
             $body = json_decode((string) $e->getResponse()->getBody(), true, 512, \JSON_THROW_ON_ERROR);
         } catch (\JsonException) {
-            return $e->getMessage();
+            return $unreadable;
         }
 
         $reason = \is_array($body) ? ($body['error']['root_cause'][0]['reason'] ?? $body['error']['reason'] ?? null) : null;
 
-        return \is_string($reason) && $reason !== '' ? RequestRejectedException::withoutValuePreview($reason) : $e->getMessage();
+        return \is_string($reason) && $reason !== '' ? RequestRejectedException::withoutValuePreview($reason) : $unreadable;
     }
 }

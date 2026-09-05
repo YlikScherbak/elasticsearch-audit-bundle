@@ -92,6 +92,49 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame(['Refused', 'Saved'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'], $documents));
     }
 
+    public function testAnInnerFlushSomebodyElseAbortedDoesNotStrandTheOuterFlushesRecords(): void
+    {
+        // The mirror of the test above, and a hole the fix for it opened. A nested flush
+        // pushes a level of its own; if a listener behind this one throws in *its*
+        // onFlush and the application catches it, that level is never popped. postFlush
+        // popped the top of the stack blindly, saw one left and published nothing — so
+        // the outer flush, which did commit, wrote no history at all, and the flush after
+        // it read the stack as abandoned and dropped what was collected.
+        $veto = new class {
+            public int $seen = 0;
+
+            public function onFlush(): void
+            {
+                // The outer flush passes; the inner one is refused.
+                if (++$this->seen === 2) {
+                    throw new \DomainException('this entity may not be saved');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+        $em = $this->em;
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($em) {
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em)
+            {
+            }
+
+            public function postPersist(): void
+            {
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // The application copes and carries on, which is the whole point.
+                }
+            }
+        });
+
+        $this->em->persist(new Article('Hello'));
+        $this->em->flush();
+
+        self::assertCount(1, $this->documents(), 'the outer flush committed, so its record is history');
+    }
+
     public function testRecordsAreSentAfterTheCommit(): void
     {
         $nestingAtWrite = null;
@@ -137,6 +180,37 @@ final class TransactionSafetyTest extends DoctrineTestCase
 
         self::assertCount(1, $this->documents(), 'the limitation, stated as a fact: the record went out when the inner flush committed');
         self::assertSame([], $this->em->getRepository(Article::class)->findAll(), 'while the database kept nothing');
+    }
+
+    public function testTheGapIsTheSameWhicheverWayTheTwoAreNested(): void
+    {
+        // wrapInTransaction() around coalesce(), rather than the other way round. The
+        // frame and the transaction are independent of each other, so both orders reach
+        // the same place — but "both orders" is exactly the kind of claim that is assumed
+        // rather than checked, and an audit trail whose correctness depended on which one
+        // an application happened to write would be a trap nobody could see.
+        $buffer = new FrameBuffer();
+        $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer));
+
+        try {
+            $this->em->wrapInTransaction(function () use ($frame): void {
+                $frame->coalesce(function (): void {
+                    $this->em->persist(new Article('Never committed'));
+                    $this->em->flush();
+                    throw new \RuntimeException('the business operation failed');
+                });
+            });
+            self::fail('the operation should have failed');
+        } catch (\RuntimeException) {
+            $this->em->clear();
+        }
+
+        // coalesce() closes its frame in a finally, so the records went out when the
+        // inner flush committed — the documented limitation, reached from the other
+        // direction. The recipe below is what closes it, and it works the same way here:
+        // it is reset() that decides, not the nesting.
+        self::assertCount(1, $this->documents(), 'the same limitation, whichever way round the two are written');
+        self::assertSame([], $this->em->getRepository(Article::class)->findAll());
     }
 
     public function testTheFrameRecipeClosesThatGap(): void

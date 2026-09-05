@@ -64,4 +64,23 @@ final class BulkResultTest extends TestCase
         self::assertSame(0, BulkResult::empty()->attempted);
         self::assertSame(7, BulkResult::allSucceeded(7)->succeeded());
     }
+
+    public function testAnActionNobodyAskedForIsNotASuccessfulIndex(): void
+    {
+        // The action was read as "whatever the first key holds", so a response naming
+        // something else — a proxy rewriting the body, a create where an index was sent,
+        // a future action — counted as a written document. This class refuses answers it
+        // cannot account for; that has to include the ones that merely look right.
+        $this->expectException(TransportUnavailableException::class);
+        $this->expectExceptionMessage('could not be read as a result');
+
+        BulkResult::fromResponse(['items' => [['something_else' => ['status' => 201]]]], 1);
+    }
+
+    public function testAnItemCarryingMoreThanOneActionIsRefusedToo(): void
+    {
+        $this->expectException(TransportUnavailableException::class);
+
+        BulkResult::fromResponse(['items' => [['index' => ['status' => 201], 'delete' => ['status' => 200]]]], 1);
+    }
 }

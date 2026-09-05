@@ -21,6 +21,24 @@ is a 400 the bundle reads as a permanent refusal — on an older cluster every a
 dropped. If you pinned `elasticsearch/elasticsearch:^8.0`, move the pin to `^8.18`, and check the
 cluster version too: this is the one requirement here that the client alone cannot satisfy.
 
+**A custom `GatewayInterface` implementation gains one method**, `indicesAcceptingUnknownFields()`,
+which answers with the indices behind a name whose mapping is not `dynamic: false`. Returning an
+empty array keeps the previous behaviour; `audit:check` then reports nothing about it.
+
+**A `doctrine.connection` that no entity manager uses fails the boot**, and so does a
+`message_bus` that is not a Messenger bus. Both used to boot and record nothing at all. The
+message names the connections that do have entity managers, or the buses that are tagged.
+
+**An association among `alwaysRecord` fields fails the boot too.** It was accepted and honoured
+nowhere; audit it as a field with a representer instead.
+
+**An audited association now needs its representer at the first flush**, whether or not a value
+was ever represented. If a collection or a to-one was declared without one, it recorded `null` on
+both sides through the membership path, or nothing at all while it stayed null; now it says so.
+
+**A field named in `trackElements` must exist on the element.** A misspelling used to watch
+nothing in silence.
+
 **An `#[AuditField]` on an embedded property now fails at the first flush.** It never recorded
 anything — Doctrine reports an embeddable's columns as `address.city`, never as `address` — so
 this turns silence into a message naming the fields that do exist. Audit those names instead. The
@@ -30,11 +48,30 @@ same check refuses a property Doctrine maps as neither a field nor an associatio
 built ranges from user input without ordering the bounds, an impossible one used to come back as
 an empty page and is now an `InvalidQueryException`.
 
+**With `redact.failure_details: cause`, `WriteFailedException::getPrevious()` is the sanitized
+reason, not the original.** Configuring `redact.fields` selects that mode, so this is the default
+for any application that redacts anything. Code reading the previous exception for the cluster's
+own words should either set `failure_details: full` or read `FailureReason::$causeClass`, which
+names what failed. Under `full` nothing changes.
+
+**A Messenger handler's exception carries no chain**, whatever `failure_details` says: Symfony
+stores it in the failure transport, where it outlives the request. `FailureReason::$causeClass`
+still names the cause.
+
+**`TransportUnavailableException::getMessage()` names the cause instead of quoting it.** Code
+matching on the text of a bus or client failure should read `getPrevious()`.
+
 **The Elasticsearch client's `debug` output no longer reaches your log.** It carried the request
 and response bodies — that is, the audited document — so on any environment running at debug the
 values redaction removes were in the log anyway. If you were reading those lines to debug a
 request, use the cluster's own slow log or a proxy; the bundle will not carry a payload into a
 log again. The `info` lines stay, minus the PSR-7 objects their context used to carry.
+
+**Changing a query after `after()`/`afterToken()` drops the cursor.** It used to survive
+everything except `page()` and a change of sort direction, which let a cursor from one result set
+be continued into another — the reader would then skip every matching record before that position
+without saying so. If you build a query in steps, apply the cursor last. A `QueryExtension` is
+unaffected: the reader keeps the cursor across extensions, because they run on every page alike.
 
 **Cursor tokens issued before 1.0 cannot be continued.** Every cursor read outside a consistent
 `iterate()` now sorts by the index name as well, so a token carries three sort values where it

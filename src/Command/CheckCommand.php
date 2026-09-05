@@ -54,7 +54,7 @@ final class CheckCommand extends Command
         try {
             $info = $this->gateway->info();
         } catch (AuditException $e) {
-            $io->error('Elasticsearch is unreachable: '.$e->getMessage());
+            $io->error('Elasticsearch is unreachable: '.self::diagnostic($e));
 
             return self::FAILURE;
         }
@@ -68,7 +68,7 @@ final class CheckCommand extends Command
             try {
                 $healthy = $this->checkIndex($io, $index, $expected) && $healthy;
             } catch (AuditException $e) {
-                $io->text(sprintf('<error>%s</error>: %s', $index, $e->getMessage()));
+                $io->text(sprintf('<error>%s</error>: %s', $index, self::diagnostic($e)));
                 $healthy = false;
             }
         }
@@ -89,6 +89,14 @@ final class CheckCommand extends Command
 
         $diff = MappingComparison::between($expected, $this->gateway->mapping($index));
         $drift = $this->windowDrift($index);
+
+        // The claim the bundle makes about its own indices, checked rather than assumed:
+        // dynamic: false is what keeps Elasticsearch from inventing a mapping, and an
+        // index created by hand, a changed template or a new member of an alias can be
+        // without it while every declared field is mapped exactly right.
+        foreach ($this->gateway->indicesAcceptingUnknownFields($index) as $open) {
+            $drift[] = sprintf('%s is not "dynamic: false", so Elasticsearch will map fields nobody declared — the mapping grows on its own and later documents are refused over type conflicts. Reindex it into an index that audit:index:create made, or set dynamic to false on it.', $open);
+        }
 
         if ($diff->clean() && $drift === []) {
             $io->text(sprintf('<info>%s</info> ok', $index));
@@ -133,4 +141,23 @@ final class CheckCommand extends Command
         return $drift;
     }
 
+
+    /**
+     * What to show an operator: the bundle's sentence and the cause behind it.
+     *
+     * The bundle deliberately keeps a foreign exception's message out of its own, because
+     * those travel into logs, failure transports and listeners. A console command is the
+     * other case — a person ran it to find out what is wrong, the output goes to their
+     * terminal, and a class name alone would leave them nowhere.
+     */
+    private static function diagnostic(\Throwable $e): string
+    {
+        $said = [$e->getMessage()];
+
+        for ($cause = $e->getPrevious(); $cause !== null; $cause = $cause->getPrevious()) {
+            $said[] = $cause->getMessage();
+        }
+
+        return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));
+    }
 }

@@ -334,6 +334,50 @@ final class AuditFrameTest extends TestCase
         self::assertSame([], $this->buffer->takeFinalizeFailures(), 'nothing is left to surface inside somebody else\'s operation');
     }
 
+    public function testAGeneratorOfComparatorsIsNotExhaustedAfterTheFirstComparison(): void
+    {
+        // The constructors take iterable because a tagged iterator is one, which made a
+        // plain Generator legal too — and the chain is walked again for every value, so
+        // the second walk found it empty and agreed with nothing from then on. A
+        // comparator that stops being consulted does not fail; it quietly starts letting
+        // through records it exists to drop.
+        $numeric = new \Borsche\ElasticsearchAuditBundle\Coalescing\NumericNullAsZeroComparator(['stock.fact']);
+        $chain = new \Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator((static function () use ($numeric): \Generator {
+            yield $numeric;
+        })());
+
+        self::assertTrue($chain->equals('stock', 'fact', null, 0));
+        self::assertTrue($chain->equals('stock', 'fact', null, 0), 'and again, on a list somebody could only walk once');
+    }
+
+    public function testAFrameLeftOpenBeforeAConsumeIsNotFedTheNewMessagesHistory(): void
+    {
+        // The price of deciding ownership by "is a frame open": a frame that leaked into
+        // the worker some other way — a handler bypassing the middleware, a listener
+        // opening one outside a message — is treated as the caller's, so the middleware
+        // leaves it alone and the new message's records join whatever it was holding.
+        // The counter is what keeps the two apart in a worker, and this pins the
+        // behaviour so a change to that reasoning has to face it.
+        $middleware = new FrameResetMiddleware($this->frame, $this->logger());
+
+        $this->frame->begin();
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+        $middleware->handle(self::consumed(new \stdClass()), new StackMiddleware(new HandlerMiddleware(function (): void {
+            $this->writer->record('stock', 9, AuditEvent::UPDATE, ['fact' => new Change(5, 6)]);
+        })));
+
+        // Documented as it is rather than pretended away: the stale frame is still open,
+        // still holding both, and the next reset() or end() decides their fate. What the
+        // middleware must not do is close somebody else's frame, and it did not.
+        self::assertTrue($this->frame->isOpen());
+        self::assertSame([], $this->gateway->documents);
+
+        $this->frame->end();
+
+        self::assertCount(2, $this->gateway->documents['audit_log'], 'both are written, neither is lost');
+    }
+
     private static function consumed(object $message, string $transport = 'test'): Envelope
     {
         return new Envelope($message, [new ReceivedStamp($transport)]);

@@ -256,7 +256,7 @@ final class Configuration implements ConfigurationInterface
     private static function doctrine(ArrayNodeDefinition $doctrine): void
     {
         $doctrine
-            ->info('Automatic auditing of entities implementing AuditableInterface or marked #[Auditable]. Needs doctrine/orm.')
+            ->info('Automatic auditing of entities implementing AuditableInterface or marked #[Auditable]. Needs doctrine/orm AND doctrine/doctrine-bundle: the listener reaches Doctrine through the doctrine.event_listener tag that DoctrineBundle owns, which the ORM alone does not collect.')
             ->addDefaultsIfNotSet();
 
         $children = $doctrine->children();
@@ -266,7 +266,7 @@ final class Configuration implements ConfigurationInterface
         // honest answer is a boot failure — a silent skip surfaces months later, as the
         // history that was never written.
         $children->enumNode('enabled')
-            ->info('true requires doctrine/orm and fails the boot without it; "auto" (default) attaches the listener when doctrine/orm is installed and stays quiet when not.')
+            ->info('"true" requires doctrine/orm and doctrine/doctrine-bundle, and fails the boot when either is missing; "auto" (default) attaches the listener when both are there and stays quiet otherwise.')
             ->values(['auto', true, false])
             ->defaultValue('auto');
 

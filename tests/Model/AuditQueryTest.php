@@ -74,7 +74,17 @@ final class AuditQueryTest extends TestCase
         self::assertSame(['2026-08-26 10:00:00', 17], $bigger->searchAfter);
         self::assertSame(50, $bigger->limit);
 
-        self::assertTrue($withCursor->withEvents('x')->usesCursor(), 'other withers keep the cursor');
+        // Elasticsearch takes a search_after against any query whose sort has the right
+        // shape, and answers with the page after that position *in the new result set*.
+        // So a cursor from "all events" continued into "remove events" skips every
+        // remove before that position, silently. A cursor belongs to the query that
+        // produced it, and anything that changes what the query matches abandons it.
+        self::assertFalse($withCursor->withEvents('x')->usesCursor(), 'a filter change makes it a different result set');
+        self::assertFalse($withCursor->withActors('u1')->usesCursor());
+        self::assertFalse($withCursor->where('country', 'UA')->usesCursor());
+        self::assertFalse($withCursor->since(new \DateTimeImmutable('2026-01-01'))->usesCursor(), 'a date bound is a filter like any other');
+        self::assertFalse($withCursor->matchNothing()->usesCursor());
+        self::assertFalse($withCursor->withOption('viewer', 7)->usesCursor(), 'an option is what a QueryExtension turns into a filter');
         self::assertFalse($withCursor->oldestFirst()->usesCursor(), 'a cursor belongs to the ordering that made it: flipping the direction abandons it');
         self::assertTrue($withCursor->newestFirst()->usesCursor(), 'restating the direction it already has changes nothing');
     }
@@ -157,13 +167,14 @@ final class AuditQueryTest extends TestCase
         AuditQuery::for('order')->whereBetween('paidAt', new \DateTimeImmutable('2026-08-27'), new \DateTimeImmutable('2026-08-26'));
     }
 
-    public function testBoundsOfDifferentKindsAreLeftToElasticsearch(): void
+    public function testStringBoundsAreLeftToElasticsearch(): void
     {
-        // "10" against 9 is not a comparison this can make: the field may be a keyword,
-        // where the cluster orders them as text. Only bounds of one kind are checked.
-        $query = AuditQuery::for('order')->whereBetween('code', '10', 9);
-
-        self::assertSame('10', $query->filters['code']->from);
+        // Not a comparison this can make. PHP reads '10' > '9' numerically; an
+        // Elasticsearch keyword orders them as text, where '10' comes first — and nothing
+        // here knows which the field is. Refusing on PHP's reading would reject a range
+        // that is perfectly good for a keyword field, so string bounds travel untouched.
+        self::assertSame('10', AuditQuery::for('order')->whereBetween('code', '10', '9')->filters['code']->from);
+        self::assertSame('10', AuditQuery::for('order')->whereBetween('code', '10', 9)->filters['code']->from);
     }
 
 }

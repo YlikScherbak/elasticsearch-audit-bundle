@@ -45,7 +45,12 @@ final class DoctrineSupport
             return new self($orm, \array_key_exists('DoctrineBundle', $bundles));
         }
 
-        return new self($orm, class_exists(\Doctrine\Bundle\DoctrineBundle\DoctrineBundle::class));
+        // No kernel.bundles means no kernel: a bare ContainerBuilder, which is a test
+        // or a tool, not an application. class_exists() here would answer "registered"
+        // for a package that merely sits in vendor/ — the very confusion this class
+        // exists to end. A test that needs a different answer injects one: full(),
+        // none(), ormOnly().
+        return new self($orm, false);
     }
 
     public static function none(): self

@@ -13,6 +13,7 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Exception\UnrecoverableExceptionInterface;
 use Symfony\Component\Messenger\MessageBusInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\FailureReason;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 
 final class MessengerTransportTest extends TestCase
@@ -48,7 +49,9 @@ final class MessengerTransportTest extends TestCase
         };
 
         $this->expectException(TransportUnavailableException::class);
-        $this->expectExceptionMessage('AMQP connection refused');
+        // The bus's own words are one getPrevious() away, not interpolated into a
+        // message that travels into logs and failure transports.
+        $this->expectExceptionMessage('RuntimeException');
 
         (new MessengerTransport($bus))->send('audit_log', []);
     }
@@ -85,7 +88,18 @@ final class MessengerTransportTest extends TestCase
             self::fail('expected the message to fail');
         } catch (UnrecoverableExceptionInterface $e) {
             self::assertStringContainsString('failed to parse field [objectId]', $e->getMessage());
-            self::assertInstanceOf(RequestRejectedException::class, $e->getPrevious());
+
+            // The gateway's own sentence survives; what it wrapped does not. Symfony
+            // stores a failed message's cause as an ErrorDetailsStamp built from
+            // FlattenException, which walks the chain — and the client's exception at
+            // the end of it is the response body, which is where a refused document's
+            // values are. The class of the real cause rides on the reason, for a
+            // listener that needs to tell one refusal from another.
+            $reason = $e->getPrevious();
+
+            self::assertInstanceOf(FailureReason::class, $reason);
+            self::assertSame(RequestRejectedException::class, $reason->causeClass);
+            self::assertNull($reason->getPrevious(), 'nothing walkable is left hanging off it');
         }
     }
 

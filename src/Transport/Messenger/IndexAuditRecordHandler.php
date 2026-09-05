@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Transport\Messenger;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\FailureReason;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
 
@@ -35,7 +36,16 @@ final class IndexAuditRecordHandler
         try {
             $this->gateway->index($message->index, $message->document, $message->id);
         } catch (RequestRejectedException $e) {
-            throw new UnrecoverableMessageHandlingException($e->getMessage(), 0, $e);
+            // The chain stops here. Symfony keeps a failed message's cause as an
+            // ErrorDetailsStamp built from FlattenException, which walks getPrevious()
+            // and keeps every message it finds — and that stamp lives in the failure
+            // transport until somebody retries or removes it. The gateway's own sentence
+            // is cut and safe; the client's exception behind it is the status line
+            // followed by the whole response body, which is where a refused document's
+            // values are. FailureReason keeps the first and drops the second.
+            $safe = FailureReason::keepingTheMessageOf($e);
+
+            throw new UnrecoverableMessageHandlingException($safe->getMessage(), 0, $safe);
         }
     }
 }

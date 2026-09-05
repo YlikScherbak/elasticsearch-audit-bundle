@@ -118,7 +118,11 @@ final class AuditWriterTest extends TestCase
 
         self::assertCount(1, $this->logs);
         self::assertSame('error', $this->logs[0]['level']);
-        self::assertStringContainsString('cluster down', (string) $this->logs[0]['context']['reason']);
+        // Under the default policy — no redactor configured, so failure_details is
+        // "full" — the cause travels as the previous exception, and what the bundle
+        // wrote names it rather than quoting it.
+        self::assertStringNotContainsString('cluster down', (string) $this->logs[0]['context']['reason']);
+        self::assertStringContainsString('cluster down', self::chainOf($this->logs[0]['context']['exception']));
         self::assertSame('order', $this->logs[0]['context']['objectType']);
     }
 
@@ -136,7 +140,7 @@ final class AuditWriterTest extends TestCase
             // one the bundle did not write and cannot redact, and this exception is
             // logged in places a value must not reach.
             self::assertStringNotContainsString('cluster down', $e->getMessage());
-            self::assertStringContainsString('cluster down', (string) $e->getPrevious()?->getMessage());
+            self::assertStringContainsString('cluster down', self::chainOf($e), 'two steps down now, not one: the gateway names the cause instead of quoting it');
             self::assertSame([], $this->logs);
         }
     }
@@ -209,5 +213,21 @@ final class AuditWriterTest extends TestCase
         $transport = new SyncTransport($this->gateway);
 
         return new AuditWriter($transport, $transport, new IndexResolver('audit_log', $routing), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, $policy, $logger);
+    }
+
+    /**
+     * Every message in an exception chain, joined. The bundle names a foreign cause
+     * rather than quoting it, so a diagnostic that used to sit one getPrevious() away
+     * may now sit two or three; what matters is that it is still reachable.
+     */
+    private static function chainOf(?\Throwable $e): string
+    {
+        $said = [];
+
+        for (; $e !== null; $e = $e->getPrevious()) {
+            $said[] = $e->getMessage();
+        }
+
+        return implode(' | ', $said);
     }
 }
