@@ -54,7 +54,15 @@ final class ChangeSetBuilder
 
         foreach ($metadata->fields as $field => $represent) {
             if ($classMetadata->isCollectionValuedAssociation($field)) {
-                $change = $this->collectionChange($classMetadata->getFieldValue($entity, $field), $represent);
+                // Only an owning collection is compared as a whole. An inverse one is
+                // not what Doctrine persists — the element's own reference back is —
+                // so it can be dirty in memory while the database keeps nothing, and it
+                // is dirty in memory whenever an element was added properly, which the
+                // membership path already records. Comparing it here told the same
+                // change twice, and invented one for a relation that was never saved.
+                $change = $classMetadata->isAssociationInverseSide($field)
+                    ? null
+                    : $this->collectionChange($classMetadata->getFieldValue($entity, $field), $represent);
             } elseif ($classMetadata->isSingleValuedAssociation($field)) {
                 $change = \array_key_exists($field, $changeSet) && \is_array($changeSet[$field])
                     ? new Change(self::represent($changeSet[$field][0] ?? null, $represent), self::represent($classMetadata->getFieldValue($entity, $field), $represent))

@@ -12,7 +12,19 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 ## To 1.0.0
 
 A pre-release audit found things that had to be right before the surface froze, so 1.0 is not
-quite "0.12 with a promise". Four of them can ask something of you:
+quite "0.12 with a promise". These can ask something of you:
+
+**The Elasticsearch client floor is 8.18** (`^8.18 || ^9.0`). Writes are sent with
+`include_source_on_error=false`, which keeps a rejected document's own values out of the error the
+cluster returns and out of the logs it reaches; the parameter does not exist before 8.18. If you
+pinned `elasticsearch/elasticsearch:^8.0`, move the pin to `^8.18` — the cluster itself needs no
+upgrade, an 8.18 client speaks to an 8.x cluster.
+
+**`AuditReader::find()`, `iterate()` and `raw()` now raise `PartialResultException`** when
+Elasticsearch answers with part of a result (a failed shard, or a search that ran out of time).
+Previously that answer was returned as though it were complete, and an export took its next
+cursor from the last hit of a short batch. If you would rather show what there is, catch the
+exception at the call site — but do not do it in an export.
 
 **`doctrine.enabled: true` now also requires doctrine/doctrine-bundle.** The entity listener is
 attached through DoctrineBundle's `doctrine.event_listener` tag; with doctrine/orm alone it was

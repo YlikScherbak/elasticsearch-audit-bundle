@@ -6,12 +6,14 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Reader;
 
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
+use Borsche\ElasticsearchAuditBundle\Exception\PartialResultException;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class AuditReaderTest extends TestCase
@@ -165,6 +167,47 @@ final class AuditReaderTest extends TestCase
         ]]);
     }
 
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function aggregationsThatCountMoreThanTheQueryAllows(): iterable
+    {
+        yield 'global ignores the query outright' => ['global'];
+        yield 'significant_terms compares against the whole index' => ['significant_terms'];
+        yield 'significant_text does the same' => ['significant_text'];
+        yield 'children moves to another document scope' => ['children'];
+        yield 'parent likewise' => ['parent'];
+        yield 'and anything nobody has vouched for' => ['some_future_aggregation'];
+    }
+
+    #[DataProvider('aggregationsThatCountMoreThanTheQueryAllows')]
+    public function testAnAggregationTheReaderCannotVouchForIsRefused(string $aggregation): void
+    {
+        // A list of what is allowed, not of what is known to be dangerous. The deny-list
+        // this replaces named "global", and then significant_terms turned out to have
+        // the whole index as its background, and children to move document scope —
+        // each a true finding, and there would always have been a next one.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage($aggregation);
+
+        $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'aggs' => ['x' => [$aggregation => ['field' => 'status']]]]);
+    }
+
+    public function testAnAggregationTheReaderCanVouchForGoesThrough(): void
+    {
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 0], 'hits' => []], 'aggregations' => []];
+
+        $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'aggs' => [
+            'by_event' => [
+                'terms' => ['field' => 'event'],
+                'meta' => ['label' => 'events'],
+                'aggs' => ['actors' => ['cardinality' => ['field' => 'source']]],
+            ],
+        ]]);
+
+        self::assertCount(1, $this->gateway->searches);
+    }
+
     public function testARetrievalMechanismOutsideTheQueryIsRefused(): void
     {
         // knn is combined with the query by union, not intersection: documents the
@@ -284,6 +327,74 @@ final class AuditReaderTest extends TestCase
         // which aggregation was asked for, so the answer says nothing rather than
         // guessing — and the docblock tells callers to read with ?? [].
         self::assertSame(['hits'], array_keys($response), 'no aggregations key over nothing');
+    }
+
+    public function testAPartialAnswerIsNotAPage(): void
+    {
+        // Elasticsearch answers with what it has when a shard fails, and for a search
+        // screen that is often the right trade. For an audit trail it is not: "these
+        // are the records" would be false, and nothing in the response says so unless
+        // someone looks.
+        $this->gateway->respondToSearch = static fn () => [
+            'timed_out' => false,
+            '_shards' => ['total' => 3, 'successful' => 2, 'failed' => 1],
+            'hits' => ['total' => ['value' => 1], 'hits' => []],
+        ];
+
+        $this->expectException(PartialResultException::class);
+        $this->expectExceptionMessage('1 of 3');
+
+        $this->reader()->find(AuditQuery::for('order'));
+    }
+
+    public function testATimedOutAnswerIsNotAPageEither(): void
+    {
+        $this->gateway->respondToSearch = static fn () => [
+            'timed_out' => true,
+            'hits' => ['total' => ['value' => 0], 'hits' => []],
+        ];
+
+        $this->expectException(PartialResultException::class);
+        $this->expectExceptionMessage('timed out');
+
+        $this->reader()->find(AuditQuery::for('order'));
+    }
+
+    public function testAnExportStopsRatherThanSkippingWhatAShardDidNotAnswer(): void
+    {
+        // The worst version: iterate() would take its cursor from the last hit of an
+        // incomplete batch, and everything the failed shard held before that position
+        // would never be read — an export that looks complete and is not.
+        $answers = [
+            ['hits' => ['total' => ['value' => 2], 'hits' => [
+                ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+            ]]],
+            ['_shards' => ['total' => 2, 'successful' => 1, 'failed' => 1], 'hits' => ['total' => ['value' => 2], 'hits' => []]],
+        ];
+        $this->gateway->respondToSearch = static function () use (&$answers) {
+            return array_shift($answers) ?? ['hits' => ['total' => ['value' => 0], 'hits' => []]];
+        };
+
+        $this->expectException(PartialResultException::class);
+
+        iterator_to_array($this->reader()->iterate(AuditQuery::for('order'), batchSize: 1, consistent: false), false);
+    }
+
+    public function testARawAnswerIsHeldToTheSameStandardAsAPage(): void
+    {
+        // Worse here than on a page: an aggregation over part of the index is a number
+        // that looks like an answer. A count of failed logins that is short by one shard
+        // reads exactly like a count that is right.
+        $this->gateway->respondToSearch = static fn () => [
+            '_shards' => ['total' => 4, 'successful' => 3, 'failed' => 1],
+            'hits' => ['total' => ['value' => 0], 'hits' => []],
+            'aggregations' => ['e' => ['buckets' => []]],
+        ];
+
+        $this->expectException(PartialResultException::class);
+        $this->expectExceptionMessage('1 of 4');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'aggs' => ['e' => ['terms' => ['field' => 'event']]]]);
     }
 
     public function testACorruptTimestampDoesNotBlockThePageItIsOn(): void

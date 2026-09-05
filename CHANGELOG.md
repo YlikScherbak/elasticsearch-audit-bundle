@@ -36,6 +36,19 @@ the dependency range.
   original stays reachable through `WriteFailedException::getPrevious()`. The earlier rule —
   "it wrapped nothing, so we wrote it" — was a guess, and false for every library that throws
   directly. `redact.failure_details` sets it explicitly; unset, it follows `redact.fields`
+- **A partial answer is no longer served as if it were the whole one.** Elasticsearch replies with
+  what it has when a shard fails or a search runs out of time, and says so in `_shards.failed` and
+  `timed_out` — which nobody reads. For a search screen that is the right trade; for an audit trail
+  "these are the records" would simply be false. Worst on `iterate()`, which took its next cursor
+  from the last hit of a short batch, so everything the failed shard held before that position was
+  never read and the export finished looking complete. `find()`, `iterate()` and `raw()` now raise
+  `PartialResultException` instead, `iterate()` before the cursor moves
+- **`raw()` allows the aggregations it knows rather than refusing the ones it remembered.** The
+  boundary is a filter, and an aggregation that steps outside the query — `global`,
+  `significant_terms`, `significant_text`, `children`, `parent` — reads documents the filter never
+  saw. Naming them one by one meant every aggregation Elasticsearch adds next is allowed by
+  default; the list now says which aggregations are inside the boundary, and an unknown name is
+  refused
 - **`raw()` could be handed a body that escapes its own boundary through `runtime_mappings`.**
   A runtime field may carry the name of a mapped one and shadows it for the whole query, so a
   body could define `source` as a script emitting the value the boundary filters on — and the
@@ -164,6 +177,12 @@ the dependency range.
   A removed element is still represented eagerly, while it still has its values
 
 ### Changed
+- **The Elasticsearch client floor is 8.18**, up from 8.0. Writes are sent with
+  `include_source_on_error=false` so a rejected document's own values stay out of the error the
+  cluster returns, and out of the logs that error reaches; the parameter does not exist before
+  8.18, where a mapping conflict quotes the audited value back. A privacy guarantee that holds
+  only on some supported versions is not one, so the versions where it does not hold are no
+  longer supported
 - **Indices are created with one replica** instead of none. An audit trail is the last data
   anyone wants living on a single node; a one-node development cluster wants
   `indices.settings.number_of_replicas: 0`, which is now a deliberate choice rather than the
@@ -177,6 +196,10 @@ the dependency range.
   an order-sensitive comparison called those incompatible
 - **An expired point in time is recognised by Elasticsearch's error type**, with the message text
   as a fallback: a human-readable sentence is free to change between versions
+- **The README routes both Messenger messages.** A flush that produced several records is sent as
+  `IndexAuditRecords` and written in one `_bulk`; routing only `IndexAuditRecord` left the batch
+  message on the synchronous bus, so exactly the requests that produce the most audit records were
+  the ones still waiting for Elasticsearch — and nothing said so
 - **Documented rather than implied**: what redaction does *not* cover (records already written,
   the actor field, `_source` under `dynamic: false`, values nested in free-form arrays); that
   `RecordFailedEvent` reports a failed hand-over, and with the messenger transport an indexing
@@ -185,7 +208,6 @@ the dependency range.
   error rather than a guarantee — `action.auto_create_index` on the cluster is the guarantee, and
   the README now asks for it as part of installing the bundle
 
-### Changed
 - **`@throws` on `GatewayInterface` matches what the implementation raises**, method by method,
   with the two failures common to all of them (an unreachable cluster, a client built for
   asynchronous responses) said once at the top instead of half-listed on each

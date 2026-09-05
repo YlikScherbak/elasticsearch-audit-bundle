@@ -336,6 +336,14 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(self::SERVICE_FRAME_BUFFER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             new Reference(ChangeRedactor::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             $batchSize,
+            // Said explicitly, or read from the declaration already made: configuring
+            // redaction is saying that some values must not be kept, and a cause's
+            // message is a place they turn up. The writer has the same default, but a
+            // container that passes null relies on its ability to see the redactor —
+            // which it is handed as a reference, not a value.
+            $redact['failure_details'] !== null
+                ? FailureDetails::from($redact['failure_details'])
+                : ($redact['fields'] === [] ? FailureDetails::Full : FailureDetails::Cause),
         ]));
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }

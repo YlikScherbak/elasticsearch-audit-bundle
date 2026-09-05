@@ -51,6 +51,7 @@ jobs:
           composer require --no-update --dev \
             symfony/console:${{ matrix.symfony }} \
             symfony/event-dispatcher:${{ matrix.symfony }} \
+            symfony/framework-bundle:${{ matrix.symfony }} \
             symfony/messenger:${{ matrix.symfony }} \
             symfony/security-core:${{ matrix.symfony }}
 
@@ -93,7 +94,7 @@ jobs:
       matrix:
         include:
           - elasticsearch: '8.19.0'
-            client: '^8.0'
+            client: '^8.18'
           - elasticsearch: '9.1.0'
             client: '^9.0'
     services:

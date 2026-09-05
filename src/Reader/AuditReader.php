@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
+use Borsche\ElasticsearchAuditBundle\Exception\PartialResultException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
 use Borsche\ElasticsearchAuditBundle\Model\AuditPage;
@@ -59,6 +60,7 @@ final class AuditReader
         }
 
         $response = $this->gateway->search($this->indexFor($query), $this->queryBuilder->build($query));
+        self::assertNothingWasMissed($response);
 
         $hits = array_values($response['hits']['hits'] ?? []);
         $entries = array_map(AuditEntry::fromHit(...), $hits);
@@ -123,6 +125,11 @@ final class AuditReader
                     // result set on every batch is a full pass over the index per page.
                     ? $this->gateway->search($index, $this->queryBuilder->build($query, trackTotalHits: false))
                     : $this->gateway->searchPointInTime($pit, $this->pointInTimeKeepAlive, $this->queryBuilder->build($query, pointInTime: true, trackTotalHits: false));
+
+                // Before the hits are read and before the cursor moves: an incomplete
+                // batch would hand its last hit over as the place to continue from, and
+                // whatever the failed shard held earlier would never be read at all.
+                self::assertNothingWasMissed($response);
 
                 // Elasticsearch may hand back a renewed id; the next search must use it.
                 if ($pit !== null && \is_string($response['pit_id'] ?? null) && $response['pit_id'] !== '') {
@@ -204,7 +211,14 @@ final class AuditReader
             ? ['bool' => ['filter' => [$boundary], 'must' => [$body['query']]]]
             : $boundary;
 
-        return $this->gateway->search($this->indexFor($query), $body);
+        $response = $this->gateway->search($this->indexFor($query), $body);
+
+        // An aggregation over part of the index is a number that looks like an answer
+        // and is not one — worse here than on a page, because nothing about a count
+        // suggests it might be short.
+        self::assertNothingWasMissed($response);
+
+        return $response;
     }
 
     /**
@@ -246,6 +260,32 @@ final class AuditReader
             if (\is_array($body[$key] ?? null)) {
                 self::refuseGlobalAggregations($body[$key], $key);
             }
+        }
+    }
+
+    /**
+     * Whether this answer is the whole answer.
+     *
+     * Elasticsearch returns what it has when a shard fails or a search runs out of
+     * time, and says so in the response rather than by failing. For a search screen
+     * that is often right; for an audit trail "these are the records" has to be true
+     * or be an error.
+     *
+     * @param array<string, mixed> $response
+     *
+     * @throws PartialResultException
+     */
+    private static function assertNothingWasMissed(array $response): void
+    {
+        if (($response['timed_out'] ?? false) === true) {
+            throw PartialResultException::timedOut();
+        }
+
+        $shards = \is_array($response['_shards'] ?? null) ? $response['_shards'] : [];
+        $failed = (int) ($shards['failed'] ?? 0);
+
+        if ($failed > 0) {
+            throw PartialResultException::shardsFailed($failed, (int) ($shards['total'] ?? $failed));
         }
     }
 
@@ -299,6 +339,44 @@ final class AuditReader
     }
 
     /**
+     * Which aggregations may be asked for, at any depth — a list of what is allowed,
+     * not of what is known to be dangerous.
+     *
+     * The difference is the whole point. A deny-list was written first, naming `global`;
+     * then `significant_terms` turned out to compare against the whole index as its
+     * background, and `significant_text` after it, and `children` reaches into another
+     * document scope. Each was a true finding, and the next one would have been too,
+     * because "everything except the escapes we have thought of" is not a boundary. An
+     * aggregation not on this list is refused by name, and adding one is a decision
+     * someone makes deliberately, having asked what it counts.
+     *
+     * What is here answers only within the query: bucketing by a field, by a range, by
+     * time; and the metrics over those buckets.
+     */
+    private const ALLOWED_AGGREGATIONS = [
+        // buckets
+        'terms', 'multi_terms', 'rare_terms', 'range', 'date_range', 'ip_range',
+        'histogram', 'date_histogram', 'auto_date_histogram', 'variable_width_histogram',
+        'filter', 'filters', 'missing', 'nested', 'reverse_nested', 'composite', 'sampler',
+        'diversified_sampler', 'adjacency_matrix',
+        // metrics
+        'avg', 'min', 'max', 'sum', 'stats', 'extended_stats', 'value_count', 'cardinality',
+        'percentiles', 'percentile_ranks', 'median_absolute_deviation', 'top_hits',
+        'top_metrics', 'scripted_metric', 'string_stats', 'boxplot', 'geo_bounds',
+        'geo_centroid', 'weighted_avg',
+        // pipeline: they read other aggregations, not the index
+        'avg_bucket', 'min_bucket', 'max_bucket', 'sum_bucket', 'stats_bucket',
+        'extended_stats_bucket', 'percentiles_bucket', 'cumulative_sum', 'derivative',
+        'moving_fn', 'moving_percentiles', 'serial_diff', 'bucket_script', 'bucket_selector',
+        'bucket_sort', 'bucket_count_ks_test', 'normalize', 'inference',
+    ];
+
+    /**
+     * Keys an aggregation node may carry beside the aggregation itself.
+     */
+    private const AGGREGATION_KEYWORDS = ['aggs', 'aggregations', 'meta'];
+
+    /**
      * At any depth: an aggregation nested three levels down escapes the query exactly
      * as thoroughly as one at the top.
      *
@@ -315,8 +393,16 @@ final class AuditReader
 
             $here = $path.'.'.(string) $name;
 
-            if (\array_key_exists('global', $aggregation)) {
-                throw new InvalidQueryException(sprintf('The aggregation at "%s" is global, and a global aggregation ignores the query by definition: it would count records the query — and any visibility rule on it — excludes. Aggregate inside the query, or ask the cluster directly if you really mean "everything".', $here));
+            foreach (array_keys($aggregation) as $key) {
+                $key = (string) $key;
+
+                if (\in_array($key, self::AGGREGATION_KEYWORDS, true)) {
+                    continue;
+                }
+
+                if (!\in_array($key, self::ALLOWED_AGGREGATIONS, true)) {
+                    throw new InvalidQueryException(sprintf('The aggregation at "%s" is a "%s", which raw() cannot vouch for: what it counts is not necessarily what the query allows — "global" ignores the query outright, "significant_terms" and "significant_text" compare against the whole index as their background, and "children" moves to another document scope. Aggregate with one of: %s.', $here, $key, implode(', ', self::ALLOWED_AGGREGATIONS)));
+                }
             }
 
             foreach (['aggs', 'aggregations'] as $key) {

@@ -36,10 +36,14 @@ history screen showed the new events without a change.
 
 - PHP 8.1+
 - Symfony 6.4, 7.x or 8.x
-- Elasticsearch 8 or 9 (`elasticsearch/elasticsearch` `^8.0 || ^9.0`). The client's major
+- Elasticsearch 8.18+ or 9 (`elasticsearch/elasticsearch` `^8.18 || ^9.0`). The client's major
   version must match the cluster's: a 9.x client is refused by an 8.x cluster
   (`Accept version must be either version 8 or 7`), so pin it —
-  `composer require elasticsearch/elasticsearch:^8.0` for an 8.x cluster
+  `composer require elasticsearch/elasticsearch:^8.18` for an 8.x cluster.
+  The floor is 8.18 rather than 8.0 because writes are sent with
+  `include_source_on_error=false`, which keeps a rejected document's own values out of
+  the error Elasticsearch returns — and out of your logs. Earlier 8.x releases have no
+  such parameter, so on those a mapping conflict quotes the audited value back
 - With the version 9 client, a PSR-18 HTTP client — it no longer ships one:
   `composer require guzzlehttp/guzzle`
 
@@ -642,6 +646,14 @@ $response = $this->reader->raw(
 $buckets = $response['aggregations']['actors']['buckets'] ?? [];   // ?? [] — see below
 ```
 
+The body is checked before it is sent, and refused when it would step outside the boundary the
+query drew: an unknown top-level key, `runtime_mappings` (a runtime field can shadow the very
+field a visibility rule filters on), paging past the reader's limits, or an aggregation that is
+not one of the ones known to stay inside the query. That last list is an allow-list on purpose —
+`global`, `significant_terms`, `significant_text`, `children` and `parent` all read documents the
+filter never saw, and so would the next aggregation Elasticsearch adds. If yours is refused and
+you are sure it aggregates within the query, open an issue naming it.
+
 Read the aggregations defensively. When an extension closed the query down to
 `matchNothing()`, the reader answers **without a request**, and that answer has hits and no
 `aggregations` key at all — an empty bucket list cannot be invented without knowing which
@@ -711,6 +723,14 @@ public function history(Request $request, AuditReader $reader): JsonResponse
 Unlike the writer, the reader does not swallow failures: an unreachable cluster is a
 `TransportUnavailableException`, a missing index an `IndexNotFoundException` — map them to the
 HTTP status you want.
+
+That includes the failure nobody usually notices. When a shard fails or a search runs out of
+time, Elasticsearch answers with what it has and says so in `_shards.failed` and `timed_out`;
+`find()`, `iterate()` and `raw()` refuse that answer with a `PartialResultException` (**since
+1.0**) rather than presenting a short page as the history. It matters most in an export:
+`iterate()` takes its next cursor from the last hit it received, so a short batch would skip
+everything the failed shard held before that position and the export would finish looking
+complete. A screen that would rather show what there is can catch it; an export should not.
 
 ## Reacting to records
 
@@ -867,7 +887,14 @@ framework:
   messenger:
     routing:
       'Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord': async
+      'Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords': async
 ```
+
+**Route both.** One record is sent as `IndexAuditRecord`; several at once — a closing frame,
+a flush that changed three entities — are sent as `IndexAuditRecords` and written in one
+`_bulk`. Routing only the first is not an error and says nothing: the batch message stays on
+the synchronous bus, so exactly the requests that produce the most audit records are the ones
+that still wait for Elasticsearch.
 
 The request now only pays for the dispatch; a worker writes the document. The message carries
 plain arrays, so it serialises with any Messenger serializer and survives a deploy that changes
@@ -896,7 +923,8 @@ Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Except
 did not answer, or answered 429 or 503 — backpressure is not a refusal, and a write that met it is
 retried), `RequestRejectedException` (it answered and refused — a document that does not
 fit the mapping, missing permissions; retrying will not help), `InvalidQueryException`
-(a query the bundle or Elasticsearch rejected), `WriteFailedException`.
+(a query the bundle or Elasticsearch rejected), `PartialResultException` (the cluster answered
+with part of a result), `WriteFailedException`.
 
 ## The document
 

@@ -27,6 +27,7 @@ use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
+use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
@@ -231,6 +232,37 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         $gateway = $container->get(GatewayInterface::class);
 
         self::assertSame('u-42', $gateway->only('audit_log')['source'], 'the application answered first');
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>, string}>
+     */
+    public static function failureDetailModes(): iterable
+    {
+        yield 'nothing redacted: the cause is repeated' => [[], 'full'];
+        yield 'redaction configured: it is not' => [['fields' => ['password']], 'cause'];
+        yield 'said explicitly, without redaction' => [['failure_details' => 'cause'], 'cause'];
+        yield 'said explicitly, against the default' => [['fields' => ['password'], 'failure_details' => 'full'], 'full'];
+    }
+
+    /**
+     * @param array<string, mixed> $redact
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('failureDetailModes')]
+    public function testHowMuchOfAFailureIsRepeatedIsActuallyWired(array $redact, string $expected): void
+    {
+        // The setting existed in the configuration tree and reached nothing: the writer
+        // was built without it, so "cause" and "full" wired identically and the
+        // documented default — follow redact.fields — was never applied. A tree that
+        // accepts a setting nobody reads is worse than no setting.
+        $arguments = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'redact' => $redact])
+            ->getDefinition(ElasticsearchAuditExtension::SERVICE_WRITER)
+            ->getArguments();
+
+        $details = array_values(array_filter($arguments, static fn (mixed $a) => $a instanceof FailureDetails));
+
+        self::assertCount(1, $details, 'the writer is told how much to repeat');
+        self::assertSame($expected, $details[0]->value);
     }
 
     public function testCommandsAreRegisteredForTheConsole(): void
