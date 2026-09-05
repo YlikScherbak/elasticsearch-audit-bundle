@@ -349,7 +349,9 @@ final class FullKernel extends Kernel
                         'routing' => [],
                         'buses' => [
                             'messenger.bus.default' => [],
-                            'audit.bus' => ['default_middleware' => ['enabled' => false], 'middleware' => []],
+                            // Spelled as a bare false, which every supported Symfony
+                            // normalises: 6.4 refuses the {enabled: false} form outright.
+                            'audit.bus' => ['default_middleware' => false, 'middleware' => []],
                         ],
                     ]
                     : ['transports' => [], 'routing' => []],
