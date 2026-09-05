@@ -189,7 +189,12 @@ the dependency range.
   between a promise and an offer: `auto` says "attach the listener where it can work and stay
   quiet where it cannot", and it was made to fail exactly like an explicit `true`. An application
   using DBAL alone, with doctrine/orm present in its vendor directory, stopped booting. The mode
-  travels to the compiler now — `auto` removes the listener and says nothing, `true` still refuses
+  travels to the compiler now — `auto` says nothing and leaves the listener where it is, on a
+  connection nothing flushes through, which is the silence it promised; `true` still refuses.
+  (Removing the listener instead was the first attempt, and it broke the boot outright on some
+  DoctrineBundle versions: by the time a compiler pass runs, the id is already written into the
+  connection's event manager, so the container was left referencing a service that no longer
+  existed. A pass test pins that now, without depending on which version is installed)
 - **A flush whose postFlush threw no longer leaves its state to the next one.** postFlush runs
   application code — a representer deferred until an inserted element has its id, `withContext()`
   reading a declaration — and under `on_failure: throw` reporting one of those failures leaves the

@@ -70,9 +70,17 @@ final class CarriesRecordsPass implements CompilerPassInterface
         // and refusing to boot it would be a worse answer than the silence "auto"
         // exists to give. An explicit true is a promise, and a promise nothing can keep
         // has to be said out loud.
+        //
+        // And staying quiet means leaving the listener where it is. Removing it looked
+        // tidier — a service that can never be called — and it is not this pass's to
+        // remove: by the time a compiler pass runs, DoctrineBundle has already collected
+        // the tag and written the id into the connection's event manager, so the removal
+        // left a reference to a service that no longer exists and the container stopped
+        // compiling at all. Which version of DoctrineBundle decides whether that happens
+        // is not a thing to depend on either. Registered on a connection nothing flushes
+        // through, the listener is never called: that is the silence, and it costs a
+        // service definition.
         if ($container->getParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_PROMISED) !== true) {
-            $container->removeDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER);
-
             return;
         }
 

@@ -43,8 +43,9 @@ setting that keeps every record; `throw` is for a caller that rolls the operatio
 **With `doctrine.enabled: true`, a `doctrine.connection` that no entity manager uses fails the
 boot**, and so does a `message_bus` that is not a Messenger bus. Both used to boot and record
 nothing at all; the message names the connections that do have entity managers, or the buses that
-are tagged. Under the default `auto` nothing fails: the listener is dropped without a word, because
-`auto` promises to attach where it can rather than to work everywhere.
+are tagged. Under the default `auto` nothing fails and nothing is said: the listener stays attached
+to a connection nothing flushes through and is never called, because `auto` promises to attach
+where it can rather than to work everywhere.
 
 **An association among `alwaysRecord` fields fails the boot too.** It was accepted and honoured
 nowhere; audit it as a field with a representer instead.
