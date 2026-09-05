@@ -29,9 +29,9 @@ use Elastic\Elasticsearch\Response\Elasticsearch;
  * precise about: between the HEAD and the write the index can be dropped or rolled
  * over, and no amount of checking here can close that window. The guarantee belongs
  * to the cluster — action.auto_create_index excluding the audit pattern, or
- * require_alias on the template — which the README asks for as part of installing
- * the bundle. This check makes the common mistake legible; that setting makes the
- * guessed mapping impossible.
+ * allow_auto_create: false on an index template that matches it — which the README
+ * asks for as part of installing the bundle. This check makes the common mistake
+ * legible; that setting makes the guessed mapping impossible.
  */
 final class ElasticsearchGateway implements GatewayInterface
 {
@@ -48,7 +48,11 @@ final class ElasticsearchGateway implements GatewayInterface
             throw IndexNotFoundException::forIndex($index);
         }
 
-        $params = ['index' => $index, 'body' => $document];
+        // Elasticsearch echoes the offending document back in a parsing error unless
+        // told not to, and an audit document is exactly the one whose values must not
+        // travel into an error message, a log or an exception. Stripping the preview
+        // afterwards is a second line; this is the first.
+        $params = ['index' => $index, 'body' => $document, 'include_source_on_error' => false];
 
         if ($id !== null) {
             $params['id'] = $id;
@@ -106,7 +110,7 @@ final class ElasticsearchGateway implements GatewayInterface
             $body[] = $item['document'];
         }
 
-        $response = $this->call(fn () => self::answer($this->client->bulk(['body' => $body]))->asArray());
+        $response = $this->call(fn () => self::answer($this->client->bulk(['body' => $body, 'include_source_on_error' => false]))->asArray());
         $result = BulkResult::fromResponse($response, \count($items));
 
         // The same forgetting index() does on its 404: an index that answered "not

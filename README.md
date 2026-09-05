@@ -120,9 +120,16 @@ action.auto_create_index: "-audit_*,+*"
 ```
 
 With that in place a write to a missing index is a clean `IndexNotFoundException` whatever the
-bundle remembers, and a guessed mapping cannot happen at all. If your audit indices live behind a
-write alias (see Retention), `"require_alias": true` on the index template does the same job for
-the alias. **Treat this as part of installing the bundle**, not as hardening to get to later —
+bundle remembers, and a guessed mapping cannot happen at all. An index template does the same job
+for one pattern, without touching a cluster-wide setting — verified against Elasticsearch 9, where
+the write then fails with *"composable template forbids index auto creation"*:
+
+```json
+PUT _index_template/audit
+{ "index_patterns": ["audit_*"], "allow_auto_create": false }
+```
+
+**Treat this as part of installing the bundle**, not as hardening to get to later —
 the existence check exists to give a good error, not to be the only thing standing between you
 and an index Elasticsearch invented.
 

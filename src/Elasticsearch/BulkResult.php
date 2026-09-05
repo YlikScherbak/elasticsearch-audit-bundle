@@ -16,13 +16,12 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 final class BulkResult
 {
     /**
-     * Statuses that mean "not now" rather than "not ever": a full write queue, an
-     * unavailable shard — and a missing index, which with rollover and the recommended
-     * auto_create_index guard is an index mid-rotation, back a moment later. The single
-     * write path already retries a 404; a batch must not answer the same moment with
-     * the failure transport.
+     * Statuses below 500 that still mean "not now" rather than "not ever": a full write
+     * queue (429), and a missing index (404), which with rollover and the recommended
+     * auto_create_index guard is an index mid-rotation, back a moment later. Everything
+     * from 500 up is transient too and needs no list — see hasTransientFailures().
      */
-    public const TRANSIENT = [404, 429, 503];
+    public const TRANSIENT = [404, 429];
 
     /**
      * @param int                                                    $attempted how many items were sent
@@ -75,17 +74,18 @@ final class BulkResult
         foreach (array_values($items) as $position => $item) {
             $action = \is_array($item) ? reset($item) : null;
 
-            // Read the status first, and let it decide. Looking for an "error" object
-            // first meant a position nobody could read — a null item, an action without
-            // a status, a 500 that named no error — was counted as written, which is
-            // the one answer this class exists to refuse. Success has to be stated.
+            // A position nobody can read is not a failed document — it is an answer
+            // that cannot be trusted at all, and the difference decides what happens
+            // next: a failure is classified (and an unclassifiable one was being
+            // classified as permanent, so the batch went to the failure transport),
+            // while an unreadable answer means the whole response is untrustworthy and
+            // the batch has to be sent again. Which is safe: every document carries
+            // its own id and overwrites itself.
             if (!\is_array($action) || !is_numeric($action['status'] ?? null)) {
-                $failures[$position] = [
-                    'status' => 0,
-                    'reason' => 'Elasticsearch answered this position with something unreadable, so whether the document was written is unknown.',
-                ];
-
-                continue;
+                throw TransportUnavailableException::because(new \UnexpectedValueException(sprintf(
+                    'Elasticsearch answered position %d of a bulk request with something that could not be read as a result, so whether those documents were written is unknown.',
+                    $position,
+                )));
             }
 
             $status = (int) $action['status'];
@@ -135,7 +135,10 @@ final class BulkResult
     public function hasTransientFailures(): bool
     {
         foreach ($this->failures as $failure) {
-            if (\in_array($failure['status'], self::TRANSIENT, true)) {
+            // Every server error, not a list of the ones seen so far: the single-write
+            // path already treats any 5xx as "not now", and the same refusal must not
+            // mean two different things depending on how many records a flush produced.
+            if (\in_array($failure['status'], self::TRANSIENT, true) || $failure['status'] >= 500) {
                 return true;
             }
         }

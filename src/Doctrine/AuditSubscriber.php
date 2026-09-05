@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
@@ -234,20 +235,30 @@ final class AuditSubscriber
         // it, so that record is built here or nowhere.
         $em = self::entityManagerOf($args->getObjectManager());
 
+        // The whole of this is inside the failure policy, not only the record building:
+        // withContext() reads the declaration and Doctrine's metadata, and both can
+        // throw. This is postFlush — the transaction has committed — so an exception
+        // escaping would come out of flush() for a database change that is already
+        // real. What the policy cannot do here is undo it: "throw" tells the caller,
+        // it does not rewind the flush.
         foreach ($this->elementsByOwner($args->getObjectManager()) as [$owner, $changes]) {
             $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
 
-            if ($index !== null && isset($records[$index])) {
-                $merged = array_replace($records[$index]->changes, $changes);
-                $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged));
+            try {
+                if ($index !== null && isset($records[$index])) {
+                    $merged = array_replace($records[$index]->changes, $changes);
+                    $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged));
 
-                continue;
-            }
+                    continue;
+                }
 
-            $record = $this->recordForOwner($args->getObjectManager(), $owner, $changes);
+                $record = $this->recordForOwner($args->getObjectManager(), $owner, $changes);
 
-            if ($record !== null) {
-                $records[] = $record;
+                if ($record !== null) {
+                    $records[] = $record;
+                }
+            } catch (\Throwable $e) {
+                $this->writer->reportFailure($e, $index !== null ? ($records[$index] ?? null) : null);
             }
         }
 
@@ -435,7 +446,7 @@ final class AuditSubscriber
             };
 
             if ($reason !== null) {
-                throw new \LogicException(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $entity::class, $field, $reason));
+                throw new DeclarationMistake(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $entity::class, $field, $reason));
             }
         }
 
@@ -471,14 +482,23 @@ final class AuditSubscriber
     {
         $ownerMetadata = $em->getClassMetadata($owner::class);
 
-        foreach ($metadata->trackedCollections() as $field) {
+        // Every audited to-many field, not only the tracked ones: membership is part of
+        // auditing a collection, and only what changed INSIDE an element needs
+        // trackElements. Gating both behind it meant an inverse OneToMany that was
+        // audited without tracking recorded nothing at all when a line was added or
+        // taken away — Doctrine keeps such a change on the element's own reference
+        // back, so the owner's collection never goes dirty and nothing else notices.
+        foreach (array_keys($metadata->fields) as $field) {
             $wanted = $metadata->trackedElementFields($field);
 
-            // The tracked collection has to be the other side of the very association
-            // this element points back through; a second collection of the same class,
+            if ($added === null && $wanted === null) {
+                continue; // no element tracking declared: nothing to look inside for
+            }
+
+            // The collection has to be the other side of the very association this
+            // element points back through; a second collection of the same class,
             // mapped by another field, is not this element's home.
-            if ($wanted === null
-                || !$ownerMetadata->hasAssociation($field)
+            if (!$ownerMetadata->hasAssociation($field)
                 || !$ownerMetadata->isAssociationInverseSide($field)
                 || $ownerMetadata->getAssociationMappedByTargetField($field) !== $association
                 || !$element instanceof ($ownerMetadata->getAssociationTargetClass($field))
@@ -567,9 +587,19 @@ final class AuditSubscriber
                 }
 
                 if ($entry['deferred']) {
-                    // Now it has its identifier, so a representer that reads one has
-                    // something to read.
-                    $entry['value'] = self::represent($entry['element'], $entry['represent']);
+                    try {
+                        // Now it has its identifier, so a representer that reads one has
+                        // something to read. It is the application's code, it runs after
+                        // the commit, and an exception escaping here would come out of
+                        // flush() for a database change that is already real — so it goes
+                        // through the failure policy like everything else the listener
+                        // does, and only this element is lost.
+                        $entry['value'] = self::represent($entry['element'], $entry['represent']);
+                    } catch (\Throwable $e) {
+                        $this->writer->reportFailure($e);
+
+                        continue;
+                    }
                 }
 
                 $changes[ElementKey::of($entry['field'], $id)] = $entry['added']
@@ -767,8 +797,8 @@ final class AuditSubscriber
             \is_int($value) => (string) $value,
             $value instanceof \Stringable => (string) $value,
             $value instanceof \BackedEnum => (string) $value->value,
-            \is_object($value) => (string) ($this->identifierOf($em, $value) ?? throw new \LogicException(sprintf('%s has no identifier yet and cannot be part of an audit object id.', get_debug_type($value)))),
-            default => throw new \LogicException(sprintf('Cannot use a %s as an audit object id.', get_debug_type($value))),
+            \is_object($value) => (string) ($this->identifierOf($em, $value) ?? throw new DeclarationMistake(sprintf('%s has no identifier yet and cannot be part of an audit object id.', get_debug_type($value)))),
+            default => throw new DeclarationMistake(sprintf('Cannot use a %s as an audit object id.', get_debug_type($value))),
         };
     }
 }

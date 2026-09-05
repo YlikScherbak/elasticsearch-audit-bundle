@@ -157,7 +157,15 @@ final class Configuration implements ConfigurationInterface
 
     private static function reader(ArrayNodeDefinition $reader): void
     {
-        $reader->addDefaultsIfNotSet();
+        $reader
+            ->addDefaultsIfNotSet()
+            // A page larger than the deepest reachable row is a size no query can ever
+            // use: the reader would allow the page and then refuse it for depth. A
+            // configuration that contradicts itself should say so at boot.
+            ->validate()
+                ->ifTrue(static fn (array $r): bool => \is_int($r['max_limit'] ?? null) && \is_int($r['max_result_window'] ?? null) && $r['max_limit'] > $r['max_result_window'])
+                ->thenInvalid('reader.max_limit cannot be larger than reader.max_result_window: a page that size could never be read.')
+            ->end();
 
         $children = $reader->children();
 
@@ -196,7 +204,16 @@ final class Configuration implements ConfigurationInterface
         $children->scalarNode('placeholder')
             ->info('What the value is replaced with. A side that was null or empty is left as it was.')
             ->cannotBeEmpty()
-            ->defaultValue('***');
+            ->defaultValue('***')
+            ->validate()
+                ->ifTrue(static fn (mixed $v) => !\is_string($v))
+                ->thenInvalid('redact.placeholder must be a string, not %s.')
+            ->end();
+
+        $children->enumNode('failure_details')
+            ->info('How much of a failed write\'s cause the bundle repeats in the log line and in RecordFailedEvent. "cause": the class, plus messages the bundle wrote itself — the original stays reachable through WriteFailedException::getPrevious(). "full": the cause\'s message too. Left unset it follows redact.fields: configured means "cause", because a cluster or an enricher may quote a value you asked never to keep.')
+            ->values(['cause', 'full'])
+            ->defaultNull();
     }
 
     private static function coalescing(ArrayNodeDefinition $coalescing): void

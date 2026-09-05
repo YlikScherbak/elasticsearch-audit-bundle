@@ -35,6 +35,7 @@ use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
+use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Borsche\ElasticsearchAuditBundle\Writer\SystemClock;
@@ -76,6 +77,7 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
 
     private readonly ?DoctrineSupport $doctrineSupport;
+    private readonly ?MessengerSupport $messengerSupport;
 
     /**
      * What the environment can do about Doctrine is a fact about the vendor directory
@@ -83,9 +85,10 @@ final class ElasticsearchAuditExtension extends Extension
      * way. Left null it is detected while loading, which is the first moment the
      * kernel's bundle list can be asked.
      */
-    public function __construct(?DoctrineSupport $doctrine = null)
+    public function __construct(?DoctrineSupport $doctrine = null, ?MessengerSupport $messenger = null)
     {
         $this->doctrineSupport = $doctrine;
+        $this->messengerSupport = $messenger;
     }
 
     public function getAlias(): string
@@ -109,7 +112,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerActor($config['actor'], $container);
         $this->registerRedaction($config['redact'], $container);
         $this->registerCoalescing($config['coalescing'], $container);
-        $this->registerWriter($config['on_failure'], $config['batch_size'], $container);
+        $this->registerWriter($config['on_failure'], $config['batch_size'], $config['redact'], $container);
         $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
         $this->registerCommands($container, $config['reader']['max_result_window']);
@@ -272,8 +275,14 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setDefinition(self::SERVICE_SYNC_TRANSPORT, new Definition(SyncTransport::class, [new Reference(self::SERVICE_GATEWAY)]));
 
         if ($transport === 'messenger') {
-            if (!interface_exists(MessageBusInterface::class)) {
-                throw new NotConfiguredException('transport "messenger" needs symfony/messenger: composer require symfony/messenger, or set transport to "sync".');
+            // Both halves, like doctrine.enabled: the component to build a message and
+            // FrameworkBundle to collect the handler tag. With the component alone the
+            // container boots, the handlers exist, the bus has never heard of them, and
+            // every record dispatched fails in a worker.
+            $support = $this->messengerSupport ?? MessengerSupport::detect($container);
+
+            if (!$support->canDispatch()) {
+                throw new NotConfiguredException('transport "messenger" cannot be used: '.$support->missing());
             }
 
             $container->setDefinition(self::SERVICE_TRANSPORT, new Definition(MessengerTransport::class, [new Reference($busId)]));
@@ -306,7 +315,10 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(ActorResolverInterface::class, self::SERVICE_ACTOR_RESOLVER);
     }
 
-    private function registerWriter(string $onFailure, int $batchSize, ContainerBuilder $container): void
+    /**
+     * @param array{fields: list<string>, placeholder: string, failure_details: ?string} $redact
+     */
+    private function registerWriter(string $onFailure, int $batchSize, array $redact, ContainerBuilder $container): void
     {
         // Override the alias (e.g. with symfony/clock's service) to control time in tests.
         $container->setDefinition(self::SERVICE_CLOCK, new Definition(SystemClock::class));

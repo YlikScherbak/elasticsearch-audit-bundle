@@ -13,7 +13,7 @@ namespace Borsche\ElasticsearchAuditBundle\Exception;
  * record whose net effect over the whole operation was nothing. Where that promise
  * is what the trail is read for, "throw" says so instead of blurring it.
  */
-final class FrameOverflowException extends \RuntimeException implements AuditException
+final class FrameOverflowException extends \RuntimeException implements AuditException, SafeExceptionMessage
 {
     public static function past(int $maxHeld): self
     {

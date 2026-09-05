@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
@@ -181,7 +182,7 @@ final class ChangeSetBuilder
         }
 
         if ($represent === null) {
-            throw new \LogicException(sprintf('An audited association needs a representer (a callable turning %s into what to store).', get_debug_type($related)));
+            throw new DeclarationMistake(sprintf('An audited association needs a representer (a callable turning %s into what to store).', get_debug_type($related)));
         }
 
         return $represent($related);

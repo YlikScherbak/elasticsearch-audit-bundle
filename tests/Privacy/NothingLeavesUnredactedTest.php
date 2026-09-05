@@ -161,6 +161,113 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertSame(['old' => 'a', 'new' => 'b'], $gateway->documents['audit_log'][0]['changes']['name']);
     }
 
+    public function testTheDefaultPolicyDoesNotWriteSomebodyElsesExceptionIntoTheLog(): void
+    {
+        // The failure path was outside the privacy boundary entirely: the record was
+        // redacted and then the cause's message — the cluster's, an enricher's, anyone's
+        // — went into the log line and the exception itself into the PSR-3 context,
+        // where a processor serialises it. Under the default "log" policy, which is the
+        // one most applications run.
+        $gateway = new InMemoryGateway();
+        $gateway->failWith = new \RuntimeException('rejected value '.self::SECRET);
+
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log);
+
+        $writer->record('user', 7, 'update', ['password' => new Change(null, self::SECRET)]);
+
+        self::assertNotSame([], $logs, 'the failure was logged at all');
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
+        self::assertStringContainsString('TransportUnavailableException', implode("\n", $logs), 'and the cause is still named by class');
+    }
+
+    public function testAListenerOnTheFailureEventCannotReadTheSecretEither(): void
+    {
+        // RecordFailedEvent is an application-visible channel — its own docblock
+        // suggests alerting on it — and it handed listeners the raw Throwable.
+        $gateway = new InMemoryGateway();
+        $gateway->failWith = new \RuntimeException('rejected value '.self::SECRET);
+
+        $reason = null;
+        $events = new class($reason) implements EventDispatcherInterface {
+            public function __construct(private ?string &$reason)
+            {
+            }
+
+            public function dispatch(object $event): object
+            {
+                if ($event instanceof RecordFailedEvent) {
+                    $this->reason = $event->reason->getMessage().'|'.($event->reason->getPrevious()?->getMessage() ?? '');
+                }
+
+                return $event;
+            }
+        };
+
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], $events, $logs, FailurePolicy::Log);
+        $writer->record('user', 7, 'update', ['password' => new Change(null, self::SECRET)]);
+
+        self::assertNotNull($reason, 'the event was dispatched');
+        self::assertStringNotContainsString(self::SECRET, (string) $reason);
+    }
+
+    public function testAnEnrichersOwnExceptionIsNotTrustedEither(): void
+    {
+        // The heuristic this replaces: "no previous exception, therefore the bundle
+        // wrote the message". An application's enricher throws directly, with no
+        // previous, and its message is the application's — which is exactly where a
+        // value it was enriching from would be.
+        $gateway = new InMemoryGateway();
+
+        $enricher = new class implements AuditEnricherInterface {
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                throw new \RuntimeException('cannot enrich with token '.NothingLeavesUnredactedTest::secret());
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Throw, [$enricher]);
+
+        try {
+            $writer->record('user', 7, 'update', ['password' => new Change(null, self::SECRET)]);
+            self::fail('the write should have failed');
+        } catch (WriteFailedException $e) {
+            self::assertStringNotContainsString(self::SECRET, $e->getMessage());
+        }
+
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
+    }
+
+    public function testTheBundlesOwnWordsAboutADeclarationAreStillSaidInFull(): void
+    {
+        // The other half: a declaration mistake is the bundle's own sentence, built
+        // from class and field names, and losing it would make a common misconfiguration
+        // unreadable. It says so about itself rather than being guessed at.
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Throw);
+
+        try {
+            $writer->write((new AuditRecord('user', 7, 'update'))->withChanges(['x' => new Change(1, 2)]));
+            $writer->reportFailure(new \Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake('"nope" is listed as always recorded but is not an audited field.'), new AuditRecord('user', 7, 'update'));
+            self::fail('expected a failure');
+        } catch (WriteFailedException $e) {
+            self::assertStringContainsString('"nope" is listed as always recorded', $e->getMessage());
+        }
+    }
+
     public function testAnExceptionCarryingTheSecretIsWhereTheGuaranteeEnds(): void
     {
         // Adversarial, because the invariant above proves less than it sounds: the
@@ -212,9 +319,29 @@ final class NothingLeavesUnredactedTest extends TestCase
         // is chosen by an ActorResolver rather than masked afterwards. Accepting the
         // rule and doing nothing is how somebody believes their actor is redacted.
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('the actor is chosen by an ActorResolverInterface');
+        $this->expectExceptionMessage('The actor is chosen by an ActorResolverInterface');
 
         new ChangeRedactor(['source']);
+    }
+
+    public function testEveryBaseFieldIsRefusedTheSameWay(): void
+    {
+        // Not just the actor: a rule naming any base field could never do anything,
+        // and "objectId" in particular looks like a reasonable privacy rule for an
+        // application whose ids are email addresses.
+        foreach (['id', 'objectType', 'objectId', 'event', 'loggedAt', 'changes'] as $field) {
+            try {
+                new ChangeRedactor([$field]);
+                self::fail(sprintf('"%s" should have been refused', $field));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('base field of every audit record', $e->getMessage());
+            }
+        }
+
+        // And scoped the same way, because that is how somebody would write it.
+        $this->expectException(\InvalidArgumentException::class);
+
+        new ChangeRedactor(['user.objectId']);
     }
 
     public static function secret(): string
@@ -226,7 +353,11 @@ final class NothingLeavesUnredactedTest extends TestCase
      * @param list<string>       $redact
      * @param list<string>       $logs
      */
-    private function writer(InMemoryGateway $gateway, array $redact, ?EventDispatcherInterface $events = null, array &$logs = [], FailurePolicy $policy = FailurePolicy::Throw): AuditWriter
+    /**
+     * @param list<string>                     $redact
+     * @param list<AuditEnricherInterface>     $enrichers
+     */
+    private function writer(InMemoryGateway $gateway, array $redact, ?EventDispatcherInterface $events = null, array &$logs = [], FailurePolicy $policy = FailurePolicy::Throw, array $enrichers = []): AuditWriter
     {
         $transport = new SyncTransport($gateway);
         $logger = new class($logs) extends \Psr\Log\AbstractLogger {
@@ -242,6 +373,6 @@ final class NothingLeavesUnredactedTest extends TestCase
             }
         };
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), [], $policy, $logger, $events, null, new ChangeRedactor($redact, '***'));
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $logger, $events, null, new ChangeRedactor($redact, '***'));
     }
 }

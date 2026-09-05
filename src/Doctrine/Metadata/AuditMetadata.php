@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Metadata;
 
+use Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake;
 /**
  * What to record for one entity class — the common form both AuditableInterface
  * and the attributes are reduced to.
@@ -28,25 +29,25 @@ final class AuditMetadata
         // from every other type that forgot to name itself. Both declarations arrive
         // here, so the rule lives here.
         if ($objectType === '') {
-            throw new \InvalidArgumentException('An audit declaration needs a non-empty object type.');
+            throw new DeclarationMistake('An audit declaration needs a non-empty object type.');
         }
 
         foreach ($alwaysRecorded as $field) {
             if (!\array_key_exists($field, $fields)) {
-                throw new \InvalidArgumentException(sprintf('"%s" is listed as always recorded but is not an audited field.', $field));
+                throw new DeclarationMistake(sprintf('"%s" is listed as always recorded but is not an audited field.', $field));
             }
         }
 
         foreach ($trackedCollections as $field => $tracked) {
             if (!\array_key_exists($field, $fields)) {
-                throw new \InvalidArgumentException(sprintf('"%s" tracks its elements but is not an audited field.', $field));
+                throw new DeclarationMistake(sprintf('"%s" tracks its elements but is not an audited field.', $field));
             }
 
             // Both declarations arrive here, so this is where the rules belong: the
             // attribute refused an empty list of fields and the interface did not, and an
             // entity that declared one got no elements tracked and no explanation either.
             if ($tracked !== true && $tracked !== false && $tracked === []) {
-                throw new \InvalidArgumentException(sprintf('"%s" tracks no field of its elements; name the fields, or pass true for every one that changed.', $field));
+                throw new DeclarationMistake(sprintf('"%s" tracks no field of its elements; name the fields, or pass true for every one that changed.', $field));
             }
 
             // Through the interface these arrive at runtime from application code, so
@@ -55,7 +56,7 @@ final class AuditMetadata
             $unnamed = static fn (mixed $name): bool => !\is_string($name) || $name === '';
 
             if (\is_array($tracked) && array_filter($tracked, $unnamed) !== []) {
-                throw new \InvalidArgumentException(sprintf('"%s" tracks a field of its elements whose name is not a name.', $field));
+                throw new DeclarationMistake(sprintf('"%s" tracks a field of its elements whose name is not a name.', $field));
             }
         }
     }

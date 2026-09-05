@@ -114,9 +114,19 @@ final class AuditFrame
             return false;
         }
 
-        $this->logger->warning('An audit frame was left open; its {held} held record(s) have been written and the frame closed. Pair begin() with end() in a try/finally, or use coalesce().', ['held' => $held]);
+        $this->logger->warning('An audit frame was left open; its {held} held record(s) are being written and the frame closed. Pair begin() with end() in a try/finally, or use coalesce().', ['held' => $held]);
 
-        $this->writer->writeManyCompleted($records);
+        try {
+            $this->writer->writeManyCompleted($records);
+        } catch (\Throwable $write) {
+            // The same drain end() does, and for the same reason: a comparator failure
+            // left in the buffer surfaces inside the NEXT operation, as a failure event
+            // about a record that operation never wrote.
+            $this->reportFinalizeFailuresQuietly();
+
+            throw $write;
+        }
+
         $this->reportFinalizeFailures();
 
         return true;

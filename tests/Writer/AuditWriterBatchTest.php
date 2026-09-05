@@ -240,6 +240,111 @@ final class AuditWriterBatchTest extends TestCase
         self::assertSame([0, 2, 3], $written, 'every record that could be prepared was still written');
     }
 
+    public function testANonBatchTransportStillAttemptsEveryRecordBeforeThrowing(): void
+    {
+        // The guarantee must not depend on whether a transport happens to implement an
+        // optional interface: with "throw", the batch path reports every failure and
+        // raises the first, and the one-by-one fallback stopped at the first — leaving
+        // the rest of a flush unattempted, and, when a frame had just drained into it,
+        // gone.
+        $plain = new class implements TransportInterface {
+            /** @var list<int|string> */
+            public array $attempted = [];
+
+            public function send(string $index, array $document, ?string $id = null): void
+            {
+                $this->attempted[] = $document['objectId'];
+
+                throw new \RuntimeException('cluster down');
+            }
+        };
+
+        $writer = new AuditWriter($plain, $plain, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Throw);
+
+        try {
+            $writer->writeAll([
+                new AuditRecord('order', 1, AuditEvent::UPDATE),
+                new AuditRecord('order', 2, AuditEvent::UPDATE),
+                new AuditRecord('order', 3, AuditEvent::UPDATE),
+            ]);
+            self::fail('expected WriteFailedException');
+        } catch (WriteFailedException $e) {
+            self::assertSame(1, $e->record?->objectId, 'the first failure is the one thrown');
+        }
+
+        self::assertSame([1, 2, 3], $plain->attempted, 'every record was tried');
+    }
+
+    public function testASingleFailureReportsTheRecordThatWasActuallySent(): void
+    {
+        // prepare() may replace the record entirely — merged enrichers, then a listener
+        // on RecordCreatedEvent. Reporting the original means the failure event names an
+        // object type and attributes that were never sent, which is what monitoring and
+        // any retry built on it would act upon.
+        $listener = static function (object $event): void {
+            if ($event instanceof RecordCreatedEvent) {
+                $event->setRecord($event->getRecord()->withAttributes(['securityLevel' => 5]));
+            }
+        };
+
+        $this->gateway->failWith = new \RuntimeException('cluster down');
+
+        $plain = new class($this->gateway) implements TransportInterface {
+            public function __construct(private readonly InMemoryGateway $gateway)
+            {
+            }
+
+            public function send(string $index, array $document, ?string $id = null): void
+            {
+                $this->gateway->index($index, $document, $id);
+            }
+        };
+
+        $writer = $this->writerWith($plain, FailurePolicy::Log, $listener);
+        $writer->write(new AuditRecord('order', 1, AuditEvent::UPDATE, changes: ['status' => new Change('a', 'b')]));
+
+        $failed = array_values(array_filter($this->events, static fn (object $e) => $e instanceof RecordFailedEvent));
+
+        self::assertCount(1, $failed);
+        self::assertSame(5, $failed[0]->record->attributes['securityLevel'] ?? null, 'the record reported is the one that was sent');
+    }
+
+    public function testAReplacementWithoutAnIdCannotReachTheTransport(): void
+    {
+        // A listener may hand back a whole new record, and a record without an id is
+        // stored again under a generated one on every redelivery. The batch path
+        // refused it already; the single path passed null straight through.
+        $listener = static function (object $event): void {
+            if ($event instanceof RecordCreatedEvent) {
+                // With a timestamp, or toDocument() would refuse it for that instead and
+                // the test would pass without proving anything about the id.
+                $event->setRecord(new AuditRecord('order', 10, AuditEvent::UPDATE, new \DateTimeImmutable('2026-09-05 10:00:00', new \DateTimeZone('UTC')), 'system', ['x' => new Change(1, 2)]));
+            }
+        };
+
+        $seen = [];
+        $plain = new class($seen) implements TransportInterface {
+            /** @param list<?string> $seen */
+            public function __construct(private array &$seen)
+            {
+            }
+
+            public function send(string $index, array $document, ?string $id = null): void
+            {
+                $this->seen[] = $id;
+            }
+        };
+
+        $writer = $this->writerWith($plain, FailurePolicy::Log, $listener);
+        $writer->write(new AuditRecord('order', 1, AuditEvent::UPDATE, changes: ['status' => new Change('a', 'b')]));
+
+        self::assertSame([], $seen, 'nothing was sent without an id');
+
+        $failed = array_values(array_filter($this->events, static fn (object $e) => $e instanceof RecordFailedEvent));
+
+        self::assertCount(1, $failed, 'and the record was reported as failed rather than silently duplicated later');
+    }
+
     public function testAnOverflowingFrameRefusesTheOperationWhateverTheFailurePolicy(): void
     {
         // on_overflow: throw is a deliberate refusal, not a failed write: it must reach
@@ -300,6 +405,33 @@ final class AuditWriterBatchTest extends TestCase
 
         self::assertSame([2, 2, 1], array_map('count', $this->gateway->bulks), 'three requests, in the order the records were made');
         self::assertCount(5, $this->gateway->documents['audit_log'], 'and every record went');
+    }
+
+    private function writerWith(TransportInterface $transport, FailurePolicy $policy, ?callable $listener = null): AuditWriter
+    {
+        $events = &$this->events;
+        $dispatcher = new class($events, $listener) implements EventDispatcherInterface {
+            /**
+             * @param list<object>                  $events
+             * @param (callable(object): void)|null $listener
+             */
+            public function __construct(private array &$events, private $listener)
+            {
+            }
+
+            public function dispatch(object $event): object
+            {
+                $this->events[] = $event;
+
+                if ($this->listener !== null) {
+                    ($this->listener)($event);
+                }
+
+                return $event;
+            }
+        };
+
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $dispatcher);
     }
 
     /**

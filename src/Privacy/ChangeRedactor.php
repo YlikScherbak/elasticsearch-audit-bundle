@@ -54,12 +54,17 @@ final class ChangeRedactor
         foreach ($fields as $rule) {
             $field = str_contains($rule, '.') ? substr($rule, (int) strpos($rule, '.') + 1) : $rule;
 
-            // "source" cannot be redacted here and quietly did nothing: the actor is a
-            // base field, chosen when the record is built. Masking it afterwards would
-            // leave a record nobody can attribute; choosing a different identifier is
-            // the answer, and it belongs one layer up.
-            if ($field === 'source') {
-                throw new \InvalidArgumentException('"source" holds the actor and cannot be redacted by a rule — the actor is chosen by an ActorResolverInterface, so return an internal id there instead of an identifier you must not keep.');
+            // A rule naming a base field could never do anything: redaction covers the
+            // fields of "changes" and the attributes, and these are neither. Accepting
+            // one and quietly ignoring it is how somebody believes an identifier is
+            // being redacted while every record carries it.
+            if (\in_array($field, AuditRecord::reservedFields(), true)) {
+                throw new \InvalidArgumentException(sprintf('"%s" is a base field of every audit record and cannot be redacted by a rule.%s', $field, match ($field) {
+                    'source' => ' The actor is chosen by an ActorResolverInterface: return an internal id there instead of an identifier you must not keep.',
+                    'objectId' => ' The object id is how history is addressed: pass an internal id to the writer instead of a personal identifier.',
+                    'changes' => ' Name the fields inside it instead — "password", or "user.password" for one object type.',
+                    default => ' It is what makes a record findable, and a record nobody can identify is not an audit trail.',
+                }));
             }
         }
     }

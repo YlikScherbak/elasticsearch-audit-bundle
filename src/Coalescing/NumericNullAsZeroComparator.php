@@ -108,6 +108,14 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
         }
 
         [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];
+
+        // A quantity nobody could hold: "1e100000000" is well formed and writing it out
+        // is a hundred megabytes of zeroes. No opinion costs an extra record at worst;
+        // materialising it costs the process.
+        if (abs((int) $exponent) > 4096) {
+            return null;
+        }
+
         $digits = $whole.$fraction;
         $point = \strlen($whole) + (int) $exponent; // where the decimal point lands
 

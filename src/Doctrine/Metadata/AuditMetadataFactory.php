@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Metadata;
 
+use Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake;
 use Borsche\ElasticsearchAuditBundle\Attribute\Auditable;
 use Borsche\ElasticsearchAuditBundle\Attribute\AuditField;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditableInterface;
@@ -96,7 +97,7 @@ final class AuditMetadataFactory
             $callable = [$related, $method];
 
             if (!\is_callable($callable)) {
-                throw new \LogicException(sprintf('#[AuditField(represent: "%s")] on %s names a method %s does not have.', $method, $declaredOn, $related::class));
+                throw new DeclarationMistake(sprintf('#[AuditField(represent: "%s")] on %s names a method %s does not have.', $method, $declaredOn, $related::class));
             }
 
             return $callable();

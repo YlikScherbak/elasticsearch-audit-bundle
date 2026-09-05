@@ -186,6 +186,64 @@ final class AuditReaderTest extends TestCase
         $this->reader()->raw(AuditQuery::for('order'), ['rank' => ['rrf' => []]]);
     }
 
+    public function testARuntimeFieldCannotShadowTheFieldTheBoundaryFiltersOn(): void
+    {
+        // A runtime field may carry the name of a mapped one, and then it shadows it
+        // for the whole query: `source` filtered to "u1" is true of every document if
+        // the body also says `emit('u1')` for source. The boundary would be on the
+        // request and mean nothing — which is the one thing raw() promises it cannot be.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('runtime_mappings');
+
+        $this->reader()->raw(AuditQuery::for('order'), [
+            'runtime_mappings' => ['source' => ['type' => 'keyword', 'script' => ['source' => "emit('u1')"]]],
+            'aggs' => ['actors' => ['terms' => ['field' => 'source']]],
+        ]);
+    }
+
+    public function testRawCountsTheWindowTheWayElasticsearchDoes(): void
+    {
+        // from + size, not a page number reconstructed from them: from 9999 with size 2
+        // reaches row 10001, and the arithmetic that turned it back into a page said
+        // 10000 and let it through — to be refused by the cluster instead.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('max_result_window');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['from' => 9999, 'size' => 2]);
+    }
+
+    public function testAMissingSizeIsElasticsearchsTenNotOne(): void
+    {
+        // Elasticsearch defaults size to 10; validating as though it were 1 let a body
+        // through that reaches ten rows deeper than the window allows.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('max_result_window');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['from' => 9995]);
+    }
+
+    public function testRawRefusesPagingThatIsNotAPosition(): void
+    {
+        foreach ([['from' => -1], ['size' => -5], ['from' => '10'], ['size' => 1.5]] as $body) {
+            try {
+                $this->reader()->raw(AuditQuery::for('order'), $body);
+                self::fail('expected '.json_encode($body, JSON_THROW_ON_ERROR).' to be refused');
+            } catch (InvalidQueryException $e) {
+                self::assertStringContainsString('whole number', $e->getMessage());
+            }
+        }
+    }
+
+    public function testRawRefusesAPositionAndACursorAtOnce(): void
+    {
+        // search_after continues from a place; from counts rows from the beginning.
+        // Elasticsearch refuses the pair, and it is cheaper to hear it here.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('search_after');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['from' => 10, 'search_after' => ['x']]);
+    }
+
     public function testRawCannotReachDeeperThanThePagingLimitsAllow(): void
     {
         $this->expectException(InvalidQueryException::class);

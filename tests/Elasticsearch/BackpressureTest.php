@@ -121,16 +121,39 @@ final class BackpressureTest extends TestCase
         BulkResult::fromResponse(['took' => 3, 'items' => [['index' => ['status' => 201]]]], 3);
     }
 
-    public function testAnItemNobodyCanReadIsNotAWrittenDocument(): void
+    public function testAnItemNobodyCanReadIsNotAnAnswerAtAll(): void
     {
-        // The count matched, so the response looked answerable — and every position
-        // that carried no readable status was counted as written. In the one class
-        // that exists to refuse exactly that answer.
-        $result = BulkResult::fromResponse(['items' => [null, ['index' => ['status' => 201]]]], 2);
+        // "Whether this document was written is unknown" was recorded as a failure with
+        // status 0 — and 0 is in no retry list, so the batch went to the failure
+        // transport as permanently rejected. An unknown outcome is the one case where
+        // re-sending is both safe (every document carries its id) and necessary.
+        $this->expectException(TransportUnavailableException::class);
+        $this->expectExceptionMessage('could not be read');
 
-        self::assertSame(1, $result->succeeded());
-        self::assertTrue($result->failed(0));
-        self::assertStringContainsString('unreadable', $result->failures[0]['reason']);
+        BulkResult::fromResponse(['items' => [null, ['index' => ['status' => 201]]]], 2);
+    }
+
+    public function testAnItemWithoutAReadableStatusIsNotAnAnswerEither(): void
+    {
+        $this->expectException(TransportUnavailableException::class);
+
+        BulkResult::fromResponse(['items' => [['index' => ['result' => 'created']]]], 1);
+    }
+
+    public function testEveryServerErrorIsTheClusterAskingAgain(): void
+    {
+        // The single-write path treats any 5xx as "not now"; the bulk path listed only
+        // 503, so a per-item 500 was permanent — the same failure classified two ways
+        // depending on how many records the flush happened to produce.
+        foreach ([500, 502, 503, 504] as $status) {
+            $result = BulkResult::fromResponse(['items' => [['index' => ['status' => $status]]]], 1);
+
+            self::assertTrue($result->hasTransientFailures(), $status.' is the cluster asking for the document again');
+        }
+
+        $permanent = BulkResult::fromResponse(['items' => [['index' => ['status' => 400, 'error' => ['reason' => 'mapping']]]]], 1);
+
+        self::assertFalse($permanent->hasTransientFailures(), 'a document the mapping refuses will be refused again');
     }
 
     public function testAFailureWithoutAnErrorObjectIsStillAFailure(): void
@@ -143,14 +166,6 @@ final class BackpressureTest extends TestCase
         self::assertSame(1, $result->succeeded());
         self::assertSame(503, $result->failures[0]['status']);
         self::assertTrue($result->hasTransientFailures(), 'and 503 is still the cluster asking for it again');
-    }
-
-    public function testAStatusThatIsNotANumberIsNotASuccessEither(): void
-    {
-        $result = BulkResult::fromResponse(['items' => [['index' => ['result' => 'created']]], ], 1);
-
-        self::assertSame(0, $result->succeeded());
-        self::assertTrue($result->failed(0));
     }
 
     public function testABulkAnswerWithNoItemsAtAllIsNotSuccessEither(): void

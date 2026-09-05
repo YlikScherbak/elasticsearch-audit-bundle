@@ -196,14 +196,7 @@ final class AuditReader
             return ['hits' => ['total' => ['value' => 0, 'relation' => 'eq'], 'hits' => []]];
         }
 
-        $this->assertWithinLimits($query->limit(
-            \is_int($body['size'] ?? null) && $body['size'] > 0 ? $body['size'] : 1
-        )->page(
-            \is_int($body['from'] ?? null) && $body['from'] > 0 && \is_int($body['size'] ?? null) && $body['size'] > 0
-                ? intdiv($body['from'], max(1, $body['size'])) + 1
-                : 1,
-            \is_int($body['size'] ?? null) && $body['size'] > 0 ? $body['size'] : 1,
-        ));
+        $this->assertRawPagingIsWithinLimits($body);
 
         $boundary = $this->queryBuilder->build($query)['query'];
 
@@ -232,10 +225,14 @@ final class AuditReader
      */
     private static function assertBodyStaysInsideTheBoundary(array $body): void
     {
+        // runtime_mappings is deliberately not here. A runtime field may carry the name
+        // of a mapped one and shadows it for the whole query, so a body could define
+        // `source` as a script emitting the very value the boundary filters on — and
+        // the filter would then be true of every document in the index.
         static $allowed = [
             'query', 'aggs', 'aggregations', 'size', 'from', 'sort', 'search_after',
-            '_source', 'fields', 'docvalue_fields', 'stored_fields', 'script_fields',
-            'runtime_mappings', 'track_total_hits', 'post_filter', 'collapse',
+            '_source', 'fields', 'docvalue_fields', 'stored_fields',
+            'track_total_hits', 'post_filter', 'collapse',
             'highlight', 'min_score', 'timeout', 'terminate_after', 'explain', 'version', 'seq_no_primary_term',
         ];
 
@@ -249,6 +246,55 @@ final class AuditReader
             if (\is_array($body[$key] ?? null)) {
                 self::refuseGlobalAggregations($body[$key], $key);
             }
+        }
+    }
+
+    /**
+     * The reader's limits, counted the way Elasticsearch counts: `from + size`.
+     *
+     * Reconstructing a page number out of a raw `from` and multiplying it back was
+     * arithmetic that agreed with itself and not with the cluster — from 9999 with size
+     * 2 reaches row 10001 and was allowed through as "page 5000 × 2". And a body with
+     * no size at all is ten rows, not one: that is Elasticsearch's default, not a
+     * convenient minimum.
+     *
+     * @param array<string, mixed> $body
+     *
+     * @throws InvalidQueryException
+     */
+    private function assertRawPagingIsWithinLimits(array $body): void
+    {
+        $position = static function (mixed $value, string $name): int {
+            if ($value !== null && (!\is_int($value) || $value < 0)) {
+                throw new InvalidQueryException(sprintf('"%s" is a whole number of rows and cannot be %s.', $name, get_debug_type($value) === 'int' ? 'negative' : 'a '.get_debug_type($value)));
+            }
+
+            return $value ?? -1;
+        };
+
+        $size = $position($body['size'] ?? null, 'size');
+        $from = $position($body['from'] ?? null, 'from');
+
+        if ($size === -1) {
+            $size = 10; // Elasticsearch's own default
+        }
+
+        if ($size > $this->maxLimit) {
+            throw new InvalidQueryException(sprintf('A request for %d rows is larger than reader.max_limit (%d). Raise the setting, or ask for fewer.', $size, $this->maxLimit));
+        }
+
+        if (isset($body['search_after'])) {
+            if ($from > 0) {
+                throw new InvalidQueryException('A body cannot carry both "from" and "search_after": one counts rows from the beginning, the other continues from a position. Elasticsearch refuses the pair, and a cursor has no depth limit anyway.');
+            }
+
+            return; // a cursor is not bounded by the window
+        }
+
+        $depth = max($from, 0) + $size;
+
+        if ($depth > $this->maxResultWindow) {
+            throw new InvalidQueryException(sprintf('from %d with size %d reaches row %d, past reader.max_result_window (%d). Raise it here and index.max_result_window on the cluster to match, or page with search_after, which has no such ceiling.', max($from, 0), $size, $depth, $this->maxResultWindow));
         }
     }
 

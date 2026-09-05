@@ -59,8 +59,12 @@ printf 'Packing into %s/\n' "$out"
 # Each axis is a promise the bundle makes, plus the code that has to keep it and the
 # tests that claim it does. A reviewer needs all three: without the promise there is
 # nothing to falsify, and without the tests it re-reports what is already covered.
+# With the fixtures: what an entity declares is half of what this axis does, and a
+# reviewer without them can only read the listener and guess at the mappings it walks.
+# The last review said so itself, and had to leave a mapping question open.
 pack doctrine          src/Doctrine src/Attribute src/Contract/AuditableInterface.php \
-                       src/Contract/TracksCollectionElementsInterface.php tests/Doctrine
+                       src/Contract/TracksCollectionElementsInterface.php \
+                       tests/Doctrine tests/Fixtures
 pack writer-coalescing src/Writer src/Coalescing src/Transport src/Event \
                        src/Contract/AuditEnricherInterface.php \
                        src/Contract/MergedRecordEnricherInterface.php \
@@ -76,9 +80,13 @@ pack di-boot           src/DependencyInjection src/ElasticsearchAuditBundle.php 
 # where a value escapes if it escapes at all. Without it a reviewer can say the
 # contract is unsafe but not whether the bundle actually leaks — which is exactly what
 # the last review had to leave open, and where the real defect turned out to be.
+# The whole failure representation, because that is where the boundary actually is:
+# which cause may be repeated (SafeExceptionMessage), what replaces one that may not
+# (FailureReason), and what decides (FailureDetails). Reviewing the redactor alone
+# proves nothing about what leaves through a log line or a failure event.
 pack privacy           src/Privacy src/Model/AuditRecord.php src/Model/Change.php \
-                       src/Writer/AuditWriter.php src/Exception/WriteFailedException.php \
-                       src/Actor src/Event \
+                       src/Writer/AuditWriter.php src/Writer/FailureDetails.php \
+                       src/Exception src/Actor src/Event \
                        src/Elasticsearch/IndexDefinition.php tests/Privacy
 # With the transports: BulkResult decides what a transient failure is, and the code
 # that acts on that decision — whole-batch retry, and whether every document carries an

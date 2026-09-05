@@ -27,17 +27,59 @@ PHP 8.1–8.4, Symfony 6.4/7/8 and Elasticsearch 8 and 9, against live clusters,
 the dependency range.
 
 ### Fixed
-- **`raw()` could be handed a body that escapes its own boundary.** It put the query's filters
-  into `query` and forwarded everything else — but a `global` aggregation ignores the query by
-  definition, and a top-level `knn` is combined with it by union rather than intersection. A
-  visibility rule was therefore on the request and absent from the numbers it produced. The body
-  is now constrained to the shapes the reader can vouch for: a global aggregation is refused at
-  any depth, an unknown top-level key is refused by name, and `size`/`from` are held to the same
-  limits as any other read
-- **A bulk answer nobody can read is no longer counted as written.** A position with no readable
-  status — a null item, an action without one, a 500 that named no error — was read as a success
-  because the code looked for an "error" object first. In the one class whose whole purpose is to
-  refuse that answer. Success now has to be stated
+- **The failure path was outside the privacy boundary.** The record was redacted and then the
+  cause's message went into the log line, the exception itself into the PSR-3 context, and the
+  raw `Throwable` into `RecordFailedEvent` — where a listener the docblock itself suggests
+  writing reads it. A cluster refusing a document quotes the field it refused; an enricher
+  quotes what it was enriching from. Now the bundle repeats a cause's message only when the
+  cause declares it safe (`SafeExceptionMessage`, which its own declaration errors do), and the
+  original stays reachable through `WriteFailedException::getPrevious()`. The earlier rule —
+  "it wrapped nothing, so we wrote it" — was a guess, and false for every library that throws
+  directly. `redact.failure_details` sets it explicitly; unset, it follows `redact.fields`
+- **`raw()` could be handed a body that escapes its own boundary through `runtime_mappings`.**
+  A runtime field may carry the name of a mapped one and shadows it for the whole query, so a
+  body could define `source` as a script emitting the value the boundary filters on — and the
+  filter would be true of every document. The key is no longer allowed
+- **`raw()` counted paging differently from Elasticsearch.** `from` was turned back into a page
+  number and multiplied: from 9999 with size 2 reaches row 10001 and passed as "page 5000 × 2".
+  A body with no size was validated as one row where the cluster reads ten. Now it is `from +
+  size`, and a body carrying both `from` and `search_after` is refused
+- **An unreadable bulk item was classified as a permanent refusal.** "Whether these documents
+  were written is unknown" was recorded as a failure with status 0, and 0 is in no retry list —
+  so the batch went to the failure transport. An unknown outcome now fails the whole response as
+  a transport failure, which re-sends it: safe, because every document carries its id
+- **A per-item 500 was permanent while a single 500 was retried.** Every 5xx is transient now;
+  the same refusal cannot mean two things depending on how many records a flush produced
+- **A record that could not be prepared no longer takes its batch down under `on_failure:
+  throw`** — the completion loop in `writeAll()` had the same hole the batching loop did
+- **The one-by-one transport path keeps the `throw` guarantee.** It stopped at the first failure,
+  so the rest of a flush was never attempted — and when a closing frame had just drained into
+  it, those records were already out of the buffer
+- **A single write reports the record that was actually sent**, not the one that came in:
+  `prepare()` may replace it entirely, and the failure event named an object type and attributes
+  that never went anywhere
+- **A replacement record without an id cannot reach the transport.** A listener may hand back a
+  new record on `RecordCreatedEvent`; without an id a redelivery stores it again under a
+  generated one. The batch path refused it already; the single path passed `null` through
+- **`AuditFrame::release()` drains comparator failures when the write itself fails**, like
+  `end()` already did — otherwise they surfaced inside the next operation, as a failure event
+  about a record that operation never wrote. Failures from early releases (a remove, a full
+  buffer) are now reported when those records are written, so `reset()` cannot erase the failure
+  of a record that has already gone out and a broken comparator cannot grow the list unbounded
+- **A postFlush that runs application code is inside the failure policy.** A deferred representer
+  and `withContext()` ran outside it, so an exception came out of `flush()` — after the commit,
+  for a database change that is already real
+- **An inverse collection records what joins and leaves it without `trackElements`.** Doctrine
+  keeps such a change on the element's own reference back, so the owner is never scheduled and
+  its collection never goes dirty; membership was reachable only through element tracking, which
+  is a different feature. Membership now follows from the field being audited, and
+  `trackElements` governs only what changed *inside* an element
+- **`reportFailure()` is failure-safe.** A redactor that threw was called again from the failure
+  path and escaped it; a listener that threw replaced the failure being reported and stopped the
+  rest of a batch
+- **The numeric comparator cannot be made to materialise a hundred megabytes** by a well-formed
+  `1e100000000`: an exponent nobody could hold gets no opinion, which costs an extra record at
+  worst
 - **A comparator that throws while a remove closes its object no longer loses both records.**
   `release()` had the net; the terminal remove path finalized without it, and because the held
   record had already left the buffer, the update *and* the remove were gone — under the policy

@@ -55,15 +55,21 @@ final class AuditWriter
         private readonly ?FrameBuffer $frame = null,
         private readonly ?ChangeRedactor $redactor = null,
         private readonly int $batchSize = 500,
+        ?FailureDetails $failureDetails = null,
     ) {
         if ($batchSize < 1) {
             throw new \InvalidArgumentException(sprintf('A batch holds at least one record, %d given.', $batchSize));
         }
 
         $this->logger = $logger ?? new NullLogger();
+        // Following the declaration the application already made: configuring
+        // redaction is saying that some values must not be kept, and a cause's
+        // message is a place they turn up.
+        $this->failureDetails = $failureDetails ?? ($redactor === null ? FailureDetails::Full : FailureDetails::Cause);
     }
 
     private readonly LoggerInterface $logger;
+    private readonly FailureDetails $failureDetails;
 
     /**
      * Records a domain action that is not a Doctrine change: a call made, a login
@@ -124,6 +130,7 @@ final class AuditWriter
             // the Doctrine path already batches them — one by one this was ten thousand
             // requests where writeAll() makes a handful.
             $this->writeManyCompleted($released);
+            $this->reportFrameFinalizeFailures();
 
             return;
         }
@@ -188,6 +195,7 @@ final class AuditWriter
         }
 
         $this->writeManyCompleted($outgoing);
+        $this->reportFrameFinalizeFailures();
 
         if ($overflow !== null) {
             throw $overflow;
@@ -213,8 +221,23 @@ final class AuditWriter
         }
 
         if (!$this->transport instanceof BatchTransportInterface) {
+            // Every record is tried, and the first failure is raised after the last one
+            // — the same promise the batch path keeps. Stopping at the first meant a
+            // guarantee that depended on whether a transport happened to implement an
+            // optional interface, and, when a closing frame had just drained into this,
+            // the records after it were already out of the buffer and simply gone.
+            $first = null;
+
             foreach ($records as $record) {
-                $this->deliver($record, false);
+                try {
+                    $this->deliver($record, false);
+                } catch (WriteFailedException $e) {
+                    $first ??= $e;
+                }
+            }
+
+            if ($first !== null) {
+                throw $first;
             }
 
             return;
@@ -307,36 +330,53 @@ final class AuditWriter
     }
 
     /**
-     * One record, one failure: whatever goes wrong on its way out is reported once,
-     * against the record it happened to.
+     * A comparator that threw while the buffer released records early — a remove
+     * closing its object, a full buffer letting go — belongs to the records that were
+     * just written, and is reported now that they have been.
+     *
+     * Waiting for the frame to close was wrong twice over: reset() then erased the
+     * failure of a record that had already gone out, and a comparator throwing on every
+     * record turned max_held from a memory ceiling into a list that only ever grew.
      */
-    private function deliver(AuditRecord $record, bool $immediately): void
+    private function reportFrameFinalizeFailures(): void
     {
-        try {
-            $this->dispatch($record, $immediately);
-        } catch (\Throwable $e) {
-            $this->reportFailure($e, $record);
+        if ($this->frame === null) {
+            return;
         }
+
+        $this->reportEach($this->frame->takeFinalizeFailures());
     }
 
     /**
-     * Sends the record, or nothing when a listener vetoed it. It does not catch: the
-     * failure policy belongs to the callers above, and applying it here as well turned
-     * one transport error into two RecordFailedEvents and an exception whose cause was
-     * another exception of the same kind.
+     * One record, one failure: whatever goes wrong on its way out is reported once, and
+     * against the record that was actually being sent. prepare() may replace it —
+     * merged enrichers, then a listener on RecordCreatedEvent — and reporting the one
+     * that came in named an object type and attributes that never went anywhere, which
+     * is what monitoring and any retry built on it would then act upon.
      */
-    private function dispatch(AuditRecord $record, bool $immediately): void
+    private function deliver(AuditRecord $record, bool $immediately): void
     {
-        $prepared = $this->prepare($record);
+        $prepared = null;
 
-        if ($prepared === null) {
-            return; // vetoed
+        try {
+            $prepared = $this->prepare($record);
+
+            if ($prepared === null) {
+                return; // vetoed
+            }
+
+            // Every record the writer sends has one, whichever path it took: a record
+            // stored again under a generated id on redelivery is the same audit event
+            // twice. complete() assigns it; a listener replacing the record wholesale
+            // is the way one can go missing.
+            $id = $prepared->id ?? throw new \LogicException('A record reached the transport without an id, so a retried write would store it a second time instead of overwriting itself. A listener on RecordCreatedEvent that replaces the record should keep the id it was given (withChanges(), withAttributes() and the other with*() methods do).');
+
+            $transport = $immediately ? $this->immediateTransport : $this->transport;
+
+            $transport->send($this->indexResolver->resolveFor($prepared), $prepared->toDocument(), $id);
+        } catch (\Throwable $e) {
+            $this->reportFailure($e, $prepared ?? $record);
         }
-
-        $index = $this->indexResolver->resolveFor($prepared);
-        $transport = $immediately ? $this->immediateTransport : $this->transport;
-
-        $transport->send($index, $prepared->toDocument(), $prepared->id);
     }
 
     /**
@@ -444,11 +484,31 @@ final class AuditWriter
     public function reportFailure(\Throwable $e, ?AuditRecord $record = null): void
     {
         // The record may have failed before it was redacted; nothing carrying it out of
-        // here — the event, the exception — may hold a value that must not be stored.
-        $record = $record === null ? null : ($this->redactor?->redact($record) ?? $record);
+        // here — the event, the exception, the log line — may hold a value that must not
+        // be stored. And the cause is part of "nothing carrying it out of here": a
+        // cluster, an enricher or a library may quote the very value in its own message,
+        // which is why the exception the outside world sees is the sanitised one and
+        // the original stays behind getPrevious() for whoever catches it.
+        try {
+            $record = $record === null ? null : ($this->redactor?->redact($record) ?? $record);
+        } catch (\Throwable $redaction) {
+            // The redactor itself failed. Whatever the record holds is unredacted by
+            // definition now, so it does not leave here at all: the failure is reported
+            // without it, naming what went wrong instead.
+            $this->logger->error('An audit record could not be redacted while reporting a failure, so it is reported without its record: {reason}', ['reason' => $redaction->getMessage(), 'exception' => $redaction]);
+            $record = null;
+        }
+
+        $reason = $this->failureDetails->of($e);
 
         if ($record !== null) {
-            $this->events?->dispatch(new RecordFailedEvent($record, $e));
+            // A listener that throws must not replace the failure being reported, nor
+            // stop the batch: an observer is not part of the operation.
+            try {
+                $this->events?->dispatch(new RecordFailedEvent($record, $reason));
+            } catch (\Throwable $listener) {
+                $this->logger->error('A listener of RecordFailedEvent threw while an audit failure was being reported: {reason}', ['reason' => $listener->getMessage(), 'exception' => $listener]);
+            }
         }
 
         if ($this->failurePolicy === FailurePolicy::Throw) {
@@ -456,11 +516,11 @@ final class AuditWriter
         }
 
         $this->logger->error('Audit record could not be written: {reason}', [
-            'reason' => $e->getMessage(),
+            'reason' => $reason->getMessage(),
             'objectType' => $record?->objectType,
             'objectId' => $record?->objectId,
             'event' => $record?->event,
-            'exception' => $e,
+            'exception' => $reason,
         ]);
     }
 }

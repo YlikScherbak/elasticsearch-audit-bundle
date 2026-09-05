@@ -33,8 +33,27 @@ declaration mistake still reads in full.
 the record is built. Remove the rule, and return the identifier you want from an
 `ActorResolverInterface`.
 
+**A failed write no longer repeats the cause's message** in the log line or in
+`RecordFailedEvent` when redaction is configured — the cause is named by class, and the original
+is reachable through `WriteFailedException::getPrevious()`. Set `redact.failure_details: full`
+to keep the old behaviour, or `cause` to have it whether or not you redact anything. Code that
+matched on the text of a logged message or of `$event->reason->getMessage()` should read the
+previous exception instead.
+
+**`transport: messenger` now also requires FrameworkBundle** (or your own wiring of the handlers
+to a bus). The Messenger component alone leaves `messenger.message_handler` collected by nobody:
+the container booted, the handlers existed, and every dispatched record failed in a worker.
+
+**An audited inverse collection now records membership without `trackElements`.** If you audited
+such a field and relied on it recording nothing until element tracking was switched on, you will
+start seeing `documents.42`-style entries. That is what the field was always documented to do.
+
+**`reader.max_limit` may not exceed `reader.max_result_window`** — a page that size could never
+be read, and the pair is refused at boot rather than at the first deep query.
+
 **`AuditReader::raw()` now refuses a body it cannot vouch for.** A `global` aggregation, a
-top-level `knn`, an unknown top-level key, or a `size`/`from` past the reader's limits are
+top-level `knn`, `runtime_mappings` (a runtime field can shadow the very field a visibility rule
+filters on), an unknown top-level key, or a `size`/`from` past the reader's limits are
 rejected with a message naming what and why. If you were relying on any of those, the query's
 visibility rules were not applying to them — which is the reason for the change. Aggregate inside
 the query, or go to the cluster directly and take on the boundary yourself.

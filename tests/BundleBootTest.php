@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\Configuration;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\ElasticsearchAuditBundle;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
@@ -90,21 +91,39 @@ final class BundleBootTest extends TestCase
         $kernel->shutdown();
     }
 
-    public function testTheMessengerTransportWiresBothHandlers(): void
+    public function testTheMessengerTransportRefusesAKernelThatCannotConsumeItsHandlers(): void
+    {
+        // This kernel holds nothing but the bundle, so nothing collects
+        // messenger.message_handler — the handlers would exist, the bus would never
+        // hear of them, and every record dispatched would fail in a worker. The
+        // container refuses to boot rather than promise that. FullKernelBootTest is
+        // where the working case is proven, with FrameworkBundle present.
+        $kernel = new AuditKernel($this->cacheDir, ['transport' => 'messenger', 'message_bus' => 'test.bus']);
+
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessage('FrameworkBundle');
+
+        $kernel->boot();
+    }
+
+    public function testTheMessengerTransportWiresBothHandlersWhereTheTagIsCollected(): void
     {
         // Two messages, two handlers: one record and a batch. A worker consuming the
         // batch message finds no handler if only the first is registered, and the
         // records sit in the failure transport with nothing to say why.
-        $kernel = new AuditKernel($this->cacheDir, ['transport' => 'messenger', 'message_bus' => 'test.bus']);
-        $kernel->boot();
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.bundles', ['FrameworkBundle' => 'Symfony\Bundle\FrameworkBundle\FrameworkBundle']);
+        $container->register('test.bus', \Symfony\Component\Messenger\MessageBus::class);
 
-        $container = $kernel->getContainer();
+        (new ElasticsearchAuditExtension())->load([[
+            'client' => ['hosts' => ['http://localhost:9200']],
+            'transport' => 'messenger',
+            'message_bus' => 'test.bus',
+        ]], $container);
 
-        self::assertInstanceOf(IndexAuditRecordHandler::class, $container->get(IndexAuditRecordHandler::class));
-        self::assertInstanceOf(IndexAuditRecordsHandler::class, $container->get(IndexAuditRecordsHandler::class));
-        self::assertInstanceOf(MessengerTransport::class, $container->get(TransportInterface::class));
-
-        $kernel->shutdown();
+        self::assertTrue($container->getDefinition(IndexAuditRecordHandler::class)->hasTag('messenger.message_handler'));
+        self::assertTrue($container->getDefinition(IndexAuditRecordsHandler::class)->hasTag('messenger.message_handler'));
+        self::assertSame(MessengerTransport::class, $container->getDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT)->getClass());
     }
 
     public function testABundleWhoseAliasIsNotItsUnderscoredNameStillBoots(): void

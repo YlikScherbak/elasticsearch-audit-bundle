@@ -35,8 +35,11 @@ final class WriteFailedException extends \RuntimeException implements AuditExcep
      */
     public static function for(?AuditRecord $record, \Throwable $previous): self
     {
-        // Nothing wrapped means nothing foreign inside: the message is the bundle's own.
-        $cause = $previous->getPrevious() === null
+        // Only a cause that says so about itself. "It wrapped nothing, therefore we
+        // wrote it" was the earlier guess, and it is false for every library that
+        // throws directly — an enricher raising RuntimeException("cannot enrich with
+        // token $token") has no previous either.
+        $cause = $previous instanceof SafeExceptionMessage
             ? $previous->getMessage()
             : $previous::class.' — see the previous exception';
 
