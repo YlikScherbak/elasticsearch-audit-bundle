@@ -4,7 +4,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
+Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0.x`, read
+[UPGRADE.md](UPGRADE.md). On the `0.x` line every minor could change the API.
+
+## [Unreleased]
+
+## [1.0.0] - 2026-09-05
+
+The promises stop moving.
+
+1.0 changes no behaviour and no signature: it is 0.12 with the surface frozen. Everything listed
+under "What counts as the public API" in the README is stable within `1.x`; everything marked
+`@internal` is not, and may change in any release. [UPGRADE.md](UPGRADE.md) collects every step
+from `0.x` in one page — from the latest `0.x` there is nothing to do.
+
+What the line arrives with: Doctrine entities audited from their change sets, arbitrary domain
+actions recorded on demand, an operation's many saves coalesced into one record per object,
+synchronous or Messenger-borne writes that batch, redaction that covers changes and attributes
+on every path out, a read API with cursors that do not skip records, extensions that can only
+narrow what a viewer sees, and a mapping the bundle creates, checks and can extend. Verified on
+PHP 8.1–8.4, Symfony 6.4/7/8 and Elasticsearch 8 and 9, against live clusters, at both ends of
+the dependency range.
+
+### Added
+- **The transaction boundary is stated once, with a test behind it.** A new README section says
+  what the guarantee covers — the flush's own transaction — and what it does not: an outer
+  transaction rolling back leaves the records written. Three tests pin all of it, including the
+  frame recipe (`end()` on commit, `reset()` on rollback) that closes the gap for an application
+  that owns the wider transaction. A transactional outbox is named as post-1.0 work rather than
+  implied to exist
+- **`UPGRADE.md`** — every version that asked something of you, and what 1.0 freezes as a
+  limitation rather than a bug
+
+### Changed
+- **`@throws` on `GatewayInterface` matches what the implementation raises**, method by method,
+  with the two failures common to all of them (an unreachable cluster, a client built for
+  asynchronous responses) said once at the top instead of half-listed on each
+- **The boot test builds the services defined by class id and the interface aliases too**, and
+  asserts both Messenger handlers under `transport: messenger` — a batch message reaching a
+  worker with no handler was, until now, only caught in production
 
 ## [0.12.0] - 2026-09-05
 

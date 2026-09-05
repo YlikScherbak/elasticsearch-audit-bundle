@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
@@ -64,6 +66,68 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame(0, $nestingAtWrite, 'the write happened after the commit, not inside the transaction');
+        self::assertCount(1, $this->documents());
+    }
+
+    /**
+     * The documented boundary, made executable: the listener writes when the flush's
+     * own transaction commits, and it cannot know about a wider transaction around it.
+     * Roll that one back and the database forgets the row while the index keeps the
+     * record — a history entry for a state that never was. This test exists to fail
+     * the day that stops being true, and the two after it show the recipe that closes
+     * the gap today. A transaction-aware delivery (an outbox) is post-1.0 work.
+     */
+    public function testAnOuterTransactionRolledBackLeavesTheRecordBehind(): void
+    {
+        $this->em->getConnection()->beginTransaction();
+
+        try {
+            $this->em->persist(new Article('Never committed'));
+            $this->em->flush();
+        } finally {
+            $this->em->getConnection()->rollBack();
+            $this->em->clear();
+        }
+
+        self::assertCount(1, $this->documents(), 'the limitation, stated as a fact: the record went out when the inner flush committed');
+        self::assertSame([], $this->em->getRepository(Article::class)->findAll(), 'while the database kept nothing');
+    }
+
+    public function testTheFrameRecipeClosesThatGap(): void
+    {
+        // What the README prescribes for an application that owns the wider
+        // transaction: hold the records in a frame, and drop them if it rolls back.
+        $buffer = new FrameBuffer();
+        $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer));
+
+        $frame->begin();
+        $this->em->getConnection()->beginTransaction();
+
+        try {
+            $this->em->persist(new Article('Never committed'));
+            $this->em->flush();
+            throw new \RuntimeException('the business operation failed');
+        } catch (\RuntimeException) {
+            $this->em->getConnection()->rollBack();
+            $this->em->clear();
+            $frame->reset(); // rolled back: the records describe nothing that happened
+        }
+
+        self::assertSame([], $this->documents(), 'reset() drops what the rollback undid');
+    }
+
+    public function testTheSameRecipeWritesWhenTheOuterTransactionCommits(): void
+    {
+        $buffer = new FrameBuffer();
+        $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer));
+
+        $frame->begin();
+        $this->em->getConnection()->beginTransaction();
+        $this->em->persist(new Article('Committed'));
+        $this->em->flush();
+        $this->em->getConnection()->commit();
+        $frame->end(); // committed: now the history may speak
+
         self::assertCount(1, $this->documents());
     }
 

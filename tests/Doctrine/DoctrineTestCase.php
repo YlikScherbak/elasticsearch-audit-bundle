@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
@@ -90,7 +91,7 @@ abstract class DoctrineTestCase extends TestCase
         // setUp listener had read the change set before the sabotage, and its record
         // was the one the assertion found.
         $attached = array_values(array_filter(
-            $this->em->getEventManager()->getListeners(\Doctrine\ORM\Events::postFlush),
+            $this->em->getEventManager()->getListeners(Events::postFlush),
             static fn (object $listener) => $listener instanceof AuditSubscriber,
         ));
 
@@ -131,11 +132,31 @@ abstract class DoctrineTestCase extends TestCase
     /**
      * @param iterable<AuditEnricherInterface> $enrichers
      */
-    protected function writer(FailurePolicy $policy, iterable $enrichers = []): AuditWriter
+    protected function writer(FailurePolicy $policy, iterable $enrichers = [], ?FrameBuffer $buffer = null): AuditWriter
     {
         $transport = new SyncTransport($this->gateway);
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $this->logger());
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $this->logger(), null, $buffer);
+    }
+
+    /**
+     * The listener the tests attach, replacing whatever setUp() put there, wired to a
+     * frame so a test can hold records across a wider transaction.
+     */
+    protected function attachListenerWithFrame(FrameBuffer $buffer, FailurePolicy $policy = FailurePolicy::Log): AuditWriter
+    {
+        $writer = $this->writer($policy, [], $buffer);
+
+        foreach (array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $listener) => $listener instanceof AuditSubscriber,
+        ) as $previous) {
+            $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, $previous);
+        }
+
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory(), logger: $this->logger()));
+
+        return $writer;
     }
 
     /**

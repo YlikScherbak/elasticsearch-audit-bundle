@@ -6,9 +6,10 @@
 ![Elasticsearch](https://img.shields.io/badge/elasticsearch-8%20%7C%209-005571)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-> **Work in progress.** The API is being built up release by release on the `0.x` line; see the
-> [CHANGELOG](CHANGELOG.md) for what each release adds and what is still to come. On `0.x`,
-> `^0.1` does **not** pull in `0.2` — pin the minor you tested against.
+> **Stable since 1.0.** The surface listed under [What counts as the public
+> API](#what-counts-as-the-public-api) carries a stability promise within `1.x`. Coming from a
+> `0.x` release, [UPGRADE.md](UPGRADE.md) is the one page to read; the
+> [CHANGELOG](CHANGELOG.md) has the reasoning behind every change.
 
 A Symfony bundle that records **who changed what** in your application into Elasticsearch:
 Doctrine entities audited automatically, arbitrary domain actions logged on demand, many small
@@ -246,10 +247,48 @@ borsche_elasticsearch_audit:
 
 Records are built during `flush()`, while Doctrine still knows the change sets, and **written
 once the transaction has committed** (`postFlush`). A flush that fails half-way leaves no trace
-in the history, and a rolled-back order never shows up as created. Inside an outer transaction
-(`wrapInTransaction()`) the records are sent when the inner `flush()` finishes, since nothing
-later would tell the listener the transaction ended. With the default `on_failure: log` an
-unreachable cluster costs you a history entry, never the transaction.
+in the history, and a rolled-back order never shows up as created. With the default
+`on_failure: log` an unreachable cluster costs you a history entry, never the transaction.
+
+### The transaction boundary, exactly
+
+The guarantee is about **the flush's own transaction**, and this is the whole of it:
+
+| What happens | What the history says |
+|---|---|
+| `flush()` commits | the records are written, after the commit |
+| `flush()` fails and rolls back | nothing is written |
+| an **outer** transaction around the flush rolls back | **the records were already written** |
+
+The third row is the limitation, stated plainly rather than implied: `postFlush` fires when the
+inner `flush()` finishes, and no later event tells the listener that a wider transaction ended,
+so a rollback of `wrapInTransaction()` (or a hand-rolled `beginTransaction()`) leaves the index
+describing a state the database rolled back. There is an executable test that asserts exactly
+this — it exists to fail the day the behaviour changes, not to bless it.
+
+When the application owns the wider transaction, close the gap with a frame — the same
+`AuditFrame` that coalesces, used here for its other property, that nothing leaves until the
+frame does:
+
+```php
+$this->frame->begin();
+$this->em->getConnection()->beginTransaction();
+
+try {
+    // ... several flushes ...
+    $this->em->getConnection()->commit();
+    $this->frame->end();       // committed: now the history may speak
+} catch (\Throwable $e) {
+    $this->em->getConnection()->rollBack();
+    $this->frame->reset();     // rolled back: drop what never happened
+    throw $e;
+}
+```
+
+`end()` writes what the frame held; `reset()` drops it. Both recipes are covered by tests. What
+this does **not** give you is atomicity between the database and Elasticsearch — nothing can,
+short of a transactional outbox, which is **post-1.0 work** and not present today. A cluster
+that is unreachable at `end()` still costs a history entry under `on_failure: log`.
 
 > **With `on_failure: throw`, read this twice.** The `WriteFailedException` surfaces from
 > `flush()` *after* the commit: the data **is** in the database, the history entry is not. Code
@@ -1062,8 +1101,10 @@ Honest list, so nothing surprises you in production:
 
 ## What counts as the public API
 
-The bundle is on the `0.x` line, where every minor may change the API — but the surface is
-already settled, and this is the part that will carry a stability promise at 1.0:
+Since 1.0 this is what carries a stability promise: it does not change in a way that breaks you
+within the `1.x` line. Everything marked `@internal` is outside it and may change in any
+release — see [UPGRADE.md](UPGRADE.md) for the list and for the limitations 1.0 freezes as
+limitations rather than bugs.
 
 **Call these**
 `AuditWriter::record()`, `write()`, `writeAll()` · `AuditReader::find()`, `iterate()`, `raw()` ·

@@ -9,6 +9,10 @@ use Borsche\ElasticsearchAuditBundle\DependencyInjection\Configuration;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\ElasticsearchAuditBundle;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
+use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Loader\LoaderInterface;
@@ -63,23 +67,47 @@ final class BundleBootTest extends TestCase
         $kernel->boot();
 
         $container = $kernel->getContainer();
-        $built = 0;
+        $prefixed = 0;
+        $byClass = 0;
 
         foreach ($container->getServiceIds() as $id) {
-            if (!str_starts_with($id, Configuration::ROOT.'.')) {
+            if (str_starts_with($id, Configuration::ROOT.'.')) {
+                ++$prefixed;
+            } elseif (str_starts_with($id, 'Borsche\\ElasticsearchAuditBundle\\') && $container->has($id)) {
+                ++$byClass;
+            } else {
                 continue;
             }
 
             self::assertIsObject($container->get($id), $id.' could not be built');
-            ++$built;
         }
 
-        self::assertGreaterThan(10, $built, 'the whole of the bundle, not a corner of it');
+        self::assertGreaterThan(10, $prefixed, 'the whole of the bundle, not a corner of it');
+        // The redactor, the two commands, the comparators: defined under their class
+        // name, and so invisible to a sweep that only knew the prefixed ids.
+        self::assertGreaterThan(3, $byClass, 'the services defined by class id too');
 
         $kernel->shutdown();
     }
 
-    public function testTheBundleHandsOverTheVendorPrefixedExtension(): void
+    public function testTheMessengerTransportWiresBothHandlers(): void
+    {
+        // Two messages, two handlers: one record and a batch. A worker consuming the
+        // batch message finds no handler if only the first is registered, and the
+        // records sit in the failure transport with nothing to say why.
+        $kernel = new AuditKernel($this->cacheDir, ['transport' => 'messenger', 'message_bus' => 'test.bus']);
+        $kernel->boot();
+
+        $container = $kernel->getContainer();
+
+        self::assertInstanceOf(IndexAuditRecordHandler::class, $container->get(IndexAuditRecordHandler::class));
+        self::assertInstanceOf(IndexAuditRecordsHandler::class, $container->get(IndexAuditRecordsHandler::class));
+        self::assertInstanceOf(MessengerTransport::class, $container->get(TransportInterface::class));
+
+        $kernel->shutdown();
+    }
+
+    public function testABundleWhoseAliasIsNotItsUnderscoredNameStillBoots(): void
     {
         // Bundle::getContainerExtension() refuses an alias that is not the underscored
         // bundle name, and a kernel calls it on every boot.
@@ -103,9 +131,12 @@ final class BundleBootTest extends TestCase
  */
 final class AuditKernel extends Kernel
 {
-    public function __construct(private readonly string $cacheDir)
+    /**
+     * @param array<string, mixed> $extraConfig
+     */
+    public function __construct(private readonly string $cacheDir, private readonly array $extraConfig = [])
     {
-        parent::__construct('test', true);
+        parent::__construct('test'.($extraConfig === [] ? '' : 'messenger'), true);
     }
 
     /**
@@ -118,13 +149,17 @@ final class AuditKernel extends Kernel
 
     public function registerContainerConfiguration(LoaderInterface $loader): void
     {
-        $loader->load(static function (ContainerBuilder $container): void {
+        $extra = $this->extraConfig;
+
+        $loader->load(static function (ContainerBuilder $container) use ($extra): void {
+            $container->register('test.bus', \Symfony\Component\Messenger\MessageBus::class);
+
             $container->loadFromExtension(Configuration::ROOT, [
                 'client' => ['hosts' => ['http://localhost:9200']],
                 'indices' => ['default' => 'audit_log', 'routing' => ['auth' => 'audit_auth_log']],
                 'reader' => ['max_limit' => 10_000, 'max_result_window' => 50_000],
                 'redact' => ['fields' => ['password']],
-            ]);
+            ] + $extra);
         });
     }
 
@@ -143,8 +178,21 @@ final class AuditKernel extends Kernel
             public function process(ContainerBuilder $container): void
             {
                 foreach ($container->getDefinitions() as $id => $definition) {
-                    if (str_starts_with($id, Configuration::ROOT.'.')) {
+                    // Both naming schemes the extension uses: the prefixed service ids
+                    // and the class-id ones (the redactor, the commands, the Messenger
+                    // handlers). Only publicising the first left the second built by
+                    // nobody, in a test whose whole point is that everything builds.
+                    if (str_starts_with($id, Configuration::ROOT.'.') || str_starts_with($id, 'Borsche\\ElasticsearchAuditBundle\\')) {
                         $definition->setPublic(true);
+                    }
+                }
+
+                // The interface aliases too (TransportInterface, GatewayInterface...):
+                // an application autowires them, and this test asks the container for
+                // them the same way.
+                foreach ($container->getAliases() as $id => $alias) {
+                    if (str_starts_with($id, 'Borsche\\ElasticsearchAuditBundle\\')) {
+                        $alias->setPublic(true);
                     }
                 }
             }
