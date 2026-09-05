@@ -339,23 +339,19 @@ final class FullKernel extends Kernel
                 'http_method_override' => false,
                 'handle_all_throwables' => true,
                 'php_errors' => ['log' => true],
-                // A second bus built by FrameworkBundle with its default middleware
-                // turned off: it carries the messenger.bus tag like any other, and
-                // nothing in it would take a message anywhere.
-                'messenger' => $undelivered
-                    ? [
-                        'default_bus' => 'messenger.bus.default',
-                        'transports' => [],
-                        'routing' => [],
-                        'buses' => [
-                            'messenger.bus.default' => [],
-                            // Spelled as a bare false, which every supported Symfony
-                            // normalises: 6.4 refuses the {enabled: false} form outright.
-                            'audit.bus' => ['default_middleware' => false, 'middleware' => []],
-                        ],
-                    ]
-                    : ['transports' => [], 'routing' => []],
+                'messenger' => ['transports' => [], 'routing' => []],
             ]);
+
+            if ($undelivered) {
+                // A bus with the messenger.bus tag and nothing that would take a message
+                // anywhere — what `default_middleware: false` produces, built here
+                // instead of through the configuration tree because the spelling of that
+                // key differs between the Symfony versions this bundle supports and the
+                // shape being tested does not.
+                $container->setDefinition('audit.bus', (new \Symfony\Component\DependencyInjection\Definition(\Symfony\Component\Messenger\MessageBus::class, [
+                    new \Symfony\Component\DependencyInjection\Argument\IteratorArgument([]),
+                ]))->addTag('messenger.bus'));
+            }
 
             if ($ownBus) {
                 // A MessageBusInterface FrameworkBundle did not build: no messenger.bus
