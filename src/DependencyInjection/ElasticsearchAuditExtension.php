@@ -320,7 +320,10 @@ final class ElasticsearchAuditExtension extends Extension
      */
     private function registerWriter(string $onFailure, int $batchSize, array $redact, ContainerBuilder $container): void
     {
-        // Override the alias (e.g. with symfony/clock's service) to control time in tests.
+        // Replace this definition to control time in tests — with symfony/clock's
+        // MockClock, say. There is no interface alias to override: the bundle asks for
+        // this service by id, so redefining borsche_elasticsearch_audit.clock in the
+        // application is the whole of it.
         $container->setDefinition(self::SERVICE_CLOCK, new Definition(SystemClock::class));
 
         $container->setDefinition(self::SERVICE_WRITER, new Definition(AuditWriter::class, [

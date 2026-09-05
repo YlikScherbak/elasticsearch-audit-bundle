@@ -47,16 +47,32 @@ final class AuditEntry
         $base = AuditRecord::reservedFields();
 
         return new self(
-            id: (string) $hit['_id'],
-            objectType: (string) ($source['objectType'] ?? ''),
-            objectId: \is_int($source['objectId'] ?? null) ? $source['objectId'] : (string) ($source['objectId'] ?? ''),
-            event: (string) ($source['event'] ?? ''),
+            id: self::text($hit['_id'] ?? null),
+            objectType: self::text($source['objectType'] ?? null),
+            objectId: \is_int($source['objectId'] ?? null) ? $source['objectId'] : self::text($source['objectId'] ?? null),
+            event: self::text($source['event'] ?? null),
             loggedAt: self::loggedAt($source['loggedAt'] ?? null),
-            actor: isset($source['source']) ? (string) $source['source'] : null,
+            // Unreadable is nobody rather than "": the field is nullable, and null is
+            // what "this document does not tell us who" already means to every caller.
+            actor: \is_scalar($source['source'] ?? null) ? (string) $source['source'] : null,
             changes: \is_array($source['changes'] ?? null) ? $source['changes'] : [],
             attributes: array_diff_key($source, array_fill_keys($base, true)),
             sort: array_values(\is_array($hit['sort'] ?? null) ? $hit['sort'] : []),
         );
+    }
+
+    /**
+     * A stored value as the string this field is supposed to hold.
+     *
+     * A plain cast is not lenient, it only looks it: `(string) ['order']` is an "Array
+     * to string conversion" warning, and an error handler that promotes warnings — the
+     * Symfony one, in debug and in plenty of production setups — turns it into the
+     * exception this whole policy exists to avoid. Anything that is not a string a
+     * field can hold reads as empty, like a missing one.
+     */
+    private static function text(mixed $stored): string
+    {
+        return \is_scalar($stored) ? (string) $stored : '';
     }
 
     private static function loggedAt(mixed $stored): \DateTimeImmutable

@@ -88,26 +88,28 @@ final class ElasticsearchGateway implements GatewayInterface
             return BulkResult::empty();
         }
 
-        // The same guarantee as index(): no index is created by a write with a guessed mapping.
-        foreach (array_unique(array_column($items, 'index')) as $index) {
-            if (!isset($this->known[$index]) && !$this->indexExists($index)) {
-                throw IndexNotFoundException::forIndex($index);
-            }
-        }
-
         $body = [];
 
+        // Before the existence check, which is a round trip: a document without an id is
+        // a programming error in the caller and does not depend on anything the cluster
+        // has to say. Without an id Elasticsearch generates one, and a batch re-sent
+        // after a transient failure would store every already-written document a second
+        // time under a new id. The writer assigns an id before anything is sent; this is
+        // the boundary that keeps that true for every caller.
         foreach ($items as $position => $item) {
-            // Without an id Elasticsearch generates one, and a batch re-sent after a
-            // transient failure would store every already-written document a second
-            // time under a new id. The writer assigns an id before anything is sent;
-            // this is the boundary that keeps that true for every caller.
             if (($item['id'] ?? '') === '') {
                 throw new \InvalidArgumentException(sprintf('The document at position %d has no id. A bulk batch is re-sent whole when the cluster asks for it again, so every document needs an id of its own to overwrite itself instead of arriving twice.', $position));
             }
 
             $body[] = ['index' => ['_index' => $item['index'], '_id' => $item['id']]];
             $body[] = $item['document'];
+        }
+
+        // The same guarantee as index(): no index is created by a write with a guessed mapping.
+        foreach (array_unique(array_column($items, 'index')) as $index) {
+            if (!isset($this->known[$index]) && !$this->indexExists($index)) {
+                throw IndexNotFoundException::forIndex($index);
+            }
         }
 
         $response = $this->call(fn () => self::answer($this->client->bulk(['body' => $body, 'include_source_on_error' => false]))->asArray());
@@ -173,13 +175,46 @@ final class ElasticsearchGateway implements GatewayInterface
 
     public function indexExists(string $index): bool
     {
-        $exists = $this->call(fn () => self::answer($this->client->indices()->exists(['index' => $index]))->asBool());
+        // The status has to be read here rather than left to call(). The client
+        // suppresses its own exception for HEAD requests, so nothing is thrown for it to
+        // classify, and asBool() is a plain "2xx" — under which a role without
+        // view_index_metadata (403), a name the cluster rejects (400) and an unhealthy
+        // cluster (5xx) all became "the index does not exist", and the bundle sent the
+        // operator off to create an index that is already there.
+        $response = $this->call(fn () => self::answer($this->client->indices()->exists(['index' => $index])));
+        $status = $response->getStatusCode();
 
-        if ($exists) {
-            $this->known[$index] = true;
+        if ($status === 404) {
+            return false;
         }
 
-        return $exists;
+        if ($status < 200 || $status >= 300) {
+            throw self::whatTheStatusMeans($status, $response, $index);
+        }
+
+        $this->known[$index] = true;
+
+        return true;
+    }
+
+    /**
+     * The classification call() makes, for an answer that arrived instead of an
+     * exception. Same order, same reasons: backpressure and an unhealthy cluster are
+     * asked again, anything else in the 4xx range is a refusal.
+     */
+    private static function whatTheStatusMeans(int $status, Elasticsearch $response, string $index): AuditException
+    {
+        $body = json_decode((string) $response->getBody(), true);
+        $reason = \is_array($body) ? ($body['error']['root_cause'][0]['reason'] ?? $body['error']['reason'] ?? null) : null;
+        $reason = \is_string($reason) && $reason !== ''
+            ? RequestRejectedException::withoutValuePreview($reason)
+            : sprintf('Elasticsearch answered HTTP %d for "%s" without a reason anyone can read.', $status, $index);
+
+        if ($status === 429 || $status >= 500) {
+            return TransportUnavailableException::because(new \RuntimeException($reason, $status));
+        }
+
+        return RequestRejectedException::because($status, $reason);
     }
 
     public function createIndex(string $index, array $definition): void

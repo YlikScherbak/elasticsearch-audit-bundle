@@ -6,6 +6,8 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Address;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Customer;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredTracking;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Events;
@@ -229,6 +231,26 @@ final class ElementOwnershipTest extends DoctrineTestCase
         $this->expectExceptionMessage('tracks its elements, but it is the owning side');
 
         $this->em->persist(new MisdeclaredTracking());
+        $this->em->flush();
+    }
+
+    public function testAuditingAnEmbeddedPropertyIsRefusedRatherThanIgnored(): void
+    {
+        // Doctrine stores an embeddable as columns of its owner and reports them in the
+        // change set as "address.city" — never as "address". So #[AuditField] on the
+        // embedded property matched nothing, every time, and said nothing about it: the
+        // field simply never appeared in any record. Name the fields instead, or drop
+        // the declaration; either way the bundle has to say which.
+        $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, ...array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $l) => $l instanceof AuditSubscriber,
+        )));
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->expectException(WriteFailedException::class);
+        $this->expectExceptionMessage('address.city');
+
+        $this->em->persist(new Customer('Ada', new Address('Kyiv', 'Khreshchatyk 1')));
         $this->em->flush();
     }
 

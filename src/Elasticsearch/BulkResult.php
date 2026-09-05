@@ -125,7 +125,9 @@ final class BulkResult
 
     /**
      * Whether any of the refusals was the cluster asking for that document again rather
-     * than refusing it: a full write queue (429) or a shard that was not available (503).
+     * than refusing it: anything in TRANSIENT — a full write queue (429), an index
+     * mid-rollover (404) — or any 5xx, which needs no list since every server error is
+     * the same answer.
      *
      * A batch holding one of these has to be sent again as a whole. Re-sending what was
      * already written costs nothing — every document travels with its id and overwrites

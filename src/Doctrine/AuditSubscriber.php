@@ -88,14 +88,26 @@ final class AuditSubscriber
     private bool $reportedLostChangeSets = false;
 
     /**
-     * How many flushes are open right now.
+     * The transaction nesting level each flush that is still open started at.
      *
      * A flush called from inside a lifecycle listener dispatches onFlush and postFlush
      * of its own, and the inner postFlush must not throw away what the outer flush
-     * captured — the outer one is still walking its entities and has yet to build their
+     * captured — the outer one is still walking its entities and has yet to build its
      * records. So the snapshot is dropped only when the outermost flush ends.
+     *
+     * Counting flushes was enough only while every onFlush was answered by a postFlush,
+     * and one is not: UnitOfWork::commit() dispatches onFlush, then beginTransaction(),
+     * and only then enters the try whose catch closes the manager. A listener behind
+     * this one that throws in onFlush — a validation veto is the usual reason — leaves
+     * no onClear, no postFlush and an open manager, and a bare counter then reads every
+     * later flush as nested: the trail goes silent for the rest of the process, and
+     * nothing anywhere says why. The level says what a counter cannot. An inner flush
+     * runs inside the outer one's transaction, so it always starts deeper; a flush that
+     * starts no deeper than the one above it on this stack proves that one is gone.
+     *
+     * @var list<int>
      */
-    private int $openFlushes = 0;
+    private array $flushDepths = [];
 
     public function __construct(
         private readonly AuditWriter $writer,
@@ -119,13 +131,13 @@ final class AuditSubscriber
      */
     public function onFlush(OnFlushEventArgs $args): void
     {
-        ++$this->openFlushes;
-
         $em = self::entityManagerOf($args->getObjectManager());
 
         if ($em === null) {
             return;
         }
+
+        $this->beginFlush($em);
 
         $uow = $em->getUnitOfWork();
 
@@ -220,9 +232,9 @@ final class AuditSubscriber
         // has not committed, and writing them makes the history describe a state the
         // database may still roll back. Only the outermost flush publishes; the inner
         // one hands back what it collected and lets the outer one finish.
-        if ($this->openFlushes > 1) {
-            --$this->openFlushes;
+        array_pop($this->flushDepths);
 
+        if ($this->flushDepths !== []) {
             return;
         }
 
@@ -269,7 +281,7 @@ final class AuditSubscriber
         $this->elementMembership = [];
 
         // The outermost flush is ending, so everything it captured goes with it.
-        $this->openFlushes = 0;
+        $this->flushDepths = [];
         $this->changeSets = [];
         $this->reportedLostChangeSets = false;
 
@@ -303,11 +315,37 @@ final class AuditSubscriber
         $this->elementMembership = [];
 
         // Unconditionally here, and the depth with it: onClear is not paired with
-        // anything, so decrementing would leave the counter describing a flush that no
-        // longer exists.
+        // anything, so popping one level would leave the stack describing a flush that
+        // no longer exists.
         $this->changeSets = [];
         $this->reportedLostChangeSets = false;
-        $this->openFlushes = 0;
+        $this->flushDepths = [];
+    }
+
+    /**
+     * Remember how deep this flush started, and notice a flush above it that died.
+     */
+    private function beginFlush(EntityManagerInterface $em): void
+    {
+        $level = $em->getConnection()->getTransactionNestingLevel();
+
+        if ($this->flushDepths !== [] && $level <= $this->flushDepths[array_key_last($this->flushDepths)]) {
+            // Not nested inside the flush on the stack: that one never reached its
+            // transaction, so it never committed and never will. What it collected
+            // describes rows the database does not have.
+            $this->logger->warning('A flush was abandoned before it committed — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped. They describe changes the database never took.', ['count' => \count($this->pending) + \count($this->pendingRemovals)]);
+
+            $this->pending = [];
+            $this->pendingRemovals = [];
+            $this->pendingIndexByEntity = [];
+            $this->elementChanges = [];
+            $this->elementMembership = [];
+            $this->changeSets = [];
+            $this->reportedLostChangeSets = false;
+            $this->flushDepths = [];
+        }
+
+        $this->flushDepths[] = $level;
     }
 
     /**
@@ -396,6 +434,54 @@ final class AuditSubscriber
         } catch (\Throwable $e) {
             $this->writer->reportFailure($e, null);
         }
+    }
+
+    /**
+     * An audited field has to be one Doctrine reports under that name.
+     *
+     * The case that costs the most is an embeddable: Doctrine stores it as columns of
+     * its owner and reports them as "address.city", never as "address", so
+     * #[AuditField] on the embedded property matched nothing every time and said nothing
+     * about it. A property that is mapped as neither a field nor an association does the
+     * same. Both are declarations that cannot be honoured, and this bundle exists to
+     * refuse the silence rather than produce it — so they travel the failure policy like
+     * every other declaration mistake.
+     *
+     * Asked once per class and field list, like the tracking check above.
+     */
+    private function assertAuditedFieldsAreThere(EntityManagerInterface $em, object $entity, AuditMetadata $metadata): void
+    {
+        $fields = array_keys($metadata->fields);
+        sort($fields);
+        $checked = $entity::class."\0fields\0".implode("\0", $fields);
+
+        if (isset($this->checkedTracking[$checked])) {
+            return;
+        }
+
+        $classMetadata = $em->getClassMetadata($entity::class);
+
+        foreach ($fields as $field) {
+            // getFieldNames() rather than hasField(): the latter says yes to an
+            // embeddable's own name, which is exactly the name Doctrine never reports a
+            // change under.
+            if (\in_array($field, $classMetadata->getFieldNames(), true) || $classMetadata->hasAssociation($field)) {
+                continue;
+            }
+
+            // An embeddable's own columns are mapped as "field.property", which is also
+            // how they arrive in the change set — so the declaration has to name them.
+            $parts = array_values(array_filter(
+                $classMetadata->getFieldNames(),
+                static fn (string $mapped): bool => str_starts_with($mapped, $field.'.'),
+            ));
+
+            throw new DeclarationMistake($parts === []
+                ? sprintf('%s::$%s is audited, but Doctrine maps it as neither a field nor an association, so nothing about it would ever be recorded.', $entity::class, $field)
+                : sprintf('%s::$%s is audited, but it is an embeddable: Doctrine reports its columns as %s and never as "%s", so nothing about it would ever be recorded. Audit those names instead.', $entity::class, $field, implode(', ', array_map(static fn (string $p): string => '"'.$p.'"', $parts)), $field));
+        }
+
+        $this->checkedTracking[$checked] = true;
     }
 
     /**
@@ -738,6 +824,7 @@ final class AuditSubscriber
                 return null;
             }
 
+            $this->assertAuditedFieldsAreThere($em, $entity, $metadata);
             $this->assertTrackedCollectionsAreServable($em, $entity, $metadata);
 
             $id = $this->identifierOf($em, $entity);

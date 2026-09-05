@@ -7,6 +7,8 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Coalescing\NumericNullAsZeroComparator;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Folder;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\FolderDocument;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
 
@@ -140,20 +142,45 @@ final class CollectionElementsTest extends DoctrineTestCase
         self::assertSame([], $this->documents(), 'an untouched collection costs nothing and says nothing');
     }
 
-    public function testAnUntrackedCollectionIgnoresItsElements(): void
+    public function testAnUntrackedCollectionIgnoresWhatHappensInsideItsElements(): void
     {
-        $shipment = $this->shipment();
-        $line = $shipment->lines->first();
+        // Folder audits its documents without trackElements: which documents it holds is
+        // history, what changes inside one is not. This used to assert nothing at all —
+        // it changed a quantity, never flushed, and cleared the unit of work, so an empty
+        // history was guaranteed however the listener behaved. It also talked about
+        // Article while using Shipment, whose collection *is* tracked.
+        $folder = new Folder('Contracts');
+        $document = new FolderDocument('lease.pdf');
+        $folder->add($document);
 
-        // Same shape, but the audited collection of Article is not tracked.
-        $line->quantity = 8;
+        $this->em->persist($folder);
         $this->em->flush();
         $this->gateway->documents = [];
 
-        $line->quantity = 9;
-        $this->em->getUnitOfWork()->clear(ShipmentLine::class);
+        $document->title = 'lease-signed.pdf';
+        $this->em->flush();
 
-        self::assertSame([], $this->documents());
+        self::assertSame([], $this->documents(), 'a title change inside a document is not the folder\'s history');
+    }
+
+    public function testAnUntrackedCollectionStillRecordsWhatJoinsAndLeavesIt(): void
+    {
+        // The other half, and the reason the test above cannot simply assert silence:
+        // membership follows from the field being audited, and only what happens *inside*
+        // an element needs trackElements.
+        $folder = new Folder('Contracts');
+        $this->em->persist($folder);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $added = new FolderDocument('lease.pdf');
+        $folder->add($added);
+        $this->em->flush();
+
+        $documents = $this->documents();
+
+        self::assertCount(1, $documents);
+        self::assertSame(['old' => null, 'new' => 'lease.pdf'], $documents[0]['changes']['documents.'.$added->id]);
     }
 
     public function testRemovingTheOwnerWithItsElementsIsOneRemoveAndNothingAfterIt(): void

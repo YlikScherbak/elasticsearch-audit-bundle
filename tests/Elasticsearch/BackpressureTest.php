@@ -48,6 +48,38 @@ final class BackpressureTest extends TestCase
         $gateway->index('audit_log', ['objectType' => 'order']);
     }
 
+    public function testAnIndexNobodyIsAllowedToLookAtIsNotAnIndexThatIsMissing(): void
+    {
+        // The client does not throw on HEAD — it suppresses its own exception for that
+        // method — and asBool() is nothing but "2xx". So a role without
+        // view_index_metadata, a 5xx, or a name the cluster rejects all came back as
+        // "the index does not exist", and the bundle told the operator to run
+        // audit:index:create. It exists; they cannot see it, which is a different day's
+        // work.
+        $gateway = $this->gateway(static fn (RequestInterface $r) => self::response(403, ['error' => ['reason' => 'action [indices:admin/get] is unauthorized for user [reader]']]));
+
+        $this->expectException(RequestRejectedException::class);
+        $this->expectExceptionMessage('unauthorized');
+
+        $gateway->indexExists('audit_log');
+    }
+
+    public function testAnIndexTheClusterCannotAnswerAboutIsNotMissingEither(): void
+    {
+        $gateway = $this->gateway(static fn (RequestInterface $r) => self::response(503, ['error' => ['reason' => 'no master']]));
+
+        $this->expectException(TransportUnavailableException::class);
+
+        $gateway->indexExists('audit_log');
+    }
+
+    public function testAMissingIndexIsStillReportedAsMissing(): void
+    {
+        $gateway = $this->gateway(static fn (RequestInterface $r) => self::response(404, []));
+
+        self::assertFalse($gateway->indexExists('audit_log'));
+    }
+
     public function testADocumentTheMappingRefusesStillIs(): void
     {
         $gateway = $this->gateway(static fn (RequestInterface $r) => $r->getMethod() === 'HEAD'

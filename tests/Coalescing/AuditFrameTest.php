@@ -270,9 +270,73 @@ final class AuditFrameTest extends TestCase
         self::assertSame(['old' => 1000, 'new' => 995], $documents[0]['changes']['fact']);
     }
 
-    private static function consumed(object $message): Envelope
+    public function testAMessageRoutedToTheSyncTransportDoesNotCutTheFrameAroundIt(): void
     {
-        return new Envelope($message, [new ReceivedStamp('test')]);
+        // Symfony's SyncTransport::send() re-dispatches the envelope through the bus
+        // with a ReceivedStamp('sync'), so a message handled synchronously from inside
+        // an operation is indistinguishable from one a worker consumed. In a worker the
+        // nesting counter saves it; in a web request nothing does — consuming goes
+        // 0 → 1 → 0 and the frame is released in the middle of somebody's operation.
+        // Routing IndexAuditRecords to sync:// is an ordinary dev configuration, and so
+        // is dispatching a domain message from inside coalesce().
+        $middleware = new FrameResetMiddleware($this->frame, $this->logger());
+
+        $this->frame->begin();
+        $this->writer->record('stock', 7, AuditEvent::UPDATE, ['fact' => new Change(1000, 1040)]);
+
+        $middleware->handle(self::consumed(new \stdClass(), 'sync'), new StackMiddleware(new HandlerMiddleware(static function (): void {
+        })));
+
+        self::assertTrue($this->frame->isOpen(), 'the frame belongs to the operation that opened it');
+        self::assertSame([], $this->gateway->documents, 'nothing was published half-way through the operation');
+        self::assertSame([], $this->warnings, 'and nobody was blamed for a missing try/finally');
+
+        $this->writer->record('stock', 7, AuditEvent::UPDATE, ['fact' => new Change(1040, 995)]);
+        $this->frame->end();
+
+        $documents = $this->gateway->documents['audit_log'];
+
+        self::assertCount(1, $documents, 'the operation is still one record');
+        self::assertSame(['old' => 1000, 'new' => 995], $documents[0]['changes']['fact']);
+    }
+
+    public function testAFailedWriteOfReleasedRecordsDoesNotLeaveTheirFailuresBehind(): void
+    {
+        // AuditFrame::end() and release() both drain the buffer even when the write
+        // throws, so a comparator failure cannot surface inside the next operation as an
+        // event about a record that operation never wrote. The writer's own release path
+        // — an overflowing frame handing records back through write() — did not: under
+        // on_failure: throw the report line simply never ran.
+        $broken = new class implements \Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                throw new \RuntimeException('the comparator is broken');
+            }
+        };
+
+        $this->buffer = new FrameBuffer(new \Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator([$broken]), maxHeld: 1);
+        $this->writer = $this->writer(FailurePolicy::Throw);
+        $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
+
+        $this->gateway->failWith = new \RuntimeException('the cluster is down');
+
+        $this->frame->begin();
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+        try {
+            // The second object overflows a buffer of one, so the first is released and
+            // written — and the write fails.
+            $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(3, 4)]);
+            self::fail('the write should have raised under the throw policy');
+        } catch (\Throwable) {
+        }
+
+        self::assertSame([], $this->buffer->takeFinalizeFailures(), 'nothing is left to surface inside somebody else\'s operation');
+    }
+
+    private static function consumed(object $message, string $transport = 'test'): Envelope
+    {
+        return new Envelope($message, [new ReceivedStamp($transport)]);
     }
 
     public function testAComparatorThatThrowsAtCloseDoesNotTakeTheFrameWithIt(): void

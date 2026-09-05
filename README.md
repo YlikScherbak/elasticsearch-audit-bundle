@@ -41,9 +41,14 @@ history screen showed the new events without a change.
   (`Accept version must be either version 8 or 7`), so pin it —
   `composer require elasticsearch/elasticsearch:^8.18` for an 8.x cluster.
   The floor is 8.18 rather than 8.0 because writes are sent with
-  `include_source_on_error=false`, which keeps a rejected document's own values out of
-  the error Elasticsearch returns — and out of your logs. Earlier 8.x releases have no
-  such parameter, so on those a mapping conflict quotes the audited value back
+  `include_source_on_error=false`, asking the cluster to keep the refused document out of
+  the error it returns. Earlier 8.x releases do not know the parameter, and an unknown
+  query parameter is a 400 — which the bundle reads as a permanent refusal, so on those
+  every audit record would be dropped by the line meant to protect it. Measured on 8.19
+  and 9.1, the parameter suppresses the document *source* and leaves the
+  `Preview of field's value: '…'` fragment of a mapping conflict exactly where it was;
+  that fragment is cut by the bundle itself, before it reaches an exception, a log line
+  or a failure event
 - With the version 9 client, a PSR-18 HTTP client — it no longer ships one:
   `composer require guzzlehttp/guzzle`
 
@@ -92,6 +97,15 @@ bin/console audit:index:create   # creates every configured index with its mappi
 bin/console audit:index:sync     # adds fields an existing index lacks; never changes what is mapped (since 0.12)
 bin/console audit:check          # cluster reachable? indices there? every field mapped? windows aligned?
 ```
+
+The bundle passes your application logger to the Elasticsearch client through a gate rather than
+directly (**since 1.0**). The client logs `Headers: … Body: …` at `debug` for both the request and
+the response, and the request body is the audited document — the whole `changes` payload — so on
+any environment running at debug every redacted value went into the application log once per
+write; the info lines it keeps carry the PSR-7 request and response objects in their context,
+where a formatter that serialises context reaches the same body. Nothing at debug is passed on and
+those objects are dropped, leaving method, URL, status and retry count. Inline credentials in a
+host (`http://user:secret@es:9200`) are blanked wherever they appear.
 
 `audit:index:create --dump` prints the mapping instead, for when the index is provisioned by
 other means (Terraform, an ILM policy, a hand-written template). When an enricher grows a field
@@ -460,6 +474,13 @@ framework:
           - Borsche\ElasticsearchAuditBundle\Coalescing\Messenger\FrameResetMiddleware
 ```
 
+The bundle defines the service and stops there — nothing references it, so without those four
+lines the container removes it and the door stays open. That is deliberate: middleware order is
+the application's to decide, and a bundle that inserts itself into somebody's bus is harder to
+reason about than one that asks. It is a no-op outside a worker, and it leaves alone any frame
+that was already open when a message arrived: a message routed to `sync://` is dispatched from
+inside your operation, not consumed at the end of one.
+
 With `on_failure: throw`, a write that fails surfaces from `end()` (or `coalesce()`), not from
 the `flush()` that produced the record.
 
@@ -524,9 +545,13 @@ borsche_elasticsearch_audit:
     max_result_window: 50000  # five such pages; raise index.max_result_window to match
 ```
 
-Reading across object types with `any()` and a cursor also sorts by the index name (**since
-0.10**), because a timestamp and a record id are unique inside one index and not between several
-— two records sharing both used to make `search_after` step over one of them.
+Every cursor read outside a consistent `iterate()` also sorts by the index name (**since 1.0**;
+**0.10** did it only for `any()`), because a timestamp and a record id are unique inside one index
+and not between several — two records sharing both make `search_after` step over one of them. One
+object type is not one index: it is one *route*, and an append-only trail rolls over, so the alias
+spans the series. A cursor token issued for a different sort — by an older version, or by a
+consistent read — is refused with an `InvalidQueryException` telling the caller to start from the
+first page, rather than passed to the cluster to fail as a 400.
 
 A page says how far the numbers go, so a screen can tell "pages there are" from "pages you can
 ask for": `$page->totalPages()` and `$page->maxReachablePage()` (**since 0.8**), the second bounded

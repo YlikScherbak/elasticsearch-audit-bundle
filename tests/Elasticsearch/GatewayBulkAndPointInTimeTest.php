@@ -233,6 +233,35 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
         $gateway->closePointInTime('pit-abc');
     }
 
+    public function testEveryWriteAsksTheClusterNotToQuoteTheDocumentBack(): void
+    {
+        // The one line standing between a rejected document and its own values in the
+        // error the cluster returns — and, from there, in the log. Nothing proved it was
+        // actually on the wire, on either endpoint: it is a parameter name in a params
+        // array, and an endpoint that does not know it drops it in silence.
+        $seen = [];
+        $gateway = $this->gateway(function (RequestInterface $request) use (&$seen): ResponseInterface {
+            if ($request->getMethod() === 'HEAD') {
+                return self::response(200, []);
+            }
+
+            $seen[$request->getUri()->getPath()] = $request->getUri()->getQuery();
+
+            return self::response(200, str_contains($request->getUri()->getPath(), '_bulk')
+                ? ['errors' => false, 'items' => [['index' => ['status' => 201]]]]
+                : ['_id' => 'a', 'result' => 'created']);
+        });
+
+        $gateway->index('audit_log', ['objectId' => 1], 'a');
+        $gateway->bulk([['index' => 'audit_log', 'document' => ['objectId' => 2], 'id' => 'b']]);
+
+        self::assertNotSame([], $seen);
+
+        foreach ($seen as $path => $query) {
+            self::assertStringContainsString('include_source_on_error=false', $query, $path.' asked the cluster to quote the document back');
+        }
+    }
+
     private function gateway(callable $respond): ElasticsearchGateway
     {
         $http = new class($respond) implements ClientInterface {

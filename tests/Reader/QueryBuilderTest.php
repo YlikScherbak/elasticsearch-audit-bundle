@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Reader;
 
+use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
 use PHPUnit\Framework\TestCase;
@@ -113,10 +114,35 @@ final class QueryBuilderTest extends TestCase
 
     public function testPagingByCursorSendsSearchAfterInsteadOfFrom(): void
     {
-        $body = (new QueryBuilder())->build(AuditQuery::any()->after(['2026-08-26 10:00:00', 17]));
+        $body = (new QueryBuilder())->build(AuditQuery::any()->after(['2026-08-26 10:00:00', 17, 'audit_log-000002']));
 
-        self::assertSame(['2026-08-26 10:00:00', 17], $body['search_after']);
+        self::assertSame(['2026-08-26 10:00:00', 17, 'audit_log-000002'], $body['search_after']);
         self::assertArrayNotHasKey('from', $body);
+    }
+
+    public function testOneObjectTypeIsStillReadThroughAnAliasThatMayHoldManyIndices(): void
+    {
+        // The tiebreaker used to be added only for any(), on the reasoning that a query
+        // naming one object type reads one index. It reads one *route*, and a route is
+        // an alias: an append-only trail rolls over, and the alias then spans the whole
+        // series. Two records sharing a timestamp and an id — which they can, because an
+        // application may choose its own — then live in different indices, and
+        // search_after steps over one of them. The reader cannot see which shape the
+        // route has, so the tuple is made unique either way.
+        $body = (new QueryBuilder())->build(AuditQuery::for('order'));
+
+        self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']], ['_index' => 'desc']], $body['sort']);
+    }
+
+    public function testACursorFromADifferentSortIsRefusedBeforeItReachesTheCluster(): void
+    {
+        // A token issued before the tiebreaker changed carries two values against a
+        // three-value sort. Elasticsearch answers 400 with its own words about search_after
+        // and sort lengths; the reader says what the caller can act on.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('start from the first page');
+
+        (new QueryBuilder())->build(AuditQuery::any()->after(['2026-08-26 10:00:00', 17]));
     }
 
     public function testOptionsNeverReachElasticsearch(): void
@@ -126,12 +152,4 @@ final class QueryBuilderTest extends TestCase
         self::assertStringNotContainsString('country', json_encode($body, \JSON_THROW_ON_ERROR));
     }
 
-    public function testOneObjectTypeIsOneIndexAndNeedsNoIndexTiebreaker(): void
-    {
-        // The pair is unique inside an index; the third value is the price of reading
-        // across several, and a query that does not is not asked to pay it.
-        $body = (new QueryBuilder())->build(AuditQuery::for('order'));
-
-        self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']]], $body['sort']);
-    }
 }

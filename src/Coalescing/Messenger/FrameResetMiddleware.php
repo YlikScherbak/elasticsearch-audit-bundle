@@ -47,9 +47,16 @@ final class FrameResetMiddleware implements MiddlewareInterface
         // Bus middleware runs on dispatch too, and with the messenger transport the
         // writer itself dispatches — from inside the very frame this middleware guards.
         // Releasing here cut an open frame in the middle of its operation: phantom
-        // intermediate states, and a warning blaming a try/finally nobody omitted. Only
-        // a message being consumed marks a handler boundary.
-        if ($envelope->last(ReceivedStamp::class) === null) {
+        // intermediate states, and a warning blaming a try/finally nobody omitted.
+        //
+        // A consumed message is the handler boundary this middleware exists for, but the
+        // stamp alone does not identify one: SyncTransport::send() re-dispatches through
+        // the bus with a ReceivedStamp of its own, so a message routed to sync:// —
+        // IndexAuditRecords in a dev configuration, or any domain message dispatched
+        // from inside coalesce() — arrives looking exactly like a worker's. The frame
+        // decides instead: one that is already open when a consume starts was opened by
+        // whoever is calling, and closing it is not this middleware's business.
+        if ($envelope->last(ReceivedStamp::class) === null || $this->frame->isOpen()) {
             return $stack->next()->handle($envelope, $stack);
         }
 

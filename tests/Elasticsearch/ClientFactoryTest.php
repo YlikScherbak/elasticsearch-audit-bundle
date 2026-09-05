@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Elasticsearch;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClientFactory;
-use Borsche\ElasticsearchAuditBundle\Elasticsearch\UserinfoRedactingLogger;
+use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClientLogGate;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Elastic\Elasticsearch\Client;
 use PHPUnit\Framework\TestCase;
@@ -58,12 +58,78 @@ final class ClientFactoryTest extends TestCase
             }
         };
 
-        $wrapped = new UserinfoRedactingLogger($logger);
+        $wrapped = new ClientLogGate($logger);
         $wrapped->info('Request: GET http://elastic:s3cr3t@es:9209/_bulk', ['uri' => 'http://elastic:s3cr3t@es:9209/']);
 
         $observable = implode("\n", $lines);
 
         self::assertStringNotContainsString('s3cr3t', $observable);
         self::assertStringContainsString('//elastic:***@', $observable, 'the user stays, the password goes');
+    }
+
+    public function testTheDocumentItselfNeverReachesTheApplicationLog(): void
+    {
+        // elastic/transport logs "Headers: … Body: …" at debug for the request *and* the
+        // response, so every audited document — the whole changes payload — went into the
+        // application log once per write on any environment running at debug. The bundle
+        // spends its effort keeping values out of the error path and then handed them to
+        // the logger through the front door.
+        $lines = [];
+
+        (new ClientLogGate($this->recording($lines)))->debug('Headers: {"Content-Type":"application/json"}' . "\n" . 'Body: {"changes":{"password":{"new":"hunter2"}}}');
+
+        self::assertSame([], $lines, 'the level that carries bodies is not passed on at all');
+    }
+
+    public function testAPsr7ObjectIsNotHandedOnEither(): void
+    {
+        // The info lines are the useful ones — method, URL, status — but the client puts
+        // the whole request and response objects in their context, and a formatter that
+        // serialises context reaches the body through them. The message survives; the
+        // objects do not.
+        $lines = [];
+        $captured = [];
+        $logger = new class($lines, $captured) extends \Psr\Log\AbstractLogger {
+            /**
+             * @param list<string>       $lines
+             * @param list<array<mixed>> $captured
+             */
+            public function __construct(private array &$lines, private array &$captured)
+            {
+            }
+
+            /** @param mixed $level */
+            public function log($level, $message, array $context = []): void
+            {
+                $this->lines[] = (string) $message;
+                $this->captured[] = $context;
+            }
+        };
+
+        $request = new \GuzzleHttp\Psr7\Request('POST', 'http://es:9200/_bulk', [], '{"changes":{"password":{"new":"hunter2"}}}');
+
+        (new ClientLogGate($logger))->info('Request: POST http://es:9200/_bulk', ['request' => $request, 'retry' => 0]);
+
+        self::assertSame(['Request: POST http://es:9200/_bulk'], $lines);
+        self::assertSame([['retry' => 0]], $captured, 'what is left is what a log line can say');
+    }
+
+    /**
+     * @param list<string> $lines
+     */
+    private function recording(array &$lines): \Psr\Log\LoggerInterface
+    {
+        return new class($lines) extends \Psr\Log\AbstractLogger {
+            /** @param list<string> $lines */
+            public function __construct(private array &$lines)
+            {
+            }
+
+            /** @param mixed $level */
+            public function log($level, $message, array $context = []): void
+            {
+                $this->lines[] = (string) $message.' '.json_encode($context);
+            }
+        };
     }
 }

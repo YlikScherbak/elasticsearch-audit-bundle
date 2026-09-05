@@ -88,7 +88,35 @@ final class Filter
             throw new InvalidQueryException('A range needs at least one bound — leave the filter out to not filter.');
         }
 
-        return new self(FilterKind::Between, from: self::bound($from), to: self::bound($to));
+        $lower = self::bound($from);
+        $upper = self::bound($to);
+
+        // The same refusal AuditQuery::between() makes for dates. A crossed range cannot
+        // match anything, and an empty page is the one answer an audit query must never
+        // give by mistake: it reads as "nothing happened".
+        //
+        // Only bounds of one kind are compared. A keyword field orders its values as
+        // text, so "10" against 9 is not a comparison this can make on the caller's
+        // behalf, and guessing would refuse queries that are perfectly good.
+        if (self::comparable($lower, $upper) && $lower > $upper) {
+            throw new InvalidQueryException(sprintf('The lower bound of this range (%s) is after the upper one (%s), so it can match nothing at all.', var_export($lower, true), var_export($upper, true)));
+        }
+
+        return new self(FilterKind::Between, from: $lower, to: $upper);
+    }
+
+    /**
+     * Whether these two bounds can be put in order without guessing what the field is.
+     * Two numbers can; two strings can, since a date bound is formatted so that its text
+     * order is its chronological order. A number against a string cannot.
+     */
+    private static function comparable(int|float|string|null $lower, int|float|string|null $upper): bool
+    {
+        if ($lower === null || $upper === null) {
+            return false;
+        }
+
+        return \is_string($lower) === \is_string($upper);
     }
 
     private static function bound(int|float|string|\DateTimeInterface|null $bound): int|float|string|null

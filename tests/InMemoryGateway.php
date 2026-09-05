@@ -108,8 +108,11 @@ final class InMemoryGateway implements GatewayInterface
             throw IndexNotFoundException::forIndex($index);
         }
 
+        // Each hit carries the sort tuple the request asked for, the way a cluster does:
+        // a fake that answers a three-value sort with two values lets a cursor bug read
+        // as green here and fail on the first real search.
         $hits = array_map(
-            static fn (array $doc, int $i) => ['_id' => (string) $i, '_source' => $doc],
+            static fn (array $doc, int $i) => ['_id' => (string) $i, '_source' => $doc, 'sort' => [$doc['loggedAt'] ?? '', (string) $i, $index]],
             $this->documents[$index] ?? [],
             array_keys($this->documents[$index] ?? []),
         );
@@ -181,15 +184,16 @@ final class InMemoryGateway implements GatewayInterface
 
         $snapshot = $this->pointsInTime[$pitId]['snapshot'];
         $hits = array_map(
-            static fn (array $doc, int $i) => ['_id' => (string) $i, '_source' => $doc, 'sort' => [$doc['loggedAt'] ?? '', $i]],
+            // Inside a view the last value stands for _shard_doc, as a real one does.
+            static fn (array $doc, int $i) => ['_id' => (string) $i, '_source' => $doc, 'sort' => [$doc['loggedAt'] ?? '', (string) $i, $i]],
             $snapshot,
             array_keys($snapshot),
         );
 
         // Honour search_after on the position tiebreaker, so an iterate() over the snapshot terminates.
-        $after = $body['search_after'][1] ?? null;
+        $after = $body['search_after'][2] ?? null;
         if (\is_int($after)) {
-            $hits = array_values(array_filter($hits, static fn (array $h) => $h['sort'][1] > $after));
+            $hits = array_values(array_filter($hits, static fn (array $h) => $h['sort'][2] > $after));
         }
 
         $hits = \array_slice($hits, 0, (int) ($body['size'] ?? 10));

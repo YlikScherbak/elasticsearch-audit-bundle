@@ -14,11 +14,33 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 A pre-release audit found things that had to be right before the surface froze, so 1.0 is not
 quite "0.12 with a promise". These can ask something of you:
 
-**The Elasticsearch client floor is 8.18** (`^8.18 || ^9.0`). Writes are sent with
-`include_source_on_error=false`, which keeps a rejected document's own values out of the error the
-cluster returns and out of the logs it reaches; the parameter does not exist before 8.18. If you
-pinned `elasticsearch/elasticsearch:^8.0`, move the pin to `^8.18` — the cluster itself needs no
-upgrade, an 8.18 client speaks to an 8.x cluster.
+**The Elasticsearch client floor is 8.18** (`^8.18 || ^9.0`), **and so is the cluster's**. Writes
+are sent with `include_source_on_error=false`, asking the cluster to keep the refused document out
+of the error it returns; the parameter does not exist before 8.18, and an unknown query parameter
+is a 400 the bundle reads as a permanent refusal — on an older cluster every audit record would be
+dropped. If you pinned `elasticsearch/elasticsearch:^8.0`, move the pin to `^8.18`, and check the
+cluster version too: this is the one requirement here that the client alone cannot satisfy.
+
+**An `#[AuditField]` on an embedded property now fails at the first flush.** It never recorded
+anything — Doctrine reports an embeddable's columns as `address.city`, never as `address` — so
+this turns silence into a message naming the fields that do exist. Audit those names instead. The
+same check refuses a property Doctrine maps as neither a field nor an association.
+
+**`whereBetween()` refuses a crossed range**, the way `between()` already did for dates. If you
+built ranges from user input without ordering the bounds, an impossible one used to come back as
+an empty page and is now an `InvalidQueryException`.
+
+**The Elasticsearch client's `debug` output no longer reaches your log.** It carried the request
+and response bodies — that is, the audited document — so on any environment running at debug the
+values redaction removes were in the log anyway. If you were reading those lines to debug a
+request, use the cluster's own slow log or a proxy; the bundle will not carry a payload into a
+log again. The `info` lines stay, minus the PSR-7 objects their context used to carry.
+
+**Cursor tokens issued before 1.0 cannot be continued.** Every cursor read outside a consistent
+`iterate()` now sorts by the index name as well, so a token carries three sort values where it
+used to carry two. A token from an older version is refused with an `InvalidQueryException` saying
+to start from the first page — a page number is unaffected, and a token lives as long as somebody
+keeps clicking "next", so in practice this is visible only across a deploy.
 
 **`AuditReader::find()`, `iterate()` and `raw()` now raise `PartialResultException`** when
 Elasticsearch answers with part of a result (a failed shard, or a search that ran out of time).

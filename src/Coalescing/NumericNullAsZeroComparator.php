@@ -82,7 +82,11 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
             // neighbour become the same double and a real change disappears from the
             // trail — and a comparator that answers "equal" wrongly deletes history,
             // where one that answers "different" wrongly only adds a record.
-            return self::decimal($value);
+            //
+            // Trimmed first: is_numeric accepts leading whitespace, so " 12" is a number
+            // to PHP and was a different one from "12" here — a record saying a quantity
+            // changed from 12 to 12.
+            return self::decimal(trim($value));
         }
 
         return null;

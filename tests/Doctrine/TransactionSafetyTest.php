@@ -46,6 +46,52 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame([], $this->documents(), 'the history must not describe a state the database never had');
     }
 
+    public function testAFlushSomebodyElseAbortedInOnFlushDoesNotSilenceEveryFlushAfterIt(): void
+    {
+        // UnitOfWork::commit() dispatches onFlush, then beginTransaction(), and only
+        // then enters the try whose catch calls close(). A listener behind ours that
+        // throws in onFlush — a validation veto, the usual reason — therefore leaves
+        // the flush with no onClear, no postFlush and an open manager. Everything this
+        // listener collected stays, and so does its idea that a flush is running: every
+        // flush after this one looks nested, publishes nothing, and the audit trail is
+        // silent for the rest of the process without one line anywhere saying so.
+        $veto = new class {
+            public bool $angry = true;
+
+            public function onFlush(): void
+            {
+                if ($this->angry) {
+                    throw new \DomainException('this entity may not be saved');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+        try {
+            $this->em->persist(new Article('Refused'));
+            $this->em->flush();
+            self::fail('the flush should have failed');
+        } catch (\DomainException) {
+        }
+
+        // The manager is still open — Doctrine never reached its own failure path — so
+        // the application carries on, and so must the history.
+        self::assertTrue($this->em->isOpen(), 'Doctrine did not close the manager, and this test is about what happens next');
+
+        $veto->angry = false;
+        $this->em->persist(new Article('Saved'));
+        $this->em->flush();
+
+        // Two, not one: the manager stayed open, so Doctrine still holds the insert the
+        // vetoed flush scheduled and writes it now. Both rows are in the database and
+        // both belong in the history — what must not happen is the nothing this
+        // produced before.
+        $documents = $this->documents();
+
+        self::assertCount(2, $documents, 'the flush after an aborted one is still audited');
+        self::assertSame(['Refused', 'Saved'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'], $documents));
+    }
+
     public function testRecordsAreSentAfterTheCommit(): void
     {
         $nestingAtWrite = null;

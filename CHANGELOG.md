@@ -36,6 +36,92 @@ the dependency range.
   original stays reachable through `WriteFailedException::getPrevious()`. The earlier rule —
   "it wrapped nothing, so we wrote it" — was a guess, and false for every library that throws
   directly. `redact.failure_details` sets it explicitly; unset, it follows `redact.fields`
+- **A redaction rule that names no field is refused**, like a rule naming a base field already
+  was. `''` out of a config list, or `'user.'` from a scope somebody meant to finish, was accepted
+  and then matched nothing — the same silence, arrived at by a likelier accident
+- **The two log lines in `reportFailure()` go through `failure_details` like every other cause.**
+  A listener of `RecordFailedEvent` is application code with an enricher's trust level — it was
+  handed a record and may have read anything to build its reply — and its exception was logged
+  with its message and the object itself, past the policy governing everything else on that path
+- **Whitespace around a number is not a change.** `is_numeric(' 12')` is true, so `' 12'` against
+  `'12'` was recorded as a quantity that moved from 12 to 12
+- **`bulk()` checks its ids before it asks the cluster anything.** A document without an id is a
+  mistake in the caller and does not depend on what any HEAD request answers
+- **`indexExists()` answers false only when the cluster said 404.** The client suppresses its own
+  exception for `HEAD`, and the check was a plain "2xx", so a role without `view_index_metadata`
+  (403), a name Elasticsearch will not take (400) and an unhealthy cluster (5xx) all came back as
+  "the index does not exist" — and `audit:check` sent the operator off to create an index that was
+  already there, during an outage. The status is read now, and anything else is classified the way
+  every other answer is; `GatewayInterface`'s `@throws` on the method stops being unreachable
+- **Auditing an embedded property is refused instead of silently recording nothing.** Doctrine
+  stores an embeddable as columns of its owner and reports them as `address.city`, never as
+  `address`, so `#[AuditField]` on the embedded property matched nothing every time and said so
+  nowhere. It is now a declaration mistake, and the message names the fields that do exist. The
+  same check catches a property Doctrine maps as neither a field nor an association
+- **A crossed range is refused on an attribute, as it already was on dates.**
+  `whereBetween('total', 500, 100)` sent an impossible range and answered with an empty page —
+  which reads as "nothing happened", the one answer an audit query must never give by mistake.
+  Bounds of different kinds (a number against a string) are still left to Elasticsearch, since a
+  keyword field orders its values as text
+- **`redact.failure_details: ~` is accepted.** `enumNode()->defaultNull()` works only because
+  defaults are inserted without being finalized, so the value the documentation calls the default
+  was the one spelling a user could not write — including the one `config:dump-reference` prints
+- **Released records whose write fails no longer strand their finalize failures.** `AuditFrame`
+  drained the buffer even when the write threw; the writer's own release path did not, so under
+  `on_failure: throw` a comparator failure stayed behind — to surface inside the next operation as
+  an event about a record it never wrote, or to be erased by a `reset()` that cannot know better
+- **The Elasticsearch client no longer writes the audited document into the application log.**
+  `elastic/transport` logs `Headers: … Body: …` at `debug` for the request *and* the response, so
+  an environment running at debug — every dev machine, and more production ones than anyone
+  admits — put the whole `changes` payload, redacted values included, into the log once per write,
+  and a rejected document came back quoted. The wrapper in front of the client only blanked
+  passwords in URLs, which is what its name said and all it did. It is now `ClientLogGate`: it
+  passes nothing at debug, drops the PSR-7 request and response objects the info lines carry in
+  their context (a formatter that serialises context reaches the body through them), and keeps
+  method, URL, status and retry count
+- **A safe exception no longer smuggles an unsafe one along with it.** `SafeExceptionMessage` is a
+  promise about a *message*, and the failure path read it as a promise about the whole object:
+  `IndexNotFoundException` names the index in the bundle's own words and carries the cluster's
+  exception as `previous`, which is exactly what a log processor walks. Under `failure_details:
+  cause` a safe cause with a chain is now repeated as its message without the chain, and
+  `FailureReason` carries `causeClass`, so a listener can still tell a missing index from a refused
+  document without reading any message
+- **A flush somebody else aborted no longer silences every flush after it.** `UnitOfWork::commit()`
+  dispatches onFlush, *then* opens the transaction, and only then enters the try whose catch closes
+  the manager — so a listener behind this one that throws in onFlush (a validation veto, the usual
+  reason) leaves no onClear, no postFlush and an open manager. The nesting counter then read every
+  later flush as nested and published nothing: the trail went silent for the rest of the process,
+  with nothing anywhere saying why. Nesting is now decided by the transaction level each flush
+  started at — an inner flush always starts deeper — so a flush that starts no deeper proves the
+  one above it is gone, drops what it had collected (rows the database never took) and says so
+- **`FrameResetMiddleware` no longer cuts an open frame on a synchronously routed message.** The
+  `ReceivedStamp` guard was meant to tell a consumed message from a dispatch, and it cannot:
+  `SyncTransport::send()` re-dispatches through the bus with a stamp of its own. Routing
+  `IndexAuditRecords` to `sync://`, or dispatching any domain message from inside `coalesce()`,
+  therefore released somebody else's frame mid-operation — phantom intermediate records, and a
+  warning blaming a try/finally nobody omitted. A consume that starts with a frame already open
+  now leaves it alone
+- **A cursor could step over a record whenever the route was an alias.** The index name joined the
+  sort tuple only for `any()`, on the reasoning that naming an object type means reading one index.
+  It means reading one *route*, and an append-only trail rolls over, so the alias spans the series:
+  two records sharing a timestamp and an id — which they can, an application may choose its own —
+  sat in different indices and `search_after` skipped one. Every non-consistent read now sorts by
+  `_index`, and a token issued for a different sort is refused by the reader with what to do about
+  it instead of by the cluster with a 400
+- **`raw()` no longer accepts `terminate_after`, and a search that stopped early is a partial
+  answer.** The parameter reads the query like any other and was allowed for that reason; what it
+  does is make the answer incomplete by construction, which is the one thing this reader promises
+  not to return. `terminated_early` in a response now raises `PartialResultException` however it
+  got there — an index-level setting can do it too
+- **A body given to `raw()` is checked before visibility decides there is nothing to read.**
+  `from: -1` threw for a viewer who may see records and passed in silence for one who may not: a
+  malformed body is the caller's mistake whoever is looking
+- **Lenient hydration covered `loggedAt` and nothing else.** An array where `objectType`, `event`,
+  `source` or `objectId` should be — the mangled-reindex document the policy was written for —
+  raised "Array to string conversion", and an error handler that promotes warnings (Symfony's, in
+  debug and in plenty of production setups) turned that into the one-bad-document-kills-the-page
+  exception the policy exists to prevent. Anything that is not a scalar now reads as empty, and an
+  unreadable actor as `null`
 - **A partial answer is no longer served as if it were the whole one.** Elasticsearch replies with
   what it has when a shard fails or a search runs out of time, and says so in `_shards.failed` and
   `timed_out` — which nobody reads. For a search screen that is the right trade; for an audit trail
@@ -178,11 +264,14 @@ the dependency range.
 
 ### Changed
 - **The Elasticsearch client floor is 8.18**, up from 8.0. Writes are sent with
-  `include_source_on_error=false` so a rejected document's own values stay out of the error the
-  cluster returns, and out of the logs that error reaches; the parameter does not exist before
-  8.18, where a mapping conflict quotes the audited value back. A privacy guarantee that holds
-  only on some supported versions is not one, so the versions where it does not hold are no
-  longer supported
+  `include_source_on_error=false`, which asks the cluster to keep the refused document out of the
+  error it returns. The parameter does not exist before 8.18, and an unknown query parameter is a
+  400 — which this bundle classifies as a permanent refusal, so on 8.0–8.17 the line meant to
+  protect a record would have dropped every one of them. What the parameter does was then measured
+  against live 8.19 and 9.1 clusters rather than taken from its name: it suppresses the document
+  *source* and leaves `Preview of field's value: '…'` untouched. That fragment is cut by
+  `RequestRejectedException::withoutValuePreview()`, which is where the guarantee actually lives,
+  and an integration test now proves the value does not survive into the bundle's own exception
 - **Indices are created with one replica** instead of none. An audit trail is the last data
   anyone wants living on a single node; a one-node development cluster wants
   `indices.settings.number_of_replicas: 0`, which is now a deliberate choice rather than the
@@ -208,6 +297,21 @@ the dependency range.
   error rather than a guarantee — `action.auto_create_index` on the cluster is the guarantee, and
   the README now asks for it as part of installing the bundle
 
+- **Docblocks that had drifted from the code they describe**: `BulkResult::hasTransientFailures()`
+  said "429 or 503" while the constant is `[404, 429]` plus every 5xx; `InvalidQueryException`
+  said it is raised while a query is built, and the gateway also raises it for a 4xx the cluster
+  answered a search with; the clock comment offered an alias to override that was never defined;
+  `indices.settings` now says that what you write replaces the defaults rather than merging with
+  them, which matters the first time another default is added. `AuditWriter::writeCompleted()` is
+  gone — nothing called it, the frame goes through `writeManyCompleted()`. The Messenger handlers
+  name the third outcome of a write, `IndexNotFoundException`, which is neither retried-by-class
+  nor unrecoverable but retried by Messenger's default strategy — right for an index mid-rollover,
+  and worth knowing if a custom strategy keys on the class
+- **A test that asserted nothing** is now the test its name promised: "an untracked collection
+  ignores its elements" changed a quantity, never flushed, and cleared the unit of work, so an
+  empty history was guaranteed however the listener behaved — and it talked about one entity while
+  using another, whose collection *is* tracked. Rewritten against the fixture the behaviour needs,
+  with the other half (membership is recorded without `trackElements`) beside it
 - **`@throws` on `GatewayInterface` matches what the implementation raises**, method by method,
   with the two failures common to all of them (an unreachable cluster, a client built for
   asynchronous responses) said once at the top instead of half-listed on each

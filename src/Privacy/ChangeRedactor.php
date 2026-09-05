@@ -54,6 +54,14 @@ final class ChangeRedactor
         foreach ($fields as $rule) {
             $field = str_contains($rule, '.') ? substr($rule, (int) strpos($rule, '.') + 1) : $rule;
 
+            // A rule with nothing to match on: an empty entry in a config list, or a
+            // scope somebody meant to finish ("user."). It would be accepted and then
+            // match nothing, ever, which is the same silence a base-field rule was
+            // refused for — and likelier to happen by accident.
+            if (trim($field) === '' || (str_contains($rule, '.') && trim(substr($rule, 0, (int) strpos($rule, '.'))) === '')) {
+                throw new \InvalidArgumentException(sprintf('"%s" names no field to redact, so it would never match anything. A rule is a field ("password") or a field scoped to an object type ("user.password").', $rule));
+            }
+
             // A rule naming a base field could never do anything: redaction covers the
             // fields of "changes" and the attributes, and these are neither. Accepting
             // one and quietly ignoring it is how somebody believes an identifier is

@@ -78,7 +78,7 @@ final class PointInTimeTest extends TestCase
 
         self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']], ['_shard_doc' => 'desc']], $builder->build(AuditQuery::any(), pointInTime: true)['sort']);
         self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']], ['_index' => 'desc']], $builder->build(AuditQuery::any())['sort'], 'a plain search across indices has no _shard_doc, and needs the index name instead');
-        self::assertCount(2, $builder->build(AuditQuery::for('order'))['sort'], 'one index needs neither');
+        self::assertSame([['loggedAt' => 'desc'], ['id' => ['order' => 'desc', 'unmapped_type' => 'keyword']], ['_index' => 'desc']], $builder->build(AuditQuery::for('order'))['sort'], 'and one object type is still read through an alias that may hold a whole rollover series');
     }
 
     public function testTheKeepAliveTravelsWithEverySearch(): void

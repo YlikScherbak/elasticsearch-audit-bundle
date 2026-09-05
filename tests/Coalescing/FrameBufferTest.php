@@ -316,4 +316,24 @@ final class FrameBufferTest extends TestCase
 
         $buffer->hold(new AuditRecord('order', 3, 'update', changes: ['a' => new Change(1, 2)]));
     }
+    public function testClosingEverythingAtOnceIgnoresHowDeepTheNestingWent(): void
+    {
+        // What a reset does after a handler died several begin() calls deep: the frame
+        // is not unwound one level at a time, it is over. Uncovered until now, which
+        // means nothing said whether the depth was cleared or merely decremented — and a
+        // decrement would leave the next operation holding somebody else's records.
+        $buffer = new FrameBuffer();
+        $buffer->open();
+        $buffer->open();
+        $buffer->open();
+        $buffer->hold(new AuditRecord('stock', 1, 'update', changes: ['fact' => new Change(1, 2)]));
+
+        $released = $buffer->closeAll();
+
+        self::assertNotNull($released);
+        self::assertCount(1, $released);
+        self::assertFalse($buffer->isOpen(), 'three begins and one closeAll leave nothing open');
+        self::assertNull($buffer->closeAll(), 'and there is nothing left to close');
+    }
+
 }

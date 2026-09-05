@@ -29,7 +29,7 @@ final class AuditReaderTest extends TestCase
     {
         $this->gateway->respondToSearch = static fn () => [
             'hits' => ['total' => ['value' => 45], 'hits' => [
-                ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 3], '_source' => ['objectType' => 'order', 'objectId' => 42, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => ['status' => ['old' => 'a', 'new' => 'b']], 'salesType' => 3]],
+                ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 3, 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 42, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => ['status' => ['old' => 'a', 'new' => 'b']], 'salesType' => 3]],
             ]],
         ];
 
@@ -38,7 +38,7 @@ final class AuditReaderTest extends TestCase
         self::assertSame(45, $page->total);
         self::assertSame(2, $page->page);
         self::assertSame(3, $page->totalPages());
-        self::assertSame(['2026-08-26 10:00:00', 3], $page->nextCursor());
+        self::assertSame(['2026-08-26 10:00:00', 3, 'audit_log'], $page->nextCursor());
 
         $entry = $page->entries[0];
         self::assertSame('a', $entry->id);
@@ -367,7 +367,7 @@ final class AuditReaderTest extends TestCase
         // would never be read — an export that looks complete and is not.
         $answers = [
             ['hits' => ['total' => ['value' => 2], 'hits' => [
-                ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+                ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
             ]]],
             ['_shards' => ['total' => 2, 'successful' => 1, 'failed' => 1], 'hits' => ['total' => ['value' => 2], 'hits' => []]],
         ];
@@ -378,6 +378,44 @@ final class AuditReaderTest extends TestCase
         $this->expectException(PartialResultException::class);
 
         iterator_to_array($this->reader()->iterate(AuditQuery::for('order'), batchSize: 1, consistent: false), false);
+    }
+
+    public function testTerminateAfterIsNotAWayToAskForPartOfTheAnswer(): void
+    {
+        // It was on the allow-list because it reads the query like any other search
+        // parameter. It also makes the answer partial by construction — the cluster
+        // stops early and says terminated_early — and this reader's promise is that a
+        // page is the records or an exception. The two cannot both stand.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('terminate_after');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'terminate_after' => 100]);
+    }
+
+    public function testAnAnswerThatStoppedEarlyIsPartialToo(): void
+    {
+        // An index-level terminate_after, or one a future setting introduces: what
+        // matters is the flag in the answer, not who asked for it.
+        $this->gateway->respondToSearch = static fn () => [
+            'terminated_early' => true,
+            'hits' => ['total' => ['value' => 1], 'hits' => []],
+        ];
+
+        $this->expectException(PartialResultException::class);
+        $this->expectExceptionMessage('stopped early');
+
+        $this->reader()->find(AuditQuery::for('order'));
+    }
+
+    public function testARawBodyIsCheckedBeforeVisibilityDecidesThereIsNothingToRead(): void
+    {
+        // A malformed body is a caller's mistake whoever is looking: validating it after
+        // the matchNothing() shortcut meant from: -1 threw for one viewer and passed
+        // silently for another, which is the kind of difference that reaches production
+        // as "it works for me".
+        $this->expectException(InvalidQueryException::class);
+
+        $this->reader()->raw(AuditQuery::for('order')->matchNothing(), ['from' => -1]);
     }
 
     public function testARawAnswerIsHeldToTheSameStandardAsAPage(): void
@@ -395,6 +433,39 @@ final class AuditReaderTest extends TestCase
         $this->expectExceptionMessage('1 of 4');
 
         $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'aggs' => ['e' => ['terms' => ['field' => 'event']]]]);
+    }
+
+    public function testAStructureWhereAStringBelongsDoesNotBlockThePageEither(): void
+    {
+        // Leniency covered loggedAt and nothing else, so an array in objectType, event,
+        // source or objectId raised "Array to string conversion" — a Warning, which
+        // Symfony's error handler promotes to an exception in debug and commonly in
+        // production. That is exactly the one-bad-document-kills-the-page failure the
+        // policy above says cannot happen, in the same documents it was written for.
+        $this->gateway->respondToSearch = static fn () => [
+            'hits' => ['total' => ['value' => 1], 'hits' => [
+                ['_id' => 'mangled', '_source' => [
+                    'objectType' => ['order'], 'objectId' => ['gte' => 1], 'event' => ['update'],
+                    'loggedAt' => '2026-08-26 10:00:00', 'source' => ['7'], 'changes' => [],
+                ]],
+            ]],
+        ];
+
+        set_error_handler(static function (int $severity, string $message): bool {
+            throw new \ErrorException($message, 0, $severity);
+        });
+
+        try {
+            $page = $this->reader()->find(AuditQuery::for('order'));
+        } finally {
+            restore_error_handler();
+        }
+
+        self::assertCount(1, $page->entries);
+        self::assertSame('', $page->entries[0]->objectType, 'present, visibly wrong, and not in the way');
+        self::assertSame('', $page->entries[0]->objectId);
+        self::assertSame('', $page->entries[0]->event);
+        self::assertNull($page->entries[0]->actor);
     }
 
     public function testACorruptTimestampDoesNotBlockThePageItIsOn(): void
@@ -524,7 +595,7 @@ final class AuditReaderTest extends TestCase
         self::assertCount(3, $this->gateway->searches);
         self::assertSame(2, $this->gateway->searches[0]['body']['size']);
         self::assertArrayNotHasKey('search_after', $this->gateway->searches[0]['body']);
-        self::assertSame(['2026-08-26 10:00:00', 4], $this->gateway->searches[2]['body']['search_after']);
+        self::assertSame(['2026-08-26 10:00:00', 4, 'audit_log'], $this->gateway->searches[2]['body']['search_after']);
     }
 
     public function testADecoratorThatDropsEntriesDoesNotDecideWhetherMoreFollows(): void
@@ -545,11 +616,11 @@ final class AuditReaderTest extends TestCase
         };
         $reader = $this->reader(decorators: [$dropsC]);
 
-        $cursorPage = $reader->find(AuditQuery::for('order')->page(1, 3)->after(['2026-08-26 10:00:00', 0]));
+        $cursorPage = $reader->find(AuditQuery::for('order')->page(1, 3)->after(['2026-08-26 10:00:00', '0', 'audit_log']));
 
         self::assertCount(2, $cursorPage->entries, 'the decorator\'s word on what is shown stands');
         self::assertTrue($cursorPage->hasMore(), 'Elasticsearch returned a full page: more may follow');
-        self::assertSame(['2026-08-26 10:00:00', 3], $cursorPage->nextCursor(), 'the cursor is the last hit\'s, or the hidden entry\'s successors are skipped');
+        self::assertSame(['2026-08-26 10:00:00', 3, 'audit_log'], $cursorPage->nextCursor(), 'the cursor is the last hit\'s, or the hidden entry\'s successors are skipped');
 
         $lastNumberedPage = $reader->find(AuditQuery::for('order')->page(10, 3));
 
@@ -603,7 +674,7 @@ final class AuditReaderTest extends TestCase
         }
 
         self::assertSame(['a', 'c'], $ids, 'the cursor and the stop condition come from the hits, not from what the decorators left');
-        self::assertSame(['2026-08-26 10:00:00', 2], $this->gateway->searches[1]['body']['search_after']);
+        self::assertSame(['2026-08-26 10:00:00', 2, 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
     }
 
     /**
@@ -611,7 +682,7 @@ final class AuditReaderTest extends TestCase
      */
     private static function hit(string $id, string $actor, int $doc = 0): array
     {
-        return ['_id' => $id, 'sort' => ['2026-08-26 10:00:00', $doc], '_source' => [
+        return ['_id' => $id, 'sort' => ['2026-08-26 10:00:00', $doc, 'audit_log'], '_source' => [
             'objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => $actor, 'changes' => [],
         ]];
     }

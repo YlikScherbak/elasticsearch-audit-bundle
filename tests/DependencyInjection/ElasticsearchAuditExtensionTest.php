@@ -12,6 +12,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\DoctrineSupport;
+use Borsche\ElasticsearchAuditBundle\DependencyInjection\MessengerSupport;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
@@ -332,9 +333,11 @@ final class ElasticsearchAuditExtensionTest extends TestCase
     private function load(array $config): ContainerBuilder
     {
         $container = new ContainerBuilder();
-        // Full Doctrine support unless a test says otherwise: what these assert is the
-        // wiring, and the detection has tests of its own above.
-        (new ElasticsearchAuditExtension(doctrine: DoctrineSupport::full()))->load([$config], $container);
+        // Full support on both sides unless a test says otherwise: what these assert is
+        // the wiring, and the detection has tests of its own above. Leaving Messenger to
+        // its class_exists fallback made the handler assertions depend on what happens
+        // to be in vendor/ rather than on anything this test decided.
+        (new ElasticsearchAuditExtension(doctrine: DoctrineSupport::full(), messenger: MessengerSupport::full()))->load([$config], $container);
 
         return $container;
     }

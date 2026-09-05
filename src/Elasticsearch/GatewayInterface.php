@@ -104,7 +104,15 @@ interface GatewayInterface
     public function closePointInTime(string $pitId): void;
 
     /**
-     * @throws RequestRejectedException the name is not one Elasticsearch accepts
+     * Whether the index is there — false only when the cluster said 404.
+     *
+     * "I may not tell you" and "I cannot answer right now" are not "it does not exist":
+     * the first sends an operator off to create an index that already exists, the second
+     * does it during an outage.
+     *
+     * @throws RequestRejectedException  the name is not one Elasticsearch accepts, or the
+     *                                   credentials may not ask (403 without view_index_metadata)
+     * @throws TransportUnavailableException the cluster could not answer (5xx, or 429)
      */
     public function indexExists(string $index): bool;
 

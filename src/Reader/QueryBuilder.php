@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Reader;
 
+use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Filter;
@@ -78,20 +79,36 @@ final class QueryBuilder
             'sort' => array_values(array_filter([
                 ['loggedAt' => $query->sort],
                 ['id' => ['order' => $query->sort, 'unmapped_type' => 'keyword']],
-                // A timestamp and an id are unique inside one index. A query across
-                // several — any(), which reads every routed index — can meet the same
-                // pair twice, since an application may choose its own record ids, and
-                // search_after then steps over one of the two: on a live cluster the
-                // second document simply never came back. The index name settles it.
-                !$pointInTime && $query->objectType === null ? ['_index' => $query->sort] : null,
+                // A timestamp and an id are unique inside one index, and nothing here
+                // knows the query reads only one. It reads one *route*, and a route is
+                // an alias: an append-only trail rolls over, and the alias then spans the
+                // whole series — the ordinary shape, not the exotic one. Two records
+                // sharing a timestamp and an id, which they can because an application
+                // may choose its own, then sit in different indices and search_after
+                // steps over one of them: on a live cluster the second document simply
+                // never came back. Keying this on "no object type" read the tuple as
+                // unique whenever a name was given, which was never what made it unique.
+                !$pointInTime ? ['_index' => $query->sort] : null,
                 $pointInTime ? ['_shard_doc' => $query->sort] : null,
             ])),
             'size' => $query->limit,
             'track_total_hits' => $trackTotalHits,
         ];
 
-        if ($query->usesCursor()) {
-            $body['search_after'] = $query->searchAfter;
+        $searchAfter = $query->searchAfter;
+
+        if ($searchAfter !== null) {
+            // Elasticsearch refuses a search_after that is not exactly as long as the
+            // sort, with its own words about both. A token issued while the sort had a
+            // different shape — before the index name joined the tuple, or from a
+            // point-in-time read — is the way a caller gets there, and "start again"
+            // is the only answer; it is worth saying so rather than passing the cluster's
+            // sentence on.
+            if (\count($searchAfter) !== \count($body['sort'])) {
+                throw new InvalidQueryException(sprintf('This cursor token carries %d sort value(s) and this query sorts by %d. The token was issued for a different sort — by an older version of the bundle, or by a consistent read — so it cannot be continued here: start from the first page.', \count($searchAfter), \count($body['sort'])));
+            }
+
+            $body['search_after'] = $searchAfter;
         } else {
             $body['from'] = $query->offset();
         }

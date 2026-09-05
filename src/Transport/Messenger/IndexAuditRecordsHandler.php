@@ -30,6 +30,11 @@ use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
  * one is likely written — the opposite order would trade a recoverable record for a
  * faster answer about an unrecoverable one.
  *
+ * A third outcome is neither: IndexNotFoundException. It leaves the handler as itself,
+ * so Messenger's default strategy retries it — which is what an index caught
+ * mid-rollover needs, and why it is not made unrecoverable. Worth knowing if you key a
+ * custom retry strategy on the exception class rather than on the two above.
+ *
  * @internal invoked by Messenger
  */
 final class IndexAuditRecordsHandler

@@ -32,10 +32,12 @@ final class ClientFactory
             ->setSSLVerification($sslVerification);
 
         if ($logger !== null) {
-            // Never the application's logger directly: the client logs each request with
-            // its URL, and hosts carrying inline credentials would put the password in
-            // the log once per call.
-            $builder->setLogger(new UserinfoRedactingLogger($logger));
+            // Never the application's logger directly. The client logs the audited
+            // document itself at debug — request body and response body both — and puts
+            // the PSR-7 objects in the context of its info lines; a host carrying inline
+            // credentials puts the password in every URL it writes. The gate decides what
+            // of that an application's log is allowed to receive.
+            $builder->setLogger(new ClientLogGate($logger));
         }
 
         return $builder->build();

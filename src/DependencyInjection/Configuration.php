@@ -140,7 +140,7 @@ final class Configuration implements ConfigurationInterface
             ->defaultValue(IndexDefinition::OBJECT_ID_KEYWORD);
 
         $children->arrayNode('settings')
-            ->info('Index settings applied by audit:index:create. One replica by default: an audit trail is the last data anyone wants on a single node. Set number_of_replicas to 0 for a one-node development cluster, where a replica can never be assigned.')
+            ->info('Index settings applied by audit:index:create. Given whole, not merged: what you write here REPLACES the defaults, so a settings block naming only number_of_replicas drops number_of_shards with it. One replica by default: an audit trail is the last data anyone wants on a single node. Set number_of_replicas to 0 for a one-node development cluster, where a replica can never be assigned — and repeat number_of_shards: 1 alongside it.')
             ->defaultValue(['number_of_shards' => 1, 'number_of_replicas' => 1])
             ->variablePrototype();
     }
@@ -212,7 +212,11 @@ final class Configuration implements ConfigurationInterface
 
         $children->enumNode('failure_details')
             ->info('How much of a failed write\'s cause the bundle repeats in the log line and in RecordFailedEvent. "cause": the class, plus messages the bundle wrote itself — the original stays reachable through WriteFailedException::getPrevious(). "full": the cause\'s message too. Left unset it follows redact.fields: configured means "cause", because a cluster or an enricher may quote a value you asked never to keep.')
-            ->values(['cause', 'full'])
+            // null is a value here, not only a default: ArrayNode inserts defaults
+            // without finalizing them, so leaving it out of the list made `~` — the very
+            // thing config:dump-reference prints — the one spelling of the default that
+            // EnumNode refused.
+            ->values(['cause', 'full', null])
             ->defaultNull();
     }
 

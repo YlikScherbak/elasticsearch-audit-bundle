@@ -43,8 +43,16 @@ enum FailureDetails: string
      */
     public function of(\Throwable $e): \Throwable
     {
-        if ($this === self::Full || $e instanceof SafeExceptionMessage) {
+        if ($this === self::Full) {
             return $e;
+        }
+
+        if ($e instanceof SafeExceptionMessage) {
+            // The message is safe because the class says so. The chain hanging off it is
+            // not covered by that promise and is walked by everything that serialises an
+            // exception, so a safe sentence with somebody else's exception behind it is
+            // repeated without the somebody else.
+            return $e->getPrevious() === null ? $e : FailureReason::keepingTheMessageOf($e);
         }
 
         return FailureReason::insteadOf($e);

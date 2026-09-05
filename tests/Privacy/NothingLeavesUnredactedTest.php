@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Privacy;
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -266,6 +267,112 @@ final class NothingLeavesUnredactedTest extends TestCase
         } catch (WriteFailedException $e) {
             self::assertStringContainsString('"nope" is listed as always recorded', $e->getMessage());
         }
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('rulesThatCouldNeverMatch')]
+    public function testARuleThatCanNeverMatchAnythingIsRefused(string $rule): void
+    {
+        // The constructor already refuses a base field because "accepting one and
+        // quietly ignoring it is how somebody believes an identifier is being redacted".
+        // The same thing happens for a rule with no field in it at all — it is accepted
+        // and then never matches — and it is likelier: an empty string out of a config
+        // list, or "user." from a scope somebody meant to finish.
+        $this->expectException(\InvalidArgumentException::class);
+
+        new ChangeRedactor([$rule]);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function rulesThatCouldNeverMatch(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'blank' => ['   '];
+        yield 'a scope with no field' => ['user.'];
+        yield 'a field with no scope' => ['.password'];
+    }
+
+    public function testAListenerThatThrowsDoesNotGetToWriteItsMessageIntoTheLog(): void
+    {
+        // A listener is application code with the same trust level as an enricher, which
+        // this bundle explicitly stopped trusting: it is handed a record and may have
+        // read anything to build its reply. Its exception was logged with its message
+        // and the object itself, past the policy that governs every other cause.
+        $gateway = new InMemoryGateway();
+        $events = new class implements EventDispatcherInterface {
+            public function dispatch(object $event): object
+            {
+                if ($event instanceof RecordFailedEvent) {
+                    throw new \RuntimeException('while reporting: '.NothingLeavesUnredactedTest::secret());
+                }
+
+                return $event;
+            }
+        };
+
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], $events, $logs, FailurePolicy::Log);
+        $writer->reportFailure(new \RuntimeException('the cluster said no'), new AuditRecord('user', 7, 'update'));
+
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
+        self::assertNotEmpty(array_filter($logs, static fn (string $l) => str_contains($l, 'listener')), 'and the failure is still reported');
+    }
+
+    public function testASafeExceptionDoesNotCarryAnUnsafeOneAlongWithIt(): void
+    {
+        // SafeExceptionMessage vouches for a message, and the failure path was reading
+        // it as vouching for the whole object. IndexNotFoundException::forIndex() takes
+        // a previous, and the gateway hands it the cluster's exception; a log processor
+        // walking getPrevious() — which is why FailureReason exists — then finds exactly
+        // the text the safe message was chosen to avoid.
+        $gateway = new InMemoryGateway();
+        $seen = [];
+        $events = new class($seen) implements EventDispatcherInterface {
+            /** @param list<object> $seen */
+            public function __construct(private array &$seen)
+            {
+            }
+
+            public function dispatch(object $event): object
+            {
+                if ($event instanceof RecordFailedEvent) {
+                    $this->seen[] = $event;
+                }
+
+                return $event;
+            }
+        };
+
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], $events, $logs, FailurePolicy::Log);
+
+        // How the gateway raises it: the cluster's own exception travels as previous,
+        // and the sentence in front of it is the bundle's own.
+        $writer->reportFailure(
+            IndexNotFoundException::forIndex('audit_log', new \RuntimeException('rejected value '.self::SECRET)),
+            new AuditRecord('user', 7, 'update'),
+        );
+
+        $reason = $seen[0]->reason;
+
+        self::assertStringContainsString('audit_log', $reason->getMessage(), 'the safe sentence is still said in full — it is the diagnostic');
+        self::assertNull($reason->getPrevious(), 'and nothing walkable hangs off it');
+        self::assertStringNotContainsString(self::SECRET, self::everythingObservable($reason, $logs, $gateway));
+    }
+
+    /**
+     * @param list<string> $logs
+     */
+    private static function everythingObservable(\Throwable $reason, array $logs, InMemoryGateway $gateway): string
+    {
+        $chain = [];
+
+        for ($e = $reason; $e !== null; $e = $e->getPrevious()) {
+            $chain[] = $e::class.': '.$e->getMessage();
+        }
+
+        return implode("\n", [...$chain, ...$logs, json_encode($gateway->documents, JSON_THROW_ON_ERROR)]);
     }
 
     public function testAnExceptionCarryingTheSecretIsWhereTheGuaranteeEnds(): void

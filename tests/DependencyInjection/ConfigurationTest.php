@@ -30,6 +30,18 @@ final class ConfigurationTest extends TestCase
         self::assertSame(['max_limit' => 1000, 'max_result_window' => 10000, 'point_in_time_keep_alive' => '1m'], $config['reader']);
     }
 
+    public function testWritingTheDefaultOutExplicitlyIsNotAnError(): void
+    {
+        // enumNode()->defaultNull() works only because ArrayNode inserts defaults
+        // without finalizing them, so the value the bundle documents as the default is
+        // one a user cannot write down: `failure_details: ~` reached EnumNode and was
+        // refused. Config that cannot state its own default is a trap, and a small one
+        // to spring — somebody dumps config:dump-reference and pastes it back.
+        self::assertNull($this->process(['client' => ['hosts' => ['http://localhost:9200']], 'redact' => ['failure_details' => null]])['redact']['failure_details']);
+        self::assertNull($this->process(['client' => ['hosts' => ['http://localhost:9200']]])['redact']['failure_details'], 'and unset still means the same thing');
+        self::assertSame('full', $this->process(['client' => ['hosts' => ['http://localhost:9200']], 'redact' => ['failure_details' => 'full']])['redact']['failure_details']);
+    }
+
     public function testTheKeepAliveMustBeAnElasticsearchTimeValue(): void
     {
         $this->expectException(InvalidConfigurationException::class);

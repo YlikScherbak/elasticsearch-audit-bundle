@@ -159,13 +159,8 @@ final class AuditFrame
     }
 
     /**
-     * A comparator that threw while the frame closed: its record went out unfinalized,
-     * so nothing is lost — and the mistake travels the failure policy like the same
-     * mistake on the hold() path, after every record was written. With "throw" the
-     * first one raises; the others were reported before it did.
-     */
-    /**
-     * The same, when something more important is already on its way out: the buffer is
+     * The same as reportFinalizeFailures(), when something more important is already on
+     * its way out: the buffer is
      * drained so nothing leaks into the next operation, and whatever the reporting
      * itself raises is logged rather than replacing the exception in flight.
      */
@@ -178,6 +173,12 @@ final class AuditFrame
         }
     }
 
+    /**
+     * A comparator that threw while the frame closed: its record went out unfinalized,
+     * so nothing is lost — and the mistake travels the failure policy like the same
+     * mistake on the hold() path, after every record was written. With "throw" the
+     * first one raises; the others were reported before it did.
+     */
     private function reportFinalizeFailures(): void
     {
         $thrown = null;

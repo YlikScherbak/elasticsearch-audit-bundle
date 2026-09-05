@@ -71,7 +71,7 @@ final class ReaderLimitsTest extends TestCase
         $reader = $this->reader();
 
         // Far past the window, which a cursor does not care about.
-        $reader->find(AuditQuery::for('order')->page(1, 1000)->after(['2026-08-28 10:00:00', 'id-1']));
+        $reader->find(AuditQuery::for('order')->page(1, 1000)->after(['2026-08-28 10:00:00', 'id-1', 'audit_log']));
 
         self::assertArrayNotHasKey('from', $this->gateway->searches[0]['body']);
     }
@@ -124,15 +124,15 @@ final class ReaderLimitsTest extends TestCase
         $this->gateway->respondToSearch = static fn () => [
             'hits' => [
                 'total' => ['value' => 1_000_000],
-                'hits' => [['_id' => 'a', '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-30 10:00:00'], 'sort' => ['2026-08-30 10:00:00', 'a']]],
+                'hits' => [['_id' => 'a', '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-30 10:00:00'], 'sort' => ['2026-08-30 10:00:00', 'a', 'audit_log']]],
             ],
         ];
 
-        $page = $this->reader()->find(AuditQuery::for('order')->page(1, 1)->after(['2026-08-30 09:00:00', 'x']));
+        $page = $this->reader()->find(AuditQuery::for('order')->page(1, 1)->after(['2026-08-30 09:00:00', 'x', 'audit_log']));
 
         self::assertTrue($page->usesCursor);
         self::assertTrue($page->hasMore(), 'a full batch: there may be more');
-        self::assertSame(['2026-08-30 10:00:00', 'a'], $page->nextCursor());
+        self::assertSame(['2026-08-30 10:00:00', 'a', 'audit_log'], $page->nextCursor());
         self::assertNotNull($page->nextCursorToken());
     }
 
@@ -145,7 +145,7 @@ final class ReaderLimitsTest extends TestCase
         $this->expectException(InvalidQueryException::class);
         $this->expectExceptionMessage('cannot continue from a page or a cursor');
 
-        iterator_to_array($this->reader()->iterate(AuditQuery::for('order')->after(['2026-08-30 10:00:00', 'x'])));
+        iterator_to_array($this->reader()->iterate(AuditQuery::for('order')->after(['2026-08-30 10:00:00', 'x', 'audit_log'])));
     }
 
     public function testNorFromAPageNumber(): void

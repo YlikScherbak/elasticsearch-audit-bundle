@@ -117,4 +117,13 @@ final class NumericNullAsZeroComparatorTest extends TestCase
         self::assertNull($comparator->equals('stock', 'quantity', INF, INF));
         self::assertNull($comparator->equals('stock', 'quantity', NAN, 1.0));
     }
+    public function testWhitespaceAroundANumberIsNotAChange(): void
+    {
+        // is_numeric(' 12') is true, so the string reached the comparison unchanged and
+        // ' 12' against '12' read as a quantity that moved from 12 to 12. A record that
+        // says nothing happened is noise in the one log people read to find out what did.
+        self::assertTrue((new NumericNullAsZeroComparator(['order.total']))->equals('order', 'total', ' 12', '12'));
+        self::assertTrue((new NumericNullAsZeroComparator(['order.total']))->equals('order', 'total', "12\n", '12.0'));
+    }
+
 }

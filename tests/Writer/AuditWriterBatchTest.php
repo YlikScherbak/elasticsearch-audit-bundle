@@ -167,9 +167,6 @@ final class AuditWriterBatchTest extends TestCase
         self::assertSame(['old' => 1, 'new' => 3], $this->gateway->documents['audit_log'][0]['changes']['fact']);
     }
 
-    /**
-     * @param (callable(object): void)|null $listener
-     */
     public function testEveryChunkIsReportedBeforeTheFirstFailureIsThrown(): void
     {
         // The promise of the unchunked days holds across chunks: with "throw" the

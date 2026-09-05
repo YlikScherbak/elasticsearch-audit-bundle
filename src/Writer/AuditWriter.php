@@ -129,26 +129,12 @@ final class AuditWriter
             // As a batch: an overflowing frame can hand back up to max_held records, and
             // the Doctrine path already batches them — one by one this was ten thousand
             // requests where writeAll() makes a handful.
-            $this->writeManyCompleted($released);
-            $this->reportFrameFinalizeFailures();
+            $this->writeReleased($released);
 
             return;
         }
 
         $this->deliver($record, $immediately);
-    }
-
-    /**
-     * Writes a record that already went through complete() — what a frame releases when
-     * it closes. The completion pass is skipped on purpose: the timestamp, the actor, the
-     * id and the enrichers' attributes were settled when the record entered the frame, and
-     * running the enrichers again would repeat their queries and whatever else they do.
-     *
-     * @internal the seam AuditFrame writes through; use write() or writeAll(), which complete a record first
-     */
-    public function writeCompleted(AuditRecord $record): void
-    {
-        $this->deliver($record, false);
     }
 
     /**
@@ -194,8 +180,7 @@ final class AuditWriter
             }
         }
 
-        $this->writeManyCompleted($outgoing);
-        $this->reportFrameFinalizeFailures();
+        $this->writeReleased($outgoing);
 
         if ($overflow !== null) {
             throw $overflow;
@@ -338,6 +323,38 @@ final class AuditWriter
      * failure of a record that had already gone out, and a comparator throwing on every
      * record turned max_held from a memory ceiling into a list that only ever grew.
      */
+    /**
+     * Writes what the buffer handed back, and drains its finalize failures whatever
+     * happens to the write.
+     *
+     * AuditFrame::end() and release() already did this; the writer's own release path
+     * did not, so under on_failure: throw the report line was simply skipped and the
+     * comparator failures stayed in the buffer — to surface inside the next operation as
+     * a failure event about a record that operation never wrote, or to be erased by a
+     * reset() that has no idea they belong to records already written.
+     *
+     * @param list<AuditRecord> $released
+     */
+    private function writeReleased(array $released): void
+    {
+        try {
+            $this->writeManyCompleted($released);
+        } catch (\Throwable $write) {
+            // Quietly: the write's exception is what actually went wrong, and reporting
+            // raises under "throw" — replacing it with a comparator's complaint would
+            // hide the failure the caller has to act on.
+            try {
+                $this->reportFrameFinalizeFailures();
+            } catch (\Throwable $reporting) {
+                $this->logger->error('A comparator failure could not be reported while a failed write was on its way out: {reason}.', ['reason' => $reporting->getMessage()]);
+            }
+
+            throw $write;
+        }
+
+        $this->reportFrameFinalizeFailures();
+    }
+
     private function reportFrameFinalizeFailures(): void
     {
         if ($this->frame === null) {
@@ -495,6 +512,7 @@ final class AuditWriter
             // The redactor itself failed. Whatever the record holds is unredacted by
             // definition now, so it does not leave here at all: the failure is reported
             // without it, naming what went wrong instead.
+            $redaction = $this->failureDetails->of($redaction);
             $this->logger->error('An audit record could not be redacted while reporting a failure, so it is reported without its record: {reason}', ['reason' => $redaction->getMessage(), 'exception' => $redaction]);
             $record = null;
         }
@@ -507,6 +525,12 @@ final class AuditWriter
             try {
                 $this->events?->dispatch(new RecordFailedEvent($record, $reason));
             } catch (\Throwable $listener) {
+                // Through the same policy as every other cause. A listener is application
+                // code with an enricher's trust level — it was handed a record and may
+                // have read anything to build its reply — and its exception was going
+                // into the log with its message and the object itself.
+                $listener = $this->failureDetails->of($listener);
+
                 $this->logger->error('A listener of RecordFailedEvent threw while an audit failure was being reported: {reason}', ['reason' => $listener->getMessage(), 'exception' => $listener]);
             }
         }

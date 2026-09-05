@@ -138,4 +138,32 @@ final class AuditQueryTest extends TestCase
 
         AuditQuery::for('order')->whereIn('salesType', [1, ['nested']]);
     }
+    public function testARangeThatCannotContainAnythingIsRefusedLikeADateRangeIs(): void
+    {
+        // between() throws when the dates cross; whereBetween() sent the impossible
+        // range on and answered with an empty page, so the same mistake was a clear
+        // exception on one field and silence on another. Silence that looks like "no
+        // records match" is the worst answer an audit query can give.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('after');
+
+        AuditQuery::for('order')->whereBetween('total', 500, 100);
+    }
+
+    public function testACrossedRangeOfDatesOnAnAttributeIsRefusedToo(): void
+    {
+        $this->expectException(InvalidQueryException::class);
+
+        AuditQuery::for('order')->whereBetween('paidAt', new \DateTimeImmutable('2026-08-27'), new \DateTimeImmutable('2026-08-26'));
+    }
+
+    public function testBoundsOfDifferentKindsAreLeftToElasticsearch(): void
+    {
+        // "10" against 9 is not a comparison this can make: the field may be a keyword,
+        // where the cluster orders them as text. Only bounds of one kind are checked.
+        $query = AuditQuery::for('order')->whereBetween('code', '10', 9);
+
+        self::assertSame('10', $query->filters['code']->from);
+    }
+
 }

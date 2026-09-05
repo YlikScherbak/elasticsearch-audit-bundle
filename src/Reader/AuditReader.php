@@ -195,15 +195,18 @@ final class AuditReader
      */
     public function raw(AuditQuery $query, array $body): array
     {
+        // Both checks before the shortcut, and for the same reason: a malformed body is
+        // the caller's mistake whoever is looking at it. Validating paging after the
+        // shortcut made `from: -1` throw for one viewer and pass in silence for another,
+        // which is how a bug reaches production as "it works for me".
         self::assertBodyStaysInsideTheBoundary($body);
+        $this->assertRawPagingIsWithinLimits($body);
 
         $query = $this->extend($query);
 
         if ($query->matchesNothing()) {
             return ['hits' => ['total' => ['value' => 0, 'relation' => 'eq'], 'hits' => []]];
         }
-
-        $this->assertRawPagingIsWithinLimits($body);
 
         $boundary = $this->queryBuilder->build($query)['query'];
 
@@ -247,8 +250,15 @@ final class AuditReader
             'query', 'aggs', 'aggregations', 'size', 'from', 'sort', 'search_after',
             '_source', 'fields', 'docvalue_fields', 'stored_fields',
             'track_total_hits', 'post_filter', 'collapse',
-            'highlight', 'min_score', 'timeout', 'terminate_after', 'explain', 'version', 'seq_no_primary_term',
+            'highlight', 'min_score', 'timeout', 'explain', 'version', 'seq_no_primary_term',
         ];
+
+        // terminate_after is not here either, and for the other reason: it reads the
+        // query like any ordinary parameter, and it makes the answer partial by
+        // construction — the cluster stops counting and says terminated_early. This
+        // reader answers with the records or with an exception, and a parameter whose
+        // purpose is to return some of them cannot be part of that. `timeout` stays,
+        // because timing out is reported and refused rather than served.
 
         foreach (array_keys($body) as $key) {
             if (!\in_array($key, $allowed, true)) {
@@ -279,6 +289,14 @@ final class AuditReader
     {
         if (($response['timed_out'] ?? false) === true) {
             throw PartialResultException::timedOut();
+        }
+
+        // Not only when a body asked for it — raw() refuses terminate_after — but
+        // whenever the answer says it stopped early: an index-level setting can do it,
+        // and so can whatever Elasticsearch adds next. The flag in the response is the
+        // fact; who asked is not the reader's business.
+        if (($response['terminated_early'] ?? false) === true) {
+            throw PartialResultException::stoppedEarly();
         }
 
         $shards = \is_array($response['_shards'] ?? null) ? $response['_shards'] : [];
