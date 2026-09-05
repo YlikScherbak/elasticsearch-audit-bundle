@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
-## [Unreleased]
+## [0.12.0] - 2026-09-05
 
 The API takes the shape it will freeze in: what a field-tested integration had to build around
 the bundle now lives in it.
