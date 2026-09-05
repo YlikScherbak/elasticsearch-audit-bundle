@@ -35,6 +35,15 @@ final class AuditQuery
     public const DEFAULT_MAX_LIMIT = 1000;
     public const DEFAULT_MAX_WINDOW = 10_000; // Elasticsearch's default index.max_result_window
 
+    /**
+     * How many values one filter list may carry — Elasticsearch's default
+     * index.max_terms_count, which a cluster may raise. Refusing here names the
+     * setting; the alternative is the cluster refusing the whole search a round trip
+     * later, in its own words. Raised on the cluster and still needed here, filter in
+     * batches: a list this long is usually a join that belongs on the other side.
+     */
+    public const DEFAULT_MAX_TERMS = 65_536;
+
     public const SORT_DESC = 'desc';
     public const SORT_ASC = 'asc';
 
@@ -254,13 +263,12 @@ final class AuditQuery
         }
 
         if ($current->kind === FilterKind::Is) {
-            // The same comparison array_intersect() uses below: by string, the way
-            // Elasticsearch matches "5" against a numeric field.
-            return \in_array((string) $current->value, array_map(strval(...), $values), true) ? $this : $this->matchNothing();
+            return \in_array(self::comparable($current->value), array_map(self::comparable(...), $values), true) ? $this : $this->matchNothing();
         }
 
         if ($current->kind === FilterKind::In) {
-            $kept = array_values(array_intersect($current->values, $values));
+            $allowed = array_map(self::comparable(...), $values);
+            $kept = array_values(array_filter($current->values, static fn (mixed $value): bool => \in_array(self::comparable($value), $allowed, true)));
 
             return $kept === [] ? $this->matchNothing() : $this->withFilter($attribute, Filter::in($kept));
         }
@@ -394,13 +402,26 @@ final class AuditQuery
             throw new InvalidQueryException(sprintf('The list of %s cannot be empty — leave the filter out to not filter.', $what));
         }
 
-        // Elasticsearch's own ceiling for one terms query (index.max_terms_count);
-        // past it the cluster refuses the whole search, one round trip later.
-        if (\count($values) > 65536) {
-            throw new InvalidQueryException(sprintf('%d %s is past what one terms query accepts (65536, Elasticsearch\'s index.max_terms_count) — filter tighter, or query in batches.', \count($values), $what));
+        if (\count($values) > self::DEFAULT_MAX_TERMS) {
+            throw new InvalidQueryException(sprintf('%d %s is past what one terms query accepts by default (%d, Elasticsearch\'s index.max_terms_count) — filter tighter, or query in batches.', \count($values), $what, self::DEFAULT_MAX_TERMS));
         }
 
         return $values;
+    }
+
+    /**
+     * How two filter values are told apart when narrowing intersects them.
+     *
+     * Numbers and their spelling are the same value: Elasticsearch matches "5" against
+     * a numeric field, and an id arriving as a string from the HTTP layer is the common
+     * case. A boolean is not: PHP's string comparison makes true, 1 and "1" one value,
+     * while Elasticsearch keeps a boolean field and a numeric one apart — and a
+     * visibility boundary is the last place to guess, so booleans live in a namespace
+     * of their own.
+     */
+    private static function comparable(mixed $value): string
+    {
+        return \is_bool($value) ? 'bool:'.($value ? '1' : '0') : 'scalar:'.$value;
     }
 
     private function withFilter(string $attribute, Filter $filter): self

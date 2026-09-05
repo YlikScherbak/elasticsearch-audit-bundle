@@ -11,8 +11,51 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 
 ## To 1.0.0
 
-Nothing to do. 1.0 changes no behaviour and no signature: it is the point where the surface
-listed in the README's "What counts as the public API" starts carrying a stability promise.
+A pre-release audit found things that had to be right before the surface froze, so 1.0 is not
+quite "0.12 with a promise". Four of them can ask something of you:
+
+**`doctrine.enabled: true` now also requires doctrine/doctrine-bundle.** The entity listener is
+attached through DoctrineBundle's `doctrine.event_listener` tag; with doctrine/orm alone it was
+built and never attached, and auditing silently did nothing. If your application has the ORM
+without DoctrineBundle, install and register it — or set `enabled: false` (or `auto`, which
+stays quiet) if you did not want entity auditing after all.
+
+**An entity declaring `getAuditObjectType(): ''` now fails instead of writing records with an
+empty type.** If any declaration returned an empty string, it was producing history nobody could
+filter; give it a name.
+
+**`WriteFailedException::getMessage()` no longer repeats the cause's message** when the cause
+wrapped a foreign exception (the cluster's, a listener's) — the detail is in `getPrevious()`.
+Code matching on the text of the outer message should read the previous exception instead. A
+declaration mistake still reads in full.
+
+**`redact: ['source']` is now refused at boot.** It never did anything: the actor is chosen when
+the record is built. Remove the rule, and return the identifier you want from an
+`ActorResolverInterface`.
+
+**`AuditReader::raw()` now refuses a body it cannot vouch for.** A `global` aggregation, a
+top-level `knn`, an unknown top-level key, or a `size`/`from` past the reader's limits are
+rejected with a message naming what and why. If you were relying on any of those, the query's
+visibility rules were not applying to them — which is the reason for the change. Aggregate inside
+the query, or go to the cluster directly and take on the boundary yourself.
+
+**A custom `GatewayInterface` or `BatchTransportInterface` implementation gets `id` as a
+non-nullable string** in every bulk item, and `bulk()` refuses an item without one.
+
+**New indices are created with one replica.** Existing indices are untouched. On a single-node
+development cluster set `indices.settings.number_of_replicas: 0`, or the index stays yellow.
+
+Three more are fixes you do not have to act on, but should know about: a tracked element whose
+identifier contains a dot is now escaped in the flattened key (ids without dots are unchanged);
+a redaction rule containing a dot is read strictly as `objectType.field` — if you were relying on
+`shipment.lines` also hiding `shipment.lines.*` on *other* object types, name those separately;
+and the frame's internal identity escapes `|`, so two objects whose type and id spelled the same
+joined string are no longer merged.
+
+**Worth doing while you are here:** if `action.auto_create_index` on your cluster does not
+exclude the audit indices, add it (see the README). The bundle's existence check gives a good
+error, but only the cluster can make a guessed mapping impossible — an index dropped or rolled
+over between the check and the write is a window no client can close.
 
 ## To 0.12.0 — the shape of a query
 

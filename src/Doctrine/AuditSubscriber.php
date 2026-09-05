@@ -51,7 +51,7 @@ final class AuditSubscriber
 {
     public const EVENTS = [Events::onFlush, Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear];
 
-    /** @var array<class-string, true> classes whose tracked collections were checked against Doctrine's mapping */
+    /** @var array<string, true> class + the collections it declared, once checked against Doctrine's mapping */
     private array $checkedTracking = [];
 
     /** @var list<AuditRecord> records built during the current flush, written after its commit */
@@ -63,7 +63,7 @@ final class AuditSubscriber
     /** @var array<int, array{0: object, 1: array<string, Change>}> changes inside tracked collection elements, keyed by the owner's object id */
     private array $elementChanges = [];
 
-    /** @var array<int, array{0: object, 1: array<string, array{element: object, added: bool, field: string, value: mixed, id: int|string|null}>}> elements a tracked collection gained or lost, keyed by the owner's object id */
+    /** @var array<int, array{0: object, 1: array<string, array{element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>}> elements a tracked collection gained or lost, keyed by the owner's object id */
     private array $elementMembership = [];
 
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
@@ -213,6 +213,18 @@ final class AuditSubscriber
      */
     public function postFlush(PostFlushEventArgs $args): void
     {
+        // An inner flush — one a lifecycle listener started while this listener's own
+        // flush is still running — reaches here first, and what it must not do is
+        // publish the outer flush's work: those records belong to a transaction that
+        // has not committed, and writing them makes the history describe a state the
+        // database may still roll back. Only the outermost flush publishes; the inner
+        // one hands back what it collected and lets the outer one finish.
+        if ($this->openFlushes > 1) {
+            --$this->openFlushes;
+
+            return;
+        }
+
         $records = $this->pending;
 
         // Now that the flush is over, every element has its identifier — including the
@@ -245,15 +257,10 @@ final class AuditSubscriber
         $this->elementChanges = [];
         $this->elementMembership = [];
 
-        // Only the outermost flush may forget what it captured: an inner flush — the
-        // one a lifecycle listener started — reaches this line while the outer flush is
-        // still walking its entities, and dropping the snapshot here would take away
-        // exactly what it is about to need.
-        if (--$this->openFlushes <= 0) {
-            $this->openFlushes = 0;
-            $this->changeSets = [];
-            $this->reportedLostChangeSets = false;
-        }
+        // The outermost flush is ending, so everything it captured goes with it.
+        $this->openFlushes = 0;
+        $this->changeSets = [];
+        $this->reportedLostChangeSets = false;
 
         // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
         $this->writer->writeAll(array_values($records));
@@ -394,13 +401,23 @@ final class AuditSubscriber
      */
     private function assertTrackedCollectionsAreServable(EntityManagerInterface $em, object $entity, AuditMetadata $metadata): void
     {
-        $class = $entity::class;
-
-        if (isset($this->checkedTracking[$class]) || $metadata->trackedCollections() === []) {
+        if ($metadata->trackedCollections() === []) {
             return;
         }
 
-        $classMetadata = $em->getClassMetadata($class);
+        // Keyed by the class AND the collections it declared, not by the class alone:
+        // the interface form of a declaration is deliberately not cached, because its
+        // field list may differ per instance, and a class-only key let the second
+        // instance's different collections through unchecked.
+        $collections = $metadata->trackedCollections();
+        sort($collections);
+        $checked = $entity::class."\0".implode("\0", $collections);
+
+        if (isset($this->checkedTracking[$checked])) {
+            return;
+        }
+
+        $classMetadata = $em->getClassMetadata($entity::class);
 
         foreach ($metadata->trackedCollections() as $field) {
             $reason = match (true) {
@@ -418,11 +435,11 @@ final class AuditSubscriber
             };
 
             if ($reason !== null) {
-                throw new \LogicException(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $class, $field, $reason));
+                throw new \LogicException(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $entity::class, $field, $reason));
             }
         }
 
-        $this->checkedTracking[$class] = true;
+        $this->checkedTracking[$checked] = true;
     }
 
     /**
@@ -475,14 +492,23 @@ final class AuditSubscriber
             // the record is settled after the flush; the object is what is held here.
             if ($added !== null) {
                 $held = $this->elementMembership[$key][1] ?? [];
+                $identifier = $this->identifierOf($em, $element);
+
                 $held[$field.'#'.spl_object_id($element)] = [
                     'element' => $element,
                     'added' => $added,
                     'field' => $field,
-                    // Both are taken now, while a deleted element still has its values:
-                    // Doctrine clears a generated identifier once the row is gone.
-                    'value' => self::represent($element, $metadata->fields[$field] ?? null),
-                    'id' => $this->identifierOf($em, $element),
+                    'represent' => $metadata->fields[$field] ?? null,
+                    // A removal is represented now, while the element still has its
+                    // values: Doctrine clears a generated identifier once the row is
+                    // gone, and a representer reading one would find nothing after the
+                    // flush. An insertion is the other way round — before the INSERT it
+                    // has no identifier yet, so a representer built on one ("getId")
+                    // would store null for a row that is about to have a perfectly good
+                    // id. That one waits for postFlush.
+                    'value' => $added && $identifier === null ? null : self::represent($element, $metadata->fields[$field] ?? null),
+                    'deferred' => $added && $identifier === null,
+                    'id' => $identifier,
                 ];
                 $this->elementMembership[$key] = [$owner, $held];
 
@@ -540,7 +566,13 @@ final class AuditSubscriber
                     continue; // an element with no identifier is nothing the history can point at
                 }
 
-                $changes[$entry['field'].'.'.$id] = $entry['added']
+                if ($entry['deferred']) {
+                    // Now it has its identifier, so a representer that reads one has
+                    // something to read.
+                    $entry['value'] = self::represent($entry['element'], $entry['represent']);
+                }
+
+                $changes[ElementKey::of($entry['field'], $id)] = $entry['added']
                     ? new Change(null, $entry['value'])
                     : new Change($entry['value'], null);
             }

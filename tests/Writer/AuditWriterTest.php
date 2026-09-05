@@ -131,7 +131,12 @@ final class AuditWriterTest extends TestCase
             self::fail('Expected WriteFailedException');
         } catch (WriteFailedException $e) {
             self::assertSame('order', $e->record->objectType);
-            self::assertStringContainsString('cluster down', $e->getMessage());
+            self::assertStringContainsString('order#1 (update) failed', $e->getMessage());
+            // The cluster's own words stay behind getPrevious(): a wrapped message is
+            // one the bundle did not write and cannot redact, and this exception is
+            // logged in places a value must not reach.
+            self::assertStringNotContainsString('cluster down', $e->getMessage());
+            self::assertStringContainsString('cluster down', (string) $e->getPrevious()?->getMessage());
             self::assertSame([], $this->logs);
         }
     }

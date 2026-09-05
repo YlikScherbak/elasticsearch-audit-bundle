@@ -84,6 +84,29 @@ final class QueryNarrowingTest extends TestCase
         self::assertTrue($query->matchesNothing());
     }
 
+    public function testABooleanNeverIntersectsWithANumberOrItsSpelling(): void
+    {
+        // PHP's array_intersect compares as strings, and (string) true is "1": under it
+        // a boundary allowing [true] would keep a query filtered to 1, and one allowing
+        // [1] would keep true. Elasticsearch treats a boolean field and a numeric one as
+        // different things, and a visibility boundary is the last place to guess.
+        self::assertTrue(AuditQuery::for('order')->where('flag', 1)->narrowIn('flag', [true])->matchesNothing());
+        self::assertTrue(AuditQuery::for('order')->where('flag', true)->narrowIn('flag', [1])->matchesNothing());
+        self::assertTrue(AuditQuery::for('order')->where('flag', '1')->narrowIn('flag', [true])->matchesNothing());
+        self::assertTrue(AuditQuery::for('order')->whereIn('flag', [true, false])->narrowIn('flag', [1, 0])->matchesNothing());
+
+        // And a boolean still intersects with itself.
+        self::assertEquals(Filter::in([true]), AuditQuery::for('order')->whereIn('flag', [true, false])->narrowIn('flag', [true])->filters['flag']);
+    }
+
+    public function testNumbersAndTheirSpellingStillIntersect(): void
+    {
+        // Unchanged, and deliberately: Elasticsearch matches "5" against a numeric
+        // field, and an id arriving as a string from the HTTP layer is the common case.
+        self::assertEquals(Filter::in(['5']), AuditQuery::for('order')->whereIn('n', ['5', '7'])->narrowIn('n', [5])->filters['n']);
+        self::assertFalse(AuditQuery::for('order')->where('n', '5')->narrowIn('n', [5])->matchesNothing());
+    }
+
     public function testNarrowInCannotNarrowARange(): void
     {
         $this->expectException(InvalidQueryException::class);

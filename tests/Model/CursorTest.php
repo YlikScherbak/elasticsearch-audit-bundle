@@ -74,6 +74,37 @@ final class CursorTest extends TestCase
         Cursor::decode($token);
     }
 
+    public function testATokenCarriesItsVersionSoAFutureShapeCanBeToldApart(): void
+    {
+        // The token is opaque to the client, and that promise is only worth something
+        // if the bundle can recognise its own older shapes. A version marker is the
+        // difference between "this cursor is from the previous format" and a tuple
+        // silently read as something it is not.
+        $payload = json_decode(base64_decode(strtr(Cursor::encode(['2026-08-30 10:00:00', 'entry-19']), '-_', '+/'), true) ?: '', true, 512, JSON_THROW_ON_ERROR);
+
+        self::assertSame(1, $payload['v']);
+        self::assertSame(['2026-08-30 10:00:00', 'entry-19'], $payload['s']);
+    }
+
+    public function testATokenFromBeforeVersioningIsStillRead(): void
+    {
+        // What clients are holding right now: the bare array. Refusing it would strand
+        // every open page at the moment of the upgrade.
+        $legacy = rtrim(strtr(base64_encode(json_encode(['2026-08-30 10:00:00', 'entry-19'], JSON_THROW_ON_ERROR)), '+/', '-_'), '=');
+
+        self::assertSame(['2026-08-30 10:00:00', 'entry-19'], Cursor::decode($legacy));
+    }
+
+    public function testATokenFromAFutureVersionIsRefusedRatherThanGuessed(): void
+    {
+        $future = rtrim(strtr(base64_encode(json_encode(['v' => 99, 's' => ['x']], JSON_THROW_ON_ERROR)), '+/', '-_'), '=');
+
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('newer version');
+
+        Cursor::decode($future);
+    }
+
     public function testANullSortValueStaysLegal(): void
     {
         // Elasticsearch itself hands out null for a missing sort value on legacy

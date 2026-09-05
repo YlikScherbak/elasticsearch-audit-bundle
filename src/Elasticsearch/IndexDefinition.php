@@ -32,7 +32,7 @@ final class IndexDefinition
     public function __construct(
         private readonly string $objectIdType = self::OBJECT_ID_KEYWORD,
         private readonly array $properties = [],
-        private readonly array $settings = ['number_of_shards' => 1, 'number_of_replicas' => 0],
+        private readonly array $settings = ['number_of_shards' => 1, 'number_of_replicas' => 1],
     ) {
         if (!\in_array($objectIdType, [self::OBJECT_ID_KEYWORD, self::OBJECT_ID_INTEGER, self::OBJECT_ID_LONG], true)) {
             throw new \InvalidArgumentException(sprintf('objectId can be mapped as "keyword", "integer" or "long", not "%s".', $objectIdType));

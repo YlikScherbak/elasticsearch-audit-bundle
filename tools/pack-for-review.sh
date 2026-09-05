@@ -66,10 +66,24 @@ pack writer-coalescing src/Writer src/Coalescing src/Transport src/Event \
                        src/Contract/MergedRecordEnricherInterface.php \
                        src/Contract/ValueComparatorInterface.php tests/Writer tests/Coalescing
 pack read-path         src/Reader src/Model tests/Reader tests/Model
+# Both boot tests, and they prove different things: BundleBootTest that every service
+# can be built, FullKernelBootTest that the tags this bundle declares are collected by
+# the bundles that own them. A reviewer given only the first cannot tell them apart.
 pack di-boot           src/DependencyInjection src/ElasticsearchAuditBundle.php src/Command \
-                       tests/DependencyInjection tests/BundleBootTest.php tests/Command
+                       tests/DependencyInjection tests/BundleBootTest.php \
+                       tests/FullKernelBootTest.php tests/Command
+# The writer belongs here: redaction happens on the way out, and the failure path is
+# where a value escapes if it escapes at all. Without it a reviewer can say the
+# contract is unsafe but not whether the bundle actually leaks — which is exactly what
+# the last review had to leave open, and where the real defect turned out to be.
 pack privacy           src/Privacy src/Model/AuditRecord.php src/Model/Change.php \
+                       src/Writer/AuditWriter.php src/Exception/WriteFailedException.php \
+                       src/Actor src/Event \
                        src/Elasticsearch/IndexDefinition.php tests/Privacy
-pack elasticsearch     src/Elasticsearch src/Exception tests/Elasticsearch tests/Integration
+# With the transports: BulkResult decides what a transient failure is, and the code
+# that acts on that decision — whole-batch retry, and whether every document carries an
+# id — lives in Transport. Reviewing one without the other proves nothing about retries.
+pack elasticsearch     src/Elasticsearch src/Exception src/Transport \
+                       tests/Elasticsearch tests/Integration
 
 printf 'Prompts: tools/review-prompts.md\n'

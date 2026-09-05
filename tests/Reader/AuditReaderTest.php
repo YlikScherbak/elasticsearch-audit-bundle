@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Reader;
 
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
@@ -135,6 +136,81 @@ final class AuditReaderTest extends TestCase
 
         self::assertSame(['match' => ['changes.note' => 'refund']], $sent['bool']['must'][0], 'what the caller asked');
         self::assertContains(['term' => ['source' => 'u1']], $sent['bool']['filter'][0]['bool']['filter'], 'inside what the query allows');
+    }
+
+    public function testAGlobalAggregationIsRefusedBecauseItEscapesTheBoundary(): void
+    {
+        // The one that makes "raw() still wears the extensions' boundary" untrue: a
+        // global aggregation is defined to ignore the query and count the whole search
+        // context, so an extension's narrowing would be on the request and absent from
+        // the numbers. Rewriting the query cannot make an arbitrary body safe, so the
+        // body is constrained instead.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('global');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'aggs' => [
+            'everything' => ['global' => new \stdClass(), 'aggs' => ['actors' => ['terms' => ['field' => 'source']]]],
+        ]]);
+    }
+
+    public function testAGlobalAggregationIsFoundHoweverDeepItSits(): void
+    {
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('global');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['aggs' => [
+            'by_event' => ['terms' => ['field' => 'event'], 'aggs' => [
+                'sneaky' => ['global' => new \stdClass()],
+            ]],
+        ]]);
+    }
+
+    public function testARetrievalMechanismOutsideTheQueryIsRefused(): void
+    {
+        // knn is combined with the query by union, not intersection: documents the
+        // boundary excludes would come back beside the ones it allows.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('knn');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['knn' => ['field' => 'vector', 'k' => 5]]);
+    }
+
+    public function testAnUnknownTopLevelKeyIsRefusedRatherThanPassedOn(): void
+    {
+        // The list is what the reader can vouch for. Anything else may or may not
+        // respect the query, and "may" is not something a visibility boundary can be
+        // built on — so it is named and refused instead of forwarded.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('rank');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['rank' => ['rrf' => []]]);
+    }
+
+    public function testRawCannotReachDeeperThanThePagingLimitsAllow(): void
+    {
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('max_result_window');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['from' => 20_000, 'size' => 10]);
+    }
+
+    public function testRawCannotAskForMoreRowsThanTheReaderAllows(): void
+    {
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('max_limit');
+
+        $this->reader()->raw(AuditQuery::for('order'), ['size' => 5000]);
+    }
+
+    public function testAnAggregationOnlyRequestIsNotBoundedByThePageSize(): void
+    {
+        // size: 0 asks for no rows at all — the usual shape of an aggregation request,
+        // and nothing for the row limits to object to.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 0], 'hits' => []], 'aggregations' => []];
+
+        $this->reader()->raw(AuditQuery::for('order'), ['size' => 0, 'aggs' => ['e' => ['terms' => ['field' => 'event']]]]);
+
+        self::assertCount(1, $this->gateway->searches);
     }
 
     public function testARawRequestOverNothingCostsNothing(): void

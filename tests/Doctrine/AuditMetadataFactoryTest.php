@@ -88,6 +88,55 @@ final class AuditMetadataFactoryTest extends TestCase
     {
         self::assertNull((new AuditField())->represent);
     }
+
+    public function testTheInvariantsHoldWhicheverWayAnEntityDeclaresItself(): void
+    {
+        // The attribute refused these and the interface did not, though both claim to
+        // describe the same thing. AuditMetadata is where both arrive, so it is where the
+        // rules belong.
+        //
+        // This test spent three releases inside the fixture class below, where PHPUnit
+        // never ran it — and the half it was guarding was never implemented. Hence the
+        // rule now standing in CONTRIBUTING: run a new guard against the fix removed,
+        // and see it fail, before believing it guards anything.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('non-empty object type');
+
+        new AuditMetadata('', ['title' => null]);
+    }
+
+    public function testAnInterfaceDeclarationWithAnEmptyTypeIsRefusedTooAtTheFactory(): void
+    {
+        $entity = new class implements \Borsche\ElasticsearchAuditBundle\Contract\AuditableInterface {
+            public function getAuditObjectType(): string
+            {
+                return '';
+            }
+
+            public function getAuditedFields(): array
+            {
+                return ['title' => null];
+            }
+
+            public function getAlwaysRecordedFields(): array
+            {
+                return [];
+            }
+        };
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('non-empty object type');
+
+        (new AuditMetadataFactory())->for($entity);
+    }
+
+    public function testACollectionThatTracksNoFieldOfItsElements(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('tracks no field of its elements');
+
+        new AuditMetadata('shipment', ['lines' => null], [], ['lines' => []]);
+    }
 }
 
 /**
@@ -100,22 +149,4 @@ final class Misrepresented
     #[AuditField(represent: 'getNope')]
     public ?Author $author = null;
 
-    public function testTheInvariantsHoldWhicheverWayAnEntityDeclaresItself(): void
-    {
-        // The attribute refused these and the interface did not, though both claim to
-        // describe the same thing. AuditMetadata is where both arrive, so it is where the
-        // rules belong.
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('non-empty object type');
-
-        new AuditMetadata('', ['title' => null]);
-    }
-
-    public function testACollectionThatTracksNoFieldOfItsElements(): void
-    {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('tracks no field of its elements');
-
-        new AuditMetadata('shipment', ['lines' => null], [], ['lines' => []]);
-    }
 }

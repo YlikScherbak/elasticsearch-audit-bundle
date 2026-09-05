@@ -76,13 +76,45 @@ final class NumericNullAsZeroComparatorTest extends TestCase
         self::assertFalse($comparator->equals('stock', 'quantity', '12.01', '12.1'));
     }
 
-    public function testAnOverflowingNumberIsNobodysQuantity(): void
+    public function testScientificNotationKeepsItsDigits(): void
     {
-        // Through a float both are INF, and 'INF' === 'INF' deleted a real change from
-        // the trail. No opinion is the honest answer.
+        // The exponent form went through a float, so the very precision the plain form
+        // is guarded against was lost the moment somebody wrote it with an "e" — and a
+        // false "equal" deletes a real change from the trail.
         $comparator = new NumericNullAsZeroComparator(['quantity']);
 
-        self::assertNull($comparator->equals('stock', 'quantity', '1e400', '9e999'));
+        self::assertFalse($comparator->equals('stock', 'quantity', '9007199254740993e0', '9007199254740992'));
+        self::assertFalse($comparator->equals('stock', 'quantity', '0', '1e-15'), 'a millionth of a billionth is still not nothing');
+        self::assertTrue($comparator->equals('stock', 'quantity', '1.2e3', '1200'), 'and the same quantity is still the same quantity');
+        self::assertTrue($comparator->equals('stock', 'quantity', '12E-2', '0.12'));
+        self::assertTrue($comparator->equals('stock', 'quantity', '-1.5e1', '-15.00'));
+    }
+
+    public function testAFloatIsComparedByWhatItActuallyHolds(): void
+    {
+        $comparator = new NumericNullAsZeroComparator(['quantity']);
+
+        self::assertFalse($comparator->equals('stock', 'quantity', 0.0, 1.0e-15), 'the same trap, arriving as floats');
+        self::assertTrue($comparator->equals('stock', 'quantity', 0.5, '0.50'));
+    }
+
+    public function testANumberTooLargeForAFloatIsStillReadAsWritten(): void
+    {
+        // Through a float both were INF, and 'INF' === 'INF' deleted a real change from
+        // the trail; the comparator deferred to escape that. Read as text there is
+        // nothing to escape — these are simply two different numbers, and it can say so.
+        $comparator = new NumericNullAsZeroComparator(['quantity']);
+
+        self::assertFalse($comparator->equals('stock', 'quantity', '1e400', '9e999'));
+        self::assertTrue($comparator->equals('stock', 'quantity', '1e400', '10e399'), 'and the same enormous quantity is the same');
+    }
+
+    public function testAValueThatIsNotAQuantityAtAllGetsNoOpinion(): void
+    {
+        // A float can still arrive as INF or NAN, and neither has a quantity to compare.
+        $comparator = new NumericNullAsZeroComparator(['quantity']);
+
         self::assertNull($comparator->equals('stock', 'quantity', INF, INF));
+        self::assertNull($comparator->equals('stock', 'quantity', NAN, 1.0));
     }
 }

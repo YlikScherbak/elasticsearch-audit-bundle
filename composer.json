@@ -32,6 +32,7 @@
     },
     "require-dev": {
         "doctrine/dbal": "^3.8 || ^4.0",
+        "doctrine/doctrine-bundle": "^2.11",
         "doctrine/orm": "^2.19 || ^3.0",
         "guzzlehttp/guzzle": "^7.8",
         "guzzlehttp/psr7": "^2.4.5",
@@ -41,11 +42,13 @@
         "symfony/console": "^6.4 || ^7.0 || ^8.0",
         "symfony/event-dispatcher": "^6.4 || ^7.0 || ^8.0",
         "symfony/filesystem": "^6.4 || ^7.0 || ^8.0",
+        "symfony/framework-bundle": "^6.4 || ^7.0 || ^8.0",
         "symfony/messenger": "^6.4 || ^7.0 || ^8.0",
         "symfony/security-core": "^6.4 || ^7.0 || ^8.0"
     },
     "suggest": {
-        "doctrine/orm": "To audit Doctrine entities automatically",
+        "doctrine/orm": "To audit Doctrine entities automatically (with doctrine/doctrine-bundle)",
+        "doctrine/doctrine-bundle": "Required together with doctrine/orm: the entity listener is attached through its doctrine.event_listener tag",
         "symfony/messenger": "To write audit records asynchronously",
         "symfony/security-core": "To record the authenticated user as the actor of each change",
         "symfony/console": "To create and check the Elasticsearch indices from the command line",

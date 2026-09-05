@@ -121,6 +121,38 @@ final class BackpressureTest extends TestCase
         BulkResult::fromResponse(['took' => 3, 'items' => [['index' => ['status' => 201]]]], 3);
     }
 
+    public function testAnItemNobodyCanReadIsNotAWrittenDocument(): void
+    {
+        // The count matched, so the response looked answerable — and every position
+        // that carried no readable status was counted as written. In the one class
+        // that exists to refuse exactly that answer.
+        $result = BulkResult::fromResponse(['items' => [null, ['index' => ['status' => 201]]]], 2);
+
+        self::assertSame(1, $result->succeeded());
+        self::assertTrue($result->failed(0));
+        self::assertStringContainsString('unreadable', $result->failures[0]['reason']);
+    }
+
+    public function testAFailureWithoutAnErrorObjectIsStillAFailure(): void
+    {
+        // Elasticsearch names the error, but the classification must follow the status:
+        // a 500 with no "error" key was read as a success because the code looked for
+        // the error object first.
+        $result = BulkResult::fromResponse(['items' => [['index' => ['status' => 503]], ['index' => ['status' => 201]]]], 2);
+
+        self::assertSame(1, $result->succeeded());
+        self::assertSame(503, $result->failures[0]['status']);
+        self::assertTrue($result->hasTransientFailures(), 'and 503 is still the cluster asking for it again');
+    }
+
+    public function testAStatusThatIsNotANumberIsNotASuccessEither(): void
+    {
+        $result = BulkResult::fromResponse(['items' => [['index' => ['result' => 'created']]], ], 1);
+
+        self::assertSame(0, $result->succeeded());
+        self::assertTrue($result->failed(0));
+    }
+
     public function testABulkAnswerWithNoItemsAtAllIsNotSuccessEither(): void
     {
         $this->expectException(TransportUnavailableException::class);

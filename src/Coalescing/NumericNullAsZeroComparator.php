@@ -72,7 +72,9 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
         if (\is_float($value)) {
             // INF and NAN have no quantity to compare: defer, or '1e400' and '9e999'
             // become the same value and a real change disappears from the trail.
-            return is_finite($value) ? self::trim(sprintf('%.14F', $value)) : null;
+            // Otherwise printed with enough digits to round-trip, and then read as
+            // text like every other spelling.
+            return is_finite($value) ? self::decimal(var_export($value, true)) : null;
         }
 
         if (\is_string($value) && is_numeric($value)) {
@@ -80,16 +82,45 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
             // neighbour become the same double and a real change disappears from the
             // trail — and a comparator that answers "equal" wrongly deletes history,
             // where one that answers "different" wrongly only adds a record.
-            if (str_contains($value, 'e') || str_contains($value, 'E')) {
-                $asFloat = (float) $value;
-
-                return is_finite($asFloat) ? self::trim(sprintf('%.14F', $asFloat)) : null;
-            }
-
-            return self::trim($value);
+            return self::decimal($value);
         }
 
         return null;
+    }
+
+    /**
+     * A number's digits, read as text and never through a float.
+     *
+     * A float has 15–17 significant digits, and everything past them is gone: through
+     * one, "9007199254740993e0" and "9007199254740992" are the same value, and so are
+     * "0" and "1e-15" once the exponent is flattened to a fixed number of decimals.
+     * Either of those is a *false equal*, which deletes a real change from the trail —
+     * the failure this whole class is written to avoid. So the exponent is applied by
+     * moving the decimal point through the digit string instead: exact, and no wider
+     * than the number actually is.
+     *
+     * @return string|null null when the text is not a number this can read
+     */
+    private static function decimal(string $number): ?string
+    {
+        if (preg_match('/^([+-]?)(\d*)(?:\.(\d*))?[eE]([+-]?\d+)$/', $number, $m) !== 1) {
+            return str_contains($number, 'e') || str_contains($number, 'E') ? null : self::trim($number);
+        }
+
+        [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];
+        $digits = $whole.$fraction;
+        $point = \strlen($whole) + (int) $exponent; // where the decimal point lands
+
+        if ($point <= 0) {
+            $digits = str_repeat('0', 1 - $point).$digits;
+            $point = 1;
+        }
+
+        if ($point > \strlen($digits)) {
+            $digits .= str_repeat('0', $point - \strlen($digits));
+        }
+
+        return self::trim($sign.substr($digits, 0, $point).'.'.substr($digits, $point));
     }
 
     /**

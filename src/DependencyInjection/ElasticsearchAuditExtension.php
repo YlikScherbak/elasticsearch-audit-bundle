@@ -38,7 +38,6 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Borsche\ElasticsearchAuditBundle\Writer\SystemClock;
-use Doctrine\ORM\EntityManagerInterface;
 use Elastic\Elasticsearch\Client;
 use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Log\LoggerInterface;
@@ -76,15 +75,17 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_METADATA_FACTORY = 'borsche_elasticsearch_audit.doctrine.metadata_factory';
     public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
 
-    private readonly bool $ormInstalled;
+    private readonly ?DoctrineSupport $doctrineSupport;
 
     /**
-     * Whether doctrine/orm is there is a fact about the vendor directory, but a
-     * parameter here so a test can build the container both ways.
+     * What the environment can do about Doctrine is a fact about the vendor directory
+     * and the kernel, but a parameter here so a test can build the container every
+     * way. Left null it is detected while loading, which is the first moment the
+     * kernel's bundle list can be asked.
      */
-    public function __construct(?bool $ormInstalled = null)
+    public function __construct(?DoctrineSupport $doctrine = null)
     {
-        $this->ormInstalled = $ormInstalled ?? interface_exists(EntityManagerInterface::class);
+        $this->doctrineSupport = $doctrine;
     }
 
     public function getAlias(): string
@@ -161,7 +162,10 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(AuditFrame::class, self::SERVICE_FRAME)->setPublic(true);
 
         if (interface_exists(MessageBusInterface::class)) {
-            $container->setDefinition(FrameResetMiddleware::class, new Definition(FrameResetMiddleware::class, [new Reference(self::SERVICE_FRAME)]));
+            $container->setDefinition(FrameResetMiddleware::class, new Definition(FrameResetMiddleware::class, [
+                new Reference(self::SERVICE_FRAME),
+                new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            ]));
         }
     }
 
@@ -192,12 +196,14 @@ final class ElasticsearchAuditExtension extends Extension
             return;
         }
 
-        if (!$this->ormInstalled) {
+        $support = $this->doctrineSupport ?? DoctrineSupport::detect($container);
+
+        if (!$support->canAudit()) {
             // An explicit true is a promise the container cannot keep — the same
             // failure the messenger transport gives without symfony/messenger. The
             // default ("auto") made no promise and skips without a word.
             if ($doctrine['enabled'] === true) {
-                throw new NotConfiguredException('doctrine.enabled is true but doctrine/orm is not installed: composer require doctrine/orm, or drop the option.');
+                throw new NotConfiguredException('doctrine.enabled is true but '.$support->missing());
             }
 
             return;

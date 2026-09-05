@@ -18,11 +18,20 @@ use Elastic\Elasticsearch\Response\Elasticsearch;
  * GatewayInterface over the official client. The same calls work on the 8.x and
  * 9.x clients, which is why this is the only class that touches the client at all.
  *
- * A write goes only to an index that exists. Elasticsearch would otherwise create
- * it on the fly with a guessed mapping — loggedAt as text (unsortable, so every read
- * fails), changes indexed field by field (mapping explosion, and later documents
- * rejected over type conflicts) — and audit:check could not tell. The existence
- * check costs one HEAD request per index per process; its answer is remembered.
+ * A write goes only to an index this gateway has seen exist. Elasticsearch would
+ * otherwise create it on the fly with a guessed mapping — loggedAt as text
+ * (unsortable, so every read fails), changes indexed field by field (mapping
+ * explosion, and later documents rejected over type conflicts) — and audit:check
+ * could not tell. The existence check costs one HEAD request per index per process;
+ * its answer is remembered, and forgotten again the moment a write answers 404.
+ *
+ * It is a good error rather than a guarantee, and the difference is worth being
+ * precise about: between the HEAD and the write the index can be dropped or rolled
+ * over, and no amount of checking here can close that window. The guarantee belongs
+ * to the cluster — action.auto_create_index excluding the audit pattern, or
+ * require_alias on the template — which the README asks for as part of installing
+ * the bundle. This check makes the common mistake legible; that setting makes the
+ * guessed mapping impossible.
  */
 final class ElasticsearchGateway implements GatewayInterface
 {
@@ -84,14 +93,16 @@ final class ElasticsearchGateway implements GatewayInterface
 
         $body = [];
 
-        foreach ($items as $item) {
-            $action = ['_index' => $item['index']];
-
-            if ($item['id'] !== null) {
-                $action['_id'] = $item['id'];
+        foreach ($items as $position => $item) {
+            // Without an id Elasticsearch generates one, and a batch re-sent after a
+            // transient failure would store every already-written document a second
+            // time under a new id. The writer assigns an id before anything is sent;
+            // this is the boundary that keeps that true for every caller.
+            if (($item['id'] ?? '') === '') {
+                throw new \InvalidArgumentException(sprintf('The document at position %d has no id. A bulk batch is re-sent whole when the cluster asks for it again, so every document needs an id of its own to overwrite itself instead of arriving twice.', $position));
             }
 
-            $body[] = ['index' => $action];
+            $body[] = ['index' => ['_index' => $item['index'], '_id' => $item['id']]];
             $body[] = $item['document'];
         }
 
@@ -129,9 +140,12 @@ final class ElasticsearchGateway implements GatewayInterface
         try {
             return $this->call(fn () => self::answer($this->client->search(['body' => $body]))->asArray(), query: true);
         } catch (InvalidQueryException $e) {
-            // "No search context found": the view expired between two batches. The cluster's
-            // message does not say what to do about it; the setting does.
-            if (str_contains($e->getMessage(), 'search context')) {
+            // The view expired between two batches. Recognised by Elasticsearch's own
+            // error type where the response carries one — the human-readable reason is
+            // a message, and a message is free to change — with the text as a fallback
+            // for a response shaped otherwise. The cluster's words do not say what to
+            // do about it; the setting does.
+            if (self::isMissingSearchContext($e) || str_contains($e->getMessage(), 'search context')) {
                 throw new InvalidQueryException(sprintf('%s — the point in time expired between two batches (keep-alive %s): raise reader.point_in_time_keep_alive above the time a consumer needs for one batch, or iterate with consistent: false.', $e->getMessage(), $keepAlive), $e->getCode(), $e);
             }
 
@@ -192,13 +206,74 @@ final class ElasticsearchGateway implements GatewayInterface
             }
 
             foreach ($shared as $field => $definition) {
-                if (!\array_key_exists($field, $properties) || $properties[$field] !== $definition) {
+                // Compared by content, not by the order the keys happen to be in: a
+                // mapping object is unordered to Elasticsearch, and two indices behind
+                // one alias — one created from a template, one grown by putMapping —
+                // can spell the same mapping differently. Order-sensitive comparison
+                // called those incompatible and dropped a field that was perfectly fine.
+                if (!\array_key_exists($field, $properties) || !self::sameMapping($properties[$field], $definition)) {
                     unset($shared[$field]);
                 }
             }
         }
 
         return $shared ?? [];
+    }
+
+    /**
+     * Whether the cluster refused because the point in time is gone, by the type it
+     * names rather than by the sentence it wrote.
+     */
+    private static function isMissingSearchContext(InvalidQueryException $e): bool
+    {
+        $previous = $e->getPrevious();
+
+        if (!$previous instanceof ClientResponseException) {
+            return false;
+        }
+
+        try {
+            $body = json_decode((string) $previous->getResponse()->getBody(), true, 512, \JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return false;
+        }
+
+        if (!\is_array($body)) {
+            return false;
+        }
+
+        foreach ([$body['error']['type'] ?? null, $body['error']['root_cause'][0]['type'] ?? null] as $type) {
+            if ($type === 'search_context_missing_exception') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether two mapping fragments say the same thing, whatever order they say it in.
+     */
+    private static function sameMapping(mixed $one, mixed $other): bool
+    {
+        if (\is_array($one) && \is_array($other)) {
+            ksort($one);
+            ksort($other);
+
+            if (array_keys($one) !== array_keys($other)) {
+                return false;
+            }
+
+            foreach ($one as $key => $value) {
+                if (!self::sameMapping($value, $other[$key])) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return $one === $other;
     }
 
     public function putMapping(string $index, array $properties): void

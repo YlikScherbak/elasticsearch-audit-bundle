@@ -22,11 +22,24 @@ use Borsche\ElasticsearchAuditBundle\Model\Change;
  *
  * The writer applies it on the way out — after the enrichers, after a frame has
  * merged its steps, and on the failure path — so a frame still sees the real
- * values and knows the field moved, while nothing that leaves the writer (the
+ * values and knows the field moved, while nothing the bundle itself writes (the
  * document, RecordCreatedEvent, RecordFailedEvent, WriteFailedException) carries
- * the value. Only the top-level fields of "changes" are covered: a value hidden
- * inside a free-form array, or an attribute, has to be kept out by the code that
- * puts it there.
+ * the value.
+ *
+ * What it does not do, said here because the difference matters more than the
+ * feature does:
+ *
+ * - it runs at write time, so it never reaches records already in the index —
+ *   erasing those is a reindex or a delete-by-query, an operational procedure the
+ *   bundle deliberately has no button for;
+ * - it cannot reach the actor ("source" is a base field, chosen when the record is
+ *   built) — a rule naming it is refused rather than silently ignored;
+ * - it covers the top level of "changes" and the attributes, by name: a value
+ *   nested inside a free-form array is not seen, because the rule matches the
+ *   field, which there is the array;
+ * - an exception raised by somebody else's code may carry a value in its own
+ *   message, and that message is not the bundle's to rewrite — it travels as the
+ *   `previous` of a WriteFailedException, which is why this one does not repeat it.
  */
 final class ChangeRedactor
 {
@@ -38,6 +51,17 @@ final class ChangeRedactor
         private readonly array $fields,
         private readonly string $placeholder = '***',
     ) {
+        foreach ($fields as $rule) {
+            $field = str_contains($rule, '.') ? substr($rule, (int) strpos($rule, '.') + 1) : $rule;
+
+            // "source" cannot be redacted here and quietly did nothing: the actor is a
+            // base field, chosen when the record is built. Masking it afterwards would
+            // leave a record nobody can attribute; choosing a different identifier is
+            // the answer, and it belongs one layer up.
+            if ($field === 'source') {
+                throw new \InvalidArgumentException('"source" holds the actor and cannot be redacted by a rule — the actor is chosen by an ActorResolverInterface, so return an internal id there instead of an identifier you must not keep.');
+            }
+        }
     }
 
     /**
@@ -73,33 +97,47 @@ final class ChangeRedactor
         return $secret === [] ? $record : $record->withoutAttributes(...$secret);
     }
 
+    /**
+     * The grammar, in one place, because an ambiguous one is not something to freeze:
+     *
+     * - a rule **without** a dot ("password", "lines") names a field for every object
+     *   type;
+     * - a rule **with** a dot ("user.email", "shipment.lines") is scoped: the part
+     *   before the first dot is the object type it applies to, the rest is the field.
+     *   It matches nothing on any other type — "shipment.lines" is a shipment's lines,
+     *   not any path on an order that happens to begin with those words.
+     *
+     * A field name then matches its own path exactly, anything reached **through** it
+     * ("lines" covers the membership key "lines.42" and "lines.42.quantity"), and the
+     * last segment of a path ("password" covers "lines.42.password": a secret is no
+     * less a secret for sitting one level down). Mind that element changes are recorded
+     * on the owner, so a scoped rule names the owner's type — "shipment.price" covers
+     * "lines.42.price" on a shipment's record.
+     */
     private function redacts(string $objectType, string $field): bool
     {
-        if (\in_array($field, $this->fields, true) || \in_array($objectType.'.'.$field, $this->fields, true)) {
-            return true;
-        }
-
-        // A change inside a tracked collection element is named for the path that reached
-        // it — "lines.42.password". The rule names a field, not a path, and a secret is
-        // no less a secret for sitting one level down.
-        $last = strrchr($field, '.');
-
-        if ($last !== false && $last !== '.' && $this->redacts($objectType, substr($last, 1))) {
-            return true;
-        }
-
-        // And a rule naming the collection covers everything reached through it: the
-        // membership key "lines.42" ends in an element id no rule can name, and "lines"
-        // clearly meant the whole collection — with or without an object type in front.
         foreach ($this->fields as $rule) {
-            if (str_starts_with($field, $rule.'.')) {
+            $scope = strpos($rule, '.');
+
+            if ($scope !== false) {
+                if (substr($rule, 0, $scope) !== $objectType) {
+                    continue; // a rule for another object type
+                }
+
+                $rule = substr($rule, $scope + 1);
+            }
+
+            if ($rule === '') {
+                continue;
+            }
+
+            if ($field === $rule || str_starts_with($field, $rule.'.')) {
                 return true;
             }
 
-            // Only a scoped rule matches with the object type glued in front: a plain
-            // rule is fully served by the line above, and letting it match here would
-            // make "lines" cover every field of an object whose *type* is "lines".
-            if (str_contains($rule, '.') && str_starts_with($objectType.'.'.$field, $rule.'.')) {
+            $last = strrchr($field, '.');
+
+            if ($last !== false && $last !== '.' && substr($last, 1) === $rule) {
                 return true;
             }
         }

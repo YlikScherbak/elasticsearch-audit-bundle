@@ -102,6 +102,10 @@ final class FrameBuffer
         $this->depth = 0;
         $this->held = [];
         $this->moved = [];
+        // Including these: a comparator failure kept for the writer to report belongs
+        // to the operation being dropped, and one left behind surfaced in the middle of
+        // the next one — a failure event about a record nobody in that operation wrote.
+        $this->finalizeFailures = [];
 
         return $hadState;
     }
@@ -151,14 +155,22 @@ final class FrameBuffer
      */
     public function hold(AuditRecord $record): array
     {
-        $key = $record->objectType.'|'.$record->objectId;
+        // Escaped, because both halves are free-form strings through
+        // AuditWriter::record(): unescaped, an object type "a|b" with id "c" and a type
+        // "a" with id "b|c" are one key, and two objects' histories would merge inside
+        // a frame. The same reason composite identifiers escape their own delimiter.
+        $key = self::identity($record);
 
         if ($record->event === AuditEvent::REMOVE) {
             $held = $this->held[$key] ?? null;
             $moved = $this->moved[$key] ?? [];
             unset($this->held[$key], $this->moved[$key]);
 
-            $out = $held === null ? [] : array_values(array_filter([$this->finalize($held, $moved)]));
+            // Through the same net release() uses: a comparator that throws here used
+            // to escape past the failure policy, and because the held record had
+            // already been taken out of the buffer, the update AND the remove were
+            // gone — under a policy meant to keep the operation running.
+            $out = $held === null ? [] : array_values(array_filter([$this->finalizeSafely($held, $moved)]));
             $out[] = $record;
 
             return $out;
@@ -186,6 +198,16 @@ final class FrameBuffer
     }
 
     /**
+     * Which object a record is about, as one string that cannot be two objects.
+     */
+    private static function identity(AuditRecord $record): string
+    {
+        $escape = static fn (string $part): string => str_replace(['\\', '|'], ['\\\\', '\\|'], $part);
+
+        return $escape($record->objectType).'|'.$escape((string) $record->objectId);
+    }
+
+    /**
      * @return list<AuditRecord>
      */
     private function release(): array
@@ -198,17 +220,7 @@ final class FrameBuffer
         $released = [];
 
         foreach ($held as $key => $record) {
-            // Per record: held was already emptied above, so a comparator that throws
-            // here used to take every record of the frame with it — raw, past the
-            // failure policy, out of an end() or a finally. The record whose comparator
-            // failed goes out unfinalized (noisier, never lost), and the mistake is
-            // reported through the writer like the same mistake on the hold() path is.
-            try {
-                $final = $this->finalize($record, $moved[$key] ?? []);
-            } catch (\Throwable $e) {
-                $this->finalizeFailures[] = [$record, $e];
-                $final = $record;
-            }
+            $final = $this->finalizeSafely($record, $moved[$key] ?? []);
 
             if ($final !== null) {
                 $released[] = $final;
@@ -281,6 +293,26 @@ final class FrameBuffer
             ->withChanges($changes)
             ->withAttributes($next->attributes)
             ->withOrigin($origin);
+    }
+
+    /**
+     * finalize(), with the net every caller needs: the application's comparator runs
+     * here, and an exception from it must never be what loses a record. The record
+     * goes out unfinalized instead — noisier history, never missing history — and the
+     * mistake is kept for the writer to report through the failure policy, exactly as
+     * the same mistake is reported on the hold() path.
+     *
+     * @param array<string, true> $moved
+     */
+    private function finalizeSafely(AuditRecord $record, array $moved): ?AuditRecord
+    {
+        try {
+            return $this->finalize($record, $moved);
+        } catch (\Throwable $e) {
+            $this->finalizeFailures[] = [$record, $e];
+
+            return $record;
+        }
     }
 
     /**

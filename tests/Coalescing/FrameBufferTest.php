@@ -39,6 +39,50 @@ final class FrameBufferTest extends TestCase
         self::assertSame(['fact' => ['old' => 1000, 'new' => 995], 'reserve' => ['old' => 5, 'new' => 6]], $released[0]->toDocument()['changes']);
     }
 
+    public function testTwoObjectsWhoseNamesCollideAreStillTwoObjects(): void
+    {
+        // record() takes free-form strings for both halves, and the frame's identity
+        // joined them with "|": type "a|b" with id "c" and type "a" with id "b|c" were
+        // one key, and two objects' histories merged into one record inside a frame.
+        $buffer = new FrameBuffer();
+        $buffer->open();
+        $at = new \DateTimeImmutable('2026-09-05 10:00:00', new \DateTimeZone('UTC'));
+        $buffer->hold(new AuditRecord('a|b', 'c', AuditEvent::UPDATE, $at, 'tests', ['fact' => new Change(1, 2)]));
+        $buffer->hold(new AuditRecord('a', 'b|c', AuditEvent::UPDATE, $at, 'tests', ['fact' => new Change(10, 20)]));
+
+        $released = $buffer->close();
+
+        self::assertCount(2, $released, 'two objects, two records');
+        self::assertSame(['old' => 1, 'new' => 2], $released[0]->toDocument()['changes']['fact']);
+        self::assertSame(['old' => 10, 'new' => 20], $released[1]->toDocument()['changes']['fact']);
+    }
+
+    public function testABrokenComparatorAtARemoveLosesNeitherRecord(): void
+    {
+        // release() already survives a comparator that throws — the record goes out
+        // unfinalized and the mistake travels the failure policy. The terminal REMOVE
+        // path took the held record out of the buffer and finalized it without that
+        // net: one exception and both the update and the remove were gone, under a
+        // policy whose whole point is that a business operation carries on.
+        $broken = new class implements \Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                throw new \RuntimeException('the comparator is broken');
+            }
+        };
+
+        $buffer = new FrameBuffer(new ValueComparator([$broken]));
+        $buffer->open();
+        $buffer->hold(self::update(1, ['fact' => new Change(1000, 1040)]));
+
+        $out = $buffer->hold(new AuditRecord('stock', 1, AuditEvent::REMOVE));
+
+        self::assertCount(2, $out, 'the held update and the remove both came out');
+        self::assertSame(AuditEvent::UPDATE, $out[0]->event);
+        self::assertSame(AuditEvent::REMOVE, $out[1]->event);
+        self::assertCount(1, $buffer->takeFinalizeFailures(), 'and the broken comparator is reported, not swallowed');
+    }
+
     public function testASingleComparatorLinkIsEnoughForABuffer(): void
     {
         // The buffer takes the interface, and one link legitimately answers null —

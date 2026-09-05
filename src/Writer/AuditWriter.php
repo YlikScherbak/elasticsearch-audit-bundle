@@ -156,6 +156,8 @@ final class AuditWriter
     {
         $outgoing = [];
         $overflow = null;
+        /** @var list<array{AuditRecord, \Throwable}> $failures */
+        $failures = [];
 
         foreach ($records as $record) {
             try {
@@ -177,7 +179,11 @@ final class AuditWriter
                 $overflow = $e;
                 break;
             } catch (\Throwable $e) {
-                $this->reportFailure($e, $record);
+                // Held, not reported here: under "throw" reporting raises, and raising
+                // from inside this loop abandoned every record after this one — and
+                // every record already collected, which had not been written yet. One
+                // record that cannot be completed costs its own record and no other.
+                $failures[] = [$record, $e];
             }
         }
 
@@ -186,6 +192,10 @@ final class AuditWriter
         if ($overflow !== null) {
             throw $overflow;
         }
+
+        // After the batch went out, so a completion failure cannot cost the records
+        // that were fine — and still before returning, so "throw" reaches the caller.
+        $this->reportEach($failures);
     }
 
     /**
@@ -238,6 +248,7 @@ final class AuditWriter
     {
         $items = [];
         $sent = [];
+        $unpreparable = [];
 
         foreach ($records as $record) {
             try {
@@ -247,14 +258,30 @@ final class AuditWriter
                     continue; // vetoed
                 }
 
-                $items[] = ['index' => $this->indexResolver->resolveFor($prepared), 'document' => $prepared->toDocument(), 'id' => $prepared->id];
+                // complete() assigns one before anything is sent, and a batch is
+                // re-sent whole when the cluster asks for it again: a record without an
+                // id would be stored a second time under a generated one. Stated here
+                // so a path that ever skips completion fails loudly instead.
+                $items[] = [
+                    'index' => $this->indexResolver->resolveFor($prepared),
+                    'document' => $prepared->toDocument(),
+                    'id' => $prepared->id ?? throw new \LogicException('A record reached the transport without an id; batched writes need one to stay idempotent.'),
+                ];
                 $sent[] = $prepared;
             } catch (\Throwable $e) {
-                $this->reportFailure($e, $record);
+                // Collected, not reported here: under "throw" reporting raises, and
+                // raising from inside this loop meant the records already prepared
+                // never reached the request and the ones after this were never
+                // prepared at all — a hole the size of batch_size, in the policy
+                // chosen because a missing entry is unacceptable. One broken record
+                // costs its own record and nothing else.
+                $unpreparable[] = [$record, $e];
             }
         }
 
         if ($items === []) {
+            $this->reportEach($unpreparable);
+
             return;
         }
 
@@ -263,17 +290,19 @@ final class AuditWriter
         } catch (\Throwable $e) {
             // The whole batch did not go: every record failed, and with "throw" the
             // exception carries the first of them — the others are still logged.
-            $this->reportFailures($sent, $e);
+            $this->reportEach([...$unpreparable, ...array_map(static fn (AuditRecord $r) => [$r, $e], $sent)]);
 
             return;
         }
 
-        $failures = [];
+        $failures = $unpreparable;
 
         foreach ($result->failures as $position => $failure) {
             $failures[] = [$sent[$position], RequestRejectedException::because($failure['status'], $failure['reason'], new \RuntimeException('bulk item rejected'))];
         }
 
+        // Everything that went wrong in this batch, in the order it happened: the
+        // records that could not be prepared first, then the ones the cluster refused.
         $this->reportEach($failures);
     }
 
@@ -347,17 +376,6 @@ final class AuditWriter
         return $this->redactor?->redact($event->getRecord()) ?? $event->getRecord();
     }
 
-    /**
-     * Reports one failure for each record; with "throw", the first exception is raised
-     * after every record was logged and every RecordFailedEvent dispatched, so a batch
-     * that failed as a whole does not lose the other records' failure notices.
-     *
-     * @param list<AuditRecord> $records
-     */
-    private function reportFailures(array $records, \Throwable $e): void
-    {
-        $this->reportEach(array_map(static fn (AuditRecord $r) => [$r, $e], $records));
-    }
 
     /**
      * @param list<array{AuditRecord, \Throwable}> $failures

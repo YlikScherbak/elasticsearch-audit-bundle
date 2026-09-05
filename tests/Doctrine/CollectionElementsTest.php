@@ -23,6 +23,24 @@ final class CollectionElementsTest extends DoctrineTestCase
         $this->attachListener(\Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy::Log, $comparator);
     }
 
+    public function testAnElementIdCarryingADotCannotBecomeAnotherElementsField(): void
+    {
+        // Identifiers may be arbitrary strings, and the flattened key joins them with
+        // dots: an element whose id is "42.quantity" writes the membership key
+        // "lines.42.quantity" — which is exactly the field-change key of element 42.
+        // One would silently overwrite the other in the same flush. The id segment is
+        // escaped, so an id with no dot is written exactly as before.
+        self::assertSame('lines.42\\.quantity', \Borsche\ElasticsearchAuditBundle\Doctrine\ElementKey::of('lines', '42.quantity'));
+        self::assertSame('lines.42', \Borsche\ElasticsearchAuditBundle\Doctrine\ElementKey::of('lines', 42), 'the ordinary id is untouched');
+        self::assertSame('lines.42.quantity', \Borsche\ElasticsearchAuditBundle\Doctrine\ElementKey::field('lines', 42, 'quantity'));
+        self::assertNotSame(
+            \Borsche\ElasticsearchAuditBundle\Doctrine\ElementKey::of('lines', '42.quantity'),
+            \Borsche\ElasticsearchAuditBundle\Doctrine\ElementKey::field('lines', 42, 'quantity'),
+            'the two must never spell the same'
+        );
+        self::assertSame('lines.a\\\\b', \Borsche\ElasticsearchAuditBundle\Doctrine\ElementKey::of('lines', 'a\\b'), 'the escape character escapes itself');
+    }
+
     public function testAQuantityChangedInsideALineIsRecordedOnTheShipment(): void
     {
         $shipment = $this->shipment();

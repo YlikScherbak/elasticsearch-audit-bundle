@@ -193,6 +193,53 @@ final class AuditWriterBatchTest extends TestCase
         self::assertCount(5, $failed, 'the chunks after the first failure were still tried and their records reported');
     }
 
+    public function testOneRecordThatCannotBePreparedDoesNotTakeItsWholeChunkDown(): void
+    {
+        // A broken enricher fails one record while it is being prepared, and under
+        // "throw" the report threw from inside the preparation loop: the records
+        // prepared before it never reached the bulk request, and the ones after it were
+        // never prepared at all. A hole the size of batch_size, in the policy chosen
+        // because a missing entry is unacceptable.
+        $records = [];
+
+        for ($i = 0; $i < 4; ++$i) {
+            $records[] = new AuditRecord('order', $i, 'update', changes: ['status' => new Change('a', 'b')]);
+        }
+
+        $enricher = new class implements \Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface {
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                if ($record->objectId === 1) {
+                    throw new \RuntimeException('the enricher is broken for this one');
+                }
+
+                return $record;
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        try {
+            $this->writer(FailurePolicy::Throw, batchSize: 4, enrichers: [$enricher])->writeAll($records);
+            self::fail('expected WriteFailedException');
+        } catch (WriteFailedException $e) {
+            self::assertSame(1, $e->record?->objectId, 'the record that could not be prepared is the one thrown');
+        }
+
+        $written = array_column($this->gateway->documents['audit_log'] ?? [], 'objectId');
+        sort($written);
+
+        self::assertSame([0, 2, 3], $written, 'every record that could be prepared was still written');
+    }
+
     public function testAnOverflowingFrameRefusesTheOperationWhateverTheFailurePolicy(): void
     {
         // on_overflow: throw is a deliberate refusal, not a failed write: it must reach
@@ -255,7 +302,10 @@ final class AuditWriterBatchTest extends TestCase
         self::assertCount(5, $this->gateway->documents['audit_log'], 'and every record went');
     }
 
-    private function writer(FailurePolicy $policy = FailurePolicy::Log, ?callable $listener = null, ?FrameBuffer $buffer = null, int $batchSize = 500): AuditWriter
+    /**
+     * @param list<\Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface> $enrichers
+     */
+    private function writer(FailurePolicy $policy = FailurePolicy::Log, ?callable $listener = null, ?FrameBuffer $buffer = null, int $batchSize = 500, array $enrichers = []): AuditWriter
     {
         $events = &$this->events;
         $dispatcher = new class($events, $listener) implements EventDispatcherInterface {
@@ -281,6 +331,6 @@ final class AuditWriterBatchTest extends TestCase
 
         $transport = new SyncTransport($this->gateway);
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log', ['auth' => 'audit_auth']), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $dispatcher, $buffer, null, $batchSize);
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log', ['auth' => 'audit_auth']), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, $policy, null, $dispatcher, $buffer, null, $batchSize);
     }
 }

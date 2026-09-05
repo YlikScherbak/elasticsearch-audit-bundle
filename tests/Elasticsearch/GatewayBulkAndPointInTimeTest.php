@@ -41,7 +41,7 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
 
         $result = $gateway->bulk([
             ['index' => 'audit_log', 'document' => ['objectId' => 1], 'id' => 'a'],
-            ['index' => 'audit_auth', 'document' => ['objectId' => 2], 'id' => null],
+            ['index' => 'audit_auth', 'document' => ['objectId' => 2], 'id' => 'b'],
             ['index' => 'audit_log', 'document' => ['objectId' => 3], 'id' => 'c'],
         ]);
 
@@ -60,9 +60,26 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
         self::assertCount(6, $lines, 'an action line and a document line each');
         self::assertSame(['index' => ['_index' => 'audit_log', '_id' => 'a']], $lines[0]);
         self::assertSame(['objectId' => 1], $lines[1]);
-        self::assertSame(['index' => ['_index' => 'audit_auth']], $lines[2], 'no _id when the record has none: Elasticsearch assigns one');
+        self::assertSame(['index' => ['_index' => 'audit_auth', '_id' => 'b']], $lines[2], 'every item carries its id, or a re-sent batch would store it twice');
         self::assertSame(['index' => ['_index' => 'audit_log', '_id' => 'c']], $lines[4], 'indices may differ within one batch');
         self::assertSame(3, $result->succeeded());
+    }
+
+    public function testABatchWithAnIdlessDocumentIsRefusedBeforeItIsSent(): void
+    {
+        // A transient failure re-sends the batch whole, and a document with no id would
+        // be stored again under a new one — the same audit event twice, which in a
+        // trail is indistinguishable from something having happened twice. The writer
+        // assigns ids; this refuses the batch that would break the retry contract.
+        $gateway = $this->gateway(static fn (RequestInterface $request) => self::response(200, []));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('position 1 has no id');
+
+        $gateway->bulk([
+            ['index' => 'audit_log', 'document' => ['objectId' => 1], 'id' => 'a'],
+            ['index' => 'audit_log', 'document' => ['objectId' => 2], 'id' => ''],
+        ]);
     }
 
     public function testBulkReportsRefusedItemsByPositionWithoutTheValuePreview(): void

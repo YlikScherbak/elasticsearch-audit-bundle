@@ -48,7 +48,18 @@ final class AuditFrame
      */
     public function end(): void
     {
-        $this->writer->writeManyCompleted($this->buffer->close() ?? []);
+        try {
+            $this->writer->writeManyCompleted($this->buffer->close() ?? []);
+        } catch (\Throwable $write) {
+            // Drained even here, or a comparator failure kept for the writer would sit
+            // in the buffer and surface inside the NEXT operation, as a failure event
+            // about a record that operation never wrote. The write's own exception is
+            // the one that surfaces: it is what actually went wrong.
+            $this->reportFinalizeFailuresQuietly();
+
+            throw $write;
+        }
+
         $this->reportFinalizeFailures();
     }
 
@@ -143,6 +154,20 @@ final class AuditFrame
      * mistake on the hold() path, after every record was written. With "throw" the
      * first one raises; the others were reported before it did.
      */
+    /**
+     * The same, when something more important is already on its way out: the buffer is
+     * drained so nothing leaks into the next operation, and whatever the reporting
+     * itself raises is logged rather than replacing the exception in flight.
+     */
+    private function reportFinalizeFailuresQuietly(): void
+    {
+        try {
+            $this->reportFinalizeFailures();
+        } catch (\Throwable $e) {
+            $this->logger->error('A comparator failure could not be reported while the frame was closing: {reason}.', ['reason' => $e->getMessage(), 'exception' => $e]);
+        }
+    }
+
     private function reportFinalizeFailures(): void
     {
         $thrown = null;

@@ -179,6 +179,70 @@ final class AuditFrameTest extends TestCase
         self::assertSame(['old' => 1000, 'new' => 995], $documents[0]['changes']['fact'], 'coalesced across the dispatch');
     }
 
+    public function testTheMiddlewareDoesNotReplaceAHandlersExceptionWithAnAuditOne(): void
+    {
+        // The same rule coalesce() follows, at the other boundary: the handler failed
+        // for a reason, and Messenger decides retry, failure transport and alerting by
+        // that reason. Releasing a leaked frame afterwards must not overwrite it — the
+        // message would be classified by the audit trail's trouble instead of its own.
+        $writer = $this->writer(FailurePolicy::Throw);
+        $frame = new AuditFrame($this->buffer, $writer, $this->logger());
+        $middleware = new FrameResetMiddleware($frame, $this->logger());
+
+        $handler = new class($frame, $writer) {
+            public function __construct(private readonly AuditFrame $frame, private readonly AuditWriter $writer)
+            {
+            }
+
+            public function __invoke(object $message): void
+            {
+                $this->frame->begin(); // leaked, which is why the middleware acts at all
+                $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+                throw new \DomainException('the handler failed');
+            }
+        };
+
+        $this->gateway->failWith = new \RuntimeException('cluster down');
+
+        try {
+            $middleware->handle(self::consumed(new \stdClass()), new StackMiddleware(new HandlerMiddleware($handler)));
+            self::fail('the handler exception should have surfaced');
+        } catch (\DomainException $e) {
+            self::assertSame('the handler failed', $e->getMessage());
+        }
+
+        self::assertFalse($frame->isOpen(), 'and the frame was still closed');
+        self::assertNotEmpty(array_filter($this->warnings, static fn (string $m) => str_contains($m, 'could not be released')));
+    }
+
+    public function testAFailedReleaseStillSurfacesWhenTheHandlerSucceeded(): void
+    {
+        // Nothing to mask here: the operation went through, so a failed audit write
+        // under "throw" is the only thing that went wrong and the caller should hear it.
+        $writer = $this->writer(FailurePolicy::Throw);
+        $frame = new AuditFrame($this->buffer, $writer, $this->logger());
+        $middleware = new FrameResetMiddleware($frame);
+
+        $handler = new class($frame, $writer) {
+            public function __construct(private readonly AuditFrame $frame, private readonly AuditWriter $writer)
+            {
+            }
+
+            public function __invoke(object $message): void
+            {
+                $this->frame->begin();
+                $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+            }
+        };
+
+        $this->gateway->failWith = new \RuntimeException('cluster down');
+
+        $this->expectException(WriteFailedException::class);
+
+        $middleware->handle(self::consumed(new \stdClass()), new StackMiddleware(new HandlerMiddleware($handler)));
+    }
+
     public function testANestedConsumeReleasesOnlyAtTheOutermostBoundary(): void
     {
         // A handler consuming one message can consume another synchronously; the frame

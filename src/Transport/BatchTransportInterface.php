@@ -18,7 +18,11 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
  * Separate from TransportInterface on purpose: a custom transport that only
  * knows send() keeps working, the writer falls back to sending one by one.
  *
- * @phpstan-type BatchItem array{index: string, document: array<string, mixed>, id: string|null}
+ * Every item carries an id, and the writer assigns one before anything is sent: a
+ * batch holding a transient failure is re-sent whole, and a document without an id
+ * would be stored a second time under a new one — the same audit event twice.
+ *
+ * @phpstan-type BatchItem array{index: string, document: array<string, mixed>, id: string}
  */
 interface BatchTransportInterface extends TransportInterface
 {

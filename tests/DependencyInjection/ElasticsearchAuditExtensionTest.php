@@ -11,6 +11,7 @@ use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
+use Borsche\ElasticsearchAuditBundle\DependencyInjection\DoctrineSupport;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
@@ -172,17 +173,64 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         $this->expectException(NotConfiguredException::class);
         $this->expectExceptionMessage('doctrine/orm');
 
-        (new ElasticsearchAuditExtension(ormInstalled: false))
+        (new ElasticsearchAuditExtension(doctrine: DoctrineSupport::none()))
+            ->load([['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['enabled' => true]]], new ContainerBuilder());
+    }
+
+    public function testDoctrineExplicitlyOnWithoutDoctrineBundleRefusesToBootToo(): void
+    {
+        // The ORM is installed, so the old check was satisfied — but the listener is
+        // attached through the doctrine.event_listener tag, and nothing consumes that
+        // tag unless DoctrineBundle is in the kernel. The container would boot, the
+        // listener would be built, and not one entity change would ever be recorded:
+        // the exact silence "enabled: true" exists to refuse.
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessage('DoctrineBundle');
+
+        (new ElasticsearchAuditExtension(doctrine: DoctrineSupport::ormOnly()))
             ->load([['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['enabled' => true]]], new ContainerBuilder());
     }
 
     public function testWithoutTheOrmDoctrineAuditingQuietlyStaysOff(): void
     {
-        // Nobody asked for it: the default means "when doctrine/orm is there", and it is not.
+        // Nobody asked for it: the default means "when Doctrine is there", and it is not.
         $container = new ContainerBuilder();
-        (new ElasticsearchAuditExtension(ormInstalled: false))->load([['client' => ['hosts' => ['http://localhost:9200']]]], $container);
+        (new ElasticsearchAuditExtension(doctrine: DoctrineSupport::none()))->load([['client' => ['hosts' => ['http://localhost:9200']]]], $container);
 
         self::assertFalse($container->hasDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER));
+    }
+
+    public function testWithoutDoctrineBundleTheListenerIsNotRegisteredEither(): void
+    {
+        // "auto" promises nothing and says nothing — but it must not register a
+        // listener that nobody will ever attach.
+        $container = new ContainerBuilder();
+        (new ElasticsearchAuditExtension(doctrine: DoctrineSupport::ormOnly()))->load([['client' => ['hosts' => ['http://localhost:9200']]]], $container);
+
+        self::assertFalse($container->hasDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER));
+    }
+
+    public function testAnApplicationsResolverIsAskedBeforeTheSecurityToken(): void
+    {
+        // The order matters and had only ever been asserted as "the definition carries
+        // a tag". It is this way round on purpose: the documented recipe for keeping an
+        // email address out of the index is a resolver that returns the internal id,
+        // and it only works if the application is asked first — the built-in one would
+        // otherwise answer getUserIdentifier() and never let it near the record.
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']]], static function (ContainerBuilder $c): void {
+            $c->setDefinition(InternalIdResolver::class, (new Definition(InternalIdResolver::class))->setAutoconfigured(true));
+            $c->setDefinition(SecurityActorResolver::class, (new Definition(SecurityActorResolver::class, [null]))
+                ->addTag(ElasticsearchAuditExtension::TAG_ACTOR_RESOLVER, ['priority' => -100]));
+        });
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        $writer->record('order', 1, 'update', ['status' => new Change('a', 'b')]);
+
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        self::assertSame('u-42', $gateway->only('audit_log')['source'], 'the application answered first');
     }
 
     public function testCommandsAreRegisteredForTheConsole(): void
@@ -252,7 +300,9 @@ final class ElasticsearchAuditExtensionTest extends TestCase
     private function load(array $config): ContainerBuilder
     {
         $container = new ContainerBuilder();
-        (new ElasticsearchAuditExtension())->load([$config], $container);
+        // Full Doctrine support unless a test says otherwise: what these assert is the
+        // wiring, and the detection has tests of its own above.
+        (new ElasticsearchAuditExtension(doctrine: DoctrineSupport::full()))->load([$config], $container);
 
         return $container;
     }
@@ -333,5 +383,16 @@ final class ActorNameDecorator implements RecordDecoratorInterface
     {
         return array_map(static fn (AuditEntry $e) => $e->withExtra(['actorName' => 'Me, Myself']), $entries);
     }
+}
 
+/**
+ * The README's own privacy recipe: an id where the security token would have given
+ * an email address.
+ */
+final class InternalIdResolver implements \Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface
+{
+    public function resolve(): ?string
+    {
+        return 'u-42';
+    }
 }

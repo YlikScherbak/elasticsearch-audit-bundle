@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Privacy;
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
@@ -109,6 +110,111 @@ final class NothingLeavesUnredactedTest extends TestCase
         ], JSON_THROW_ON_ERROR | JSON_PARTIAL_OUTPUT_ON_ERROR);
 
         self::assertStringNotContainsString(self::SECRET, $observable);
+    }
+
+    public function testTheSecretEntersByEveryDoorAndLeavesByNone(): void
+    {
+        // The canary. One secret, pushed in through every door the writer has —
+        // both sides of a change, a free-form change, an attribute, a scoped field —
+        // and then looked for in everything an application can observe. Its value is
+        // that a channel added in six months' time makes it fail without anyone having
+        // to remember this file exists.
+        $gateway = new InMemoryGateway();
+
+        $seen = [];
+        $events = new class($seen) implements EventDispatcherInterface {
+            /** @param list<object> $seen */
+            public function __construct(private array &$seen)
+            {
+            }
+
+            public function dispatch(object $event): object
+            {
+                $this->seen[] = $event;
+
+                return $event;
+            }
+        };
+
+        $logs = [];
+        $writer = $this->writer($gateway, ['password', 'secret', 'user.token'], $events, $logs);
+
+        $writer->record('user', 7, 'update', [
+            'password' => new Change(self::SECRET, self::SECRET),
+            'token' => new Change(null, self::SECRET),
+            'secret' => self::SECRET,                       // free-form, not a Change
+            'lines.42.password' => new Change(null, self::SECRET),
+            'name' => new Change('a', 'b'),
+        ], [
+            'password' => self::SECRET,
+            'tenant' => 'acme',
+        ]);
+
+        $observable = json_encode([
+            'documents' => $gateway->documents,
+            'events' => array_map(static fn (object $e): array => (array) $e, $seen),
+            'logs' => $logs,
+        ], JSON_THROW_ON_ERROR | JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+        self::assertStringNotContainsString(self::SECRET, $observable);
+        self::assertSame('acme', $gateway->documents['audit_log'][0]['tenant'], 'and everything else came through');
+        self::assertSame(['old' => 'a', 'new' => 'b'], $gateway->documents['audit_log'][0]['changes']['name']);
+    }
+
+    public function testAnExceptionCarryingTheSecretIsWhereTheGuaranteeEnds(): void
+    {
+        // Adversarial, because the invariant above proves less than it sounds: the
+        // failures it stages never carry the secret in the first place. Here the
+        // cluster's own exception does — the message of an exception the bundle did
+        // not write and must not rewrite, because it is the only diagnostic left.
+        // The bundle's own reach: its document, its events, its log lines, its
+        // exception message.
+        $gateway = new InMemoryGateway();
+        $gateway->failWith = new \RuntimeException('rejected value '.self::SECRET);
+
+        $seen = [];
+        $events = new class($seen) implements EventDispatcherInterface {
+            /** @param list<object> $seen */
+            public function __construct(private array &$seen)
+            {
+            }
+
+            public function dispatch(object $event): object
+            {
+                if ($event instanceof RecordCreatedEvent || $event instanceof RecordFailedEvent) {
+                    $this->seen[] = $event;
+                }
+
+                return $event;
+            }
+        };
+
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], $events, $logs, FailurePolicy::Throw);
+
+        try {
+            $writer->record('user', 7, 'update', ['password' => new Change(null, self::SECRET)]);
+            self::fail('the write should have failed');
+        } catch (WriteFailedException $e) {
+            self::assertStringNotContainsString(self::SECRET, $e->getMessage(), 'what the bundle writes never carries the value');
+            self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, JSON_THROW_ON_ERROR));
+
+            // And what it cannot scrub, stated rather than pretended away: the third
+            // party's own message travels as `previous`, which is where the README
+            // says to expect it.
+            self::assertStringContainsString(self::SECRET, (string) $e->getPrevious()?->getMessage(), 'the boundary is documented, not silently crossed');
+        }
+    }
+
+    public function testARuleNamingTheActorFieldIsRefusedRatherThanIgnored(): void
+    {
+        // "source" is a base field: no redaction rule can reach it, because the actor
+        // is chosen by an ActorResolver rather than masked afterwards. Accepting the
+        // rule and doing nothing is how somebody believes their actor is redacted.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('the actor is chosen by an ActorResolverInterface');
+
+        new ChangeRedactor(['source']);
     }
 
     public static function secret(): string

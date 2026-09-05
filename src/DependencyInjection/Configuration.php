@@ -140,8 +140,8 @@ final class Configuration implements ConfigurationInterface
             ->defaultValue(IndexDefinition::OBJECT_ID_KEYWORD);
 
         $children->arrayNode('settings')
-            ->info('Index settings applied by audit:index:create.')
-            ->defaultValue(['number_of_shards' => 1, 'number_of_replicas' => 0])
+            ->info('Index settings applied by audit:index:create. One replica by default: an audit trail is the last data anyone wants on a single node. Set number_of_replicas to 0 for a one-node development cluster, where a replica can never be assigned.')
+            ->defaultValue(['number_of_shards' => 1, 'number_of_replicas' => 1])
             ->variablePrototype();
     }
 

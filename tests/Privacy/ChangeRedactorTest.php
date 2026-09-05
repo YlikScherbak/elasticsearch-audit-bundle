@@ -127,6 +127,19 @@ final class ChangeRedactorTest extends TestCase
         self::assertSame($record, $redactor->redact($record), 'nothing here is named by the rule');
     }
 
+    public function testAScopedRuleDoesNotDoubleAsAPlainPathOnAnotherType(): void
+    {
+        // "shipment.lines" is one rule with one meaning: the lines of a shipment. Read
+        // as a plain nested path it would also hide "shipment.lines.42" on an order —
+        // a different thing that happens to spell the same. Over-redaction rather than
+        // a leak, but an ambiguous grammar is not something to freeze.
+        $redactor = new ChangeRedactor(['shipment.lines'], '***');
+
+        $record = (new AuditRecord('order', 1, 'update'))->withChanges(['shipment.lines.42' => new Change('a', 'b')]);
+
+        self::assertSame($record, $redactor->redact($record), 'the rule names a shipment\'s lines, not any path that begins with those words');
+    }
+
     public function testAScopedCollectionRuleCoversTheSamePathsOnItsTypeOnly(): void
     {
         $redactor = new ChangeRedactor(['shipment.lines'], '***');

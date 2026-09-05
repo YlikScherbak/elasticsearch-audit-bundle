@@ -26,6 +26,79 @@ narrow what a viewer sees, and a mapping the bundle creates, checks and can exte
 PHP 8.1–8.4, Symfony 6.4/7/8 and Elasticsearch 8 and 9, against live clusters, at both ends of
 the dependency range.
 
+### Fixed
+- **`raw()` could be handed a body that escapes its own boundary.** It put the query's filters
+  into `query` and forwarded everything else — but a `global` aggregation ignores the query by
+  definition, and a top-level `knn` is combined with it by union rather than intersection. A
+  visibility rule was therefore on the request and absent from the numbers it produced. The body
+  is now constrained to the shapes the reader can vouch for: a global aggregation is refused at
+  any depth, an unknown top-level key is refused by name, and `size`/`from` are held to the same
+  limits as any other read
+- **A bulk answer nobody can read is no longer counted as written.** A position with no readable
+  status — a null item, an action without one, a 500 that named no error — was read as a success
+  because the code looked for an "error" object first. In the one class whose whole purpose is to
+  refuse that answer. Success now has to be stated
+- **A comparator that throws while a remove closes its object no longer loses both records.**
+  `release()` had the net; the terminal remove path finalized without it, and because the held
+  record had already left the buffer, the update *and* the remove were gone — under the policy
+  chosen so a business operation carries on
+- **One record that cannot be prepared no longer takes its whole batch with it.** Reporting
+  raises under `on_failure: throw`, and it was called from inside the loops that prepare records:
+  everything prepared before the bad one never reached the request, and everything after it was
+  never prepared. A hole the size of `batch_size`, in the policy chosen because a missing entry
+  is unacceptable. Both loops now collect and report after the batch has gone
+- **A nested `flush()` no longer publishes the outer flush's records early.** 0.11.1 made the
+  change-set snapshot survive an inner flush; everything else it collected was still cleared and
+  written by whichever `postFlush` came first. With the listener order reversed, an inner flush
+  published records belonging to a transaction that had not committed — history describing a
+  state the database could still roll back. Only the outermost flush publishes now
+- **`FrameResetMiddleware` no longer replaces a handler's exception with an audit one.** The
+  handler's exception is what Messenger decides retries, failure transport and alerting by; a
+  release that failed while cleaning up after it took its place. The same rule `coalesce()`
+  already followed
+- **The numeric comparator no longer loses digits through a float.** Scientific notation and
+  17-digit integers were canonicalised via `sprintf('%.14F')`, so `9007199254740993e0` equalled
+  `9007199254740992`, and `1e-15` equalled zero — *false equals*, which delete a real change from
+  the trail. Numbers are now read as text, digit by digit, exponent applied by moving the point
+- **A comparator failure kept for the writer no longer leaks into the next operation.** It is
+  drained when the frame closes even if the write itself failed, and `reset()` clears it
+- **Two objects can no longer share one identity inside a frame.** The key joined object type and
+  id with `|` and escaped neither, so `"a|b"` with id `"c"` and `"a"` with id `"b|c"` merged into
+  one record
+- **`doctrine.enabled` now checks what actually delivers the auditing.** The listener is
+  attached through the `doctrine.event_listener` tag, which is **DoctrineBundle's** — with
+  doctrine/orm alone the container boots, the listener is built, the tag is collected by nobody,
+  and not one entity change is ever recorded. That is the silence `enabled: true` exists to
+  refuse, and it was checking for the ORM instead. `auto` now stays quiet unless both are there,
+  `true` names the missing one, and a full-kernel test proves the listener reaches Doctrine's
+  own `EventManager`
+- **An empty object type is refused whichever way an entity declares itself.** The attribute
+  refused it; `getAuditObjectType(): ''` did not, and records went out with an unfilterable
+  empty type. 0.10 claimed both declarations were held to the same rules — half of that claim
+  was untrue, behind two test methods that had been declared inside a fixture class where
+  PHPUnit never ran them
+- **The bundle's own exception no longer repeats a message it did not write.**
+  `WriteFailedException` interpolated the cause's message, so a cluster (or a listener) naming
+  the offending value put that value into an exception the bundle logs, and into any place that
+  exception is shown — after the record itself had been redacted. A declaration mistake, which
+  is the bundle's own words, still reads in full; anything that wrapped a foreign exception is
+  named by class, with the detail one `getPrevious()` away
+- **A tracked element whose id contains a dot cannot overwrite another element's field.**
+  `lines.42.quantity` was both "element 42's quantity changed" and "element `42.quantity` came
+  or went"; ids are escaped now, and an id without a dot is written exactly as before
+- **A `trackElements` declaration is re-checked when the same class declares different
+  collections.** The check was cached per class, while the interface form of a declaration is
+  deliberately per instance — a second instance's unsupported collection went unvalidated
+- **`narrowIn()` keeps booleans apart from numbers.** PHP's string comparison made `true`, `1`
+  and `"1"` one value, so a visibility boundary allowing `[true]` kept a query filtered to `1`.
+  Numbers and their spelling still intersect, as Elasticsearch matches them
+- **A redaction rule with a dot is a scoped rule, and only that.** `shipment.lines` also acted
+  as a plain nested path on every other object type. The grammar is now stated once, in one
+  place: no dot means a field on any type, a dot means `objectType.field`
+- **`redact: [source]` is refused instead of quietly doing nothing.** The actor is a base field
+  chosen when the record is built; a rule could never reach it, and accepting one let somebody
+  believe their actor was redacted. The exception says where the choice really lives
+
 ### Added
 - **The transaction boundary is stated once, with a test behind it.** A new README section says
   what the guarantee covers — the flush's own transaction — and what it does not: an outer
@@ -35,6 +108,40 @@ the dependency range.
   implied to exist
 - **`UPGRADE.md`** — every version that asked something of you, and what 1.0 freezes as a
   limitation rather than a bug
+- **A full-kernel boot test**: FrameworkBundle and DoctrineBundle present, so what is proven is
+  that the tags the bundle declares are *collected* — not merely that its services can be
+  built. The two levels are described in CONTRIBUTING, together with the rule that earned them:
+  a guard nobody has watched fail is a guard of nothing
+- **A cursor token carries its version** (`{"v":1,"s":[…]}`). A token from an older, unversioned
+  build is still read; one from a newer version is refused by name instead of being read as
+  something it is not
+- **`AuditQuery::DEFAULT_MAX_TERMS`** — the filter-list ceiling, named and documented as
+  Elasticsearch's default `index.max_terms_count` rather than a bare number in a condition
+- **A tracked element inserted with a generated id is represented after the flush**, so a
+  representer reading that id (`getId`) records the id rather than the null it had beforehand.
+  A removed element is still represented eagerly, while it still has its values
+
+### Changed
+- **Indices are created with one replica** instead of none. An audit trail is the last data
+  anyone wants living on a single node; a one-node development cluster wants
+  `indices.settings.number_of_replicas: 0`, which is now a deliberate choice rather than the
+  default
+- **`GatewayInterface::bulk()` requires an id per item.** A batch is re-sent whole when the
+  cluster asks for it again, and a document without an id would be stored a second time under a
+  generated one — the same audit event twice. The writer has always assigned ids; the contract
+  now says so, and refuses a batch that would break the retry
+- **The mapping comparison behind `audit:check` ignores key order.** Two indices behind one alias
+  can spell the same mapping differently — one from a template, one grown by `putMapping` — and
+  an order-sensitive comparison called those incompatible
+- **An expired point in time is recognised by Elasticsearch's error type**, with the message text
+  as a fallback: a human-readable sentence is free to change between versions
+- **Documented rather than implied**: what redaction does *not* cover (records already written,
+  the actor field, `_source` under `dynamic: false`, values nested in free-form arrays); that
+  `RecordFailedEvent` reports a failed hand-over, and with the messenger transport an indexing
+  failure surfaces in the worker's failure transport instead; that a UUID v7 is random within its
+  millisecond rather than ordered by write; and that the existence check before a write is a good
+  error rather than a guarantee — `action.auto_create_index` on the cluster is the guarantee, and
+  the README now asks for it as part of installing the bundle
 
 ### Changed
 - **`@throws` on `GatewayInterface` matches what the implementation raises**, method by method,

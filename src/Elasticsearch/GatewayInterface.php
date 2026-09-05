@@ -52,8 +52,14 @@ interface GatewayInterface
      * own, so the result names the positions that were refused; the request as a
      * whole failing is an exception.
      *
-     * @param list<array{index: string, document: array<string, mixed>, id: string|null}> $items
+     * Every item carries its own id, and that is a requirement rather than a
+     * convenience: a batch holding a transient failure is re-sent whole, and a document
+     * without an id would be stored a second time under a new one — the same audit
+     * event twice, in the one place duplicates are indistinguishable from history.
      *
+     * @param list<array{index: string, document: array<string, mixed>, id: string}> $items
+     *
+     * @throws \InvalidArgumentException an item has no id, so the batch cannot be retried safely
      * @throws IndexNotFoundException   one of the indices does not exist — nothing was written
      * @throws RequestRejectedException the cluster refused the request as a whole (the per-document
      *                                  refusals are in the result instead)

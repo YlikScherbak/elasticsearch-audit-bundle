@@ -109,15 +109,22 @@ object are checked too, so a `date` whose `format` drifted — an index that ref
 the writer sends — or an enricher's nested field that was never mapped is reported by its path
 (`context.ip is keyword, expected ip`) instead of passing as healthy.
 
-An index dropped *under* a running worker is the one case that per-process check cannot see.
-Close that gap on the cluster, where it belongs, by keeping Elasticsearch from auto-creating
-audit indices at all — a write to a missing index is then a clean `IndexNotFoundException`
-whatever the bundle remembers:
+**The check is a courtesy, not the guarantee — set the guarantee on the cluster.** Between the
+`HEAD` that says the index is there and the write that follows it, the index can be dropped or
+rolled over, and Elasticsearch will then create it from the write with a guessed mapping. No
+client-side check can close that window; only the cluster can, and it takes one setting:
 
 ```yaml
 # elasticsearch.yml — or PUT _cluster/settings {"persistent": {"action.auto_create_index": "-audit_*,+*"}}
 action.auto_create_index: "-audit_*,+*"
 ```
+
+With that in place a write to a missing index is a clean `IndexNotFoundException` whatever the
+bundle remembers, and a guessed mapping cannot happen at all. If your audit indices live behind a
+write alias (see Retention), `"require_alias": true` on the index template does the same job for
+the alias. **Treat this as part of installing the bundle**, not as hardening to get to later —
+the existence check exists to give a good error, not to be the only thing standing between you
+and an index Elasticsearch invented.
 
 ## Recording an action
 
@@ -541,6 +548,16 @@ foreach ($this->reader->iterate(AuditQuery::for('order')->since($start)->oldestF
 }
 ```
 
+> **A cursor needs the record id to be there.** The sort is `loggedAt` plus the record id, and
+> the id is what makes the pair unique — which is what stops `search_after` from stepping over a
+> record. Documents written by an older tool that never stored `id` sort as
+> `[timestamp, null]`, and several of them sharing a timestamp are indistinguishable to the
+> cursor: Elasticsearch may then skip or repeat one. `unmapped_type` keeps such a query running;
+> it cannot make the tuple unique. If you are reading an index written before this bundle,
+> backfill `id` from each document's `_id` once, and cursor paging is exact again. A consistent
+> `iterate()` is unaffected — its point in time adds `_shard_doc`, which is unique inside the
+> view.
+
 `iterate()` starts a traversal of its own and refuses a query that carries a page or a cursor
 (**since 0.10**): the point in time it opens is not the one those sort values came from, and
 `_shard_doc` means nothing inside another view. To resume where an export stopped, narrow the
@@ -732,10 +749,17 @@ listener — see «Audit records and personal data».)
 ### Who did it
 
 The bundle asks each registered `ActorResolverInterface` in turn and takes the first answer.
-With `symfony/security-core` installed, the security token is asked first. Under `switch_user`
-that is the **impersonating** user — the administrator who acted, not the account they were
-looking at. Work that runs without a token — message handlers, console commands — usually
-knows who it is acting for; register a resolver and it is picked up automatically:
+**Your resolvers are asked before the built-in one**, which is registered at priority `-100`
+precisely so that it cannot get in their way: the recipe below for keeping an email address out
+of the index — a resolver returning the internal id — only works because the application answers
+first. Raise a resolver's priority above `-100` to sit behind another one of your own; the
+security token is what answers when nobody else does.
+
+With `symfony/security-core` installed and no resolver of your own, the actor is the security
+token's `getUserIdentifier()`. Under `switch_user` that is the **impersonating** user — the
+administrator who acted, not the account they were looking at. Work that runs without a token —
+message handlers, console commands — usually knows who it is acting for; register a resolver and
+it is picked up automatically:
 
 ```php
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
@@ -938,6 +962,26 @@ A listener may replace the record on
 `RecordCreatedEvent`, and what it hands back is redacted again, so a listener that reaches for the
 entity a second time cannot undo the policy. For anything conditional — redact only for this tenant, only outside
 the office — listen to `RecordCreatedEvent` and rewrite or `veto()` the record there.
+
+**What redaction is not.** It runs when a record leaves the writer, and that is the whole of it:
+
+- **It does not reach what is already written.** Adding `user.email` to the rules today cleans
+  tomorrow's records and leaves last year's ten million untouched. A request to erase existing
+  data is a reindex or a delete-by-query against the index — the bundle has no eraser, and this
+  is a deliberate gap rather than an oversight: rewriting history from inside the thing that
+  records history is not a power the writer should have. Plan it as an operational procedure.
+- **It cannot reach the actor.** `source` is a base field, chosen when the record is built, and a
+  rule naming it is refused (**since 1.0**) rather than accepted and ignored. If your users are
+  identified by an email address, that address is in an indexed field on every record they ever
+  touched — return an internal id from an `ActorResolverInterface` instead, as above. The same
+  applies to `objectId`: it is an identifier, not a place for a name or a phone number.
+- **`dynamic: false` is not a privacy boundary.** An attribute nobody declared is not *indexed*,
+  and it is still *stored* in `_source` — as is everything inside `changes`, which is stored with
+  indexing disabled. "Not searchable" and "not kept" are different things.
+- **It covers the top level of `changes` and the attributes, by name.** A value nested inside a
+  free-form array (`['profile' => ['password' => …]]`) is not seen by a rule naming `password`:
+  the rule matches the field, which here is `profile`. Keep secrets out of free-form payloads, or
+  flatten them into fields the rules can name.
 
 **Who the actor is, is a choice.** By default the actor is `getUserIdentifier()`, and in many
 applications that is an **email address** — which means every record carries personal data in an

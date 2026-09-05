@@ -141,7 +141,7 @@ final class ChangeSetBuilder
                 continue;
             }
 
-            $changes[$collectionField.'.'.$elementId.'.'.$field] = $change;
+            $changes[ElementKey::field($collectionField, $elementId, $field)] = $change;
         }
 
         return $changes;

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Coalescing\Messenger;
 
 use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Middleware\MiddlewareInterface;
 use Symfony\Component\Messenger\Middleware\StackInterface;
@@ -33,8 +35,11 @@ final class FrameResetMiddleware implements MiddlewareInterface
     /** How many consumed messages are on the stack right now: nested synchronous handling counts. */
     private int $consuming = 0;
 
-    public function __construct(private readonly AuditFrame $frame)
+    private readonly LoggerInterface $logger;
+
+    public function __construct(private readonly AuditFrame $frame, ?LoggerInterface $logger = null)
     {
+        $this->logger = $logger ?? new NullLogger();
     }
 
     public function handle(Envelope $envelope, StackInterface $stack): Envelope
@@ -48,16 +53,34 @@ final class FrameResetMiddleware implements MiddlewareInterface
             return $stack->next()->handle($envelope, $stack);
         }
 
-        try {
-            ++$this->consuming;
+        ++$this->consuming;
 
-            return $stack->next()->handle($envelope, $stack);
-        } finally {
-            // And only the outermost one: a handler may consume another message
-            // synchronously, and the frame it opened is still its own.
+        try {
+            $result = $stack->next()->handle($envelope, $stack);
+        } catch (\Throwable $failed) {
+            // The handler's own exception is what Messenger decides everything by:
+            // whether to retry, which failure transport, what the alert says. An audit
+            // write that fails while cleaning up after it must not take its place —
+            // the same rule AuditFrame::coalesce() follows, and for the same reason.
             if (--$this->consuming === 0) {
-                $this->frame->release();
+                try {
+                    $this->frame->release();
+                } catch (\Throwable $release) {
+                    $this->logger->error('An audit frame left open by a failing handler could not be released: {reason}. The handler\'s own exception follows.', ['reason' => $release->getMessage(), 'exception' => $release]);
+                }
             }
+
+            throw $failed;
         }
+
+        // Nothing to mask: the handler succeeded, so a failed release under
+        // on_failure: throw is the only thing that went wrong, and the caller hears it.
+        // And only the outermost consume closes: a handler may consume another message
+        // synchronously, and the frame it opened is still its own.
+        if (--$this->consuming === 0) {
+            $this->frame->release();
+        }
+
+        return $result;
     }
 }

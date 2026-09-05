@@ -107,6 +107,51 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         self::assertSame(['old' => null, 'new' => 'SH-BORN'], $creates[0]['changes']['reference'], 'born with its values, not empty-handed');
     }
 
+    public function testANestedFlushDoesNotPublishTheOuterFlushsRecordsEarly(): void
+    {
+        // The mirror of the case already covered: here the audit listener runs FIRST,
+        // so the outer record is already pending when another listener flushes. The
+        // inner postFlush() used to take the whole pending list — records belonging to
+        // a transaction that has not committed yet — and write them. If the outer
+        // flush then fails, the history describes what the database rolled back.
+        $shipment = $this->shipmentWithTwoLines();
+
+        $nestingAtWrite = [];
+        $connection = $this->em->getConnection();
+        $this->gateway->onIndex = static function () use (&$nestingAtWrite, $connection): void {
+            $nestingAtWrite[] = $connection->getTransactionNestingLevel();
+        };
+
+        // Registered after the audit listener, so its flush happens while the outer
+        // flush is still inside its own transaction.
+        $this->flushFromPostUpdate();
+
+        $shipment->reference = 'SH-NESTED';
+        $this->em->flush();
+
+        self::assertNotSame([], $nestingAtWrite, 'the record was written at all');
+        self::assertSame([0], array_unique($nestingAtWrite), 'and only after the transaction it belongs to had committed');
+    }
+
+    public function testANestedFlushDoesNotConsumeTheOuterFlushsElementChanges(): void
+    {
+        // elementChanges are collected in onFlush and folded in at postFlush. An inner
+        // flush emptying them leaves the outer owner's record without the changes its
+        // lines made — the record is written, and it is wrong rather than missing.
+        $shipment = $this->shipmentWithTwoLines();
+        $this->flushFromPostUpdate();
+
+        $shipment->reference = 'SH-BOTH';
+        $shipment->lines->first()->quantity = 9;
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+        $lineId = $shipment->lines->first()->id;
+
+        self::assertSame(['old' => 'SH-1', 'new' => 'SH-BOTH'], $changes['reference']);
+        self::assertSame(['old' => 1, 'new' => 9], $changes['lines.'.$lineId.'.quantity'], 'what the line did belongs to the same record');
+    }
+
     public function testTheLostChangeSetIsReportedOnce(): void
     {
         $shipment = $this->shipmentWithTwoLines();

@@ -45,7 +45,17 @@ real index and back — and needs both `pdo_sqlite` and `AUDIT_ES_URL` at once.
 
 ## What a change needs
 
-- **A test that fails without it.** For a bug, the test comes first and reproduces the report.
+- **A test that fails without it — and that you have watched fail.** For a bug, the test comes
+  first and reproduces the report. Then remove the fix (comment out the line, neutralise the
+  method) and run it: a guard nobody has seen fail is a guard of nothing. This is not a
+  formality — three separate defects reached a release behind tests that could not fail: two
+  methods declared inside a fixture class instead of the `TestCase`, so PHPUnit never ran them,
+  and a listener registered twice, so the first one answered for the second. Each looked green.
+- **A boot test proves what it can reach.** `BundleBootTest` proves every service can be built;
+  it cannot prove anything *consumes* what the bundle declares, because its kernel holds no
+  FrameworkBundle or DoctrineBundle. `FullKernelBootTest` is where a tag is proven to be
+  collected — the entity listener attached to a real `EventManager`, both Messenger messages
+  routed to their handlers. A change to a tag belongs there.
 - **Green on the whole matrix**: PHP 8.1–8.4 × Symfony 6.4/7/8, plus the lowest-dependencies job.
   Watch out for `psr/log` 1, where `LoggerInterface::log()` has no type on `$message`.
 - **A boot, if you touched the bundle or its extension.** `BundleBootTest` puts the bundle in a

@@ -188,11 +188,22 @@ final class AuditReader
      */
     public function raw(AuditQuery $query, array $body): array
     {
+        self::assertBodyStaysInsideTheBoundary($body);
+
         $query = $this->extend($query);
 
         if ($query->matchesNothing()) {
             return ['hits' => ['total' => ['value' => 0, 'relation' => 'eq'], 'hits' => []]];
         }
+
+        $this->assertWithinLimits($query->limit(
+            \is_int($body['size'] ?? null) && $body['size'] > 0 ? $body['size'] : 1
+        )->page(
+            \is_int($body['from'] ?? null) && $body['from'] > 0 && \is_int($body['size'] ?? null) && $body['size'] > 0
+                ? intdiv($body['from'], max(1, $body['size'])) + 1
+                : 1,
+            \is_int($body['size'] ?? null) && $body['size'] > 0 ? $body['size'] : 1,
+        ));
 
         $boundary = $this->queryBuilder->build($query)['query'];
 
@@ -201,6 +212,73 @@ final class AuditReader
             : $boundary;
 
         return $this->gateway->search($this->indexFor($query), $body);
+    }
+
+    /**
+     * What a raw body may contain, and why it is a list rather than "anything".
+     *
+     * Putting the query's filters into `query` makes a request narrower only for the
+     * parts of the Search API that read the query. Several do not: a `global`
+     * aggregation is *defined* to ignore it and count the whole search context, and
+     * `knn` is combined with the query by union rather than intersection. A body
+     * carrying either would wear a visibility boundary that some of its own numbers
+     * ignore — the one thing this method promises not to do — so the shapes the reader
+     * can vouch for are named, and everything else is refused rather than forwarded on
+     * the hope that it behaves.
+     *
+     * @param array<string, mixed> $body
+     *
+     * @throws InvalidQueryException
+     */
+    private static function assertBodyStaysInsideTheBoundary(array $body): void
+    {
+        static $allowed = [
+            'query', 'aggs', 'aggregations', 'size', 'from', 'sort', 'search_after',
+            '_source', 'fields', 'docvalue_fields', 'stored_fields', 'script_fields',
+            'runtime_mappings', 'track_total_hits', 'post_filter', 'collapse',
+            'highlight', 'min_score', 'timeout', 'terminate_after', 'explain', 'version', 'seq_no_primary_term',
+        ];
+
+        foreach (array_keys($body) as $key) {
+            if (!\in_array($key, $allowed, true)) {
+                throw new InvalidQueryException(sprintf('raw() cannot carry "%s": what it guarantees is that the query\'s filters bound the request, and only the parts of the Search API that read the query can be bounded that way. Allowed here: %s.', $key, implode(', ', $allowed)));
+            }
+        }
+
+        foreach (['aggs', 'aggregations'] as $key) {
+            if (\is_array($body[$key] ?? null)) {
+                self::refuseGlobalAggregations($body[$key], $key);
+            }
+        }
+    }
+
+    /**
+     * At any depth: an aggregation nested three levels down escapes the query exactly
+     * as thoroughly as one at the top.
+     *
+     * @param array<mixed> $aggregations
+     *
+     * @throws InvalidQueryException
+     */
+    private static function refuseGlobalAggregations(array $aggregations, string $path): void
+    {
+        foreach ($aggregations as $name => $aggregation) {
+            if (!\is_array($aggregation)) {
+                continue;
+            }
+
+            $here = $path.'.'.(string) $name;
+
+            if (\array_key_exists('global', $aggregation)) {
+                throw new InvalidQueryException(sprintf('The aggregation at "%s" is global, and a global aggregation ignores the query by definition: it would count records the query — and any visibility rule on it — excludes. Aggregate inside the query, or ask the cluster directly if you really mean "everything".', $here));
+            }
+
+            foreach (['aggs', 'aggregations'] as $key) {
+                if (\is_array($aggregation[$key] ?? null)) {
+                    self::refuseGlobalAggregations($aggregation[$key], $here.'.'.$key);
+                }
+            }
+        }
     }
 
     /**

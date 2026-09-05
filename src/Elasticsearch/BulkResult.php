@@ -75,16 +75,33 @@ final class BulkResult
         foreach (array_values($items) as $position => $item) {
             $action = \is_array($item) ? reset($item) : null;
 
-            if (!\is_array($action) || !isset($action['error'])) {
+            // Read the status first, and let it decide. Looking for an "error" object
+            // first meant a position nobody could read — a null item, an action without
+            // a status, a 500 that named no error — was counted as written, which is
+            // the one answer this class exists to refuse. Success has to be stated.
+            if (!\is_array($action) || !is_numeric($action['status'] ?? null)) {
+                $failures[$position] = [
+                    'status' => 0,
+                    'reason' => 'Elasticsearch answered this position with something unreadable, so whether the document was written is unknown.',
+                ];
+
                 continue;
             }
 
-            $error = \is_array($action['error']) ? $action['error'] : ['reason' => (string) $action['error']];
-            $reason = \is_string($error['reason'] ?? null) && $error['reason'] !== '' ? $error['reason'] : ($error['type'] ?? 'rejected');
+            $status = (int) $action['status'];
+
+            if ($status >= 200 && $status < 300) {
+                continue;
+            }
+
+            $error = \is_array($action['error'] ?? null) ? $action['error'] : ['reason' => \is_scalar($action['error'] ?? null) ? (string) $action['error'] : null];
+            $reason = \is_string($error['reason'] ?? null) && $error['reason'] !== ''
+                ? $error['reason']
+                : (\is_string($error['type'] ?? null) && $error['type'] !== '' ? $error['type'] : 'rejected with status '.$status);
 
             $failures[$position] = [
-                'status' => (int) ($action['status'] ?? 400),
-                'reason' => RequestRejectedException::withoutValuePreview((string) $reason),
+                'status' => $status,
+                'reason' => RequestRejectedException::withoutValuePreview($reason),
             ];
         }
 

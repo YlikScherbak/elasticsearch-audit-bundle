@@ -13,7 +13,7 @@ final class IndexDefinitionTest extends TestCase
     {
         $definition = (new IndexDefinition())->toArray();
 
-        self::assertSame(['number_of_shards' => 1, 'number_of_replicas' => 0], $definition['settings']);
+        self::assertSame(['number_of_shards' => 1, 'number_of_replicas' => 1], $definition['settings'], 'a copy by default: an audit trail is the last data to keep on one node only');
         self::assertSame(['type' => 'keyword'], $definition['mappings']['properties']['objectId']);
         self::assertSame(['type' => 'object', 'enabled' => false], $definition['mappings']['properties']['changes']);
         self::assertSame(['type' => 'date', 'format' => 'yyyy-MM-dd HH:mm:ss'], $definition['mappings']['properties']['loggedAt']);

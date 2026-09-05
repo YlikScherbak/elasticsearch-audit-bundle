@@ -6,11 +6,15 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
 
 /**
  * Identifiers for audit records: UUID version 7, built from the record's own
- * timestamp. Time-ordered, so sorting by id within one second keeps records in
- * the order they were written — which is what makes it the tiebreaker behind
- * loggedAt for cursor paging. And known before the write, so a retried write
- * (Messenger redelivering after a timeout) overwrites its own document instead
- * of adding a second one.
+ * timestamp. Ordered by the millisecond it carries, and **random within that
+ * millisecond** — the bits after the timestamp are random, not a counter, so two
+ * ids made in the same millisecond sort in no particular order. That is enough
+ * for what it is used for: a stable, unique tiebreaker behind loggedAt, so a
+ * cursor never sees the same pair twice and never steps over a record. It is not
+ * a claim about write order inside a millisecond, and nothing here relies on one.
+ *
+ * Known before the write, so a retried write (Messenger redelivering after a
+ * timeout) overwrites its own document instead of adding a second one.
  *
  * @internal the writer assigns record ids; set one yourself with AuditRecord::withId() if you have a natural one
  */

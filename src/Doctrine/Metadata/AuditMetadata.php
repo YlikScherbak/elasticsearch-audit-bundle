@@ -23,6 +23,14 @@ final class AuditMetadata
         public readonly array $alwaysRecorded = [],
         public readonly array $trackedCollections = [],
     ) {
+        // The attribute refused an empty type from the start; the interface did not,
+        // and records went out with objectType: "" — unfilterable, and indistinguishable
+        // from every other type that forgot to name itself. Both declarations arrive
+        // here, so the rule lives here.
+        if ($objectType === '') {
+            throw new \InvalidArgumentException('An audit declaration needs a non-empty object type.');
+        }
+
         foreach ($alwaysRecorded as $field) {
             if (!\array_key_exists($field, $fields)) {
                 throw new \InvalidArgumentException(sprintf('"%s" is listed as always recorded but is not an audited field.', $field));

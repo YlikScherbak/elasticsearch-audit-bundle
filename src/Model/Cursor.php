@@ -17,12 +17,20 @@ use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 final class Cursor
 {
     /**
+     * The shape of what a token carries. A client never looks inside, but the bundle
+     * has to recognise its own older tokens: without a marker, a payload from another
+     * format is read as though it were this one. Version 1 is {"v":1,"s":[...]}; a
+     * bare array is the unversioned form tokens had before, still accepted.
+     */
+    private const VERSION = 1;
+
+    /**
      * @param list<mixed> $sortValues
      */
     public static function encode(array $sortValues): string
     {
         try {
-            $json = json_encode($sortValues, JSON_THROW_ON_ERROR);
+            $json = json_encode(['v' => self::VERSION, 's' => $sortValues], JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
             throw new InvalidQueryException('The sort values of this page cannot be encoded as a cursor: '.$e->getMessage(), 0, $e);
         }
@@ -65,7 +73,25 @@ final class Cursor
             throw self::invalid();
         }
 
-        if (!\is_array($values) || $values === [] || !array_is_list($values)) {
+        if (!\is_array($values)) {
+            throw self::invalid();
+        }
+
+        // The versioned envelope, or the bare array tokens had before it — a client
+        // holding one from yesterday keeps its page.
+        if (\array_key_exists('v', $values)) {
+            if ($values['v'] !== self::VERSION) {
+                throw new InvalidQueryException(sprintf('This cursor token was issued in a newer version (%s) than this bundle understands (%d). Start from the first page.', \is_scalar($values['v']) ? (string) $values['v'] : get_debug_type($values['v']), self::VERSION));
+            }
+
+            $values = $values['s'] ?? null;
+
+            if (!\is_array($values)) {
+                throw self::invalid();
+            }
+        }
+
+        if ($values === [] || !array_is_list($values)) {
             throw self::invalid();
         }
 
