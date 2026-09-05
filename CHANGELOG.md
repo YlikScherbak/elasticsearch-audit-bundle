@@ -6,6 +6,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 On the `0.x` line every minor may change the API; `^0.1` does not pull in `0.2`.
 
+## [Unreleased]
+
+The API takes the shape it will freeze in: what a field-tested integration had to build around
+the bundle now lives in it.
+
+### Added
+- **`narrow*()` and `matchNothing()`: the extension family that cannot widen.** A
+  QueryExtension almost always means "of what was asked for, only what this viewer may see" —
+  and `with*()` REPLACES, so the natural `withObjectIds(...$visible)` threw away the id the
+  client asked about and silently widened the result (a field integration shipped that bug: a
+  filter answered with every user of the viewer's countries). `narrowObjectIds()`,
+  `narrowActors()` and `narrowIn()` intersect instead, and an empty intersection becomes
+  `matchNothing()`: the reader answers an empty page with **no request**, replacing the made-up
+  ids (`'-'`, `-1`) applications typed to fit each field's mapping. Nothing is **sticky** — once
+  an extension says "none of it", no later filter in the chain reopens the answer
+- **`whereExists()`, `whereNotExists()`, `whereBetween()`.** term/terms was all a filter could
+  say; "records that do not have the field" — what a backfill hunts — meant going around the
+  bundle with a bare client. Filters are carried as `Filter` value objects, a shape the kinds
+  can grow in without changing the map's type again
+- **`AuditReader::raw()`: the escape hatch that keeps the guarantees.** Aggregations ("who
+  changed this most", "events by type") need a body `find()` cannot say. `raw($query, $body)`
+  runs the QueryExtensions, puts the query's filters on the request as a boundary the body's own
+  `query` can narrow but not widen, routes to the query's index — and hands back the raw
+  response. Over a query that matches nothing it answers hits and **no `aggregations` key** (an
+  empty bucket list cannot be invented without knowing the aggregation), so read those with
+  `?? []` — said in the docblock, the README example and a test, because the case shows up
+  exactly when a viewer may see nothing
+- **`audit:index:sync`: the command audit:check was pointing at but did not have.** "exists but
+  lacks mapping for: orderCountry" now has an answer that works: sync adds exactly the missing
+  fields (a nested one travels as a partial parent the cluster merges — proven live) and refuses
+  to touch anything mapped otherwise than declared, because a changed type is a reindex.
+  `GatewayInterface` grew `putMapping()` and `settings()` for it
+- **`audit:check` compares the two result windows.** `reader.max_result_window` and the index's
+  own `index.max_result_window` must move together; apart, the drift surfaces as a refused deep
+  page in production. The check reads the live setting per concrete index (an alias can stand
+  for several) and fails by name
+
+### Changed
+- **`AuditQuery::$filters` holds `Filter` objects** instead of bare scalars-or-lists — see
+  Upgrading. A filter's kind is the `FilterKind` enum, so a kind the translation cannot render
+  is unconstructable rather than a `default` arm nobody would notice missing
+- **A decorator's `extra` outranks a stored attribute in `AuditEntry::toArray()`.** Extra is
+  read-side enrichment (a country code decorated into its name), and toArray() is the read-side
+  shape; the old order made such a decorator silently change nothing. Base fields still yield to
+  neither; `toDocument()` is the stored shape and never sees extra — the difference between the
+  two methods is deliberate and now documented on both
+- **`FrameBuffer` accepts any `ValueComparatorInterface`**, so the chain can be decorated or a
+  single link injected. Its close-time question falls back to the plain comparison on a null
+  ("no opinion") answer, like every other consumer of the interface — the concrete type was
+  quietly load-bearing there
+- The write path resolves an index through the whole record (`IndexResolver::resolveFor()`,
+  internal), so a time-based routing strategy stays an additive change; rotation that must work
+  today is a write alias with ILM rollover, as the README's retention section shows
+
+### Upgrading
+- Code that read `$query->filters` directly — the intersection helpers this release absorbs —
+  finds `Filter` value objects there now (`kind` — a `FilterKind` enum — plus `value`, `values`, `from`, `to`). Extensions
+  should not need the map at all any more: `narrowIn()` is the intersection, done right
+- A custom `GatewayInterface` implementation must add `putMapping()` and `settings()`
+- A decorator's `extra` entry named like a stored attribute now shows up in `toArray()` output
+  where the attribute used to. If you relied on the stored value winning, rename the extra key
+- Sentinel "match nobody" values (`'-'`, `-1`) keep working — they are ordinary values nobody
+  has — but `matchNothing()` says it without knowing the field's mapping, skips the request, and
+  survives the field changing type
+
 ## [0.11.1] - 2026-09-03
 
 What the first day of field testing found: a change set that dies under a nested flush, and the

@@ -6,6 +6,8 @@ namespace Borsche\ElasticsearchAuditBundle\Reader;
 
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
+use Borsche\ElasticsearchAuditBundle\Model\Filter;
+use Borsche\ElasticsearchAuditBundle\Model\FilterKind;
 
 /**
  * Translates an AuditQuery into an Elasticsearch request body.
@@ -60,12 +62,19 @@ final class QueryBuilder
             $filter[] = ['range' => ['loggedAt' => $range]];
         }
 
-        foreach ($query->filters as $attribute => $value) {
-            $filter[] = \is_array($value) ? self::termOrTerms($attribute, $value) : ['term' => [$attribute => $value]];
+        foreach ($query->filters as $attribute => $condition) {
+            $filter[] = self::clause((string) $attribute, $condition);
         }
 
         $body = [
-            'query' => $filter === [] ? ['match_all' => new \stdClass()] : ['bool' => ['filter' => $filter]],
+            // A query known to match nothing is answered by AuditReader without a
+            // request; anything else building the body (raw(), a future caller) still
+            // must not turn "known empty" back into a real search.
+            'query' => match (true) {
+                $query->matchesNothing() => ['match_none' => new \stdClass()],
+                $filter === [] => ['match_all' => new \stdClass()],
+                default => ['bool' => ['filter' => $filter]],
+            },
             'sort' => array_values(array_filter([
                 ['loggedAt' => $query->sort],
                 ['id' => ['order' => $query->sort, 'unmapped_type' => 'keyword']],
@@ -88,6 +97,20 @@ final class QueryBuilder
         }
 
         return $body;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function clause(string $field, Filter $filter): array
+    {
+        return match ($filter->kind) {
+            FilterKind::Is => ['term' => [$field => $filter->value]],
+            FilterKind::In => self::termOrTerms($field, $filter->values),
+            FilterKind::Exists => ['exists' => ['field' => $field]],
+            FilterKind::Missing => ['bool' => ['must_not' => [['exists' => ['field' => $field]]]]],
+            FilterKind::Between => ['range' => [$field => array_filter(['gte' => $filter->from, 'lte' => $filter->to], static fn (int|float|string|null $bound) => $bound !== null)]],
+        };
     }
 
     /**

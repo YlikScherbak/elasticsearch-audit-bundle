@@ -247,7 +247,7 @@ final class AuditWriter
                     continue; // vetoed
                 }
 
-                $items[] = ['index' => $this->indexResolver->resolve($prepared->objectType), 'document' => $prepared->toDocument(), 'id' => $prepared->id];
+                $items[] = ['index' => $this->indexResolver->resolveFor($prepared), 'document' => $prepared->toDocument(), 'id' => $prepared->id];
                 $sent[] = $prepared;
             } catch (\Throwable $e) {
                 $this->reportFailure($e, $record);
@@ -304,7 +304,7 @@ final class AuditWriter
             return; // vetoed
         }
 
-        $index = $this->indexResolver->resolve($prepared->objectType);
+        $index = $this->indexResolver->resolveFor($prepared);
         $transport = $immediately ? $this->immediateTransport : $this->transport;
 
         $transport->send($index, $prepared->toDocument(), $prepared->id);

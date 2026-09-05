@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Model;
 
 use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
+use Borsche\ElasticsearchAuditBundle\Model\Filter;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -19,7 +20,7 @@ final class AuditQueryTest extends TestCase
         self::assertSame([], $base->objectIds);
         self::assertSame([1, 2], $filtered->objectIds);
         self::assertSame(['update'], $filtered->events);
-        self::assertSame(['salesType' => 3], $filtered->filters);
+        self::assertEquals(['salesType' => Filter::is(3)], $filtered->filters);
         self::assertSame('UA', $filtered->option('country'));
         self::assertTrue($filtered->hasOption('country'));
         self::assertNull($filtered->option('missing'));
@@ -32,7 +33,7 @@ final class AuditQueryTest extends TestCase
             ->whereIn('country', ['UA'])->whereIn('country', ['PL', 'DE'])
             ->withOption('mine', false)->withOption('mine', true);
 
-        self::assertSame(['salesType' => 5, 'country' => ['PL', 'DE']], $query->filters);
+        self::assertEquals(['salesType' => Filter::is(5), 'country' => Filter::in(['PL', 'DE'])], $query->filters);
         self::assertTrue($query->option('mine'));
     }
 
@@ -120,7 +121,7 @@ final class AuditQueryTest extends TestCase
         // Elasticsearch caps a terms query at index.max_terms_count (65 536 by default);
         // past it the cluster refuses the whole search one round trip later. The
         // boundary answers now, by name, and 65 536 itself still passes.
-        self::assertCount(65536, AuditQuery::for('order')->whereIn('salesType', range(1, 65536))->filters['salesType']);
+        self::assertCount(65536, AuditQuery::for('order')->whereIn('salesType', range(1, 65536))->filters['salesType']->values);
 
         $this->expectException(InvalidQueryException::class);
         $this->expectExceptionMessage('65537 values for "salesType" is past what one terms query accepts');

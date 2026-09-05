@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Coalescing;
 
+use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
@@ -53,7 +54,7 @@ final class FrameBuffer
      * @param bool         $throwOnOverflow  refuse the operation instead of releasing early
      */
     public function __construct(
-        private readonly ValueComparator $comparator = new ValueComparator(),
+        private readonly ValueComparatorInterface $comparator = new ValueComparator(),
         private readonly array $objectTypes = [],
         private readonly int $maxHeld = 10_000,
         private readonly bool $enabled = true,
@@ -302,7 +303,11 @@ final class FrameBuffer
                 continue;
             }
 
-            if ($this->comparator->equals($record->objectType, $field, $pair->old, $pair->new)) {
+            // The interface answers ?bool, and null is "no opinion", not "never
+            // differed": the fallback is the same one every consumer of a comparator
+            // applies (see ChangeSetBuilder), so one injected link behaves like the
+            // full chain would.
+            if ($this->comparator->equals($record->objectType, $field, $pair->old, $pair->new) ?? ValueComparator::same($pair->old, $pair->new)) {
                 if (isset($moved[$field])) {
                     continue; // went somewhere and came back: the noise coalescing exists to remove
                 }

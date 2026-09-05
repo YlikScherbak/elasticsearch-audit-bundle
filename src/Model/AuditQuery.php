@@ -10,9 +10,15 @@ use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
  * What to read from the history. Immutable; every with*() returns a copy.
  *
  * Filters on the base fields have named methods; attributes added by enrichers
- * are filtered with where()/whereIn(). Options carry application-specific
+ * are filtered with the where*() family. Options carry application-specific
  * parameters (a country, a "mine only" flag) that a QueryExtension turns into
  * real filters — the bundle itself never looks at them.
+ *
+ * with*() and where*() REPLACE an earlier filter of the same name: they are for
+ * building the query. A QueryExtension almost always means "of what was asked
+ * for, only what this viewer may see" — that is narrow*(), which INTERSECTS, and
+ * whose empty intersection is an answer (matchNothing(), a page of nothing that
+ * costs no request) rather than a filter that quietly widened the result.
  *
  * Paging is either page/limit (simple, capped by Elasticsearch at 10 000 rows
  * deep) or searchAfter (cursor-style, unlimited) — see AuditPage::nextCursor().
@@ -37,9 +43,10 @@ final class AuditQuery
      * @param list<string>                                $events
      * @param list<string>                                $actors
      * @param list<string>                                $ids
-     * @param array<string, scalar|list<scalar>>          $filters attribute => value(s)
+     * @param array<string, Filter>                       $filters attribute => condition
      * @param array<string, mixed>                        $options
      * @param list<mixed>|null                            $searchAfter
+     * @param bool                                        $nothing the query is known to match nothing — see matchNothing()
      */
     private function __construct(
         public readonly ?string $objectType = null,
@@ -55,6 +62,7 @@ final class AuditQuery
         public readonly int $page = 1,
         public readonly int $limit = 20,
         public readonly ?array $searchAfter = null,
+        public readonly bool $nothing = false,
     ) {
     }
 
@@ -118,7 +126,7 @@ final class AuditQuery
             throw new InvalidQueryException('The "from" date is after the "to" date.');
         }
 
-        return new self($this->objectType, $this->objectIds, $this->events, $this->actors, $this->ids, $from, $to, $this->filters, $this->options, $this->sort, $this->page, $this->limit, $this->searchAfter);
+        return new self($this->objectType, $this->objectIds, $this->events, $this->actors, $this->ids, $from, $to, $this->filters, $this->options, $this->sort, $this->page, $this->limit, $this->searchAfter, $this->nothing);
     }
 
     public function since(\DateTimeInterface $from): self
@@ -133,14 +141,15 @@ final class AuditQuery
 
     /**
      * Exact match on an attribute added by an enricher (a keyword, integer, boolean...).
-     * Repeating an attribute replaces the earlier value, so a QueryExtension can narrow
-     * a filter the application already set.
+     * Repeating an attribute REPLACES the earlier value — this builds the query. An
+     * extension that means "only what this viewer may see" wants narrowIn(), whose
+     * replacement cannot widen.
      */
     public function where(string $attribute, bool|int|float|string $value): self
     {
         self::attributeName($attribute);
 
-        return $this->with(filters: array_replace($this->filters, [$attribute => $value]));
+        return $this->withFilter($attribute, Filter::is($value));
     }
 
     /**
@@ -150,15 +159,131 @@ final class AuditQuery
     {
         self::attributeName($attribute);
 
-        foreach ($values as $value) {
-            // where() refuses one at the boundary; this used to let an array through to
-            // Elasticsearch and report the mistake in its words, one round trip later.
-            if (!\is_scalar($value)) {
-                throw new InvalidQueryException(sprintf('A value to filter "%s" by is a %s; only strings, numbers and booleans can be.', $attribute, get_debug_type($value)));
-            }
+        return $this->withFilter($attribute, Filter::in(self::scalars($attribute, $values)));
+    }
+
+    /**
+     * Only records that have the attribute. A field written as null does not count as
+     * present — this follows Elasticsearch's own exists query.
+     */
+    public function whereExists(string $attribute): self
+    {
+        self::attributeName($attribute);
+
+        return $this->withFilter($attribute, Filter::exists());
+    }
+
+    /**
+     * Only records that do not have the attribute — the ones written before an
+     * enricher started adding it, which is what a backfill goes looking for.
+     */
+    public function whereNotExists(string $attribute): self
+    {
+        self::attributeName($attribute);
+
+        return $this->withFilter($attribute, Filter::missing());
+    }
+
+    /**
+     * Inclusive range on an attribute; either bound may be null for a half-open one.
+     * A date bound is matched the way the writer stores dates (UTC, index format).
+     */
+    public function whereBetween(string $attribute, int|float|string|\DateTimeInterface|null $from, int|float|string|\DateTimeInterface|null $to): self
+    {
+        self::attributeName($attribute);
+
+        return $this->withFilter($attribute, Filter::between($from, $to));
+    }
+
+    /**
+     * Of the object ids already asked for, only these — the intersection, where
+     * withObjectIds() would replace. For QueryExtensions: a visibility boundary that
+     * turns out disjoint from the client's request answers with matchNothing(), never
+     * with more than was asked. Values compare the way Elasticsearch matches them:
+     * "5" and 5 are the same id.
+     */
+    public function narrowObjectIds(int|string ...$ids): self
+    {
+        $ids = self::nonEmpty(array_values($ids), 'object ids');
+
+        if ($this->objectIds === []) {
+            return $this->with(objectIds: $ids);
         }
 
-        return $this->with(filters: array_replace($this->filters, [$attribute => self::nonEmpty(array_values($values), sprintf('values for "%s"', $attribute))]));
+        $kept = array_values(array_intersect($this->objectIds, $ids));
+
+        return $kept === [] ? $this->matchNothing() : $this->with(objectIds: $kept);
+    }
+
+    /**
+     * The same intersection for actors.
+     */
+    public function narrowActors(string ...$actors): self
+    {
+        $actors = self::nonEmpty(array_values($actors), 'actors');
+
+        if ($this->actors === []) {
+            return $this->with(actors: $actors);
+        }
+
+        $kept = array_values(array_intersect($this->actors, $actors));
+
+        return $kept === [] ? $this->matchNothing() : $this->with(actors: $kept);
+    }
+
+    /**
+     * The same intersection for an attribute: of the values already allowed, only
+     * these. Over exists() the list simply stands (a record with one of the values has
+     * the field); over missing() nothing can match; a range cannot be narrowed by a
+     * list and is refused.
+     *
+     * @param list<scalar> $values
+     */
+    public function narrowIn(string $attribute, array $values): self
+    {
+        self::attributeName($attribute);
+        $values = self::scalars($attribute, $values);
+        $current = $this->filters[$attribute] ?? null;
+
+        if ($current === null || $current->kind === FilterKind::Exists) {
+            return $this->withFilter($attribute, Filter::in($values));
+        }
+
+        if ($current->kind === FilterKind::Missing) {
+            return $this->matchNothing(); // no value and one of these values at once
+        }
+
+        if ($current->kind === FilterKind::Is) {
+            // The same comparison array_intersect() uses below: by string, the way
+            // Elasticsearch matches "5" against a numeric field.
+            return \in_array((string) $current->value, array_map(strval(...), $values), true) ? $this : $this->matchNothing();
+        }
+
+        if ($current->kind === FilterKind::In) {
+            $kept = array_values(array_intersect($current->values, $values));
+
+            return $kept === [] ? $this->matchNothing() : $this->withFilter($attribute, Filter::in($kept));
+        }
+
+        throw new InvalidQueryException(sprintf('"%s" is filtered by a range; a list of values cannot narrow it — set the bounds instead.', $attribute));
+    }
+
+    /**
+     * A query known to match nothing: the reader answers it with an empty page and no
+     * request at all. This is what an empty narrow*() intersection becomes — the state
+     * that used to need a made-up id nobody has, typed to fit the field's mapping.
+     *
+     * Sticky by design: once an extension has said "this viewer sees none of it", no
+     * later with*() or narrow*() in the chain may widen the answer back open.
+     */
+    public function matchNothing(): self
+    {
+        return $this->with(nothing: true);
+    }
+
+    public function matchesNothing(): bool
+    {
+        return $this->nothing;
     }
 
     /**
@@ -278,6 +403,30 @@ final class AuditQuery
         return $values;
     }
 
+    private function withFilter(string $attribute, Filter $filter): self
+    {
+        return $this->with(filters: array_replace($this->filters, [$attribute => $filter]));
+    }
+
+    /**
+     * What whereIn()/narrowIn() accept: a non-empty list of scalars, refused at the
+     * boundary rather than one round trip later in Elasticsearch's words.
+     *
+     * @param list<scalar> $values
+     *
+     * @return list<scalar>
+     */
+    private static function scalars(string $attribute, array $values): array
+    {
+        foreach ($values as $value) {
+            if (!\is_scalar($value)) {
+                throw new InvalidQueryException(sprintf('A value to filter "%s" by is a %s; only strings, numbers and booleans can be.', $attribute, get_debug_type($value)));
+            }
+        }
+
+        return self::nonEmpty(array_values($values), sprintf('values for "%s"', $attribute));
+    }
+
     private static function attributeName(string $attribute): void
     {
         if ($attribute === '') {
@@ -293,13 +442,13 @@ final class AuditQuery
      * A copy with the given fields replaced. Dates are handled by between(),
      * since null is a meaningful value for them.
      *
-     * @param list<int|string>|null                   $objectIds
-     * @param list<string>|null                       $events
-     * @param list<string>|null                       $actors
-     * @param list<string>|null                       $ids
-     * @param array<string, scalar|list<scalar>>|null $filters
-     * @param array<string, mixed>|null               $options
-     * @param list<mixed>|null                        $searchAfter
+     * @param list<int|string>|null      $objectIds
+     * @param list<string>|null          $events
+     * @param list<string>|null          $actors
+     * @param list<string>|null          $ids
+     * @param array<string, Filter>|null $filters
+     * @param array<string, mixed>|null  $options
+     * @param list<mixed>|null           $searchAfter
      */
     private function with(
         ?array $objectIds = null,
@@ -312,6 +461,7 @@ final class AuditQuery
         ?int $page = null,
         ?int $limit = null,
         ?array $searchAfter = null,
+        ?bool $nothing = null,
     ): self {
         return new self(
             $this->objectType,
@@ -331,6 +481,10 @@ final class AuditQuery
             // Elasticsearch would accept the stale pair and quietly skip or repeat.
             // after() sets it; everything else keeps it.
             $searchAfter ?? ($page !== null || ($sort !== null && $sort !== $this->sort) ? null : $this->searchAfter),
+            // Nothing is sticky: matchNothing() sets it, and nothing unsets it — a
+            // later filter in an extension chain must not widen what an earlier
+            // extension closed.
+            $nothing ?? $this->nothing,
         );
     }
 }

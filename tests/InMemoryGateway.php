@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
+use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 
 /**
@@ -58,6 +59,40 @@ final class InMemoryGateway implements GatewayInterface
 
         $this->documents[$index][] = $document;
         $this->ids[$index][] = $id;
+    }
+
+    public function putMapping(string $index, array $properties): void
+    {
+        $this->maybeFail(__FUNCTION__);
+
+        if (!isset($this->indices[$index])) {
+            throw IndexNotFoundException::forIndex($index);
+        }
+
+        $current = \is_array($this->indices[$index]['mappings']['properties'] ?? null) ? $this->indices[$index]['mappings']['properties'] : [];
+
+        // What the real cluster does: merging new fields is fine, changing the type of
+        // an existing one is refused.
+        foreach ($properties as $field => $property) {
+            if (isset($current[$field]['type'], $property['type']) && $current[$field]['type'] !== $property['type']) {
+                throw RequestRejectedException::because(400, sprintf('mapper [%s] cannot be changed from type [%s] to [%s]', $field, $current[$field]['type'], $property['type']));
+            }
+        }
+
+        $this->indices[$index]['mappings']['properties'] = array_replace_recursive($current, $properties);
+    }
+
+    public function settings(string $index): array
+    {
+        $this->maybeFail(__FUNCTION__);
+
+        if (!isset($this->indices[$index])) {
+            throw IndexNotFoundException::forIndex($index);
+        }
+
+        $settings = $this->indices[$index]['settings'] ?? [];
+
+        return [$index => \is_array($settings) ? $settings : []];
     }
 
     public function search(string $index, array $body): array

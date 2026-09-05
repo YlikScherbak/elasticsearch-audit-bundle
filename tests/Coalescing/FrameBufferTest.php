@@ -39,6 +39,32 @@ final class FrameBufferTest extends TestCase
         self::assertSame(['fact' => ['old' => 1000, 'new' => 995], 'reserve' => ['old' => 5, 'new' => 6]], $released[0]->toDocument()['changes']);
     }
 
+    public function testASingleComparatorLinkIsEnoughForABuffer(): void
+    {
+        // The buffer takes the interface, and one link legitimately answers null —
+        // "no opinion". The buffer's own question at close ("did this field ever
+        // differ") must then fall back to the plain comparison, like every other
+        // consumer of the interface, instead of reading null as "never differed".
+        $noOpinion = new class implements \Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                return null;
+            }
+        };
+
+        $buffer = new FrameBuffer($noOpinion);
+        $buffer->open();
+        $buffer->hold(self::update(1, ['fact' => new Change(1000, 995), 'status' => new Change('open', 'open')]));
+
+        [$record] = $buffer->close();
+
+        self::assertSame(
+            ['fact' => ['old' => 1000, 'new' => 995], 'status' => ['old' => 'open', 'new' => 'open']],
+            $record->toDocument()['changes'],
+            'the moved field is a change and the still one is context — decided by the fallback, not by a null read as an answer'
+        );
+    }
+
     public function testAFieldThatNeverDifferedIsKeptAsTheRecordsContext(): void
     {
         // What #[Auditable(alwaysRecord: ['status'])] produces: the same value on both

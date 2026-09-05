@@ -84,11 +84,16 @@ Then create the indices:
 
 ```bash
 bin/console audit:index:create   # creates every configured index with its mapping
-bin/console audit:check          # cluster reachable? indices there? every field mapped?
+bin/console audit:index:sync     # adds fields an existing index lacks; never changes what is mapped (since 0.12)
+bin/console audit:check          # cluster reachable? indices there? every field mapped? windows aligned?
 ```
 
 `audit:index:create --dump` prints the mapping instead, for when the index is provisioned by
-other means (Terraform, an ILM policy, a hand-written template).
+other means (Terraform, an ILM policy, a hand-written template). When an enricher grows a field
+*after* the index was created — the usual story behind `audit:check`'s "lacks mapping for" —
+`audit:index:sync` adds exactly the missing fields (a nested one travels as a partial parent the
+cluster merges) and refuses to touch anything mapped otherwise than declared: a changed type is a
+reindex, and no command should pretend it is not.
 
 The index has to exist before the first record: **a write to a missing index is refused**
 (`IndexNotFoundException`, handled by `on_failure` like any other failure) rather than left to
@@ -415,6 +420,9 @@ $page = $this->reader->find(
         ->between($since, $until)                   // when (either side may be null)
         ->where('salesType', 3)                     // any attribute an enricher added
         ->whereIn('warehouseId', [1, 2])
+        ->whereExists('orderCountry')               // has the attribute (since 0.12)
+        ->whereNotExists('legacyRef')               // does not have it — what a backfill looks for
+        ->whereBetween('total', 100, 500)           // inclusive range; either bound may be null
         ->page(2, 50)                               // newest first by default; ->oldestFirst()
 );
 
@@ -448,7 +456,9 @@ cluster answer 400.
 Both are properties of your deployment, not of the bundle. A screen that shows five thousand rows
 at a time needs the first raised; pages beyond the window need the second raised **together with
 the cluster's** `index.max_result_window`, because a `from` deeper than that is a queue of
-`from + size` hits held on every shard:
+`from + size` hits held on every shard. The two windows drifting apart is a bug that surfaces on
+a deep page in production, so `audit:check` compares them (**since 0.12**): an index whose own
+window is below `reader.max_result_window` fails the check by name.
 
 ```yaml
 borsche_elasticsearch_audit:
@@ -527,7 +537,7 @@ final class CountryFilter implements QueryExtensionInterface
 
         $ids = $this->users->idsInCountry($query->option('country'));
 
-        return $query->withActors(...($ids ?: ['-']));   // no operators → match nobody, not everybody
+        return $ids === [] ? $query->matchNothing() : $query->narrowActors(...$ids);
     }
 }
 
@@ -536,9 +546,44 @@ $query = AuditQuery::for('order')->withOption('country', $request->query->get('c
 ```
 
 Because extensions see every query, they are also the place for **visibility rules** — restrict
-to the actors the current user may see, and no endpoint can forget to. Setting an attribute or
-option a second time replaces the first value, so an extension can narrow a filter the
-controller already set.
+to the actors the current user may see, and no endpoint can forget to.
+
+An extension almost always means "of what was asked for, only what this viewer may see", and that
+is **`narrow*()`, not `with*()`** (both **since 0.12**). `with*()` and `where*()` REPLACE a filter
+of the same name — they build the query — so a visibility rule written as
+`withObjectIds(...$visible)` throws away the id the client asked about and silently *widens* the
+result: the one mistake a boundary must not make. `narrowObjectIds()`, `narrowActors()` and
+`narrowIn()` INTERSECT with whatever the query already carries, and an intersection that comes up
+empty becomes `matchNothing()`: the reader answers with an empty page and **no request at all** —
+no more made-up ids (`'-'`, `-1`) typed to fit the field's mapping. `matchNothing()` is sticky by
+design: once one extension has said "none of it", no later filter in the chain can widen the
+answer back open.
+
+### Aggregations and everything else: raw()
+
+"Who changed this object most", "events by type over a month" — ordinary questions a history
+answers with **aggregations**, which `find()` cannot say. `AuditReader::raw($query, $body)`
+(**since 0.12**) is the escape hatch that does not escape the guarantees: the QueryExtensions
+run, the query's filters become the request's boundary (a `query` inside `$body` is kept, nested
+so it can narrow but never widen), and the index is the one the query routes to. The body is
+otherwise yours — `aggs`, `size: 0`, whatever the endpoint needs — and the response comes back
+raw. Without it, the first aggregation reaches for the bare client and quietly loses the
+visibility narrowing.
+
+```php
+$response = $this->reader->raw(
+    AuditQuery::for('order')->withObjectId(42),
+    ['size' => 0, 'aggs' => ['actors' => ['terms' => ['field' => 'source']]]],
+);
+
+$buckets = $response['aggregations']['actors']['buckets'] ?? [];   // ?? [] — see below
+```
+
+Read the aggregations defensively. When an extension closed the query down to
+`matchNothing()`, the reader answers **without a request**, and that answer has hits and no
+`aggregations` key at all — an empty bucket list cannot be invented without knowing which
+aggregation was asked for. Reaching straight for `$response['aggregations'][...]` breaks exactly
+when a viewer is allowed to see nothing, which is the case least likely to be tested.
 
 ### Making a page readable
 
@@ -1021,9 +1066,10 @@ The bundle is on the `0.x` line, where every minor may change the API — but th
 already settled, and this is the part that will carry a stability promise at 1.0:
 
 **Call these**
-`AuditWriter::record()`, `write()`, `writeAll()` · `AuditReader::find()`, `iterate()` ·
+`AuditWriter::record()`, `write()`, `writeAll()` · `AuditReader::find()`, `iterate()`, `raw()` ·
 `AuditFrame::coalesce()`, `begin()`, `end()`, `reset()`, `release()` · the models you build and
-receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditOrigin`, `AuditQuery`, `AuditEntry`, `AuditPage`,
+receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditOrigin`, `AuditQuery`, `Filter`,
+`FilterKind`, `AuditEntry`, `AuditPage`,
 `Cursor`, `BulkResult` · `FailurePolicy` · every exception under `AuditException` · the two PSR-14 events.
 
 **Implement these**

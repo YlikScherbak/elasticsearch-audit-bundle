@@ -201,6 +201,23 @@ final class ElasticsearchGateway implements GatewayInterface
         return $shared ?? [];
     }
 
+    public function putMapping(string $index, array $properties): void
+    {
+        $this->call(fn () => self::answer($this->client->indices()->putMapping(['index' => $index, 'body' => ['properties' => $properties]])), $index);
+    }
+
+    public function settings(string $index): array
+    {
+        $response = $this->call(fn () => self::answer($this->client->indices()->getSettings(['index' => $index]))->asArray(), $index);
+        $settings = [];
+
+        foreach ($response as $concrete => $data) {
+            $settings[$concrete] = \is_array($data['settings']['index'] ?? null) ? $data['settings']['index'] : [];
+        }
+
+        return $settings;
+    }
+
     public function info(): array
     {
         return $this->call(fn () => self::answer($this->client->info())->asArray());

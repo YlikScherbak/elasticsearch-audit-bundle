@@ -110,6 +110,36 @@ interface GatewayInterface
     public function mapping(string $index): array;
 
     /**
+     * Adds fields to an existing index's mapping. Additive by nature: Elasticsearch
+     * itself refuses to change the type of a field that already exists, which is what
+     * makes this safe to run against a live index — a changed type is a reindex, and
+     * the cluster says so instead of quietly rewriting anything.
+     *
+     * @param array<string, array<string, mixed>> $properties field => mapping; an object
+     *                                                        field may carry a partial
+     *                                                        "properties" subtree, which
+     *                                                        the cluster merges
+     *
+     * @throws IndexNotFoundException
+     * @throws RequestRejectedException      a named field exists with another type
+     * @throws TransportUnavailableException
+     */
+    public function putMapping(string $index, array $properties): void;
+
+    /**
+     * The index settings, keyed by concrete index name — an alias can stand for
+     * several, and a setting that must hold (max_result_window, say) has to hold on
+     * every one of them. Values come back as Elasticsearch returns them, often
+     * strings; a setting the index never set is simply absent.
+     *
+     * @return array<string, array<string, mixed>> concrete index => its "index" settings object
+     *
+     * @throws IndexNotFoundException
+     * @throws TransportUnavailableException
+     */
+    public function settings(string $index): array;
+
+    /**
      * @return array<string, mixed> the cluster's root info response (name, version, ...)
      *
      * @throws TransportUnavailableException

@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\NumericNullAsZeroComparator;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
+use Borsche\ElasticsearchAuditBundle\Command\SyncIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
@@ -110,7 +111,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerWriter($config['on_failure'], $config['batch_size'], $container);
         $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
-        $this->registerCommands($container);
+        $this->registerCommands($container, $config['reader']['max_result_window']);
     }
 
     /**
@@ -321,7 +322,7 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
 
-    private function registerCommands(ContainerBuilder $container): void
+    private function registerCommands(ContainerBuilder $container, int $maxResultWindow): void
     {
         if (!class_exists(Command::class)) {
             return;
@@ -334,11 +335,21 @@ final class ElasticsearchAuditExtension extends Extension
             new TaggedIteratorArgument(self::TAG_ENRICHER),
         ]))->addTag('console.command'));
 
+        $container->setDefinition(SyncIndexCommand::class, (new Definition(SyncIndexCommand::class, [
+            new Reference(self::SERVICE_GATEWAY),
+            new Reference(self::SERVICE_INDEX_RESOLVER),
+            new Reference(self::SERVICE_INDEX_DEFINITION),
+            new TaggedIteratorArgument(self::TAG_ENRICHER),
+        ]))->addTag('console.command'));
+
         $container->setDefinition(CheckCommand::class, (new Definition(CheckCommand::class, [
             new Reference(self::SERVICE_GATEWAY),
             new Reference(self::SERVICE_INDEX_RESOLVER),
             new Reference(self::SERVICE_INDEX_DEFINITION),
             new TaggedIteratorArgument(self::TAG_ENRICHER),
+            // reader.max_result_window: the check owns the comparison with each
+            // index's own window, because the two must move together.
+            $maxResultWindow,
         ]))->addTag('console.command'));
     }
 }

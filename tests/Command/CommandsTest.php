@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Command;
 
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
+use Borsche\ElasticsearchAuditBundle\Command\SyncIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -163,6 +164,88 @@ final class CommandsTest extends TestCase
         (new CommandTester(new CreateIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->nestedEnricher()])))->execute([]);
 
         $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->nestedEnricher()]));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]), $tester->getDisplay());
+    }
+
+    public function testSyncAddsTheFieldsAnIndexLacks(): void
+    {
+        // The index was created before the enricher existed — the story audit:check
+        // tells with "lacks mapping for" — and sync is the command that acts on it.
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->enricher()]));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+        self::assertStringContainsString('audit_log: added mapping for salesType', $tester->getDisplay());
+        self::assertSame(['type' => 'integer'], $this->gateway->indices['audit_log']['mappings']['properties']['salesType']);
+        self::assertSame(['type' => 'integer'], $this->gateway->indices['audit_auth']['mappings']['properties']['salesType']);
+    }
+
+    public function testSyncReachesAFieldInsideAnObject(): void
+    {
+        // context exists, context.city does not: the addition travels as a partial
+        // parent, which Elasticsearch merges without touching context.ip.
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->withProperties(['context' => ['properties' => ['ip' => ['type' => 'ip']]]])->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->withProperties(['context' => ['properties' => ['ip' => ['type' => 'ip'], 'city' => ['type' => 'keyword']]]])->toArray();
+
+        $tester = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->nestedEnricher()]));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+        self::assertStringContainsString('audit_log: added mapping for context.city', $tester->getDisplay());
+        self::assertSame(['type' => 'keyword'], $this->gateway->indices['audit_log']['mappings']['properties']['context']['properties']['city']);
+        self::assertSame(['type' => 'ip'], $this->gateway->indices['audit_log']['mappings']['properties']['context']['properties']['ip'], 'the sibling was not touched');
+        self::assertStringContainsString('audit_auth ok', $tester->getDisplay());
+    }
+
+    public function testSyncRefusesToTouchAFieldMappedDifferently(): void
+    {
+        // A changed type is a reindex, and no command should pretend otherwise. The
+        // missing field on the same index is still added: what can be fixed, is.
+        $drifted = (new IndexDefinition())->toArray();
+        $drifted['mappings']['properties']['loggedAt'] = ['type' => 'text'];
+        $this->gateway->indices['audit_log'] = $drifted;
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->enricher()]));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('loggedAt is text, expected date', $tester->getDisplay());
+        self::assertStringContainsString('reindex', $tester->getDisplay());
+        self::assertSame(['type' => 'integer'], $this->gateway->indices['audit_log']['mappings']['properties']['salesType'], 'the addable field was still added');
+        self::assertSame(['type' => 'text'], $this->gateway->indices['audit_log']['mappings']['properties']['loggedAt'], 'the drifted one was left alone');
+    }
+
+    public function testSyncSendsAMissingIndexToCreate(): void
+    {
+        $tester = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition()));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('audit_log missing — run audit:index:create', $tester->getDisplay());
+    }
+
+    public function testCheckComparesTheIndexWindowAgainstTheReaders(): void
+    {
+        // The two settings must move together: reader.max_result_window promises pages
+        // the index then refuses, and the drift surfaces on a deep page in production.
+        $small = (new IndexDefinition())->withSettings(['max_result_window' => 5000])->toArray();
+        $this->gateway->indices['audit_log'] = $small;
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray(); // no explicit window: Elasticsearch's default 10 000
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [], maxResultWindow: 10_000));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('index.max_result_window (5000) on audit_log is below reader.max_result_window (10000)', $tester->getDisplay());
+        self::assertStringContainsString('audit_auth ok', $tester->getDisplay());
+    }
+
+    public function testCheckIsQuietWhenTheWindowsAgree(): void
+    {
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->withSettings(['max_result_window' => 20_000])->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [], maxResultWindow: 10_000));
 
         self::assertSame(Command::SUCCESS, $tester->execute([]), $tester->getDisplay());
     }

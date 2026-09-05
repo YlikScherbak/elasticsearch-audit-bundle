@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Writer;
 
+use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
+
 /**
  * Decides which index a record goes to: a per-object-type route when configured,
  * the default index otherwise. Lets a chatty type (stock movements, logins) live
@@ -28,6 +30,19 @@ final class IndexResolver
     public function resolve(string $objectType): string
     {
         return $this->routing[$objectType] ?? $this->default;
+    }
+
+    /**
+     * Where this record goes. The writer resolves through the whole record, not just
+     * its type: today the answer only looks at objectType, but the record carries
+     * loggedAt — which is what a time-based routing strategy (monthly indices) will
+     * need, and widening this later would mean rewiring the write path. Reading stays
+     * by type (a query has no record): rotation that must work today is served by a
+     * write alias with ILM rollover — see "Retention" in the README.
+     */
+    public function resolveFor(AuditRecord $record): string
+    {
+        return $this->resolve($record->objectType);
     }
 
     public function default(): string

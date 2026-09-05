@@ -47,6 +47,111 @@ final class AuditReaderTest extends TestCase
         self::assertSame(['status' => ['old' => 'a', 'new' => 'b']], $entry->changes);
     }
 
+    public function testAQueryThatMatchesNothingNeverReachesTheCluster(): void
+    {
+        $page = $this->reader()->find(AuditQuery::for('order')->matchNothing()->page(2, 50));
+
+        self::assertSame([], $this->gateway->searches, 'known emptiness costs no request');
+        self::assertTrue($page->isEmpty());
+        self::assertSame(0, $page->total);
+        self::assertFalse($page->hasMore());
+        self::assertNull($page->nextCursor(), 'and there is no "load more" pointing into the void');
+        self::assertNull($page->nextCursorToken());
+        self::assertSame(2, $page->page, 'the page still answers as the page that was asked for');
+    }
+
+    public function testOneExtensionsNothingSurvivesTheNextExtensionsFilter(): void
+    {
+        // The class of bug narrow*() exists for, at the boundary where it matters: A
+        // said "this viewer sees none of these", B added its own filter after — and an
+        // un-sticky nothing would have quietly reopened the visibility A closed.
+        $a = new class implements QueryExtensionInterface {
+            public function extend(AuditQuery $query): AuditQuery
+            {
+                return $query->narrowObjectIds(90, 91); // viewer's ids; disjoint from the client's
+            }
+        };
+        $b = new class implements QueryExtensionInterface {
+            public function extend(AuditQuery $query): AuditQuery
+            {
+                return $query->withEvents('update')->where('country', 'UA');
+            }
+        };
+
+        $page = $this->reader(extensions: [$a, $b])->find(AuditQuery::for('order')->withObjectIds(1, 2));
+
+        self::assertSame([], $this->gateway->searches);
+        self::assertTrue($page->isEmpty());
+    }
+
+    public function testIterateOverNothingYieldsNothingAndOpensNothing(): void
+    {
+        $entries = iterator_to_array($this->reader()->iterate(AuditQuery::for('order')->matchNothing()), false);
+
+        self::assertSame([], $entries);
+        self::assertSame([], $this->gateway->searches);
+        self::assertSame([], $this->gateway->pointsInTime, 'no view was opened for a traversal of nothing');
+    }
+
+    public function testARawRequestStillWearsTheExtensionsBoundary(): void
+    {
+        // The escape hatch for aggregations — but an escape from find()'s shape, not
+        // from visibility: without this every consumer needing one "who changed it
+        // most" reaches for the bare client and loses the narrowing.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 0], 'hits' => []], 'aggregations' => ['actors' => ['buckets' => []]]];
+
+        $visibility = new class implements QueryExtensionInterface {
+            public function extend(AuditQuery $query): AuditQuery
+            {
+                return $query->narrowActors('u1', 'u2');
+            }
+        };
+
+        $response = $this->reader(extensions: [$visibility])->raw(
+            AuditQuery::for('order'),
+            ['size' => 0, 'aggs' => ['actors' => ['terms' => ['field' => 'source']]]],
+        );
+
+        self::assertArrayHasKey('aggregations', $response);
+
+        $sent = $this->gateway->searches[0]['body'];
+
+        self::assertSame(0, $sent['size'], 'the caller\'s body is the request');
+        self::assertSame(['actors' => ['terms' => ['field' => 'source']]], $sent['aggs']);
+        self::assertContains(['terms' => ['source' => ['u1', 'u2']]], $sent['query']['bool']['filter'], 'and the extension\'s boundary is on it');
+        self::assertContains(['term' => ['objectType' => 'order']], $sent['query']['bool']['filter']);
+    }
+
+    public function testARawBodysOwnQueryIsKeptInsideTheBoundary(): void
+    {
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 0], 'hits' => []]];
+
+        $this->reader()->raw(
+            AuditQuery::for('order')->withActors('u1'),
+            ['query' => ['match' => ['changes.note' => 'refund']], 'size' => 5],
+        );
+
+        $sent = $this->gateway->searches[0]['body']['query'];
+
+        self::assertSame(['match' => ['changes.note' => 'refund']], $sent['bool']['must'][0], 'what the caller asked');
+        self::assertContains(['term' => ['source' => 'u1']], $sent['bool']['filter'][0]['bool']['filter'], 'inside what the query allows');
+    }
+
+    public function testARawRequestOverNothingCostsNothing(): void
+    {
+        $response = $this->reader()->raw(AuditQuery::for('order')->matchNothing(), ['aggs' => ['x' => ['terms' => ['field' => 'event']]]]);
+
+        self::assertSame([], $this->gateway->searches);
+        self::assertSame(['value' => 0, 'relation' => 'eq'], $response['hits']['total']);
+        self::assertSame([], $response['hits']['hits']);
+
+        // Documented, and pinned here because callers write against it: hits and
+        // nothing else. An empty bucket list cannot be synthesised without knowing
+        // which aggregation was asked for, so the answer says nothing rather than
+        // guessing — and the docblock tells callers to read with ?? [].
+        self::assertSame(['hits'], array_keys($response), 'no aggregations key over nothing');
+    }
+
     public function testACorruptTimestampDoesNotBlockThePageItIsOn(): void
     {
         // Written by another tool, mangled by a reindex — the document is bad, but the

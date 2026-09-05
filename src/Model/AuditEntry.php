@@ -102,10 +102,10 @@ final class AuditEntry
     }
 
     /**
-     * The entry in the shape it has in Elasticsearch — "source" for the actor and the
-     * stored timestamp format — for an endpoint that has to keep answering the way the
-     * documents themselves read. toArray() is the other one: "actor", ISO 8601, and
-     * whatever the decorators added under extra.
+     * The entry in the shape it has in Elasticsearch — "source" for the actor, the
+     * stored timestamp format, and no extra: what a decorator added on the read never
+     * pretends to be stored. toArray() is the other one — "actor", ISO 8601, extra
+     * winning over attributes — and the difference between the two is deliberate.
      *
      * @return array<string, mixed>
      */
@@ -125,6 +125,12 @@ final class AuditEntry
     /**
      * A JSON-friendly array: what an API endpoint returns for one line of history.
      *
+     * Extra outranks a stored attribute of the same name — deliberately, and
+     * deliberately only here: extra is read-side enrichment (a decorator turning a
+     * country code into its name), and toArray() is the read-side shape, while
+     * toDocument() is the stored shape and never sees extra at all. Do not "align"
+     * the two methods: their difference is the point. Base fields yield to neither.
+     *
      * @return array<string, mixed>
      */
     public function toArray(): array
@@ -137,6 +143,6 @@ final class AuditEntry
             'loggedAt' => $this->loggedAt->format(\DATE_ATOM),
             'actor' => $this->actor,
             'changes' => $this->changes,
-        ] + $this->attributes + $this->extra;
+        ] + $this->extra + $this->attributes;
     }
 }

@@ -52,6 +52,49 @@ final class QueryBuilderTest extends TestCase
         ], $body['query']['bool']['filter']);
     }
 
+    public function testExistsMissingAndRangeFiltersHaveTheirClauses(): void
+    {
+        // The three shapes term/terms could not say: "has the field", "does not have
+        // it" (a backfill looking for records written before an enricher existed), and
+        // a range over an attribute.
+        $query = AuditQuery::for('order')
+            ->whereExists('orderCountry')
+            ->whereNotExists('legacyRef')
+            ->whereBetween('total', 100, 500);
+
+        $body = (new QueryBuilder())->build($query);
+
+        self::assertSame([
+            ['term' => ['objectType' => 'order']],
+            ['exists' => ['field' => 'orderCountry']],
+            ['bool' => ['must_not' => [['exists' => ['field' => 'legacyRef']]]]],
+            ['range' => ['total' => ['gte' => 100, 'lte' => 500]]],
+        ], $body['query']['bool']['filter']);
+    }
+
+    public function testAnAttributeRangeCanBeHalfOpenAndSpeakDates(): void
+    {
+        $query = AuditQuery::for('order')->whereBetween('paidAt', new \DateTimeImmutable('2026-01-01 00:00:00', new \DateTimeZone('Europe/Kyiv')), null);
+
+        $body = (new QueryBuilder())->build($query);
+
+        self::assertSame(
+            ['range' => ['paidAt' => ['gte' => '2025-12-31 22:00:00']]],
+            $body['query']['bool']['filter'][1],
+            'a date bound is stored the way the writer stores dates: UTC, in the index format'
+        );
+    }
+
+    public function testAQueryThatMatchesNothingSaysSoInItsBody(): void
+    {
+        // Never sent by AuditReader, which answers such a query without a request —
+        // but anything else that builds the body (raw(), a future caller) must not
+        // quietly turn "known empty" back into a real search.
+        $body = (new QueryBuilder())->build(AuditQuery::for('order')->withObjectIds(1)->matchNothing());
+
+        self::assertEquals(['match_none' => new \stdClass()], $body['query']);
+    }
+
     public function testAnOpenDateRangeOnlyHasOneBound(): void
     {
         $body = (new QueryBuilder())->build(AuditQuery::any()->since(new \DateTimeImmutable('2026-01-01 00:00:00', new \DateTimeZone('UTC'))));

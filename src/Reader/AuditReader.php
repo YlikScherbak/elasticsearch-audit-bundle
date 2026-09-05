@@ -51,6 +51,13 @@ final class AuditReader
         $query = $this->extend($query);
         $this->assertWithinLimits($query);
 
+        // Known emptiness — an extension whose visibility boundary is disjoint from
+        // what was asked — is an answer, not a search: an empty page, no request, and
+        // no cursor pointing into the void.
+        if ($query->matchesNothing()) {
+            return new AuditPage([], 0, $query->page, $query->limit, $query->usesCursor(), $this->maxResultWindow, fetched: 0, cursor: []);
+        }
+
         $response = $this->gateway->search($this->indexFor($query), $this->queryBuilder->build($query));
 
         $hits = array_values($response['hits']['hits'] ?? []);
@@ -97,6 +104,10 @@ final class AuditReader
 
         $query = $query->page(1, $batchSize);
         $this->assertWithinLimits($query);
+
+        if ($query->matchesNothing()) {
+            return; // a traversal of nothing: no batches, and no point in time opened for them
+        }
 
         $index = $this->indexFor($query);
 
@@ -146,6 +157,50 @@ final class AuditReader
                 $this->gateway->closePointInTime($pit);
             }
         }
+    }
+
+    /**
+     * The escape hatch: a raw request body — aggregations, a shape find() cannot say —
+     * that still wears everything the reader guarantees. The QueryExtensions run, the
+     * query's filters become the request's boundary, and the index is the one the
+     * query routes to; without this, every consumer needing one "who changed this
+     * most" reaches for the bare client and silently loses the visibility narrowing.
+     *
+     * The body is the caller's: sort, size, aggs travel as given. A "query" the body
+     * carries is kept, wrapped inside the boundary (it can narrow further, never
+     * widen). Decorators do not run — what comes back is Elasticsearch's response,
+     * whose hits need not be audit entries at all.
+     *
+     * A query known to match nothing is answered without a request, and that answer
+     * carries **hits only — no "aggregations" key**: an empty bucket list cannot be
+     * synthesised without knowing which aggregation was asked for. Read the response
+     * defensively (`$response['aggregations']['by']['buckets'] ?? []`), or the code
+     * breaks exactly when a viewer may see nothing.
+     *
+     * @param array<string, mixed> $body
+     *
+     * @return array<string, mixed> the raw response; for a query known to match
+     *                              nothing, an empty hits envelope and nothing else
+     *
+     * @throws InvalidQueryException
+     * @throws IndexNotFoundException
+     * @throws TransportUnavailableException
+     */
+    public function raw(AuditQuery $query, array $body): array
+    {
+        $query = $this->extend($query);
+
+        if ($query->matchesNothing()) {
+            return ['hits' => ['total' => ['value' => 0, 'relation' => 'eq'], 'hits' => []]];
+        }
+
+        $boundary = $this->queryBuilder->build($query)['query'];
+
+        $body['query'] = isset($body['query'])
+            ? ['bool' => ['filter' => [$boundary], 'must' => [$body['query']]]]
+            : $boundary;
+
+        return $this->gateway->search($this->indexFor($query), $body);
     }
 
     /**

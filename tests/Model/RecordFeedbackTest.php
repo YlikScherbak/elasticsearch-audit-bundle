@@ -80,6 +80,21 @@ final class RecordFeedbackTest extends TestCase
         self::assertArrayNotHasKey('source', $array);
     }
 
+    public function testADecoratorsExtraOutranksAStoredAttributeInTheJson(): void
+    {
+        // A decorator replacing an attribute on the way out — a country code with its
+        // name — is read-side enrichment, and toArray() is the read-side shape: extra
+        // wins over the stored value. It silently lost before, and the decorator that
+        // "worked" changed nothing on the screen. Base fields stay unoverridable.
+        $entry = self::entry()->withExtra(['salesType' => 'Retail', 'event' => 'hijacked']);
+
+        $array = $entry->toArray();
+
+        self::assertSame('Retail', $array['salesType'], 'the readable form is what the endpoint answers');
+        self::assertSame('update', $array['event'], 'a base field cannot be overridden from extra');
+        self::assertSame(2, $entry->toDocument()['salesType'], 'toDocument() is the stored shape and never sees extra');
+    }
+
     public function testADecoratorCanRewriteTheChangesThemselves(): void
     {
         $entry = self::entry();

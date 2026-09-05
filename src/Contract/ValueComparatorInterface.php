@@ -16,6 +16,13 @@ namespace Borsche\ElasticsearchAuditBundle\Contract;
 interface ValueComparatorInterface
 {
     /**
+     * null is "no opinion", never an answer: every consumer of the interface falls
+     * back to the plain comparison (ValueComparator::same()) when it gets one. The
+     * chain the bundle wires (ValueComparator) narrows the return to bool because it
+     * ends in that fallback itself — a single link handed in where the chain usually
+     * goes must behave the same, which is why the consumers apply the fallback rather
+     * than trust the narrower type.
+     *
      * @return bool|null true/false when this comparator has an opinion about $field, null to defer
      */
     public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool;

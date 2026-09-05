@@ -14,7 +14,7 @@ namespace Borsche\ElasticsearchAuditBundle\Exception;
  */
 final class RequestRejectedException extends \RuntimeException implements AuditException
 {
-    public static function because(int $status, string $reason, \Throwable $previous): self
+    public static function because(int $status, string $reason, ?\Throwable $previous = null): self
     {
         return new self(sprintf('Elasticsearch rejected the request (HTTP %d): %s', $status, $reason), $status, $previous);
     }

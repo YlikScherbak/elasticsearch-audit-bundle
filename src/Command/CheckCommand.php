@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
+use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -32,12 +33,16 @@ final class CheckCommand extends Command
 {
     /**
      * @param iterable<AuditEnricherInterface> $enrichers
+     * @param int                              $maxResultWindow reader.max_result_window — checked against
+     *                                                          every index's own, because the two must
+     *                                                          move together or a deep page is refused
      */
     public function __construct(
         private readonly GatewayInterface $gateway,
         private readonly IndexResolver $indexResolver,
         private readonly IndexDefinition $definition,
         private readonly iterable $enrichers = [],
+        private readonly int $maxResultWindow = AuditQuery::DEFAULT_MAX_WINDOW,
     ) {
         parent::__construct();
     }
@@ -82,86 +87,50 @@ final class CheckCommand extends Command
             return false;
         }
 
-        $missing = [];
-        $mismatched = [];
-        self::compare('', $expected, $this->gateway->mapping($index), $missing, $mismatched);
+        $diff = MappingComparison::between($expected, $this->gateway->mapping($index));
+        $drift = $this->windowDrift($index);
 
-        if ($missing === [] && $mismatched === []) {
+        if ($diff->clean() && $drift === []) {
             $io->text(sprintf('<info>%s</info> ok', $index));
 
             return true;
         }
 
-        if ($missing !== []) {
-            $io->text(sprintf('<comment>%s</comment> exists but lacks mapping for: %s', $index, implode(', ', $missing)));
+        if ($diff->missing !== []) {
+            $io->text(sprintf('<comment>%s</comment> exists but lacks mapping for: %s — run audit:index:sync to add it', $index, implode(', ', $diff->missing)));
         }
 
-        if ($mismatched !== []) {
-            $io->text(sprintf('<error>%s</error> is mapped differently (reindex needed): %s', $index, implode('; ', $mismatched)));
+        if ($diff->mismatched !== []) {
+            $io->text(sprintf('<error>%s</error> is mapped differently (reindex needed): %s', $index, implode('; ', $diff->mismatched)));
+        }
+
+        foreach ($drift as $line) {
+            $io->text(sprintf('<error>%s</error>: %s', $index, $line));
         }
 
         return false;
     }
 
     /**
-     * Whatever the definition declares has to hold in the index: the type, the options
-     * behind it, and the fields inside an object. A date whose format drifted refuses
-     * every document the writer sends, and a nested field that was never mapped filters
-     * to nothing — both fail exactly like a wrong top-level type, and neither is visible
-     * to a comparison that stops at the type.
+     * reader.max_result_window promises pages the index then has to serve: an index
+     * whose own window is lower refuses them, and the drift surfaces on a deep page in
+     * production. Checked per concrete index — an alias can stand for several.
      *
-     * The walk is one-directional: an option the index has and the definition never
-     * named is an Elasticsearch default, not drift.
-     *
-     * @param array<string, array<string, mixed>> $expected
-     * @param array<string, mixed>                $actual
-     * @param list<string>                        $missing
-     * @param list<string>                        $mismatched
+     * @return list<string>
      */
-    private static function compare(string $prefix, array $expected, array $actual, array &$missing, array &$mismatched): void
+    private function windowDrift(string $index): array
     {
-        foreach ($expected as $field => $property) {
-            $path = $prefix.$field;
+        $drift = [];
 
-            if (!\is_array($actual[$field] ?? null)) {
-                $missing[] = $path;
+        foreach ($this->gateway->settings($index) as $concrete => $settings) {
+            $window = (int) ($settings['max_result_window'] ?? AuditQuery::DEFAULT_MAX_WINDOW);
 
-                continue;
-            }
-
-            $found = $actual[$field];
-
-            // An object needs no "type" in the mapping — a field holding properties and
-            // nothing else is an object on both sides of the comparison.
-            $expectedType = $property['type'] ?? (isset($property['properties']) ? 'object' : null);
-            $actualType = $found['type'] ?? (isset($found['properties']) ? 'object' : null);
-
-            if ($expectedType !== null && $actualType !== $expectedType) {
-                $mismatched[] = sprintf('%s is %s, expected %s', $path, $actualType ?? 'an object', $expectedType);
-
-                continue; // under a wrong type, every option is noise
-            }
-
-            foreach ($property as $option => $value) {
-                if ($option === 'type' || $option === 'properties') {
-                    continue;
-                }
-
-                if (!\array_key_exists($option, $found)) {
-                    $mismatched[] = sprintf('%s %s is not set, expected %s', $path, $option, self::describe($value));
-                } elseif ($found[$option] !== $value) {
-                    $mismatched[] = sprintf('%s %s is %s, expected %s', $path, $option, self::describe($found[$option]), self::describe($value));
-                }
-            }
-
-            if (\is_array($property['properties'] ?? null)) {
-                self::compare($path.'.', $property['properties'], \is_array($found['properties'] ?? null) ? $found['properties'] : [], $missing, $mismatched);
+            if ($window < $this->maxResultWindow) {
+                $drift[] = sprintf('index.max_result_window (%d) on %s is below reader.max_result_window (%d) — a page past row %d will be refused: raise the index setting, or lower the reader\'s to match', $window, $concrete, $this->maxResultWindow, $window);
             }
         }
+
+        return $drift;
     }
 
-    private static function describe(mixed $value): string
-    {
-        return \is_string($value) ? '"'.$value.'"' : json_encode($value, \JSON_THROW_ON_ERROR);
-    }
 }
