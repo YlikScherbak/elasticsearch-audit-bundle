@@ -21,7 +21,10 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
  * something unusable (a 5xx, a 429 — backpressure counts as "ask again", not as a
  * refusal — a response that cannot be read), and {@see NotConfiguredException} when
  * the client was built for asynchronous responses, which this bundle does not
- * support. What each method lists below is what is specific to it.
+ * support. What each method lists below is what is specific to it — plus, on the two
+ * write methods, the transport failure itself: the Messenger handlers catch it by name
+ * to cut the chain before Symfony stores it, and a caller cannot be asked to know that
+ * from a paragraph.
  */
 interface GatewayInterface
 {
@@ -31,8 +34,9 @@ interface GatewayInterface
      *
      * @param array<string, mixed> $document
      *
-     * @throws IndexNotFoundException   the index does not exist — nothing was written
-     * @throws RequestRejectedException Elasticsearch refused the document (it does not fit the mapping, say)
+     * @throws IndexNotFoundException        the index does not exist — nothing was written
+     * @throws RequestRejectedException      Elasticsearch refused the document (it does not fit the mapping, say)
+     * @throws TransportUnavailableException the cluster could not be reached, or asked for the write again
      */
     public function index(string $index, array $document, ?string $id = null, bool $refresh = false): void;
 
@@ -59,10 +63,12 @@ interface GatewayInterface
      *
      * @param list<array{index: string, document: array<string, mixed>, id: string}> $items
      *
-     * @throws \InvalidArgumentException an item has no id, so the batch cannot be retried safely
-     * @throws IndexNotFoundException   one of the indices does not exist — nothing was written
-     * @throws RequestRejectedException the cluster refused the request as a whole (the per-document
-     *                                  refusals are in the result instead)
+     * @throws \InvalidArgumentException     an item has no id, so the batch cannot be retried safely
+     * @throws IndexNotFoundException        one of the indices does not exist — nothing was written
+     * @throws RequestRejectedException      the cluster refused the request as a whole (the per-document
+     *                                       refusals are in the result instead)
+     * @throws TransportUnavailableException the cluster could not be reached, or answered something
+     *                                       that cannot be matched to the documents that were sent
      */
     public function bulk(array $items): BulkResult;
 

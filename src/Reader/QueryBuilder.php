@@ -67,6 +67,20 @@ final class QueryBuilder
                 throw new InvalidQueryException(sprintf('This cursor token carries %d sort value(s) and this query sorts by %d. The token was issued for a different sort — by an older version of the bundle, or by a consistent read — so it cannot be continued here: start from the first page.', \count($searchAfter), \count($body['sort'])));
             }
 
+            // The count no longer separates the two shapes: a plain search ends its sort
+            // with _index and a point-in-time read with _shard_doc, and both tuples are
+            // the same length. What still separates them is the value — an index name is
+            // a string, a shard-doc position is an integer — and a tuple from a
+            // traversal (AuditEntry::$sort, which is public, handed to after()) would
+            // otherwise be a valid-looking position in a search it does not belong to.
+            $last = $searchAfter[array_key_last($searchAfter)];
+
+            if ($pointInTime !== \is_int($last)) {
+                throw new InvalidQueryException($pointInTime
+                    ? 'This cursor ends with an index name, so it came from an ordinary search, and a point-in-time read sorts by a position inside its own view instead. The two cannot be continued into each other: start the traversal without a cursor.'
+                    : 'This cursor ends with a position inside a point in time (_shard_doc), which exists only inside the view iterate() opened and means nothing in an ordinary search. Page with the token AuditPage::nextCursorToken() gives you, or start from the first page.');
+            }
+
             $body['search_after'] = $searchAfter;
         } else {
             $body['from'] = $query->offset();

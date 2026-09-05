@@ -472,21 +472,9 @@ final class ElasticsearchGateway implements GatewayInterface
             return RequestRejectedException::withoutValuePreview($reason);
         }
 
-        if (!\is_string($type) || $type === '') {
-            return 'the cluster gave no error type anyone can read';
-        }
-
-        // The field name is worth keeping and safe to keep: it is a name the application
-        // chose, not a value a record carried. Lifted out rather than left in — and that
-        // is the whole difference from the regex this replaced. That one cut a known
-        // phrase away and passed the rest on, so an unfamiliar wording carried the value
-        // through; this takes one recognised fragment and passes nothing else, so a
-        // wording it does not know costs a field name and leaks nothing.
-        $field = \is_string($reason) && preg_match('~\bfield \[([^\]]{1,128})\]~', $reason, $found) === 1 ? $found[1] : null;
-
-        // Without the status: the callers put that in front of this.
-        return $field === null
-            ? sprintf('%s. Its own wording is not repeated, because a refused document is quoted in it — read the previous exception, or set redact.failure_details to "full".', $type)
-            : sprintf('%s on field "%s". The cluster\'s own wording is not repeated, because a refused document is quoted in it — read the previous exception, or set redact.failure_details to "full".', $type, $field);
+        // Without the status: the callers put that in front of this. The same words a
+        // refused bulk item gets, from the same place — the two paths described one
+        // refusal differently until now, and the weaker description was the boundary.
+        return DocumentRefusal::describe($type, $reason) ?? 'the cluster gave no error type anyone can read';
     }
 }

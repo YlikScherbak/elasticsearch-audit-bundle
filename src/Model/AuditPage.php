@@ -113,11 +113,21 @@ final class AuditPage
     {
         $cursor = $this->nextCursor();
 
+        if ($cursor === null) {
+            return null;
+        }
+
         // The token carries which query produced it. Continuing it on another one is not
         // a mistake Elasticsearch can see — the sort tuple has the right shape, so it
         // answers with what follows that position in whatever set is being searched, and
-        // everything before it is quietly missing.
-        return $cursor === null ? null : Cursor::encode($cursor, $this->query);
+        // everything before it is quietly missing. A page assembled by hand does not know
+        // which query that was, so it cannot hand out a token: nextCursor() and after()
+        // are the way to continue one of those.
+        if ($this->query === null) {
+            throw new \LogicException('This page was not produced by AuditReader::find(), so it does not know which query it is a page of, and a cursor token that cannot name its query is one nothing can check when it comes back. Use nextCursor() with AuditQuery::after(), or build the page with the reader.');
+        }
+
+        return Cursor::encode($cursor, $this->query);
     }
 
     /**

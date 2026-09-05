@@ -6,11 +6,14 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Transport;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\BulkResult;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
+use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\ErrorHandler\Exception\FlattenException;
 
@@ -59,26 +62,124 @@ final class HandlerBoundaryTest extends TestCase
     }
 
     /**
+     * @return iterable<string, array{\Closure(): GatewayInterface}>
+     */
+    public static function failuresThatAreRetried(): iterable
+    {
+        // Both leave a handler as themselves, on purpose: a busy cluster and an index
+        // caught mid-rollover are asked again rather than sent to the failure transport,
+        // and a record must not be lost for arriving during a bad minute. Retries end,
+        // though, and what Symfony keeps then is the whole flattened chain.
+        yield 'the cluster could not be reached' => [static fn (): GatewayInterface => self::unreachable()];
+        yield 'the index was not there' => [static fn (): GatewayInterface => self::missingIndex()];
+    }
+
+    /**
+     * @param \Closure(): GatewayInterface $gateway
+     */
+    #[DataProvider('failuresThatAreRetried')]
+    public function testARetriedFailureDoesNotCarryTheClustersAnswerIntoTheFailureTransport(\Closure $gateway): void
+    {
+        try {
+            (new IndexAuditRecordHandler($gateway()))(new IndexAuditRecord('audit_log', ['objectType' => 'user'], 'a'));
+            self::fail('the handler should have failed');
+        } catch (\Throwable $thrown) {
+            self::assertStringNotContainsString(self::SECRET, self::everythingSymfonyWouldKeep($thrown));
+            self::assertNull($thrown->getPrevious(), 'and nothing behind it for a flattener to walk');
+        }
+    }
+
+    /**
+     * @param \Closure(): GatewayInterface $gateway
+     */
+    #[DataProvider('failuresThatAreRetried')]
+    public function testTheSameHoldsForABatch(\Closure $gateway): void
+    {
+        try {
+            (new IndexAuditRecordsHandler($gateway()))(new IndexAuditRecords([
+                ['index' => 'audit_log', 'document' => ['objectType' => 'user'], 'id' => 'a'],
+            ]));
+            self::fail('the handler should have failed');
+        } catch (\Throwable $thrown) {
+            self::assertStringNotContainsString(self::SECRET, self::everythingSymfonyWouldKeep($thrown));
+            self::assertNull($thrown->getPrevious());
+        }
+    }
+
+    public function testARetriedFailureKeepsItsClassSoTheStrategyStillReadsIt(): void
+    {
+        // The chain goes; the class stays. Messenger's retry strategy and any custom one
+        // key off the exception, and turning a busy cluster into something else here
+        // would trade one leak for a record nobody retries.
+        try {
+            (new IndexAuditRecordHandler(self::unreachable()))(new IndexAuditRecord('audit_log', ['objectType' => 'user'], 'a'));
+            self::fail('the handler should have failed');
+        } catch (\Throwable $thrown) {
+            self::assertInstanceOf(TransportUnavailableException::class, $thrown);
+        }
+
+        try {
+            (new IndexAuditRecordHandler(self::missingIndex()))(new IndexAuditRecord('audit_log', ['objectType' => 'user'], 'a'));
+            self::fail('the handler should have failed');
+        } catch (\Throwable $thrown) {
+            self::assertInstanceOf(IndexNotFoundException::class, $thrown);
+        }
+    }
+
+    /**
      * A gateway that refuses the way a real one does: the reason is already cut, and the
      * client's own exception — status line plus the whole response body — travels as the
      * previous, which is where the value survives.
      */
     private static function refusing(): GatewayInterface
     {
-        return new class implements GatewayInterface {
+        return self::failingWith(static fn (): \Throwable => RequestRejectedException::because(400, 'failed to parse field [total] of type [long]', self::whatTheClientThrew()));
+    }
+
+    /**
+     * And one that cannot be reached — the road travelled far more often, and the one
+     * with no boundary on it until now: this exception is *retried*, so it left the
+     * handler as it was, and Symfony flattened it into the failure transport once the
+     * attempts ran out.
+     */
+    private static function unreachable(): GatewayInterface
+    {
+        return self::failingWith(static fn (): \Throwable => TransportUnavailableException::because(self::whatTheClientThrew()));
+    }
+
+    private static function missingIndex(): GatewayInterface
+    {
+        return self::failingWith(static fn (): \Throwable => IndexNotFoundException::forIndex('audit_log', self::whatTheClientThrew()));
+    }
+
+    /**
+     * The client's own exception: the status line followed by the whole response body,
+     * which is where a refused document is quoted.
+     */
+    private static function whatTheClientThrew(): \Throwable
+    {
+        return new \RuntimeException("400 Bad Request: {\"error\":{\"reason\":\"failed to parse field [total]. Preview of field's value: '".self::SECRET."'\"}}");
+    }
+
+    /**
+     * @param \Closure(): \Throwable $fail
+     */
+    private static function failingWith(\Closure $fail): GatewayInterface
+    {
+        return new class($fail) implements GatewayInterface {
+            /** @param \Closure(): \Throwable $fail */
+            public function __construct(private readonly \Closure $fail)
+            {
+            }
+
             public function index(string $index, array $document, ?string $id = null, bool $refresh = false): void
             {
-                throw $this->refusal();
+                throw ($this->fail)();
             }
 
             public function bulk(array $items): BulkResult
             {
-                throw $this->refusal();
-            }
-
-            private function refusal(): RequestRejectedException
-            {
-                return RequestRejectedException::because(400, 'failed to parse field [total] of type [long]', new \RuntimeException("400 Bad Request: {\"error\":{\"reason\":\"failed to parse field [total]. Preview of field's value: '".HandlerBoundaryTest::secret()."'\"}}"));
+                throw ($this->fail)();
             }
 
             public function search(string $index, array $body): array

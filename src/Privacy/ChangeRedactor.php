@@ -34,9 +34,11 @@ use Borsche\ElasticsearchAuditBundle\Model\Change;
  *   bundle deliberately has no button for;
  * - it cannot reach the actor ("source" is a base field, chosen when the record is
  *   built) — a rule naming it is refused rather than silently ignored;
- * - it covers the top level of "changes" and the attributes, by name: a value
- *   nested inside a free-form array is not seen, because the rule matches the
- *   field, which there is the array;
+ * - it matches by name, and a name is a name at any depth: a rule sees the fields of
+ *   "changes" and the attributes, and also the keys inside whatever structure one of
+ *   those holds, because "password" reads as global and a secret one level down is no
+ *   less a secret. What it cannot do is name a path — a dot in a rule is an object
+ *   type, not a parent key;
  * - an exception raised by somebody else's code may carry a value in its own
  *   message, and that message is not the bundle's to rewrite — it travels as the
  *   `previous` of a WriteFailedException, which is why this one does not repeat it.
@@ -103,7 +105,19 @@ final class ChangeRedactor
                 continue;
             }
 
-            $changes[$field] = $change;
+            // And inside it. A change can hold a structure the application built —
+            // `profile` => `['name' => …, 'password' => …]` — where the rule names a key
+            // one level down. The rule "password" reads as global, which is exactly how
+            // somebody writes it, and it used to see only the field a change is filed
+            // under: here that field is "profile", and the secret went to the index in
+            // full.
+            $scrubbed = $this->scrubChange($record->objectType, $change);
+
+            if ($scrubbed !== $change) {
+                $touched = true;
+            }
+
+            $changes[$field] = $scrubbed;
         }
 
         $record = $touched ? $record->withChanges($changes) : $record;
@@ -116,7 +130,76 @@ final class ChangeRedactor
             fn (string $name): bool => $this->redacts($record->objectType, $name),
         ));
 
-        return $secret === [] ? $record : $record->withoutAttributes(...$secret);
+        $record = $secret === [] ? $record : $record->withoutAttributes(...$secret);
+
+        // The same reach into an attribute that survived: the attribute itself is not
+        // named by a rule, and something inside it is.
+        $inside = [];
+
+        foreach ($record->attributes as $name => $value) {
+            $scrubbed = $this->scrub($record->objectType, $value);
+
+            if ($scrubbed !== $value) {
+                $inside[$name] = $scrubbed;
+            }
+        }
+
+        return $inside === [] ? $record : $record->withAttributes($inside);
+    }
+
+    /**
+     * A change's value with the named keys inside it masked, whichever shape the change
+     * has: a Change object, the pair it serialises to, or a free-form value.
+     */
+    private function scrubChange(string $objectType, mixed $change): mixed
+    {
+        if ($change instanceof Change) {
+            $old = $this->scrub($objectType, $change->old);
+            $new = $this->scrub($objectType, $change->new);
+
+            return $old === $change->old && $new === $change->new ? $change : new Change($old, $new);
+        }
+
+        if (Change::isPair($change)) {
+            return ['old' => $this->scrub($objectType, $change['old']), 'new' => $this->scrub($objectType, $change['new'])] + $change;
+        }
+
+        return $this->scrub($objectType, $change);
+    }
+
+    /**
+     * Walks a value the application built and masks every key a rule names, however
+     * deep it sits.
+     *
+     * The depth is bounded because this walks data the bundle did not make: an audit
+     * record can hold whatever an enricher or a caller put in it, and a privacy pass is
+     * not the place to discover how deep that goes. Past the bound the value is left as
+     * it is — the alternative is dropping data that was never named — and sixteen levels
+     * of nesting inside one audited field is not a shape any of this was written for.
+     */
+    private function scrub(string $objectType, mixed $value, int $depth = 0): mixed
+    {
+        if (!\is_array($value) || $depth >= 16) {
+            return $value;
+        }
+
+        $out = [];
+        $touched = false;
+
+        foreach ($value as $key => $item) {
+            if (\is_string($key) && $this->redacts($objectType, $key)) {
+                $out[$key] = $this->mask($item);
+                $touched = true;
+
+                continue;
+            }
+
+            $scrubbed = $this->scrub($objectType, $item, $depth + 1);
+            $touched = $touched || $scrubbed !== $item;
+            $out[$key] = $scrubbed;
+        }
+
+        return $touched ? $out : $value;
     }
 
     /**

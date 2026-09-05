@@ -126,7 +126,7 @@ final class AuditPageTest extends TestCase
 
     public function testTheCursorInTheArrayFormIsAToken(): void
     {
-        $page = new AuditPage(self::entries(20), total: 137, page: 1, limit: 20);
+        $page = new AuditPage(self::entries(20), total: 137, page: 1, limit: 20, query: 'fingerprint');
 
         $pagination = $page->toArray()['pagination'];
 

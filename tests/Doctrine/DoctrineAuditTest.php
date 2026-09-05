@@ -107,6 +107,46 @@ final class DoctrineAuditTest extends DoctrineTestCase
         self::assertSame(['old' => ['php'], 'new' => ['php', 'elasticsearch']], $this->lastDocument()['changes']['tags']);
     }
 
+    public function testARepresenterDescribesTheObjectAsItStandsWhenTheRecordIsBuilt(): void
+    {
+        // Written down because it surprises people, and because the alternative is worse
+        // than the surprise.
+        //
+        // Doctrine's collection snapshot holds the *objects* that were in the collection,
+        // not a copy of what they looked like. A representer runs when the record is
+        // built, at the end of the flush — so if the same flush also renamed one of those
+        // objects, both sides of the change show the new name. The history then says the
+        // article's tags went from ["php 9"] to ["php 9", "elasticsearch"], and "php" is
+        // nowhere.
+        //
+        // Representing eagerly, field by field, as Doctrine computes each change, would
+        // mean running application code inside onFlush for every audited association of
+        // every entity in the flush — and a representer that touches the entity manager
+        // there is a much worse failure than a label that reads as of today. The rule
+        // this leaves the caller is in the README: represent by something that does not
+        // move, an id or a reference, and the record is true whenever it is read.
+        $php = new Tag('php');
+        $es = new Tag('elasticsearch');
+        $this->em->persist($php);
+        $this->em->persist($es);
+
+        $article = new Article('Hello');
+        $article->tags->add($php);
+        $this->persisted($article);
+        $this->gateway->documents = [];
+
+        // One operation: the tag is renamed and the article gains another tag.
+        $php->label = 'php 9';
+        $article->tags->add($es);
+        $this->em->flush();
+
+        self::assertSame(
+            ['old' => ['php 9'], 'new' => ['php 9', 'elasticsearch']],
+            $this->lastDocument()['changes']['tags'],
+            'the old side is the same objects, described as they are now',
+        );
+    }
+
     public function testDatesEqualToTheSecondAreNotAChange(): void
     {
         $article = new Article('Hello');

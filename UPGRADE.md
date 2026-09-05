@@ -29,8 +29,20 @@ empty array keeps the previous behaviour; `audit:check` then reports nothing abo
 value it named was being written in full. Trim the rule.
 
 **An exception class of your own that implements `SafeExceptionMessage` is no longer trusted.**
-The marker means "the bundle wrote this message"; only the bundle's own exceptions carry it now.
-To have your own messages repeated, set `redact.failure_details: full`.
+The marker means "the bundle wrote this message"; only the bundle's own exceptions carry it, and
+they are named one by one rather than recognised by namespace. To have your own messages repeated,
+set `redact.failure_details: full`.
+
+**`redact.failure_details` is `cause` by default now, redaction or no redaction.** It used to
+follow `redact.fields`, so an application that redacted nothing got the cause's message in the log,
+the failure event and the exception. If you rely on that detail, ask for it: `failure_details:
+full`. The sanitized message names the setting, so nobody has to go looking.
+
+**Redaction now reaches inside the structures a record carries.** A rule like `password` matches
+that key at any depth in `changes` and in the attributes, not only a top-level field. Records will
+carry less than they did — which is the point — but if you have a legitimate field whose *name*
+collides with a rule somewhere deep inside a payload, scope the rule to an object type
+(`user.password`) or rename the field.
 
 **`raw()` requires the aggregation tree to be arrays.** A body built with `stdClass` used to pass
 the boundary check unexamined. Keep `new \stdClass()` for the empty objects Elasticsearch expects,
@@ -39,6 +51,24 @@ and build everything around them as arrays.
 **`coalescing.on_overflow: throw` writes nothing of the operation it refuses.** It used to write
 the part that had already been released and raise as well. If you relied on that, `release` is the
 setting that keeps every record; `throw` is for a caller that rolls the operation back.
+
+Three consequences, if you use `throw`. A frame under it **publishes nothing before it closes** —
+a remove, or a step recorded with a different `actor:`, used to go out where it happened and now
+waits for the outermost `end()`. A refusal **covers what the operation records afterwards**, so
+code that catches `FrameOverflowException` and carries on writes nothing more for that operation.
+And it **covers enclosing frames**: catching the exception inside an outer frame does not save that
+operation's history either, because nested frames share one buffer. The outer frame stays open and
+is still yours to close — it simply writes nothing. Under `release` (the default) none of this
+applies.
+
+**A `message_bus` with no delivery middleware fails the boot too.** A bus declared with
+`default_middleware: false` and nothing equivalent put back takes a dispatch and delivers nothing;
+it used to pass, because it carries the `messenger.bus` tag like any other. Give the bus Symfony's
+default middleware, name a bus that has it, or set `transport: sync`.
+
+**The audit handlers are now bound to that bus alone.** They used to be available on every bus in
+the application. If something in your code dispatches `IndexAuditRecord` or `IndexAuditRecords` to
+a different bus and relies on it being handled there, route it to the configured bus instead.
 
 **With `doctrine.enabled: true`, a `doctrine.connection` that no entity manager uses fails the
 boot**, and so does a `message_bus` that is not a Messenger bus. Both used to boot and record
@@ -60,6 +90,21 @@ you record a step with an explicit `actor:` inside a frame — a system correcti
 edit — that step used to be merged into the record before it and take that record's actor. Nothing
 is lost; there is simply a second history line, under the name that belongs to it.
 
+**`Cursor::encode()` requires the query fingerprint**, and a page you built yourself refuses to
+hand out a token. If you assemble an `AuditPage` in a decorator or a cache and call
+`nextCursorToken()`, either build it through the reader or continue with `nextCursor()` and
+`AuditQuery::after()` — a token that cannot name its query is one nothing can check when it
+comes back.
+
+**A query option must be a scalar, null, or an array of those.** `withOption()` used to take
+anything; an object in there would break the cursor fingerprint after the search had already run.
+Pass an id or a name instead of the object.
+
+**Indices whose records have no `id` field cannot be paged by cursor.** Elasticsearch sorts those
+with `null`, two records written in the same second then share a position, and `search_after`
+steps over one. `after()`, `iterate()` and `nextCursorToken()` refuse such a tuple now; use page
+numbers for those indices, or reindex them with ids.
+
 **A cursor token is bound to the query that issued it, and tokens made before 1.0 are refused.**
 Two things to check. First, code that changes a filter, a date range or the sort order while
 keeping the token it already has: that used to answer from the middle of the new result set,
@@ -74,6 +119,12 @@ both sides through the membership path, or nothing at all while it stayed null; 
 
 **A field named in `trackElements` must exist on the element.** A misspelling used to watch
 nothing in silence.
+
+**A declaration made through `AuditableInterface` is validated on every instance.** It used to be
+checked once per class and set of field names. If two instances of one class declare the same
+fields differently — one with a representer, one without; one tracking `quantity`, one tracking a
+typo — the second one now fails the flush the way the first would have. That is the check doing
+its job; fix the declaration.
 
 **An `#[AuditField]` on an embedded property now fails at the first flush.** It never recorded
 anything — Doctrine reports an embeddable's columns as `address.city`, never as `address` — so

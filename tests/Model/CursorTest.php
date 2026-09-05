@@ -20,14 +20,14 @@ final class CursorTest extends TestCase
     {
         $sort = ['2026-08-30 10:00:00', 'entry-19', 42];
 
-        self::assertSame($sort, Cursor::decode(Cursor::encode($sort)));
+        self::assertSame($sort, Cursor::decode(Cursor::encode($sort, 'fp')));
     }
 
     public function testNoTokenNeedsEscapingInAUrl(): void
     {
         // Plain base64 would hand out + and /, which a query string then mangles.
         for ($i = 0; $i < 200; ++$i) {
-            $token = Cursor::encode([sprintf('2026-08-%02d 10:00:%02d', $i % 28 + 1, $i % 60), 'entry-'.$i, $i]);
+            $token = Cursor::encode([sprintf('2026-08-%02d 10:00:%02d', $i % 28 + 1, $i % 60), 'entry-'.$i, $i], 'fp');
 
             self::assertMatchesRegularExpression('/^[A-Za-z0-9_-]+$/', $token);
             self::assertSame($token, rawurlencode($token));
@@ -126,23 +126,41 @@ final class CursorTest extends TestCase
         Cursor::decode($future);
     }
 
-    public function testANullSortValueStaysLegal(): void
+    public function testANullSortValueIsRefusedRatherThanPagedOver(): void
     {
-        // Elasticsearch itself hands out null for a missing sort value on legacy
-        // documents; a boundary that refuses it would strand those pages.
-        $sort = ['2026-08-30 10:00:00', null, 42];
+        // Elasticsearch hands out null for a record with no value for a sort field — a
+        // record written before audit records carried ids. That tuple was accepted so
+        // those pages would not be stranded, and the price is worse than the problem:
+        // two such records in one index, saved in the same second, are the same position
+        // to search_after, and one of them is stepped over without a word. No token is
+        // issued for a position that cannot be continued from.
+        try {
+            Cursor::encode(['2026-08-30 10:00:00', null, 42], 'fp');
+            self::fail('a cursor was issued for a tuple with no order after it');
+        } catch (InvalidQueryException $refused) {
+            self::assertStringContainsString('reindexed with ids', $refused->getMessage());
+        }
 
-        self::assertSame($sort, Cursor::decode(Cursor::encode($sort)));
+        // And the same on the way in, for a token from before this rule.
+        $this->expectException(InvalidQueryException::class);
+
+        Cursor::decode(rtrim(strtr(base64_encode(json_encode(['v' => 2, 's' => ['2026-08-30 10:00:00', null], 'q' => 'fp'], JSON_THROW_ON_ERROR)), '+/', '-_'), '='));
     }
 
     public function testAQueryContinuesFromAToken(): void
     {
-        $token = Cursor::encode(['2026-08-30 10:00:00', 'entry-19']);
+        $token = Cursor::encode(['2026-08-30 10:00:00', 'entry-19'], 'fp');
 
         $query = AuditQuery::for('order')->afterToken($token);
 
         self::assertTrue($query->usesCursor());
-        self::assertEquals(AuditQuery::for('order')->after(['2026-08-30 10:00:00', 'entry-19']), $query);
+        self::assertSame(['2026-08-30 10:00:00', 'entry-19'], $query->searchAfter);
+
+        // And it remembers which query the token was issued for. after() takes bare sort
+        // values and has nothing to remember, which is the difference between the two:
+        // one is a position a client was handed, the other a position the caller states.
+        self::assertSame('fp', $query->continuedQuery());
+        self::assertNull(AuditQuery::for('order')->after(['2026-08-30 10:00:00', 'entry-19'])->continuedQuery());
     }
 
     public function testAQueryRefusesADamagedTokenBeforeTheClusterSeesIt(): void
@@ -160,14 +178,13 @@ final class CursorTest extends TestCase
         // names the page that produced it instead of the request that carried it back.
         foreach ([[], [['nested']], [new \stdClass()]] as $unusable) {
             try {
-                Cursor::encode($unusable);
+                Cursor::encode($unusable, 'fp');
                 self::fail('encode() accepted '.json_encode($unusable));
             } catch (InvalidQueryException) {
             }
         }
 
-        // And what decode() does accept still round-trips, nulls included: a legacy
-        // document sorts with one.
-        self::assertSame(['2026-08-30 10:00:00', null, 'audit_log'], Cursor::decode(Cursor::encode(['2026-08-30 10:00:00', null, 'audit_log'])));
+        // And what decode() does accept still round-trips.
+        self::assertSame(['2026-08-30 10:00:00', 7, 'audit_log'], Cursor::decode(Cursor::encode(['2026-08-30 10:00:00', 7, 'audit_log'], 'fp')));
     }
 }

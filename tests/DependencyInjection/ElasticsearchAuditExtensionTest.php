@@ -24,6 +24,7 @@ use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
@@ -240,10 +241,15 @@ final class ElasticsearchAuditExtensionTest extends TestCase
      */
     public static function failureDetailModes(): iterable
     {
-        yield 'nothing redacted: the cause is repeated' => [[], 'full'];
-        yield 'redaction configured: it is not' => [['fields' => ['password']], 'cause'];
+        // Whether the cause is repeated is its own decision now, and the answer nobody
+        // gave is "cause": redaction covers the record, this covers the message of an
+        // exception the bundle did not write, and an application that declared no
+        // sensitive fields has said nothing about those.
+        yield 'nothing said at all' => [[], 'cause'];
+        yield 'redaction configured' => [['fields' => ['password']], 'cause'];
         yield 'said explicitly, without redaction' => [['failure_details' => 'cause'], 'cause'];
         yield 'said explicitly, against the default' => [['fields' => ['password'], 'failure_details' => 'full'], 'full'];
+        yield 'asked for in full, with nothing redacted' => [['failure_details' => 'full'], 'full'];
     }
 
     /**
@@ -286,6 +292,13 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
     public function testMessengerTransportRegistersTheHandler(): void
     {
+        // What this proves is the wiring the extension does: the transport is the
+        // Messenger one, and the handlers carry the tag MessengerPass collects. Which
+        // buses are acceptable is not the extension's answer and is not asserted here —
+        // it belongs to CarriesRecordsPass, which this helper deliberately does not run,
+        // and to FullKernelBootTest, where a real kernel says yes or no. A test that
+        // stood a service of its own in for the bus was reading as though an
+        // application-owned bus were supported, which the boot refuses.
         $container = $this->build(
             ['client' => ['hosts' => ['http://localhost:9200']], 'transport' => 'messenger', 'message_bus' => 'app.bus'],
             static function (ContainerBuilder $c): void {
@@ -293,11 +306,12 @@ final class ElasticsearchAuditExtensionTest extends TestCase
             },
         );
 
-        self::assertInstanceOf(MessengerTransport::class, $container->get(TransportInterface::class));
+        self::assertInstanceOf(MessengerTransport::class, $container->get(TransportInterface::class), 'the extension builds the messenger transport around whatever id it was given');
 
         $definitions = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'transport' => 'messenger']);
 
         self::assertTrue($definitions->getDefinition(IndexAuditRecordHandler::class)->hasTag('messenger.message_handler'));
+        self::assertTrue($definitions->getDefinition(IndexAuditRecordsHandler::class)->hasTag('messenger.message_handler'), 'the batch handler too — the one a worker meets only on a large flush');
     }
 
     public function testEnrichersAreCollectedByAutoconfiguration(): void

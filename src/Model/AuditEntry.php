@@ -43,7 +43,12 @@ final class AuditEntry
      */
     public static function fromHit(array $hit): self
     {
-        $source = $hit['_source'] ?? [];
+        // Read as "nothing" when it is not a map, rather than trusted because it is
+        // usually one. The policy below is that one damaged document must not break a
+        // page, and array_diff_key() on a string would have broken the page anyway —
+        // the check the rest of this method already applies to every field, applied to
+        // the envelope holding them.
+        $source = \is_array($hit['_source'] ?? null) ? $hit['_source'] : [];
         $base = AuditRecord::reservedFields();
 
         return new self(

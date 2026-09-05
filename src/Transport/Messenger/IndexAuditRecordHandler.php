@@ -6,7 +6,10 @@ namespace Borsche\ElasticsearchAuditBundle\Transport\Messenger;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\FailureReason;
+use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
+use Borsche\ElasticsearchAuditBundle\Exception\SafeMessage;
+use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
 
 /**
@@ -22,6 +25,10 @@ use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
  * so Messenger's default strategy retries it — which is what an index caught
  * mid-rollover needs, and why it is not made unrecoverable. Worth knowing if you key a
  * custom retry strategy on the exception class rather than on the two named above.
+ *
+ * Whichever of the three it is, it leaves here with no chain behind it. Retries end,
+ * and Symfony then keeps the flattened cause in the failure transport for as long as
+ * the message sits there.
  *
  * @internal invoked by Messenger
  */
@@ -44,6 +51,16 @@ final class IndexAuditRecordHandler
 
         try {
             $this->gateway->index($message->index, $message->document, $id);
+        } catch (TransportUnavailableException|IndexNotFoundException $e) {
+            // Retried, so it stays this class — Messenger's strategy keys off it, and a
+            // busy cluster or an index mid-rollover must not cost a record. What does
+            // not travel is the chain: these carry the client's own exception, whose
+            // message is the status line followed by the whole response body, and a 429
+            // refusing a document quotes that document. Retries end eventually, and when
+            // they do Symfony stores the flattened chain in the failure transport, where
+            // it outlives the request that made it. The bundle's own sentence is enough
+            // to act on, and it is the same one either way.
+            throw SafeMessage::withoutTheChain($e);
         } catch (RequestRejectedException $e) {
             // The chain stops here. Symfony keeps a failed message's cause as an
             // ErrorDetailsStamp built from FlattenException, which walks getPrevious()

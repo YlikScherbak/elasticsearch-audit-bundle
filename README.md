@@ -251,7 +251,12 @@ on state.
 What gets recorded, and what deliberately does not:
 
 - **Associations are stored through their representer** — a name, an id, a small array. Storing
-  the related entity itself is neither possible nor useful in a history.
+  the related entity itself is neither possible nor useful in a history. Represent by something
+  that does not move: a representer runs when the record is built, at the end of the flush, and
+  Doctrine's collection snapshot holds the *objects* that were in the collection rather than a
+  copy of how they looked. Rename a tag and re-tag an article in one operation and both sides of
+  that change read `["php 9"]` — the label as it is now, on both. An id or a reference is true
+  whenever the record is read; a label is a description of today.
 - **Two dates for the same instant are not a change.** Doctrine compares objects by identity, so
   re-assigning `new DateTimeImmutable('2026-08-26 10:00')` looks like a change to it; the record
   skips it.
@@ -455,6 +460,21 @@ database: a record reaches the frame because its save committed, so the rollback
 which is why this setting is only meaningful inside a transaction you own (see the recipe under
 [Frames in workers](#frames-in-workers)). Records written by *earlier* operations are untouched by
 it, and so are records an earlier flush of the same operation already sent.
+
+Three things follow from "nothing of that operation", and they are worth stating (**since 1.0**):
+
+- **a frame under `throw` publishes nothing before it closes.** A remove is terminal and a step by
+  another actor ends the record before it — under `release` both go out where they happen, under
+  `throw` they wait for the outermost `end()`, or never leave;
+- **the refusal covers the operation still to come**, not only what was held. A frame that has
+  refused keeps taking records and dropping them until its outermost `end()`;
+- **it covers enclosing frames too.** Nested frames share one buffer, their records are part of
+  what overflowed, and nothing distinguishes whose is whose — so catching a `FrameOverflowException`
+  inside an outer frame does not save that operation's history. The outer frame does stay open and
+  is still yours to close; it simply writes nothing.
+
+`begin()`/`end()` mean exactly what `coalesce()` means here: an `end()` in a `finally` after a
+refusal writes nothing either.
 
 A value that is neither a number nor "nothing" is left alone — two different words must not
 look equal — so `numeric_fields` is safe on a column that sometimes holds text.
@@ -944,6 +964,13 @@ framework:
       'Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords': async
 ```
 
+The bus has to be one **FrameworkBundle built** — a service tagged `messenger.bus` — and one that
+still has its delivery middleware (**since 1.0**). A bus assembled by hand takes the dispatch and
+never reaches the handlers, because `MessengerPass` attaches them to the tagged buses; a bus
+declared with `default_middleware: false` and nothing equivalent put back does the same, tag or no
+tag. Both are refused at boot rather than left to deliver nothing. The handlers are bound to that
+one bus, so dispatching an audit message to another bus of yours does nothing on purpose.
+
 **Route both.** One record is sent as `IndexAuditRecord`; several at once — a closing frame,
 a flush that changed three entities — are sent as `IndexAuditRecords` and written in one
 `_bulk`. Routing only the first is not an error and says nothing: the batch message stays on
@@ -982,13 +1009,12 @@ read. `redact.failure_details` decides what happens to that text (**since 1.0**)
 borsche_elasticsearch_audit:
   redact:
     fields: [password]
-    failure_details: cause   # or "full"; unset follows redact.fields
+    failure_details: cause   # or "full"; "cause" is the default
 ```
 
 - **`full`** — the cause travels intact: its message in the log line, the exception itself in the
-  PSR-3 context and in `RecordFailedEvent`, and as the `previous` of `WriteFailedException`. This
-  is the default when no redaction is configured, because an application that keeps every value
-  has said nothing about which ones must not be repeated.
+  PSR-3 context and in `RecordFailedEvent`, and as the `previous` of `WriteFailedException`. Ask
+  for it when the diagnostics matter more than what a foreign message might quote.
 - **`cause`** — the cause is named by class and its message is not repeated *anywhere the bundle
   emits*: not in the log, not in the event, and **not as the previous of what it throws**. That
   last one matters more than it looks: an uncaught `WriteFailedException` reaches Symfony's error
@@ -996,13 +1022,19 @@ borsche_elasticsearch_audit:
   them walks the chain — so leaving the raw cause attached would let the policy be walked around
   by a logger nobody configured for audit. `RecordFailedEvent` receives a `FailureReason` whose
   `causeClass` names what actually failed, so a listener can still tell a missing index from a
-  refused document. Configuring `redact.fields` selects this automatically.
+  refused document. **This is the default** — including when nothing is redacted: what redaction
+  covers is the record, what this covers is a sentence written elsewhere, and an application that
+  declared no sensitive fields has said nothing about the second. The sanitized reason names the
+  setting, so an operator who needs the detail is told where to ask for it.
 
-The same rule holds in the worker. When a handler throws, Symfony stores the cause on the message
-as an `ErrorDetailsStamp` built from `FlattenException` — which keeps every message in the chain,
-in the failure transport, until somebody retries or removes it. The handlers therefore hand it a
-cause with no chain regardless of `failure_details`: a durable copy of a refused document's values
-is not something a setting should be able to ask for by accident.
+The same rule holds in the worker, and harder. When a handler throws, Symfony stores the cause on
+the message as an `ErrorDetailsStamp` built from `FlattenException` — which keeps every message in
+the chain, in the failure transport, until somebody retries or removes it. The handlers therefore
+hand it a cause with no chain regardless of `failure_details`, and **that includes the failures
+that are retried** (**since 1.0**): a busy cluster and an index caught mid-rollover keep their
+class, because a retry strategy reads it, but not the client exception they were built from. A
+durable copy of a refused document's values is not something a setting should be able to ask for
+by accident, and retries end.
 
 Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Exception\AuditException`:
 `NotConfiguredException`, `IndexNotFoundException`, `TransportUnavailableException` (the cluster

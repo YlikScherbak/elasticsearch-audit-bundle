@@ -62,8 +62,6 @@ final class AuditReader
             return new AuditPage([], 0, $query->page, $query->limit, $query->usesCursor(), $this->maxResultWindow, fetched: 0, cursor: []);
         }
 
-        self::assertTheCursorBelongsHere($query);
-
         $response = $this->gateway->search($this->indexFor($query), $this->queryBuilder->build($query));
         self::assertNothingWasMissed($response);
 
@@ -109,8 +107,11 @@ final class AuditReader
 
         // Not a silent restart, which hid the caller's mistake: a consistent traversal
         // opens its own point in time, and the sort values of an earlier one carry
-        // _shard_doc, which means nothing inside a different view — and is a third
-        // value where a plain search has two.
+        // _shard_doc, which is a position inside that view and means nothing inside
+        // another. Counting the values no longer tells the two apart — a plain search
+        // sorts by _index as its last tiebreaker, so both tuples are three long — which
+        // is why QueryBuilder checks what the last value *is* rather than how many
+        // there are.
         if ($query->usesCursor() || $query->page !== 1) {
             throw new InvalidQueryException('iterate() starts a traversal of its own and cannot continue from a page or a cursor: the point in time it opens is not the one those values came from. Pass an unpaged query, and narrow it if you need to resume where an export stopped.');
         }
@@ -325,10 +326,8 @@ final class AuditReader
      *
      * @throws InvalidQueryException
      */
-    private static function assertTheCursorBelongsHere(AuditQuery $query): void
+    private static function assertTheCursorBelongsHere(?string $issuedFor, AuditQuery $query): void
     {
-        $issuedFor = $query->continuedQuery();
-
         if ($issuedFor !== null && $issuedFor !== $query->fingerprint()) {
             throw new InvalidQueryException('This cursor token was issued for a different query — different filters, dates, options or sort order — and continuing it here would answer with the page after that position in this result set, silently skipping everything before it. Read this query from the first page, or continue the token on the query it came from.');
         }
@@ -522,8 +521,20 @@ final class AuditReader
     {
         $cursor = $query->searchAfter;
 
+        // Read before the extensions run, because they will lose it. A with*() builds a
+        // new query and the provenance deliberately does not survive one — it belongs to
+        // the act of continuing a token, not to what the query matches. The check below
+        // is the whole reason a token carries a fingerprint, and it was silently not
+        // happening for any application with an extension: exactly the applications whose
+        // result set changes underneath a cursor.
+        $issuedFor = $query->continuedQuery();
+
         foreach ($this->extensions as $extension) {
             $query = $extension->extend($query);
+        }
+
+        if ($query->matchesNothing()) {
+            return $query;
         }
 
         // Narrowing a query abandons its cursor, because a cursor points into the result
@@ -532,9 +543,17 @@ final class AuditReader
         // cursor came from. Without this, an application with a visibility extension
         // would find every "next page" quietly returning the first — and only that
         // application, which is the worst way to find out.
-        return $cursor !== null && !$query->usesCursor() && !$query->matchesNothing()
-            ? $query->after($cursor)
-            : $query;
+        if ($cursor !== null && !$query->usesCursor()) {
+            $query = $query->after($cursor);
+        }
+
+        // Against the effective query, extensions included: the token was issued for what
+        // was actually searched. A boundary that moved between two pages — permissions
+        // changed, a viewer switched — is precisely the case where continuing would
+        // answer from a position in somebody else's result set.
+        self::assertTheCursorBelongsHere($issuedFor, $query);
+
+        return $query;
     }
 
     private function indexFor(AuditQuery $query): string

@@ -7,7 +7,9 @@ namespace Borsche\ElasticsearchAuditBundle\Transport\Messenger;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\BulkResult;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\FailureReason;
+use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
+use Borsche\ElasticsearchAuditBundle\Exception\SafeMessage;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
 
@@ -48,6 +50,12 @@ final class IndexAuditRecordsHandler
     {
         try {
             $result = $this->gateway->bulk($message->items);
+        } catch (TransportUnavailableException|IndexNotFoundException $e) {
+            // Retried, so it keeps its class; but not the cause it was built from. See
+            // the single-record handler: what the client puts in a message is the status
+            // line followed by the whole response body, and the failure transport keeps
+            // a flattened chain for as long as the message is in it.
+            throw SafeMessage::withoutTheChain($e);
         } catch (RequestRejectedException $e) {
             // A refusal of the whole request — a 400 or a 403 on the _bulk call itself —
             // never reaches BulkResult, so the per-item road that sanitises reasons is

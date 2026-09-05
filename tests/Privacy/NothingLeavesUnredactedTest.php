@@ -46,6 +46,49 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertSame('acme', $document['tenant']);
     }
 
+    public function testASecretNestedInsideAFreeFormChangeIsFoundToo(): void
+    {
+        // A rule reads as global — "password", anywhere — and it used to see only the
+        // field a change is filed under. Here that field is "profile", the secret is a
+        // key inside the structure the application put there, and the whole thing went
+        // to the index untouched. The name is what a rule names, and a name one level
+        // down is still that name.
+        $gateway = new InMemoryGateway();
+        $writer = $this->writer($gateway, ['password']);
+
+        $writer->record('user', 7, 'update', [
+            'profile' => new Change(
+                ['name' => 'John', 'password' => self::SECRET],
+                ['name' => 'John Doe', 'password' => self::SECRET.'-new'],
+            ),
+        ]);
+
+        $document = $gateway->documents['audit_log'][0];
+
+        self::assertStringNotContainsString(self::SECRET, json_encode($document, \JSON_THROW_ON_ERROR));
+        self::assertSame('John', $document['changes']['profile']['old']['name'], 'and what was not named is untouched');
+        self::assertSame('***', $document['changes']['profile']['old']['password']);
+    }
+
+    public function testASecretNestedInsideAnAttributeIsFoundToo(): void
+    {
+        // The same reach into the indexed half. The attribute itself is not named by a
+        // rule — dropping it whole would take "tenant" with it — so what is masked is
+        // the key inside it.
+        $gateway = new InMemoryGateway();
+        $writer = $this->writer($gateway, ['password']);
+
+        $writer->record('user', 7, 'update', ['name' => new Change('a', 'b')], [
+            'metadata' => ['tenant' => 'acme', 'credentials' => ['password' => self::SECRET]],
+        ]);
+
+        $document = $gateway->documents['audit_log'][0];
+
+        self::assertStringNotContainsString(self::SECRET, json_encode($document, \JSON_THROW_ON_ERROR));
+        self::assertSame('acme', $document['metadata']['tenant']);
+        self::assertSame('***', $document['metadata']['credentials']['password']);
+    }
+
     public function testATypedAttributeIsNotMaskedIntoSomethingTheMappingRefuses(): void
     {
         $gateway = new InMemoryGateway();
@@ -382,6 +425,41 @@ final class NothingLeavesUnredactedTest extends TestCase
             public function enrich(AuditRecord $record): AuditRecord
             {
                 throw new SelfDeclaredSafeException('cannot enrich with token '.NothingLeavesUnredactedTest::secret());
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log, [$enricher]);
+        $writer->record('user', 7, 'update', ['name' => new Change('a', 'b')]);
+
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
+    }
+
+    public function testAClassNameIsNotWhatMakesAMessageTrusted(): void
+    {
+        // The rule was "declares the marker, and its class name starts with the bundle's
+        // exception namespace". PHP lets any file declare a class in any namespace, so
+        // the second half was a file header away from being satisfied — by accident as
+        // easily as on purpose, since a project that copies an exception out of a
+        // dependency keeps the namespace with it. The trusted set is named class by
+        // class now, and this one is not in it.
+        require_once __DIR__.'/../Fixtures/NamespaceSquatter.php';
+
+        $enricher = new class implements AuditEnricherInterface {
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                throw new \Borsche\ElasticsearchAuditBundle\Exception\SquattedSafeException('cannot enrich with token '.NothingLeavesUnredactedTest::secret());
             }
 
             public function mapping(): array

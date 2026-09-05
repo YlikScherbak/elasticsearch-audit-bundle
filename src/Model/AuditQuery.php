@@ -299,10 +299,36 @@ final class AuditQuery
 
     /**
      * An application-specific parameter for a QueryExtension to interpret.
+     *
+     * Scalars, null, and arrays of those. An option is part of what a query matches —
+     * an extension reads it and narrows accordingly — so it is part of the fingerprint
+     * a cursor token carries, and a value that cannot be written down the same way twice
+     * cannot be in one. An object would also have made the fingerprint throw, and it is
+     * computed after the search has already been run: a page that Elasticsearch answered
+     * would have failed on the way back.
      */
     public function withOption(string $name, mixed $value): self
     {
+        self::assertOptionIsCanonical($name, $value);
+
         return $this->with(options: array_replace($this->options, [$name => $value]));
+    }
+
+    private static function assertOptionIsCanonical(string $name, mixed $value, int $depth = 0): void
+    {
+        if ($value === null || \is_scalar($value)) {
+            return;
+        }
+
+        if (\is_array($value) && $depth < 8) {
+            foreach ($value as $item) {
+                self::assertOptionIsCanonical($name, $item, $depth + 1);
+            }
+
+            return;
+        }
+
+        throw new InvalidQueryException(sprintf('The query option "%s" is %s. An option decides what a query matches, so it travels in the fingerprint a cursor token carries and has to be something that reads the same way every time: a scalar, null, or an array of those%s. Pass an id or a name rather than the object itself.', $name, get_debug_type($value), \is_array($value) ? ', nested no deeper than 8 levels' : ''));
     }
 
     public function option(string $name, mixed $default = null): mixed
@@ -367,6 +393,18 @@ final class AuditQuery
     {
         if ($cursor === []) {
             throw new InvalidQueryException('The cursor is empty.');
+        }
+
+        // A null in the tuple is Elasticsearch saying the document has no value for that
+        // sort field, which for this sort means a record written before the bundle gave
+        // records ids. Two of those in one index, saved in the same second, sort by
+        // nothing at all: search_after cannot tell them apart and steps over one. The
+        // tuple was accepted so those pages would not be stranded — but a page that may
+        // silently be missing a record is not a page an audit trail can hand out.
+        foreach ($cursor as $value) {
+            if ($value === null) {
+                throw new InvalidQueryException('This cursor has no value for one of the fields it sorts by, which means a record from before audit records carried ids. Records like that have no order Elasticsearch can continue from — two written in the same second are indistinguishable to search_after, and one of them would be stepped over — so they are paged by page number, or reindexed with ids first.');
+            }
         }
 
         return $this->with(page: 1, searchAfter: array_values($cursor));

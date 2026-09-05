@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Elasticsearch;
 
-use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 
 /**
@@ -129,14 +128,18 @@ final class BulkResult
                 continue;
             }
 
-            $error = \is_array($action['error'] ?? null) ? $action['error'] : ['reason' => \is_scalar($action['error'] ?? null) ? (string) $action['error'] : null];
-            $reason = \is_string($error['reason'] ?? null) && $error['reason'] !== ''
-                ? $error['reason']
-                : (\is_string($error['type'] ?? null) && $error['type'] !== '' ? $error['type'] : 'rejected with status '.$status);
+            $error = \is_array($action['error'] ?? null) ? $action['error'] : [];
 
+            // Described from what the answer states — the error type, and the field name
+            // lifted out of the wording — and never from the wording itself. A refused
+            // document is quoted in that wording, and this reason travels: into the
+            // summary the Messenger handler raises, and from there into the failure
+            // transport, which keeps it until somebody removes the message. Cutting the
+            // one phrase 8 and 9 happen to use held only for those wordings; the single
+            // write path stopped relying on that, and this one was still the way around it.
             $failures[$position] = [
                 'status' => $status,
-                'reason' => RequestRejectedException::withoutValuePreview($reason),
+                'reason' => DocumentRefusal::describe($error['type'] ?? null, $error['reason'] ?? null) ?? sprintf('rejected with status %d, and the answer named no error type anyone can read', $status),
             ];
         }
 

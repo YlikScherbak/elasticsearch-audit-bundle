@@ -68,10 +68,16 @@ final class AuditWriter
         // supports are now the same thing.
         $this->enrichers = \is_array($enrichers) ? array_values($enrichers) : iterator_to_array($enrichers, false);
         $this->logger = $logger ?? new NullLogger();
-        // Following the declaration the application already made: configuring
-        // redaction is saying that some values must not be kept, and a cause's
-        // message is a place they turn up.
-        $this->failureDetails = $failureDetails ?? ($redactor === null ? FailureDetails::Full : FailureDetails::Cause);
+        // "Cause" unless somebody asks for more, whether or not anything is redacted.
+        // The two used to be tied together — no redactor meant a raw cause — and they
+        // are not the same question. What redaction covers is the record; what this
+        // covers is the message of an exception written by code the bundle did not
+        // write: an enricher raising "authorization failed with token abc", a client
+        // quoting a request body, a driver naming a row. None of those values has to be
+        // in the record for the record's failure to publish them, so "the application
+        // declared no sensitive fields" says nothing about whether they are safe.
+        // Repeating a foreign message is a decision, and it is made in one place.
+        $this->failureDetails = $failureDetails ?? FailureDetails::Cause;
     }
 
     /** @var list<AuditEnricherInterface> */

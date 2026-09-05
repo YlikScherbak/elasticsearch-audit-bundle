@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 use Borsche\ElasticsearchAuditBundle\Exception\PartialResultException;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
+use Borsche\ElasticsearchAuditBundle\Model\AuditPage;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
@@ -123,6 +124,113 @@ final class AuditReaderTest extends TestCase
         $this->reader()->find($query->afterToken($token));
 
         self::assertSame(['2026-08-26 10:00:00', 'a', 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
+    }
+
+    public function testAnExtensionDoesNotTakeTheTokensProvenanceWithIt(): void
+    {
+        // The check that a token belongs to the query being read was not running at all
+        // for anyone with an extension — which is exactly the population it was written
+        // for, since an extension is what makes a result set change between two pages.
+        // A with*() builds a new query and the provenance deliberately does not survive
+        // one, and extend() rebuilt the query on every page: by the time the check ran,
+        // it had nothing to compare.
+        //
+        // Page 1 read under one visibility boundary, page 2 offered under another: the
+        // sort tuple fits, so Elasticsearch answers from that position in the *new* set
+        // and everything before it is missing without a word.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => 'u1', 'changes' => []]],
+        ]]];
+
+        $token = $this->reader(extensions: [self::narrowingTo('u1')])->find(AuditQuery::for('order'))->nextCursorToken();
+
+        self::assertIsString($token);
+
+        $searchesSoFar = \count($this->gateway->searches);
+
+        try {
+            $this->reader(extensions: [self::narrowingTo('u2')])->find(AuditQuery::for('order')->afterToken($token));
+            self::fail('a token from one visibility boundary was continued under another');
+        } catch (InvalidQueryException $refused) {
+            self::assertStringContainsString('different query', $refused->getMessage());
+        }
+
+        self::assertCount($searchesSoFar, $this->gateway->searches, 'and refused before the cluster was asked anything');
+    }
+
+    public function testATokenStillContinuesWhenTheExtensionNarrowsTheSameWayItDidBefore(): void
+    {
+        // The other half, and the reason the check compares effective queries rather
+        // than what the caller passed: an extension runs identically on every page, so
+        // the narrowed query *is* the one the token came from.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => 'u1', 'changes' => []]],
+        ]]];
+
+        $reader = $this->reader(extensions: [self::narrowingTo('u1')]);
+        $token = $reader->find(AuditQuery::for('order'))->nextCursorToken();
+
+        self::assertIsString($token);
+
+        $reader->find(AuditQuery::for('order')->afterToken($token));
+
+        self::assertSame(['2026-08-26 10:00:00', 'a', 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
+    }
+
+    private static function narrowingTo(string ...$actors): QueryExtensionInterface
+    {
+        return new class($actors) implements QueryExtensionInterface {
+            /** @param list<string> $actors */
+            public function __construct(private readonly array $actors)
+            {
+            }
+
+            public function extend(AuditQuery $query): AuditQuery
+            {
+                return $query->narrowActors(...$this->actors);
+            }
+        };
+    }
+
+    public function testAPageBuiltByHandCannotHandOutATokenNothingCanCheck(): void
+    {
+        // A token that does not name its query is one the reader will accept and then
+        // not be able to check — the same silence the fingerprint exists to end. The
+        // reader always knows what it searched; a page assembled by a decorator or a
+        // cache does not, and gets told so rather than issuing an unbound token.
+        $page = new AuditPage([], total: 5, page: 1, limit: 1, usesCursor: true, fetched: 1, cursor: ['2026-08-26 10:00:00', 'a', 'audit_log']);
+
+        self::assertSame(['2026-08-26 10:00:00', 'a', 'audit_log'], $page->nextCursor(), 'the raw position is still there for after()');
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('which query it is a page of');
+
+        $page->nextCursorToken();
+    }
+
+    public function testACursorFromATraversalIsNotAPositionInAnOrdinarySearch(): void
+    {
+        // A point in time sorts by _shard_doc, a position inside that view. It used to
+        // be told apart by counting the sort values, and it no longer can be: an
+        // ordinary search sorts by _index as its own last tiebreaker, so both tuples are
+        // three long. AuditEntry::$sort is public and after() takes anything, so the
+        // mix-up is one line of application code away.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('_shard_doc');
+
+        $this->reader()->find(AuditQuery::for('order')->after(['2026-08-26 10:00:00', 'a', 904]));
+    }
+
+    public function testAnOptionThatCannotBeWrittenDownTheSameWayTwiceIsRefused(): void
+    {
+        // An option decides what a query matches — an extension reads it and narrows —
+        // so it travels in the fingerprint a token carries. An object in there made the
+        // fingerprint throw, and it is computed after the search has already run: the
+        // cluster answered and the page failed on the way back.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('reads the same way every time');
+
+        AuditQuery::for('order')->withOption('viewer', new \stdClass());
     }
 
     public function testAVisibilityExtensionDoesNotThrowAwayTheCursorItIsPagingWith(): void
@@ -664,9 +772,9 @@ final class AuditReaderTest extends TestCase
         $this->gateway->respondToSearch = static function (string $index, array $body): array {
             $after = $body['search_after'] ?? null;
             $batch = match ($after[1] ?? null) {
-                null => [self::hit('a', '1', 1), self::hit('b', '1', 2)],
-                2 => [self::hit('c', '1', 3), self::hit('d', '1', 4)],
-                4 => [self::hit('e', '1', 5)],
+                null => [self::pitHit('a', '1', 1), self::pitHit('b', '1', 2)],
+                2 => [self::pitHit('c', '1', 3), self::pitHit('d', '1', 4)],
+                4 => [self::pitHit('e', '1', 5)],
                 default => [],
             };
 
@@ -682,7 +790,7 @@ final class AuditReaderTest extends TestCase
         self::assertCount(3, $this->gateway->searches);
         self::assertSame(2, $this->gateway->searches[0]['body']['size']);
         self::assertArrayNotHasKey('search_after', $this->gateway->searches[0]['body']);
-        self::assertSame(['2026-08-26 10:00:00', 4, 'audit_log'], $this->gateway->searches[2]['body']['search_after']);
+        self::assertSame(['2026-08-26 10:00:00', 4, 904], $this->gateway->searches[2]['body']['search_after']);
     }
 
     public function testADecoratorThatDropsEntriesDoesNotDecideWhetherMoreFollows(): void
@@ -740,8 +848,8 @@ final class AuditReaderTest extends TestCase
     {
         $this->gateway->respondToSearch = static function (string $index, array $body): array {
             $batch = match ($body['search_after'][1] ?? null) {
-                null => [self::hit('a', '1', 1), self::hit('b', '1', 2)],
-                2 => [self::hit('c', '1', 3)],
+                null => [self::pitHit('a', '1', 1), self::pitHit('b', '1', 2)],
+                2 => [self::pitHit('c', '1', 3)],
                 default => [],
             };
 
@@ -761,7 +869,7 @@ final class AuditReaderTest extends TestCase
         }
 
         self::assertSame(['a', 'c'], $ids, 'the cursor and the stop condition come from the hits, not from what the decorators left');
-        self::assertSame(['2026-08-26 10:00:00', 2, 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
+        self::assertSame(['2026-08-26 10:00:00', 2, 902], $this->gateway->searches[1]['body']['search_after']);
     }
 
     /**
@@ -772,6 +880,20 @@ final class AuditReaderTest extends TestCase
         return ['_id' => $id, 'sort' => ['2026-08-26 10:00:00', $doc, 'audit_log'], '_source' => [
             'objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => $actor, 'changes' => [],
         ]];
+    }
+
+    /**
+     * A hit as it comes back from a search inside a point in time: the last sort value
+     * is _shard_doc, a position in that view, and not the index name a plain search
+     * ends with. iterate() reads inside one, so its fixtures have to answer like one —
+     * with the live shape they were proving a traversal that could not happen.
+     */
+    private static function pitHit(string $id, string $actor, int $doc): array
+    {
+        $hit = self::hit($id, $actor, $doc);
+        $hit['sort'][2] = 900 + $doc;
+
+        return $hit;
     }
 
     /**

@@ -202,6 +202,102 @@ the dependency range.
   stayed, and the depth stack was already unwound, so the next flush did not read it as abandoned
   either: somebody else's operation published those records as its own. The cleanup is in a
   `finally` now
+- **`coalescing.on_overflow: throw` refuses the whole operation, including the parts that had
+  already left.** The setting says a refused operation has no history, and two paths out of the
+  frame were publishing before the refusal could happen: a remove is terminal, and a step by
+  another actor ends the record before it, so both were written where they occurred — with the
+  messenger transport, dispatched before the caller's transaction had a chance to roll anything
+  back. Under `throw` an early release is now staged and leaves only when the outermost frame
+  closes. Under `release` nothing changes: that mode never claimed the operation was atomic
+- **A refusal no longer takes every enclosing frame down with it.** `coalesce()` caught the
+  overflow and reset the buffer — which zeroes the nesting depth — so an application that caught
+  the exception inside its own outer frame lost that operation's earlier records *and* went on
+  recording into a frame that was no longer there: everything after the `catch` was written one
+  save at a time, unframed. The buffer now refuses itself where the overflow is raised and the
+  frame closes its own level like any other. The refusal does cover the enclosing operation — those
+  frames share one buffer and there is no telling whose records overflowed it — but the stack stays
+  standing until its own `end()`
+- **A manual `begin()`/`end()` pair means what `coalesce()` means.** `coalesce()` dropped a refused
+  operation while an `end()` in a `finally` wrote whatever had fitted — the documented pattern and
+  the closure that exists to write it for you gave different guarantees. The refusal is now raised
+  by the buffer itself, so both end with the operation unpublished, and so does the leak path:
+  `release()` (what `FrameResetMiddleware` calls after every message) will not publish a refused
+  operation because its frame was also left open
+- **A bus that would deliver nothing no longer passes the boot check.** The `messenger.bus` tag
+  says FrameworkBundle built the bus, which is not the same as "a record dispatched here reaches
+  anything": Symfony lets a bus be declared with `default_middleware: false`, and what is left
+  carries no message to a transport or a handler. `dispatch()` still succeeds and still answers
+  with an Envelope — the exact failure this pass exists to refuse, one configuration key away from
+  the shape it already caught. The middleware list is now read for `send_message` or
+  `handle_message`, and read fail-open: a shape the pass cannot recognise is left alone, because a
+  bundle that stops booting when FrameworkBundle's internals change would be the worse bug
+- **The handlers are attached to the configured bus rather than to every bus.**
+  `messenger.message_handler` without a `bus` attribute makes a handler available on all of them —
+  a strange shape for a bundle that names one bus and checks it, and one where an audit record
+  dispatched to the wrong bus by mistake would be handled there and written, with nothing ever
+  saying the routing was wrong. The tag now carries the canonical id of the bus the configuration
+  named (`messenger.default_bus` resolved to `messenger.bus.default`)
+- **An alias loop ends rather than being cut off by a step count.** Following `message_bus` through
+  its aliases was bounded at ten hops, which stops a loop and stops a long legitimate chain the
+  same way — silently, answering with whichever id it was holding. Every id is seen once instead
+- **A declaration the instance decides is checked for every instance.** The validation cache was
+  keyed on the class and the *names* a declaration used, while the checks read more than the names:
+  whether an audited association has a representer, what is always recorded, which fields of an
+  element are tracked. `AuditableInterface` exists so a declaration can depend on the instance — its
+  own docblock says so — and two instances naming the same fields shared one key, so the second
+  one's missing representer or misspelled element field walked past the rule that exists for it.
+  Attribute declarations are still cached, because they cannot differ between instances; interface
+  ones are checked every time
+- **A record no longer disagrees with the row it describes.** A `preUpdate` listener correcting a
+  value is merged in by Doctrine, and the record follows — unless another listener's flush emptied
+  the unit of work's change sets first, in which case the record was built from the snapshot taken
+  in `onFlush`, which predates the correction. The database took one value and the history recorded
+  another. On that path the "new" side of each mapped field is now read off the entity, which is
+  what the UPDATE was built from
+- **The embeddable refusal names something you can actually write.** It said to audit
+  `"address.city"` — which `#[AuditField]` cannot express, there being no property by that name to
+  put it on. It now says so, and points at `AuditableInterface::getAuditedFields()`, which takes the
+  names as strings
+- **A refused bulk item is described the way a refused document already was.** The single-write
+  path stopped repeating the cluster's prose in this release, because that prose quotes the value
+  it could not parse and its wording is not an API. The bulk path still cut one known phrase out of
+  it with a regex and passed the rest on — so a wording nobody had seen (another parser, another
+  version, a `caused_by` surfacing as the reason) carried the document straight into the summary
+  the Messenger handler raises, and from there into the failure transport, which keeps it until
+  somebody removes the message. Both paths now describe a refusal from what the answer *states*:
+  the error type, and the field name lifted structurally
+- **A retried failure no longer carries the cluster's answer into the failure transport.** The
+  permanent path cut the chain; the transient one — the road travelled far more often — did not.
+  `TransportUnavailableException` and `IndexNotFoundException` are built from the client's own
+  exception, whose message is the status line followed by the whole response body, and they leave a
+  handler as themselves so Messenger will retry them. Retries end, and Symfony then flattens the
+  whole chain into an `ErrorDetailsStamp` that outlives the request. They keep their class, and
+  nothing behind them
+- **A failure from a synchronously routed handler is not called an unreachable cluster.**
+  `MessengerTransport::dispatch()` turned every `Throwable` into a transport failure, which is the
+  one classification meaning "ask again": with a `sync://` route, a document the mapping refuses
+  for good was retried as though the cluster were busy, and the actual reason sat two levels down
+  in a chain nobody reads. The handler's own answer is passed through instead
+- **A QueryExtension no longer takes the token's provenance with it.** The check that a cursor
+  belongs to the query being read was not running at all for anyone with an extension — which is
+  exactly the population it was written for, since an extension is what makes a result set change
+  between two pages. A `with*()` builds a new query and the provenance deliberately does not
+  survive one; `extend()` rebuilt the query on every page, so by the time the check ran it had
+  nothing left to compare and passed in silence. The provenance is now read before the extensions
+  run and compared against the effective query, which is also the one the token was issued for
+- **A cursor token that cannot name its query is refused rather than trusted.** `Cursor::encode()`
+  took the fingerprint as an optional argument, so a hand-made `{"v":2,…}` with no `q` was accepted
+  and then quietly exempted from the check — the same silence the envelope exists to end. The
+  fingerprint is required now, and a page assembled by hand (a decorator, a cache) says so instead
+  of issuing an unbound token: `nextCursor()` with `after()` is how one of those is continued
+- **A point-in-time cursor is not a position in an ordinary search.** The two were told apart by
+  counting sort values, and since the index name joined the sort as a tiebreaker both tuples are
+  three long: a tuple from `iterate()` — `AuditEntry::$sort` is public, `after()` takes anything —
+  was a valid-looking position in a search it did not belong to. What separates them is read
+  instead: an index name is a string, a `_shard_doc` position is an integer
+- **A `_source` that is not a map reads as an empty one.** `AuditEntry::fromHit()` promises that one
+  damaged document does not break a page, and applied that promise to every field inside the
+  envelope but not to the envelope itself
 - **A cursor token belongs to the query that issued it.** A cursor is a position inside one
   result set, and nothing said which: `withEvents(UPDATE)->afterToken($t)` with a token from the
   unfiltered query is not an error Elasticsearch can see — the sort tuple has the right shape, so
@@ -427,6 +523,32 @@ the dependency range.
   existed at all, which has neither
 
 ### Changed
+- **`redact.failure_details` defaults to `cause`, whether or not anything is redacted.** It used to
+  follow `redact.fields`: an application that declared no sensitive fields got the cause's message
+  repeated in the log, the failure event and the exception. Those are two different questions.
+  Redaction covers what the *record* holds; this covers the message of an exception written by code
+  the bundle did not write — an enricher naming the token it could not use, a client quoting a
+  request body, a driver naming a row — and none of that has to be in the record for the record's
+  failure to publish it. Set `failure_details: full` to have foreign messages repeated; the
+  sanitized reason names the setting, so the way back is in the message itself
+- **Redaction reaches inside the structures a record carries.** A rule reads as global —
+  `password`, anywhere — and it saw only the field a change was filed under: with
+  `['profile' => ['name' => …, 'password' => …]]` the field is `profile`, and the secret went to
+  the index in full. Keys are matched at any depth now, in changes and in attributes alike, to a
+  bounded depth. What a rule still cannot do is name a path: a dot in a rule is an object type
+- **`SafeExceptionMessage` is trusted from a named list rather than a namespace.** "Declares the
+  marker and lives in the bundle's exception namespace" reads like a boundary and is not one — PHP
+  lets any file declare a class in any namespace, which a project that copies an exception out of a
+  dependency does by accident. The trusted set is now closed and named class by class
+- **A cursor with no value for a field it sorts by is refused.** Elasticsearch answers with `null`
+  there for a record written before audit records carried ids, and the tuple was accepted so those
+  pages would not be stranded. The price is worse than the problem: two such records in one index,
+  saved in the same second, are the same position to `search_after`, and one of them is stepped
+  over without a word. Those indices page by page number, or are reindexed with ids
+- **A query option has to be something that reads the same way twice** — a scalar, null, or an
+  array of those. An option decides what a query matches, so it travels in the fingerprint a token
+  carries; an object in there also made the fingerprint throw, and the fingerprint is computed
+  after the search has already run, so the cluster answered and the page failed on the way back
 - **A cursor token from before 1.0 is refused rather than continued.** Both older shapes — the
   bare array, and `{"v":1,"s":[…]}` — decode into a usable sort tuple and say nothing about which
   query they came from, so the check that a cursor belongs to the query being read cannot be

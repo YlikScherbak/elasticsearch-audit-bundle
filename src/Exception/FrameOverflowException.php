@@ -15,8 +15,23 @@ namespace Borsche\ElasticsearchAuditBundle\Exception;
  */
 final class FrameOverflowException extends \RuntimeException implements AuditException, SafeExceptionMessage
 {
-    public static function past(int $maxHeld): self
+    private int $dropped = 0;
+
+    public static function past(int $maxHeld, int $dropped = 0): self
     {
-        return new self(sprintf('The frame is holding %d objects, which is coalescing.max_held. With on_overflow: throw it stops here rather than releasing early and coalescing the rest per object.', $maxHeld));
+        $refused = new self(sprintf('The frame is holding %d objects, which is coalescing.max_held. With on_overflow: throw it stops here rather than releasing early and coalescing the rest per object.', $maxHeld));
+        $refused->dropped = $dropped;
+
+        return $refused;
+    }
+
+    /**
+     * How many records the refusal threw away — what the frame was holding, plus what
+     * an early release had staged. For the warning that reports the refusal; the caller
+     * has no other way to know, since the buffer is empty by the time it catches this.
+     */
+    public function held(): int
+    {
+        return $this->dropped;
     }
 }

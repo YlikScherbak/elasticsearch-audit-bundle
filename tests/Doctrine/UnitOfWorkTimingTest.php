@@ -216,6 +216,63 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         self::assertSame('SH-CORRECTED', $this->lastDocument()['changes']['reference']['new']);
     }
 
+    /**
+     * The two defences meeting each other: a preUpdate listener corrects a value after
+     * the onFlush snapshot was taken, and another listener then flushes, which empties
+     * the unit of work's change sets — of this flush too. The record is then built from
+     * the snapshot alone, and the snapshot predates the correction.
+     *
+     * What the database holds is the corrected value. A record saying otherwise is the
+     * one thing worse than a record that says nothing: it is evidence, and it is wrong.
+     */
+    public function testACorrectionInPreUpdateSurvivesAFlushThatWipesTheChangeSets(): void
+    {
+        $shipment = $this->shipmentWithTwoLines();
+
+        $corrects = new class {
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof Shipment && $entity->reference !== 'SH-CORRECTED') {
+                    $entity->reference = 'SH-CORRECTED';
+                }
+            }
+        };
+
+        $em = $this->em;
+        $flushes = new class($em) {
+            private bool $done = false;
+
+            public function __construct(private readonly EntityManagerInterface $em)
+            {
+            }
+
+            public function postUpdate(\Doctrine\ORM\Event\PostUpdateEventArgs $args): void
+            {
+                if ($this->done) {
+                    return;
+                }
+
+                $this->done = true;
+                // Somebody else's listener, doing what Doctrine warns against — and
+                // doing it after the row was written, where the change set this record
+                // is built from is still needed. Registered before the audit listener,
+                // so postUpdate reaches it first.
+                $this->em->flush();
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], $corrects);
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $flushes);
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment->reference = 'SH-12';
+        $this->em->flush();
+
+        self::assertSame('SH-CORRECTED', $this->lastDocument()['changes']['reference']['new'], 'the record says what the database took');
+    }
+
     private function flushFromPostPersist(): void
     {
         $em = $this->em;

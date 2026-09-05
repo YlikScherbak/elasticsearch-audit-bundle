@@ -6,6 +6,8 @@ namespace Borsche\ElasticsearchAuditBundle\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
+use Borsche\ElasticsearchAuditBundle\Contract\AuditableInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\TracksCollectionElementsInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
@@ -53,11 +55,20 @@ final class AuditSubscriber
     public const EVENTS = [Events::onFlush, Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear];
 
     /**
-     * What has already been checked against Doctrine's mapping, keyed by the class
-     * **and the declaration itself** — the audited fields, or the tracked collections.
-     * The attribute form is fixed per class, but the interface form is answered by the
-     * instance, and two instances of one class may answer differently; keying on the
-     * class alone would let the second one's declaration through unchecked.
+     * Which classes have already been checked against Doctrine's mapping.
+     *
+     * Attribute declarations only. They are fixed per class — the same names, the same
+     * representers, the same tracked fields for every instance — so checking one
+     * instance answers for all of them.
+     *
+     * An interface declaration is not cached at all, and the key is why: it held the
+     * class plus the *names* the declaration used, while what the checks read is more
+     * than the names — whether an audited association has a representer, what is always
+     * recorded, which fields of an element are tracked. Two instances answering with the
+     * same names and a different representer shared one key, and the second one walked
+     * past the check that exists for it. Fingerprinting all of it would be a second
+     * declaration format to keep in step; not caching what an instance is free to change
+     * is the version that cannot drift.
      *
      * @var array<string, true>
      */
@@ -87,6 +98,15 @@ final class AuditSubscriber
      * too. The listener that did it need not be ours, need not be aware of us, and
      * leaves nothing in any log. Whoever reads the history simply finds an update whose
      * "changes" are empty.
+     *
+     * What this is, and what it is not: the listener keeps its own state across the
+     * reentrant flushes it has met, so a trail does not go blank because somebody's
+     * listener saved something. It is not a claim that reentrant flushes work —
+     * Doctrine's own documentation calls flushing from a flush event strongly
+     * discouraged, says the UnitOfWork was not designed for it, and warns that updates
+     * can be lost or half-applied. The bundle defends its own records; the entities in
+     * that flush are between the application and Doctrine, and the warning below says
+     * where to move the work.
      *
      * @var array<int, array<string, mixed>>
      */
@@ -500,13 +520,17 @@ final class AuditSubscriber
      */
     private function assertAuditedFieldsAreThere(EntityManagerInterface $em, object $entity, AuditMetadata $metadata): void
     {
-        $fields = array_keys($metadata->fields);
-        sort($fields);
-        $checked = $entity::class."\0fields\0".implode("\0", $fields);
+        // Cached for a declaration that cannot change between instances, and repeated
+        // for one that can: getAuditedFields() and getAlwaysRecordedFields() are the
+        // instance's answer, and the checks below read the representers and the
+        // always-recorded list, not only the field names.
+        $checked = $entity instanceof AuditableInterface ? null : $entity::class."\0fields";
 
-        if (isset($this->checkedTracking[$checked])) {
+        if ($checked !== null && isset($this->checkedTracking[$checked])) {
             return;
         }
+
+        $fields = array_keys($metadata->fields);
 
         $classMetadata = $em->getClassMetadata($entity::class);
 
@@ -566,10 +590,12 @@ final class AuditSubscriber
 
             throw new DeclarationMistake($parts === []
                 ? sprintf('%s::$%s is audited, but Doctrine maps it as neither a field nor an association, so nothing about it would ever be recorded.', $entity::class, $field)
-                : sprintf('%s::$%s is audited, but it is an embeddable: Doctrine reports its columns as %s and never as "%s", so nothing about it would ever be recorded. Audit those names instead.', $entity::class, $field, implode(', ', array_map(static fn (string $p): string => '"'.$p.'"', $parts)), $field));
+                : sprintf('%s::$%s is audited, but it is an embeddable: Doctrine reports its columns as %s and never as "%s", so nothing about it would ever be recorded. Name those columns instead — which #[AuditField] cannot do, since there is no property called "%s" to put it on: declare them through AuditableInterface::getAuditedFields(), which takes the names as strings.', $entity::class, $field, implode(', ', array_map(static fn (string $p): string => '"'.$p.'"', $parts)), $field, $parts[0]));
         }
 
-        $this->checkedTracking[$checked] = true;
+        if ($checked !== null) {
+            $this->checkedTracking[$checked] = true;
+        }
     }
 
     /**
@@ -594,11 +620,12 @@ final class AuditSubscriber
         // the interface form of a declaration is deliberately not cached, because its
         // field list may differ per instance, and a class-only key let the second
         // instance's different collections through unchecked.
-        $collections = $metadata->trackedCollections();
-        sort($collections);
-        $checked = $entity::class."\0".implode("\0", $collections);
+        // As above: an instance that declares its own tracked collections declares its
+        // own tracked element fields with them, and a typo in the second is what this
+        // check is for.
+        $checked = $entity instanceof TracksCollectionElementsInterface ? null : $entity::class."\0collections";
 
-        if (isset($this->checkedTracking[$checked])) {
+        if ($checked !== null && isset($this->checkedTracking[$checked])) {
             return;
         }
 
@@ -647,7 +674,9 @@ final class AuditSubscriber
             }
         }
 
-        $this->checkedTracking[$checked] = true;
+        if ($checked !== null) {
+            $this->checkedTracking[$checked] = true;
+        }
     }
 
     /**
@@ -899,9 +928,51 @@ final class AuditSubscriber
 
         if ($current === [] && $snapshot !== []) {
             $this->reportLostChangeSets($entity);
+
+            return self::asTheEntityNowStands($em, $entity, $snapshot);
         }
 
         return $current + $snapshot;
+    }
+
+    /**
+     * The snapshot, with the "new" side of each field read off the entity.
+     *
+     * The snapshot is what onFlush saw; the row holds what the entity held when the
+     * UPDATE was built, which is later. A preUpdate listener correcting a value —
+     * Doctrine recomputes the change set for exactly that — is the ordinary way the two
+     * differ, and the merge above normally covers it because the unit of work still has
+     * the recomputed set. On the path that gets here it does not: another listener's
+     * flush emptied it. Handing back the snapshot then writes a record that disagrees
+     * with the row, and an audit trail that is wrong is worse than one that is thin.
+     *
+     * Only mapped fields, and only their new side: an association's old and new are
+     * objects the snapshot already holds, and reading one back off the entity would say
+     * nothing the record does not already know.
+     *
+     * @param array<string, mixed> $snapshot
+     *
+     * @return array<string, mixed>
+     */
+    private static function asTheEntityNowStands(EntityManagerInterface $em, object $entity, array $snapshot): array
+    {
+        $metadata = $em->getClassMetadata($entity::class);
+
+        foreach ($snapshot as $field => $sides) {
+            if (!\is_array($sides) || !\array_key_exists(1, $sides) || !$metadata->hasField((string) $field)) {
+                continue;
+            }
+
+            try {
+                $sides[1] = $metadata->getFieldValue($entity, (string) $field);
+            } catch (\Throwable) {
+                continue; // unreadable for whatever reason: the snapshot's own value stands
+            }
+
+            $snapshot[$field] = $sides;
+        }
+
+        return $snapshot;
     }
 
     /**

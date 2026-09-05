@@ -180,8 +180,14 @@ final class BulkAndPointInTimeTest extends ElasticsearchTestCase
     /**
      * @return array<string, mixed>
      */
+    /**
+     * A document shaped like the writer's own: the record id travels inside it as well
+     * as being the document id. Without it Elasticsearch answers with null for that
+     * sort value, and a cursor cannot continue from a position two records can share —
+     * which is a real refusal, not a fixture detail worth working around.
+     */
     private static function document(string $type, int|string $id, string $at = '2026-08-28 10:00:00'): array
     {
-        return ['objectType' => $type, 'objectId' => $id, 'event' => 'update', 'loggedAt' => $at, 'source' => 'system', 'changes' => []];
+        return ['id' => sprintf('%s-%s-%s', $type, $id, str_replace([' ', ':'], '', $at)), 'objectType' => $type, 'objectId' => $id, 'event' => 'update', 'loggedAt' => $at, 'source' => 'system', 'changes' => []];
     }
 }

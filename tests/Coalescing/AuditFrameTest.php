@@ -408,6 +408,176 @@ final class AuditFrameTest extends TestCase
         self::assertFalse($this->frame->isOpen(), 'and no frame either');
     }
 
+    public function testARemoveInsideARefusedOperationIsNotPublishedEither(): void
+    {
+        // The hole under the test above. A remove is terminal — the frame lets it out
+        // where it happens — so an operation refused three saves later had already
+        // published part of itself, and with the messenger transport the message was
+        // already on its way before the caller's transaction rolled anything back.
+        // Under on_overflow: throw the early release is staged instead: it leaves when
+        // the outermost frame closes, or never.
+        $this->refusing();
+
+        try {
+            $this->frame->coalesce(function (): void {
+                $this->writer->record('stock', 1, AuditEvent::REMOVE);
+                $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+                $this->writer->record('stock', 3, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+            });
+            self::fail('the frame should have refused the third object');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertSame([], $this->gateway->documents, 'the remove was part of the refused operation');
+    }
+
+    public function testASecondActorInsideARefusedOperationIsNotPublishedEither(): void
+    {
+        // The other early release, for the same reason: a step recorded under another
+        // actor ends the record before it, and that record used to go out where it
+        // happened.
+        $this->refusing();
+
+        try {
+            $this->frame->coalesce(function (): void {
+                $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)], actor: 'alice');
+                $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(2, 3)], actor: 'system');
+                $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+            });
+            self::fail('the frame should have refused the second object');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertSame([], $this->gateway->documents, "alice's record belonged to the refused operation too");
+    }
+
+    public function testWhatAnEarlyReleaseStagedStillLeavesWhenTheFrameClosesNormally(): void
+    {
+        // And staging is not swallowing: an operation that ends the ordinary way writes
+        // everything, the staged records first — they happened before what the frame was
+        // still holding, and the trail reads in the order the operation ran.
+        $this->refusing();
+
+        $this->frame->coalesce(function (): void {
+            $this->writer->record('stock', 1, AuditEvent::REMOVE);
+            $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+        });
+
+        self::assertSame(
+            [['1', 'remove'], ['2', 'update']],
+            array_map(static fn (array $d): array => [(string) $d['objectId'], $d['event']], $this->gateway->documents['audit_log']),
+        );
+    }
+
+    public function testARefusalInsideAnInnerFrameDoesNotLeaveTheOuterOneOpenAndUnwatched(): void
+    {
+        // reset() took every level down with it, so an application that caught the
+        // refusal inside its outer frame went on recording into a frame that was no
+        // longer there: the outer operation's earlier records were gone, and everything
+        // after the catch was written one save at a time, outside any frame.
+        //
+        // The refusal covers the whole stack — those frames share one buffer and their
+        // records are part of what overflowed — but the stack stays standing until its
+        // own end().
+        $this->refusing();
+        $caught = false;
+
+        $this->frame->coalesce(function () use (&$caught): void {
+            $this->writer->record('order', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+            try {
+                $this->frame->coalesce(function (): void {
+                    $this->writer->record('order', 2, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+                });
+            } catch (FrameOverflowException) {
+                $caught = true;
+                self::assertTrue($this->frame->isOpen(), 'the outer frame is still the caller\'s to close');
+            }
+
+            $this->writer->record('order', 1, AuditEvent::UPDATE, ['fact' => new Change(2, 3)]);
+        });
+
+        self::assertTrue($caught, 'the inner frame should have refused');
+        self::assertSame([], $this->gateway->documents, 'nothing of the refused operation reached the log, before or after the catch');
+        self::assertFalse($this->frame->isOpen());
+    }
+
+    public function testAManualEndAfterARefusalWritesNothingEither(): void
+    {
+        // The two lifecycles have to mean the same thing. coalesce() dropped the
+        // operation and begin()/end() wrote whatever had fitted — so the documented
+        // try/finally pattern quietly gave a different guarantee from the closure that
+        // exists to write it for you.
+        $this->refusing();
+
+        $this->frame->begin();
+
+        try {
+            $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+            $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(3, 4)]);
+            self::fail('the frame should have refused the second object');
+        } catch (FrameOverflowException) {
+        } finally {
+            $this->frame->end();
+        }
+
+        self::assertSame([], $this->gateway->documents);
+        self::assertFalse($this->frame->isOpen());
+    }
+
+    public function testTheLeakPathDoesNotResurrectARefusedOperation(): void
+    {
+        // release() exists to write what a leaked frame held, because those saves went
+        // through — but a refused operation is the one case where "it happened" is not
+        // the question. FrameResetMiddleware calls this after every message, so without
+        // it a refusal followed by a missing end() would be published by the safety net.
+        $this->refusing();
+
+        $this->frame->begin();
+
+        try {
+            $this->writer->record('stock', 1, AuditEvent::REMOVE);
+            $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+            $this->writer->record('stock', 3, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+            self::fail('the frame should have refused the third object');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertTrue($this->frame->release(), 'the frame was still open');
+        self::assertSame([], $this->gateway->documents);
+    }
+
+    public function testTheFrameWorksAgainAfterARefusedOperation(): void
+    {
+        // The refusal belongs to the operation that overflowed, not to the process.
+        $this->refusing();
+
+        try {
+            $this->frame->coalesce(function (): void {
+                $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+                $this->writer->record('stock', 2, AuditEvent::UPDATE, ['fact' => new Change(3, 4)]);
+            });
+        } catch (FrameOverflowException) {
+        }
+
+        $this->frame->coalesce(function (): void {
+            $this->writer->record('stock', 3, AuditEvent::UPDATE, ['fact' => new Change(5, 6)]);
+        });
+
+        self::assertCount(1, $this->gateway->documents['audit_log']);
+        self::assertSame('3', (string) $this->gateway->documents['audit_log'][0]['objectId']);
+    }
+
+    /**
+     * A frame that refuses rather than releases, with room for exactly one object.
+     */
+    private function refusing(): void
+    {
+        $this->buffer = new FrameBuffer(maxHeld: 1, throwOnOverflow: true);
+        $this->writer = $this->writer(FailurePolicy::Log);
+        $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
+    }
+
     private static function consumed(object $message, string $transport = 'test'): Envelope
     {
         return new Envelope($message, [new ReceivedStamp($transport)]);

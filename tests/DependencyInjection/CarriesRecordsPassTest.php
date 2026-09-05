@@ -50,6 +50,28 @@ final class CarriesRecordsPassTest extends TestCase
         (new CarriesRecordsPass())->process($container);
     }
 
+    public function testAnAliasThatPointsAtItselfIsAnAnswerRatherThanAHang(): void
+    {
+        // A loop is somebody else's bug, and this pass is not the place to find out
+        // about it by hanging. It used to be bounded by a step count, which stops a loop
+        // and stops a long legitimate chain the same way — silently, answering with
+        // whichever id it happened to be holding. Every id is seen once now, so a circle
+        // ends at the last id before it closes.
+        $container = new ContainerBuilder();
+        $container->setParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_PROMISED, false);
+
+        $container->setDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT, new Definition(\stdClass::class, ['round.and.round']));
+        $container->setAlias('round.and.round', 'round.again');
+        $container->setAlias('round.again', 'round.and.round');
+
+        try {
+            (new CarriesRecordsPass())->process($container);
+            self::fail('a bus that is only an alias loop should not have passed');
+        } catch (NotConfiguredException $refused) {
+            self::assertStringContainsString('is not a Messenger bus', $refused->getMessage());
+        }
+    }
+
     private static function containerWithoutAnEntityManager(bool $promised): ContainerBuilder
     {
         $container = new ContainerBuilder();

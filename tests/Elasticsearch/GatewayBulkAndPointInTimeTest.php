@@ -98,7 +98,7 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
 
         self::assertSame([1], array_keys($result->failures));
         self::assertSame(400, $result->failures[1]['status']);
-        self::assertStringContainsString('failed to parse field [email]', $result->failures[1]['reason']);
+        self::assertStringContainsString('on field "email"', $result->failures[1]['reason']);
         self::assertStringNotContainsString('alice@example.com', $result->failures[1]['reason'], 'the refused value is a person\'s data and stays out of the error path');
     }
 

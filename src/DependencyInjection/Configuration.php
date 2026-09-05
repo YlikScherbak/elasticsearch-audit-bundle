@@ -52,7 +52,7 @@ final class Configuration implements ConfigurationInterface
             ->defaultValue('sync');
 
         $children->scalarNode('message_bus')
-            ->info('Service id of the bus to dispatch to when transport is "messenger".')
+            ->info('Service id of a FrameworkBundle Messenger bus to dispatch to when transport is "messenger". It has to be a bus Symfony built (one tagged messenger.bus), with the delivery middleware it comes with: the handlers are attached to that bus by MessengerPass, and a bus assembled by hand — or one declared with default_middleware disabled — takes the dispatch and delivers nothing. The boot refuses both rather than record into the void.')
             ->defaultValue('messenger.default_bus')
             ->validate()
                 ->ifTrue(static fn (mixed $v) => !\is_string($v) || $v === '')

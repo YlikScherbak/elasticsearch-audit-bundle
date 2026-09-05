@@ -15,6 +15,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
+use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use PHPUnit\Framework\TestCase;
@@ -100,7 +101,7 @@ final class AuditWriterTest extends TestCase
             }
         };
 
-        $writer = $this->writer(enrichers: [$enricher]);
+        $writer = $this->writer(enrichers: [$enricher], details: FailureDetails::Full);
         $writer->record('order', 1, AuditEvent::CREATE);
         $writer->record('user', 1, AuditEvent::CREATE);
 
@@ -114,13 +115,13 @@ final class AuditWriterTest extends TestCase
     {
         $this->gateway->failWith = new \RuntimeException('cluster down');
 
-        $this->writer()->record('order', 1, AuditEvent::UPDATE, ['status' => new Change('a', 'b')]);
+        $this->writer(details: FailureDetails::Full)->record('order', 1, AuditEvent::UPDATE, ['status' => new Change('a', 'b')]);
 
         self::assertCount(1, $this->logs);
         self::assertSame('error', $this->logs[0]['level']);
-        // Under the default policy — no redactor configured, so failure_details is
-        // "full" — the cause travels as the previous exception, and what the bundle
-        // wrote names it rather than quoting it.
+        // With failure_details: full — which has to be asked for — the cause travels as
+        // the previous exception, and what the bundle wrote names it rather than
+        // quoting it.
         self::assertStringNotContainsString('cluster down', (string) $this->logs[0]['context']['reason']);
         self::assertStringContainsString('cluster down', self::chainOf($this->logs[0]['context']['exception']));
         self::assertSame('order', $this->logs[0]['context']['objectType']);
@@ -131,7 +132,7 @@ final class AuditWriterTest extends TestCase
         $this->gateway->failWith = new \RuntimeException('cluster down');
 
         try {
-            $this->writer(policy: FailurePolicy::Throw)->record('order', 1, AuditEvent::UPDATE);
+            $this->writer(policy: FailurePolicy::Throw, details: FailureDetails::Full)->record('order', 1, AuditEvent::UPDATE);
             self::fail('Expected WriteFailedException');
         } catch (WriteFailedException $e) {
             self::assertSame('order', $e->record->objectType);
@@ -164,10 +165,44 @@ final class AuditWriterTest extends TestCase
             }
         };
 
-        $this->writer(enrichers: [$enricher])->record('order', 1, AuditEvent::UPDATE);
+        $this->writer(enrichers: [$enricher], details: FailureDetails::Full)->record('order', 1, AuditEvent::UPDATE);
 
         self::assertSame([], $this->gateway->documents);
         self::assertStringContainsString('enricher bug', (string) $this->logs[0]['context']['reason']);
+    }
+
+    public function testAForeignMessageIsNotRepeatedUnlessSomebodyAskedForIt(): void
+    {
+        // The default used to follow redaction: no redact.fields configured meant the
+        // cause travelled in full. They are not the same question. Redaction covers what
+        // the record holds; this covers the message of an exception written elsewhere —
+        // an enricher naming the token it could not use, a client quoting a request body
+        // — and none of that has to be in the record for the record's failure to publish
+        // it. So "cause" is what an application gets without saying anything.
+        $enricher = new class implements AuditEnricherInterface {
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                throw new \RuntimeException('authorization failed with token s3cr3t-42');
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $this->writer(enrichers: [$enricher])->record('order', 1, AuditEvent::UPDATE);
+
+        $logged = json_encode($this->logs, \JSON_THROW_ON_ERROR);
+
+        self::assertStringNotContainsString('s3cr3t-42', $logged, 'nothing the application never declared sensitive is safe to repeat by default');
+        self::assertStringContainsString('RuntimeException', $logged, 'the class still says what failed');
+        self::assertStringContainsString('failure_details', $logged, 'and the way to see more is named where it is missed');
     }
 
     public function testImmediatelyBypassesTheConfiguredTransport(): void
@@ -194,7 +229,7 @@ final class AuditWriterTest extends TestCase
      * @param array<string, string>            $routing
      * @param iterable<AuditEnricherInterface> $enrichers
      */
-    private function writer(array $routing = [], iterable $enrichers = [], FailurePolicy $policy = FailurePolicy::Log): AuditWriter
+    private function writer(array $routing = [], iterable $enrichers = [], FailurePolicy $policy = FailurePolicy::Log, ?FailureDetails $details = null): AuditWriter
     {
         $logs = &$this->logs;
         $logger = new class($logs) extends AbstractLogger {
@@ -212,7 +247,7 @@ final class AuditWriterTest extends TestCase
 
         $transport = new SyncTransport($this->gateway);
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log', $routing), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, $policy, $logger);
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log', $routing), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, $policy, $logger, failureDetails: $details);
     }
 
     /**

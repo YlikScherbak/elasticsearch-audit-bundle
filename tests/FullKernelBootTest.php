@@ -192,6 +192,72 @@ final class FullKernelBootTest extends TestCase
         }
     }
 
+    public function testABusThatWouldDeliverNothingIsRefusedRatherThanDispatchedTo(): void
+    {
+        // The tag says FrameworkBundle built the bus. It does not say a message
+        // dispatched there reaches anything: Symfony lets a bus be declared with
+        // default_middleware disabled, and what is left carries nothing. dispatch()
+        // still succeeds and still answers with an Envelope — the failure this pass
+        // exists to refuse, one configuration key away from the shape it already caught.
+        $kernel = new FullKernel($this->cacheDir, messenger: true, withoutDoctrine: true, busWithoutDelivery: true);
+
+        try {
+            $kernel->boot();
+            self::fail('a bus with no delivery middleware should not have booted');
+        } catch (\Throwable $refused) {
+            self::assertStringContainsString('neither the send_message nor the handle_message middleware', self::chainOf($refused));
+        }
+    }
+
+    public function testTheHandlersAreAttachedToTheConfiguredBusAndNotToEveryBus(): void
+    {
+        // A handler tagged without a bus is available on all of them, which is a strange
+        // shape for a bundle that names one bus and checks it: an audit record dispatched
+        // to somebody else's bus by mistake would be handled there and written, and
+        // nothing would ever say the routing was wrong.
+        $kernel = new FullKernel($this->cacheDir, messenger: true, withoutDoctrine: true);
+        $kernel->boot();
+
+        $tags = $kernel->getContainer()->getParameter('test.handler_buses');
+
+        self::assertSame(
+            ['messenger.bus.default', 'messenger.bus.default'],
+            $tags,
+            'both handlers, bound to the canonical id of the configured bus',
+        );
+
+        $kernel->shutdown();
+    }
+
+    public function testANamedEntityManagerOnANamedConnectionBootsFine(): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
+        // The positive side of the connection check, and the one that pins what it reads:
+        // connectionOf() takes the connection from the entity manager's own definition,
+        // which is DoctrineBundle's internal shape. A second database with its own
+        // manager is the ordinary way an application has one, and the refusal must not
+        // catch it.
+        $kernel = new FullKernel($this->cacheDir, insistOnDoctrine: true, namedEntityManager: true);
+        $kernel->boot();
+
+        /** @var \Doctrine\ORM\EntityManagerInterface $em */
+        $em = $kernel->getContainer()->get('doctrine.orm.audit_entity_manager');
+        $attached = [];
+
+        foreach ($em->getEventManager()->getListeners(Events::postFlush) as $listener) {
+            if ($listener instanceof AuditSubscriber) {
+                $attached[] = $listener::class;
+            }
+        }
+
+        self::assertSame([AuditSubscriber::class], $attached, 'attached to the manager on the connection it was pointed at');
+
+        $kernel->shutdown();
+    }
+
     private static function chainOf(?\Throwable $e): string
     {
         $said = [];
@@ -218,8 +284,10 @@ final class FullKernel extends Kernel
         private readonly bool $dbalOnly = false,
         private readonly bool $insistOnDoctrine = false,
         private readonly bool $withoutDoctrine = false,
+        private readonly bool $busWithoutDelivery = false,
+        private readonly bool $namedEntityManager = false,
     ) {
-        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : ''), true);
+        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : ''), true);
     }
 
     /**
@@ -241,6 +309,19 @@ final class FullKernel extends Kernel
         yield new ElasticsearchAuditBundle();
     }
 
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private static function fixtureMapping(): array
+    {
+        return ['Fixtures' => [
+            'type' => 'attribute',
+            'dir' => __DIR__.'/Fixtures',
+            'prefix' => 'Borsche\\ElasticsearchAuditBundle\\Tests\\Fixtures',
+            'is_bundle' => false,
+        ]];
+    }
+
     public function registerContainerConfiguration(LoaderInterface $loader): void
     {
         $messenger = $this->messenger;
@@ -249,14 +330,29 @@ final class FullKernel extends Kernel
         $dbalOnly = $this->dbalOnly;
         $insist = $this->insistOnDoctrine;
         $noDoctrine = $this->withoutDoctrine;
+        $undelivered = $this->busWithoutDelivery;
+        $namedManager = $this->namedEntityManager;
 
-        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine): void {
+        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager): void {
             $container->loadFromExtension('framework', [
                 'test' => true,
                 'http_method_override' => false,
                 'handle_all_throwables' => true,
                 'php_errors' => ['log' => true],
-                'messenger' => ['transports' => [], 'routing' => []],
+                // A second bus built by FrameworkBundle with its default middleware
+                // turned off: it carries the messenger.bus tag like any other, and
+                // nothing in it would take a message anywhere.
+                'messenger' => $undelivered
+                    ? [
+                        'default_bus' => 'messenger.bus.default',
+                        'transports' => [],
+                        'routing' => [],
+                        'buses' => [
+                            'messenger.bus.default' => [],
+                            'audit.bus' => ['default_middleware' => ['enabled' => false], 'middleware' => []],
+                        ],
+                    ]
+                    : ['transports' => [], 'routing' => []],
             ]);
 
             if ($ownBus) {
@@ -274,7 +370,7 @@ final class FullKernel extends Kernel
             ] : [
                 // A second connection with no entity manager on it — the DBAL-only
                 // setup Symfony documents, and the one an audit listener cannot hear.
-                'dbal' => $reporting
+                'dbal' => ($reporting || $namedManager)
                     ? ['default_connection' => 'default', 'connections' => [
                         'default' => ['driver' => 'pdo_sqlite', 'memory' => true],
                         'reporting' => ['driver' => 'pdo_sqlite', 'memory' => true],
@@ -285,6 +381,16 @@ final class FullKernel extends Kernel
                     // proxies themselves (PHP 8.4 lazy objects), and in 2.x it defaults
                     // to kernel.debug, which this kernel sets anyway.
                     'controller_resolver' => ['auto_mapping' => false],
+                ] + ($namedManager ? [
+                    // A named entity manager on a named connection: the shape a second
+                    // database has in a real application, and the one connectionOf()
+                    // reads off the manager's own definition.
+                    'default_entity_manager' => 'default',
+                    'entity_managers' => [
+                        'default' => ['connection' => 'default', 'mappings' => self::fixtureMapping()],
+                        'audit' => ['connection' => 'reporting', 'mappings' => self::fixtureMapping()],
+                    ],
+                ] : [
                     'mappings' => [
                         'Fixtures' => [
                             'type' => 'attribute',
@@ -293,19 +399,22 @@ final class FullKernel extends Kernel
                             'is_bundle' => false,
                         ],
                     ],
-                ],
+                ]),
                 ]);
             }
 
             $container->loadFromExtension(Configuration::ROOT, [
                 'client' => ['hosts' => ['http://localhost:9200']],
                 'transport' => $messenger ? 'messenger' : 'sync',
-                'doctrine' => ($reporting ? ['connection' => 'reporting'] : []) + ($insist ? ['enabled' => true] : []),
-            ] + ($ownBus ? ['message_bus' => 'app.bus'] : []));
+                'doctrine' => (($reporting || $namedManager) ? ['connection' => 'reporting'] : []) + ($insist ? ['enabled' => true] : []),
+            ] + ($ownBus ? ['message_bus' => 'app.bus'] : []) + ($undelivered ? ['message_bus' => 'audit.bus'] : []));
 
             // What a test needs to look at: private by default, and the point of the
             // test is to ask the container what a worker would be handed.
             $container->setAlias('test.handlers_locator', 'messenger.bus.default.messenger.handlers_locator')->setPublic(true);
+
+            // And which bus each handler was bound to, read after every pass has run.
+            $container->addCompilerPass(new HandlerBusesPass(), \Symfony\Component\DependencyInjection\Compiler\PassConfig::TYPE_BEFORE_REMOVING, -1000);
         });
     }
 
@@ -317,5 +426,29 @@ final class FullKernel extends Kernel
     public function getLogDir(): string
     {
         return $this->cacheDir.'/log';
+    }
+}
+
+/**
+ * Records which bus each audit handler ended up tagged for, so a test can read it back
+ * from the built container.
+ */
+final class HandlerBusesPass implements \Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface
+{
+    public function process(ContainerBuilder $container): void
+    {
+        $buses = [];
+
+        foreach ([IndexAuditRecordHandler::class, IndexAuditRecordsHandler::class] as $handler) {
+            if (!$container->hasDefinition($handler)) {
+                continue;
+            }
+
+            foreach ($container->getDefinition($handler)->getTag('messenger.message_handler') as $tag) {
+                $buses[] = $tag['bus'] ?? '(every bus)';
+            }
+        }
+
+        $container->setParameter('test.handler_buses', $buses);
     }
 }

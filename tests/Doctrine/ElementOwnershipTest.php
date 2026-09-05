@@ -8,12 +8,15 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Address;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AlwaysRecordsAnAssociation;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Basket;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\BasketItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Customer;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredTracking;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisspelledTracking;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\UntrackedInverseManyToMany;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesMisspelledTracking;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesRepresented;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Events;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
@@ -285,6 +288,69 @@ final class ElementOwnershipTest extends DoctrineTestCase
 
         $basket->add(new BasketItem('apples'));
         $this->em->flush();
+    }
+
+    public function testASecondInstanceDeclaringSomethingElseIsCheckedToo(): void
+    {
+        // The interface form exists so a declaration can depend on the instance — its
+        // own docblock says so — and the validation cache was keyed on the class plus
+        // the field *names*. These two instances name the same two fields; one of them
+        // audits an association with no representer, which records "something changed"
+        // and not what. Checked once, the second one walked straight past the rule.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $author = new Author('alice');
+        $this->em->persist($author);
+
+        $fine = new SometimesRepresented('with a representer');
+        $fine->author = $author;
+        $this->em->persist($fine);
+        $this->em->flush();
+
+        $broken = new SometimesRepresented('without one', represented: false);
+        $broken->author = $author;
+        $this->em->persist($broken);
+
+        try {
+            $this->em->flush();
+            self::fail('the second declaration was not checked');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString('is an audited association and has no representer', self::chain($refused), 'refused by the declaration check, before anything was built');
+        }
+    }
+
+    public function testASecondInstanceTrackingOtherElementFieldsIsCheckedToo(): void
+    {
+        // The tracking half of the same cache. The collection names were the key, and
+        // what the check reads is the element fields named inside them: one of these two
+        // instances watches "quanitity", which watches nothing at all — the silence the
+        // check exists to refuse.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $spelled = new SometimesMisspelledTracking('SM-1');
+        $this->em->persist($spelled);
+        $this->em->flush();
+
+        $misspelled = new SometimesMisspelledTracking('SM-2', spelled: false);
+        $this->em->persist($misspelled);
+
+        try {
+            $this->em->flush();
+            self::fail('the second declaration was not checked');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString('quanitity', self::chain($refused));
+        }
+    }
+
+    private static function chain(\Throwable $e): string
+    {
+        $said = [];
+
+        for (; $e !== null; $e = $e->getPrevious()) {
+            $said[] = $e->getMessage();
+        }
+
+        return implode(' | ', $said);
     }
 
     public function testAnUntrackedInverseManyToManyIsRefusedRatherThanSilentlyIgnored(): void

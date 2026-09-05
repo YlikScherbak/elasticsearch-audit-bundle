@@ -86,11 +86,20 @@ final class AuditFrame
             // trail is fragmented either way, and a setting that gives no different
             // guarantee has no reason to exist.
             //
+            // The buffer refused itself where the overflow was raised, so there is
+            // nothing to drop here and nothing this frame could still publish. This
+            // level is closed like any other — not reset: a reset would take every
+            // enclosing frame down with it, and a caller that catches this exception
+            // inside an outer frame would go on recording outside a frame it believes
+            // is still open.
+            //
             // What this cannot undo is the database. Those records reached the frame
             // because their saves committed, so the caller's own transaction is what
             // rolls them back — which is why this setting is only meaningful where
             // there is one.
-            $this->drop('An operation was refused because the audit frame could not hold it (coalescing.on_overflow: throw); its {held} held record(s) were dropped. The database changes behind them are not undone by this — the transaction around the operation is what rolls those back.');
+            $this->logger->warning('An operation was refused because the audit frame could not hold it (coalescing.on_overflow: throw); the {held} record(s) it had collected were dropped, and nothing it records from here until the outermost frame closes will be written either. The database changes behind them are not undone by this — the transaction around the operation is what rolls those back.', ['held' => $refused->held()]);
+
+            $this->end();
 
             throw $refused;
         } catch (\Throwable $failed) {

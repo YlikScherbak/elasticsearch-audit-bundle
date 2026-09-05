@@ -30,8 +30,13 @@ final class Cursor
 
     /**
      * @param list<mixed> $sortValues
+     * @param string      $query      the fingerprint of the query this page came from. Required, and
+     *                                that is the point: a token that cannot say which result set it
+     *                                is a position in cannot be checked when it comes back, and an
+     *                                unchecked one answers from the middle of whatever is searched
+     *                                next
      */
-    public static function encode(array $sortValues, ?string $query = null): string
+    public static function encode(array $sortValues, string $query): string
     {
         // Held to what decode() accepts, on the way out as well as on the way in. It
         // checked only that json_encode could run, so the bundle could hand a client a
@@ -104,16 +109,27 @@ final class Cursor
             throw self::fromAnotherVersion($values['v']);
         }
 
+        // Every token this bundle issues names the query it belongs to, and one that
+        // does not is not a token it issued. The reader's check is skipped for a token
+        // with no fingerprint — silently, which is the shape of the mistake this whole
+        // envelope exists to prevent — so the shape is refused here instead of being
+        // read as a cursor that answers anywhere.
+        if (!\is_string($values['q'] ?? null) || $values['q'] === '') {
+            throw new InvalidQueryException('This cursor token does not say which query it was issued for, so nothing can check whether continuing it here answers from the middle of a different result set. Pass back a token AuditPage::nextCursorToken() produced, or start from the first page.');
+        }
+
         $values = $values['s'] ?? null;
 
         if (!\is_array($values) || $values === [] || !array_is_list($values)) {
             throw self::invalid();
         }
 
-        // Sort values are scalars — and null, which legacy indices sort with. A token
-        // smuggling a structure in is not a cursor, whatever else it may be.
+        // Sort values are scalars. A token smuggling a structure in is not a cursor,
+        // whatever else it may be — and a null is not one either: it means the record has
+        // no value for a field the query sorts by, and AuditQuery::after() explains why
+        // that has no order to continue from.
         foreach ($values as $value) {
-            if ($value !== null && !\is_scalar($value)) {
+            if (!\is_scalar($value)) {
                 throw self::invalid();
             }
         }
@@ -133,8 +149,12 @@ final class Cursor
         }
 
         foreach ($sortValues as $value) {
-            if ($value !== null && !is_scalar($value)) {
-                throw new InvalidQueryException(sprintf('A sort value is a scalar or null; %s cannot travel in a cursor token.', get_debug_type($value)));
+            if (!is_scalar($value)) {
+                // Including null. Elasticsearch answers with one for a record that has no
+                // value for a sort field — a record from before audit records carried ids —
+                // and a tuple like that names a position two records can share. No token is
+                // issued for it rather than one that may step over a record.
+                throw new InvalidQueryException(sprintf('A sort value is a scalar; %s cannot travel in a cursor token. A null means the last record on this page has no value for a field the query sorts by, which is a record from before audit records carried ids: there is no position after it that Elasticsearch can continue from, so those are paged by page number or reindexed with ids first.', get_debug_type($value)));
             }
         }
     }

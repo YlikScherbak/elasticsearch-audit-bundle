@@ -48,6 +48,36 @@ final class FrameBuffer
     private array $finalizeFailures = [];
 
     /**
+     * Records an early release produced while the frame is staged — held back until
+     * the outermost frame closes rather than written where they happened.
+     *
+     * Only under `on_overflow: throw`. Nothing else in the buffer changes: a remove is
+     * still terminal, an actor boundary still ends the record before it. What changes
+     * is when those records leave, because that setting promises something the two
+     * early-release paths were quietly breaking — an operation refused halfway had
+     * already published whatever a remove or a second actor let out of the frame.
+     *
+     * @var list<AuditRecord>
+     */
+    private array $staged = [];
+
+    /**
+     * Set when an operation was refused for overflowing, and held until the outermost
+     * frame closes.
+     *
+     * The refusal covers the operation, not the record that happened to be the last
+     * one: every record still to come belongs to the same refused operation, and the
+     * frame keeps taking them and dropping them rather than letting them out one at a
+     * time. It also covers frames further out — they share this buffer, their records
+     * are part of what overflowed, and there is no way to tell whose is whose.
+     *
+     * This is also what makes the manual lifecycle mean the same thing as coalesce():
+     * an end() in a finally after an overflow writes nothing, where it used to write
+     * whatever had fitted.
+     */
+    private bool $poisoned = false;
+
+    /**
      * @param list<string> $objectTypes object types to coalesce; [] means every type
      * @param int          $maxHeld     safety valve: past this many objects the buffer releases what it has
      * @param bool         $enabled     false: frames still open and close, but hold nothing
@@ -87,6 +117,14 @@ final class FrameBuffer
             return null;
         }
 
+        if ($this->poisoned) {
+            // The operation was refused. Closing it writes nothing — and clears the
+            // refusal, because the next operation is not this one.
+            $this->forget();
+
+            return [];
+        }
+
         return $this->release();
     }
 
@@ -98,16 +136,51 @@ final class FrameBuffer
      */
     public function reset(): bool
     {
-        $hadState = $this->depth > 0 || $this->held !== [];
+        $hadState = $this->depth > 0 || $this->held !== [] || $this->staged !== [];
         $this->depth = 0;
-        $this->held = [];
-        $this->moved = [];
-        // Including these: a comparator failure kept for the writer to report belongs
-        // to the operation being dropped, and one left behind surfaced in the middle of
-        // the next one — a failure event about a record nobody in that operation wrote.
-        $this->finalizeFailures = [];
+        $this->forget();
 
         return $hadState;
+    }
+
+    /**
+     * Everything one operation left here, gone: what is held, what was staged, the
+     * comparator failures kept for the writer — and the refusal itself.
+     *
+     * The failures belong to the operation being dropped, and one left behind surfaced
+     * in the middle of the next one, as a failure event about a record nobody in that
+     * operation wrote.
+     */
+    private function forget(): void
+    {
+        $this->held = [];
+        $this->moved = [];
+        $this->staged = [];
+        $this->finalizeFailures = [];
+        $this->poisoned = false;
+    }
+
+    /**
+     * Refuses the operation this buffer is holding: everything it has is dropped, and
+     * everything still to come is dropped as it arrives, until the outermost frame
+     * closes. Answers with how many records were thrown away, which is what the caller
+     * has to say in its warning.
+     *
+     * Called where the refusal is raised rather than where it is caught, so that the
+     * two lifecycles agree: coalesce() catches FrameOverflowException, a manual
+     * begin()/end() pair does not, and both must end with the operation unpublished.
+     */
+    public function refuse(): int
+    {
+        $dropped = \count($this->held) + \count($this->staged);
+
+        $this->held = [];
+        $this->moved = [];
+        $this->staged = [];
+        $this->finalizeFailures = [];
+        $this->poisoned = true;
+
+        return $dropped;
     }
 
     /**
@@ -119,11 +192,19 @@ final class FrameBuffer
      */
     public function closeAll(): ?array
     {
-        if ($this->depth === 0 && $this->held === []) {
+        if ($this->depth === 0 && $this->held === [] && $this->staged === []) {
             return null;
         }
 
         $this->depth = 0;
+
+        if ($this->poisoned) {
+            // A refused operation does not become history because a middleware found
+            // its frame still open afterwards.
+            $this->forget();
+
+            return [];
+        }
 
         return $this->release();
     }
@@ -133,9 +214,14 @@ final class FrameBuffer
         return $this->depth > 0;
     }
 
+    /**
+     * How many records this frame is keeping from the log right now — held and staged
+     * alike. Both are records the caller cannot see yet, which is what the warnings
+     * about a leaked or dropped frame are counting.
+     */
     public function count(): int
     {
-        return \count($this->held);
+        return \count($this->held) + \count($this->staged);
     }
 
     /**
@@ -161,6 +247,13 @@ final class FrameBuffer
         // a frame. The same reason composite identifiers escape their own delimiter.
         $key = self::identity($record);
 
+        // The operation this record belongs to was refused. Letting it out here — the
+        // one path that still leads outside — would publish a piece of an operation the
+        // setting says has no history at all.
+        if ($this->poisoned) {
+            return [];
+        }
+
         if ($record->event === AuditEvent::REMOVE) {
             $held = $this->held[$key] ?? null;
             $moved = $this->moved[$key] ?? [];
@@ -173,7 +266,7 @@ final class FrameBuffer
             $out = $held === null ? [] : array_values(array_filter([$this->finalizeSafely($held, $moved)]));
             $out[] = $record;
 
-            return $out;
+            return $this->handOver($out);
         }
 
         if (!isset($this->held[$key])) {
@@ -181,7 +274,10 @@ final class FrameBuffer
             // early can produce a second record for an operation whose net effect was
             // nothing. A deployment that reads the trail for that promise says so.
             if (\count($this->held) >= $this->maxHeld && $this->throwOnOverflow) {
-                throw FrameOverflowException::past($this->maxHeld);
+                // Refused here, where it is raised, and not where somebody catches it:
+                // coalesce() catches this exception and a manual begin()/end() pair does
+                // not, and both have to end with the operation unpublished.
+                throw FrameOverflowException::past($this->maxHeld, $this->refuse());
             }
 
             $out = \count($this->held) >= $this->maxHeld ? $this->release() : [];
@@ -209,11 +305,38 @@ final class FrameBuffer
             $this->held[$key] = $record;
             $this->markMoved($key, $record);
 
-            return array_values(array_filter([$this->finalizeSafely($held, $moved)]));
+            return $this->handOver(array_values(array_filter([$this->finalizeSafely($held, $moved)])));
         }
 
         $this->held[$key] = self::merge($held, $record);
         $this->markMoved($key, $record);
+
+        return [];
+    }
+
+    /**
+     * What an early release does with its records: hands them to the caller to write,
+     * or stages them until the frame closes.
+     *
+     * Staging is what `on_overflow: throw` needs to mean what it says. A remove and an
+     * actor boundary both end a held record early, and those records were written where
+     * they happened — so an operation refused three saves later had already published
+     * part of itself, which is the one outcome that setting exists to prevent. Under
+     * `release` nothing changes: that mode never promised the operation was atomic.
+     *
+     * @param list<AuditRecord> $records
+     *
+     * @return list<AuditRecord>
+     */
+    private function handOver(array $records): array
+    {
+        if (!$this->throwOnOverflow || $records === []) {
+            return $records;
+        }
+
+        foreach ($records as $record) {
+            $this->staged[] = $record;
+        }
 
         return [];
     }
@@ -238,7 +361,10 @@ final class FrameBuffer
         $this->held = [];
         $this->moved = [];
 
-        $released = [];
+        // What an early release staged goes out first: it happened before anything the
+        // frame is still holding, and the trail reads in the order the operation ran.
+        $released = $this->staged;
+        $this->staged = [];
 
         foreach ($held as $key => $record) {
             $final = $this->finalizeSafely($record, $moved[$key] ?? []);
