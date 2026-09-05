@@ -42,21 +42,36 @@ jobs:
           coverage: none
           tools: composer:v2
 
-      - name: Pin Symfony version
+      # Every symfony/* package, not a list of the ones somebody thought of. Naming
+      # them one by one left the rest floating to their newest major: a job called
+      # "Symfony 7" installed var-exporter 8, whose LazyGhostTrait is gone, and
+      # Doctrine's proxies stopped working for a reason no version in the job name
+      # explains. SYMFONY_REQUIRE constrains the whole vendor at once.
+      - name: Pin every Symfony package to the matrix version
         run: |
-          composer require --no-update \
-            symfony/config:${{ matrix.symfony }} \
-            symfony/dependency-injection:${{ matrix.symfony }} \
-            symfony/http-kernel:${{ matrix.symfony }}
-          composer require --no-update --dev \
-            symfony/console:${{ matrix.symfony }} \
-            symfony/event-dispatcher:${{ matrix.symfony }} \
-            symfony/framework-bundle:${{ matrix.symfony }} \
-            symfony/messenger:${{ matrix.symfony }} \
-            symfony/security-core:${{ matrix.symfony }}
+          composer global config --no-plugins allow-plugins.symfony/flex true
+          composer global require --no-progress --no-scripts --no-plugins symfony/flex
+          composer config --no-plugins allow-plugins.symfony/flex true
+        env:
+          SYMFONY_REQUIRE: ${{ matrix.symfony }}
 
       - name: Install dependencies
         run: composer update --prefer-dist --no-progress --no-interaction
+        env:
+          SYMFONY_REQUIRE: ${{ matrix.symfony }}
+
+      # A pin that silently does nothing leaves a green job testing the wrong version,
+      # which is how the last hole survived. Contracts and polyfills carry their own
+      # version line and are excluded by name.
+      - name: Prove the pin held
+        run: |
+          major="${{ matrix.symfony }}"; major="${major%%.*}"
+          off=$(composer show 'symfony/*' \
+            | grep -vE '^symfony/(polyfill-|flex|[a-z0-9-]+-contracts)' \
+            | awk -v m="$major" '$2 !~ "^v?"m"[.]" {print $1" "$2}')
+          if [ -n "$off" ]; then
+            echo "Installed outside Symfony $major:"; echo "$off"; exit 1
+          fi
 
       - name: Run tests
         run: vendor/bin/phpunit
