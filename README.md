@@ -32,6 +32,35 @@ It was extracted from a CRM where the same mechanism had quietly become a librar
 for an external Google Drive integration took one constant and a subscriber, and the existing
 history screen showed the new events without a change.
 
+## The path a record takes
+
+Every word in it is explained below; the order is the part worth having up front.
+
+```mermaid
+flowchart TD
+    D["a Doctrine flush<br/>the listener reads the change set"] --> C
+    A["$writer->record(...)<br/>anything that is not an entity change"] --> C
+
+    C["the record is completed<br/>timestamp · actor · id · enrichers"] --> F{"a frame open?"}
+
+    F -- "no" --> P
+    F -- "yes" --> B["the frame holds it<br/>the steps for one object, merged"]
+    B -- "the outermost frame closes" --> P
+    B -. "more than max_held, on_overflow: throw" .-> X(["the operation is refused:<br/>nothing of it is written"])
+
+    P["on the way out<br/>merged enrichers → redaction →<br/>RecordCreatedEvent, may veto → redaction again"] --> T{"transport"}
+
+    T -- "sync" --> ES[("Elasticsearch")]
+    T -- "messenger" --> Q["a queued message"]
+    Q --> H["the worker writes it"]
+    H --> ES
+```
+
+Two questions, answered in that order. A **frame** decides *when* a record goes out; **redaction**
+decides *what* may leave the process, and it runs last — after the enrichers, and again after the
+event — so nothing that adds to a record can put a secret back. `write($record, immediately: true)`
+skips both the frame and the queue, for the one record that must be visible before the request ends.
+
 ## Requirements
 
 - PHP 8.1+
@@ -85,6 +114,8 @@ borsche_elasticsearch_audit:
     fallback: system                      # recorded when nobody is authenticated
   redact:
     fields: [password, token]             # values replaced before anything is written
+    max_depth: 16                         # how deep a rule is followed into a value (since 1.0)
+    max_nodes: 10000                      # how many places it looks in one record (since 1.0)
   reader:                                 # both keys since 0.8
     max_limit: 1000                       # largest page; raise for screens showing thousands of rows
     max_result_window: 10000              # how deep page/limit may reach; match index.max_result_window
@@ -487,6 +518,26 @@ Five things follow from "nothing of that operation", and they are worth stating 
 `begin()`/`end()` mean exactly what `coalesce()` means here: an `end()` in a `finally` after a
 refusal writes nothing either.
 
+The whole of it, since the two settings pull in different directions:
+
+```mermaid
+flowchart TD
+    S(["begin() / coalesce()"]) --> H["held<br/>one record per object, steps merged"]
+
+    H -- "a remove, or a step by another actor,<br/>ends a held record early" --> E{"on_overflow"}
+    E -- "release" --> WN["written where it happened"]
+    E -- "throw" --> ST["staged<br/>nothing leaves the frame"]
+    WN --> H
+    ST --> H
+
+    H -- "more than max_held<br/>held and staged together" --> O{"on_overflow"}
+    O -- "release" --> WH["what is held is written,<br/>the frame goes on"]
+    WH --> H
+    O -- "throw" --> R(["refused — nothing of the operation is written,<br/>the records it staged included"])
+
+    H -- "the outermost end()" --> W(["one record per object, written"])
+```
+
 A value that is neither a number nor "nothing" is left alone — two different words must not
 look equal — so `numeric_fields` is safe on a column that sometimes holds text.
 
@@ -549,7 +600,7 @@ $page = $this->reader->find(
         ->page(2, 50)                               // newest first by default; ->oldestFirst()
 );
 
-$page->entries;          // list<AuditEntry>: id, objectType, objectId, event, loggedAt, actor, changes, attributes, extra
+$page->entries;          // list<AuditEntry>: id, objectType, objectId, event, loggedAt, actor, changes, attributes, extra, warnings
 $page->total;            // exact
 $page->totalPages();
 $page->toArray();        // ['items' => [...], 'pagination' => [currentPage, limit, total, totalPages, nextCursor]]
@@ -564,7 +615,24 @@ Hydration is deliberately **lenient**: writing is strict — the mapping refuses
 but reading meets whatever the index actually holds (documents written by another tool, a mangling
 reindex, a legacy format), and one bad document must not turn a page of nineteen good ones into an
 exception. A missing field reads as its empty value; a `loggedAt` nobody can parse reads as the
-epoch (**since 0.11**) — present and visibly wrong rather than in the way.
+epoch (**since 0.11**) — present and out of the way.
+
+The leniency says so out loud (**since 1.0**). The epoch is a real-looking date: it sorts, it
+exports, it draws on a chart, and nothing about such an entry used to say the document was damaged.
+`$entry->isComplete()` is false when anything in it was invented rather than read,
+`$entry->warnings` says what, in words a screen can show, and `toArray()` carries a `warnings` key
+**only when there is something to say** — every document this bundle wrote reads back complete, and
+a key that is always there stops being read:
+
+```php
+foreach ($page->entries as $entry) {
+    if (!$entry->isComplete()) {
+        // show it greyed out, leave it out of the CSV, count it in a health check —
+        // $entry->warnings[0] is "The logged-at value could not be read, so this entry
+        // is dated 1970-01-01. It is not when this happened."
+    }
+}
+```
 
 ### Two ways to page
 
@@ -1128,11 +1196,19 @@ readable (`false` and `0` are values and are hidden like any other). Redaction i
 moment a record leaves the writer — after your enrichers, after a frame has merged its steps, and
 on the failure path — so it also covers what enrichers put into `changes`, a frame still sees the
 real values and records a password change as a change, and neither `RecordCreatedEvent`,
-`RecordFailedEvent` nor `WriteFailedException` carries the value. It covers the **top-level fields
-of `changes`** and the **attributes** by name (**since 0.9.3**; a redacted attribute is not written
-at all rather than masked, because an attribute is a mapped field and `'***'` where the mapping says
-integer would have Elasticsearch refuse the whole document). A secret inside a free-form array still
-has to be kept out by the code that puts it there.
+`RecordFailedEvent` nor `WriteFailedException` carries the value. It covers the fields of
+`changes` and the **attributes** by name (**since 0.9.3**; a redacted attribute is not written at
+all rather than masked, because an attribute is a mapped field and `'***'` where the mapping says
+integer would have Elasticsearch refuse the whole document) — and, **since 1.0**, the keys inside
+whatever structure one of those holds: `password` covers `['profile' => ['password' => …]]` too,
+because a rule reads as global and a secret one level down is no less a secret. What a rule cannot
+do is name a *path*: a dot in a rule is an object type, not a parent key.
+
+How far that goes is bounded, and past the bound the record is **refused rather than written
+half-checked** (`RedactionLimitExceeded`): `redact.max_depth` levels (16) and `redact.max_nodes`
+places to look in one record (10 000), both configurable **since 1.0**. Depth alone did not bound
+the work — a flat array of a million elements is one level deep, and the walk happens on the
+request, before anything is written.
 
 For **tracked collection elements** the rule names a field, not a path: `password` also covers
 `lines.42.password`, and a rule naming the collection covers everything reached through it —
@@ -1161,10 +1237,10 @@ the office — listen to `RecordCreatedEvent` and rewrite or `veto()` the record
 - **`dynamic: false` is not a privacy boundary.** An attribute nobody declared is not *indexed*,
   and it is still *stored* in `_source` — as is everything inside `changes`, which is stored with
   indexing disabled. "Not searchable" and "not kept" are different things.
-- **It covers the top level of `changes` and the attributes, by name.** A value nested inside a
-  free-form array (`['profile' => ['password' => …]]`) is not seen by a rule naming `password`:
-  the rule matches the field, which here is `profile`. Keep secrets out of free-form payloads, or
-  flatten them into fields the rules can name.
+- **It matches names, not paths.** A rule sees the fields of `changes`, the attributes, and the
+  keys inside whatever structure one of those holds (**since 1.0**) — but `profile.password` is
+  read as "the field `password` on object type `profile`", not as a path into an array. Name the
+  key itself, and it is covered wherever it sits.
 
 **Who the actor is, is a choice.** By default the actor is `getUserIdentifier()`, and in many
 applications that is an **email address** — which means every record carries personal data in an

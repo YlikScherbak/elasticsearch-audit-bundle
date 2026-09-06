@@ -9,14 +9,16 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-05
+## [1.0.0] - 2026-09-06
 
 The promises stop moving.
 
-1.0 changes no behaviour and no signature: it is 0.12 with the surface frozen. Everything listed
-under "What counts as the public API" in the README is stable within `1.x`; everything marked
-`@internal` is not, and may change in any release. [UPGRADE.md](UPGRADE.md) collects every step
-from `0.x` in one page — from the latest `0.x` there is nothing to do.
+1.0 is 0.12 with the surface frozen and the freeze review's findings in it: nothing changed shape
+for a caller — the two additions below take optional arguments and add a property — and what did
+change in behaviour is listed under "Fixed". Everything listed under "What counts as the public
+API" in the README is stable within `1.x`; everything marked `@internal` is not, and may change in
+any release. [UPGRADE.md](UPGRADE.md) collects every step from `0.x` in one page — from the latest
+`0.x` there is nothing to do.
 
 What the line arrives with: Doctrine entities audited from their change sets, arbitrary domain
 actions recorded on demand, an operation's many saves coalesced into one record per object,
@@ -25,6 +27,21 @@ on every path out, a read API with cursors that do not skip records, extensions 
 narrow what a viewer sees, and a mapping the bundle creates, checks and can extend. Verified on
 PHP 8.1–8.4, Symfony 6.4/7/8 and Elasticsearch 8 and 9, against live clusters, at both ends of
 the dependency range.
+
+### Added
+- **`redact.max_depth` and `redact.max_nodes`.** How far redaction follows a rule into a value
+  the application built, and how many places it looks inside one record, are now the
+  application's to set (16 and 10 000 by default). Depth alone did not bound the work: a flat
+  array of a million elements is one level deep, and walking it happens on the request, before
+  anything is written. Past either bound the record is refused rather than written
+  half-checked — a rule that reads as "this name, anywhere" must not quietly stop applying at
+  a limit nobody thinks about
+- **`AuditEntry::$warnings` and `isComplete()`.** Reading a document is lenient by policy, so
+  one damaged document cannot break a page of good ones — but the leniency was silent: a
+  timestamp nobody can parse reads as the epoch, and the epoch is a real-looking date that
+  sorts, exports and draws on a chart. An entry now says what it had to invent, in plain words,
+  and `toArray()` carries a `warnings` key when there is something to say (and only then).
+  Every document this bundle wrote reads back complete
 
 ### Fixed
 - **The failure path was outside the privacy boundary.** The record was redacted and then the

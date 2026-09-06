@@ -39,9 +39,18 @@ the failure event and the exception. If you rely on that detail, ask for it: `fa
 full`. The sanitized message names the setting, so nobody has to go looking.
 
 **Redaction refuses a record it cannot see the bottom of.** A value nested more than sixteen levels
-deep inside `changes` or an attribute is no longer written: it raises `RedactionLimitExceeded`,
-which the failure policy reports. Flatten what the record carries, or redact that value before it
-reaches the writer.
+deep inside `changes` or an attribute is no longer written, and neither is a record with more than
+ten thousand places to look inside it: both raise `RedactionLimitExceeded`, which the failure policy
+reports. Depth alone did not bound the work — a flat array of a million elements is one level deep,
+and the walk happens on the request. Flatten what the record carries, redact that value before it
+reaches the writer, or, if the shape is what your domain really keeps, say so: `redact.max_depth`
+and `redact.max_nodes` are settings.
+
+**An entry can say that its document was damaged.** `AuditEntry` gained `warnings` and
+`isComplete()`, and `toArray()` carries a `warnings` key **when there is something to say** — a
+`loggedAt` nobody can parse, a `_source` that is not a document. Nothing changes for the documents
+this bundle wrote: they read back complete and the key is absent. Code that walks the keys of
+`toArray()` and expects a fixed set is the one place to look.
 
 **The bundle's own exception classes cannot be borrowed to have a message repeated.** If your code
 throws `DeclarationMistake`, `IndexNotFoundException`, `PartialResultException`,
