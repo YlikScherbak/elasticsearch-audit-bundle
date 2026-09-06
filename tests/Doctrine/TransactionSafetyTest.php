@@ -279,6 +279,69 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame([], $this->documents(), 'reset() drops what the rollback undid');
     }
 
+    public function testUnderReleaseTheFrameIsNotABufferAndTheRecipeLeaks(): void
+    {
+        // The hole in the recipe as it was written, pinned rather than argued about.
+        // A frame holds records back, but on_overflow: release never promised it holds
+        // ALL of them: a remove ends the held record for that object and both go out
+        // where they happen, before end() and beyond the reach of reset(). An outer
+        // transaction that rolls back afterwards leaves them in the index describing
+        // an object the database still has.
+        $buffer = new FrameBuffer();   // the default: release
+        $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer));
+
+        $frame->begin();
+        $this->em->getConnection()->beginTransaction();
+
+        try {
+            $this->em->persist($article = new Article('Never committed'));
+            $this->em->flush();
+
+            $this->em->remove($article);
+            $this->em->flush();
+
+            throw new \RuntimeException('the business operation failed');
+        } catch (\RuntimeException) {
+            $this->em->getConnection()->rollBack();
+            $this->em->clear();
+            $frame->reset();
+        }
+
+        self::assertNotSame([], $this->documents(), 'the remove had already left the frame; reset() could not take it back');
+        self::assertSame([], $this->em->getRepository(Article::class)->findAll(), 'while the database has nothing at all');
+    }
+
+    public function testUnderThrowTheFrameHoldsEverythingAndTheRecipeHolds(): void
+    {
+        // The same operation with the setting the recipe requires. Under
+        // on_overflow: throw nothing leaves an open frame - a remove and an actor
+        // boundary are staged rather than written where they happen - so reset() can
+        // still take all of it back.
+        $buffer = new FrameBuffer(throwOnOverflow: true);
+        $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer));
+
+        $frame->begin();
+        $this->em->getConnection()->beginTransaction();
+
+        try {
+            $this->em->persist($article = new Article('Never committed'));
+            $this->em->flush();
+
+            $this->em->remove($article);
+            $this->em->flush();
+
+            self::assertSame([], $this->documents(), 'nothing leaves the frame, not even the remove');
+
+            throw new \RuntimeException('the business operation failed');
+        } catch (\RuntimeException) {
+            $this->em->getConnection()->rollBack();
+            $this->em->clear();
+            $frame->reset();
+        }
+
+        self::assertSame([], $this->documents(), 'and reset() drops all of it');
+    }
+
     public function testTheSameRecipeWritesWhenTheOuterTransactionCommits(): void
     {
         $buffer = new FrameBuffer();

@@ -9,6 +9,79 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-06
+
+### Fixed
+- **A key beside `old` and `new` went to the index unredacted.** `changes` takes `mixed`, so a
+  manual record or an enricher may build the pair by hand — and whatever sat beside the two
+  sides was copied through unread: a rule naming that key did not apply, and a secret nested
+  inside it was never looked at. Every key of a pair is now treated exactly as it would be
+  anywhere else in a record. The sides keep their meaning, because a rule named "old" or
+  "new" would otherwise blank every change in the log. `Change::isPair()` said the shape was
+  sealed, which was the model that allowed this; its assertion is unsealed now
+- **A record said a field went from a value the row never held.** `computeChangeSet()` ends by
+  writing the current values into `originalEntityData`, so when a `preUpdate` listener corrects
+  a field and calls `recomputeSingleEntityChangeSet()`, the change set Doctrine hands back says
+  the field went from what was *planned* a moment earlier. Taken whole, that wrote a record
+  about a transition that never happened. Each side now comes from where it is true: the old
+  from the snapshot taken in `onFlush`, the new from the change set as it finally stands
+- **A correction inside an element of a tracked collection was lost entirely.** Element changes
+  were turned into records in `onFlush` — before the element's own `preUpdate` had run — so a
+  line corrected on its way to the database left the owner's history saying it went to 7 while
+  the row took 5. The collection is asked again in `postUpdate`, where the change set is final,
+  and only when something actually moved after the snapshot. A value put back where it started
+  now disappears from the record rather than lingering as the change that never happened
+- **A date change could be recorded as a change into itself.** The comparator that decides
+  whether a date moved reads it to the microsecond; `changes` stored it to the second. A value
+  that moved inside one second was therefore recorded — correctly — with two sides that read as
+  the same string, which is a line that makes a reader distrust the whole trail. A fractional
+  second is kept now when there is one. Nothing inside `changes` is indexed, so the longer form
+  costs only the characters, and a date without a fraction is written exactly as before
+- **The transaction recipe in the README did not hold at the default settings.** It prescribes a
+  frame as a buffer around an application-owned transaction — hold the records, write them after
+  the commit, drop them on a rollback — and that only works while nothing leaves the frame early.
+  Under `on_overflow: release`, the default, three things do: a remove, a step by a different
+  actor, and `max_held` being reached. A rollback afterwards left those records in the index
+  describing what the database had undone, and `reset()` could not take them back. The recipe now
+  states the setting it needs (`on_overflow: throw`), says what leaks without it, and there are
+  tests for both — the leak included, so it is a documented limitation rather than a surprise
+- **The same recipe rolled back a transaction that was no longer there.** `commit()` and
+  `frame->end()` sat in one `try`, so a failed history write after a successful commit reached the
+  `catch`, which called `rollBack()` on a finished transaction — and the caller saw a DBAL error
+  in place of the real cause. Writing the history is now outside the try
+- **"A write that met 429 or 503 is retried" was true of one transport only.** Retrying belongs to
+  Messenger; `transport: sync` has none of its own, so under `on_failure: log` such a record is
+  logged and gone. The exception list says which transport does what
+- **The README said the default index has no replica**, while the configuration and
+  `IndexDefinition` have had one since 0.5. The replica is deliberate; the sentence describing it
+  was not
+- **Redaction could be walked in circles.** The bounds are read where a structure is walked, and
+  following a `JsonSerializable` to what it serialises to was not that walk: it spent no depth,
+  no node budget and kept no record of where it had been, so an object answering with itself —
+  or two answering with each other — exhausted memory before either limit was consulted. The
+  hops are counted and the objects remembered; a value that leads back into itself raises
+  `RedactionLimitExceeded` (`goingInCircles()`) and the record is not written
+
+### Added
+- **The listener's cost on a flush, measured** and written into the README: about 2 KB and one
+  flush's worth of time again per audited entity, and about 60 bytes for an entity nobody
+  audits (the change-set snapshot the listener takes for every entity in the flush). The
+  comment in the code that used to claim this was free now names the number instead
+- **`examples/`** — working code for each thing the bundle does, in the shape an application
+  would have it: services taking the bundle's classes in their constructor, entities declaring
+  what to audit, implementations of the interfaces you implement. They are analysed at the same
+  PHPStan level as the source and the ones that can be executed are executed in the suite, so a
+  signature that moves breaks the build before it breaks somebody's copy-paste
+
+### Fixed
+- **`AuditableInterface::getAuditedFields()` no longer refuses the idiom it documents.** Its
+  `@return` said `callable(object): mixed`, which describes the call exactly and then rejects
+  `fn (User $u) => $u->getName()` — the line in its own docblock: a closure typed for its related
+  class is narrower than `object`, and contravariance forbids that, so every application on
+  PHPStan level 8 had to choose between the documented shape and a green analysis. The type is a
+  plain `callable` now and the docblock says what it is called with. Nothing changed at runtime;
+  code that worked keeps working, and code that was fighting the analyser stops
+
 ## [1.0.0] - 2026-09-06
 
 The promises stop moving.

@@ -182,6 +182,14 @@ PUT _index_template/audit
 the existence check exists to give a good error, not to be the only thing standing between you
 and an index Elasticsearch invented.
 
+## Examples
+
+Working code for each thing below, in the shape an application would have it —
+services, entities, implementations of the interfaces you implement:
+**[examples/](examples/)**. They are analysed at the same PHPStan level as the source
+and the ones that can be executed are executed in the test suite, so a signature that
+moves breaks the build there before it breaks your copy-paste.
+
 ## Recording an action
 
 ```php
@@ -341,7 +349,14 @@ this — it exists to fail the day the behaviour changes, not to bless it.
 
 When the application owns the wider transaction, close the gap with a frame — the same
 `AuditFrame` that coalesces, used here for its other property, that nothing leaves until the
-frame does:
+frame does. **That property is a setting, not a default**, and the recipe is wrong without it:
+
+```yaml
+borsche_elasticsearch_audit:
+    coalescing:
+        enabled: true
+        on_overflow: throw    # required here: under "release" a frame is not a buffer
+```
 
 ```php
 $this->frame->begin();
@@ -350,18 +365,40 @@ $this->em->getConnection()->beginTransaction();
 try {
     // ... several flushes ...
     $this->em->getConnection()->commit();
-    $this->frame->end();       // committed: now the history may speak
 } catch (\Throwable $e) {
     $this->em->getConnection()->rollBack();
     $this->frame->reset();     // rolled back: drop what never happened
     throw $e;
 }
+
+// Committed. The history speaks separately, and outside the try on purpose: a failed
+// write here must not reach the rollback above, which would then roll back a
+// transaction that is no longer there and bury the real cause under a DBAL error.
+$this->frame->end();
 ```
 
-`end()` writes what the frame held; `reset()` drops it. Both recipes are covered by tests. What
-this does **not** give you is atomicity between the database and Elasticsearch — nothing can,
-short of a transactional outbox, which is **post-1.0 work** and not present today. A cluster
-that is unreachable at `end()` still costs a history entry under `on_failure: log`.
+**Why the setting.** Under `on_overflow: release` — the default — a frame holds records back but
+never promised to hold *all* of them. Three things end a held record early and send it where it
+happened, before `end()` and beyond the reach of `reset()`:
+
+- a **remove**: it is terminal, so what was held for that object goes out with it;
+- a step by a **different actor** on the same object: neither record may be filed under the other's
+  name, so the held one goes out as it stands;
+- **`max_held`** being reached: the valve opens and writes what the frame holds.
+
+Under `throw` all three wait for the outermost `end()` instead — a remove and an actor boundary are
+staged, and an overflow refuses the operation outright with a `FrameOverflowException`, which in
+this recipe is exactly what you want: the `catch` rolls the database back and `reset()` drops the
+history. Both behaviours are covered by tests, including the leak under `release`.
+
+Two more things the recipe needs: no `write($record, immediately: true)` inside it (that call
+bypasses the frame by design), and a `max_held` large enough for the operation, since it counts
+everything the frame is keeping back, staged records included.
+
+`end()` writes what the frame held; `reset()` drops it. What this does **not** give you is
+atomicity between the database and Elasticsearch — nothing can, short of a transactional outbox,
+which is **post-1.0 work** and not present today. A cluster that is unreachable at `end()` still
+costs a history entry under `on_failure: log`.
 
 > **With `on_failure: throw`, read this twice.** The `WriteFailedException` surfaces from
 > `flush()` *after* the commit: the data **is** in the database, the history entry is not. Code
@@ -1135,8 +1172,11 @@ by accident, and retries end.
 
 Everything the bundle throws implements `Borsche\ElasticsearchAuditBundle\Exception\AuditException`:
 `NotConfiguredException`, `IndexNotFoundException`, `TransportUnavailableException` (the cluster
-did not answer, or answered 429 or 503 — backpressure is not a refusal, and a write that met it is
-retried), `RequestRejectedException` (it answered and refused — a document that does not
+did not answer, or answered 429 or 503 — backpressure is not a refusal, and the write is worth
+retrying; **who retries it is the transport**: with `transport: messenger` the message is retried
+by Messenger's strategy and finally goes to its failure transport, while `transport: sync` has no
+retry of its own, so under `on_failure: log` such a record is logged and gone),
+`RequestRejectedException` (it answered and refused — a document that does not
 fit the mapping, missing permissions; retrying will not help), `InvalidQueryException`
 (a query the bundle or Elasticsearch rejected), `PartialResultException` (the cluster answered
 with part of a result), `RedactionLimitExceeded` (a record carried a value nested deeper than
@@ -1326,6 +1366,24 @@ decide once, at the start. For numeric identifiers reach for **`long`** (**since
 
 ## Performance
 
+**What the listener costs a flush**, measured rather than reasoned about: PHP 8.3, SQLite in
+memory, a gateway that keeps nothing, 20 000 entities in one flush, peak memory during the
+flush itself.
+
+| The flush | Without the listener | With it |
+|---|---|---|
+| inserting 20 000 **audited** entities | 511 ms, +58 MB | 966 ms, +95 MB |
+| updating 20 000 **audited** entities | 328 ms, +16 MB | 727 ms, +57 MB |
+| updating 20 000 entities **nobody audits** | 242 ms, +16 MB | 276 ms, +17 MB |
+
+Roughly **2 KB and one flush's worth of time again, per audited entity** — that is the feature,
+not overhead: a record is being built for each one. The last row is the one worth knowing: the
+listener snapshots the change set of *every* entity in the flush, audited or not, because
+deciding otherwise would mean reading each one's declaration first — and that snapshot costs
+about **60 bytes per entity**, since PHP shares the values rather than copying them. A bulk
+import of rows nobody audits is not something to route around the bundle for; a bulk import of
+audited rows is, and `transport: messenger` is how.
+
 - **A flush is one request.** The records one `flush()` produces — or one frame releases — travel
   together: one `_bulk` call with the `sync` transport, one message that becomes one `_bulk` call
   in the worker with `messenger`. Fifty audited entities in a flush cost one round-trip, not fifty.
@@ -1366,8 +1424,12 @@ decide once, at the start. For numeric identifiers reach for **`long`** (**since
   `iterate()` rather than deep `page()` — past `reader.max_result_window` (10 000 by default,
   and by Elasticsearch's own default) a jump to a far page is refused, and raising it costs heap
   on every shard.
-- **The default index has one shard and no replica.** That is a starting point for a dev cluster,
-  not a production setting: give the template the shard and replica counts your cluster wants.
+- **The default index has one shard and one replica.** The replica is deliberate — an audit trail
+  is the last data anyone wants on a single node — but it is still a starting point rather than a
+  production setting: give `indices.settings` the shard and replica counts your cluster wants. On a
+  one-node development cluster the replica can never be assigned and the index sits yellow, so set
+  `number_of_replicas: 0` there. Mind that the block replaces the defaults rather than merging with
+  them: name `number_of_shards` alongside it.
 
 ## Limitations
 
