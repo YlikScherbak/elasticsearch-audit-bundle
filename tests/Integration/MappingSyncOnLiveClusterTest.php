@@ -32,11 +32,6 @@ final class MappingSyncOnLiveClusterTest extends ElasticsearchTestCase
         ])->toArray());
     }
 
-    protected function tearDown(): void
-    {
-        $this->dropIndex($this->index);
-    }
-
     public function testPutMappingAddsWithoutTouchingSiblings(): void
     {
         $this->gateway->putMapping($this->index, [

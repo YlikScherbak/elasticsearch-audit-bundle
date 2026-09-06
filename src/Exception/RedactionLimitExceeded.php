@@ -24,6 +24,11 @@ final class RedactionLimitExceeded extends \RuntimeException implements AuditExc
         parent::__construct($message);
     }
 
+    public static function pastNodes(int $nodes): self
+    {
+        return new self(sprintf('An audited value has more than %d places to look inside, and redaction stops there — so nothing can promise that what a rule names is not in the rest of it. The record was not written. Record less in one go, or raise redact.max_nodes if this shape is what the application really keeps.', $nodes));
+    }
+
     public static function deeperThan(int $levels): self
     {
         return new self(sprintf('An audited value is nested more than %d levels deep, and redaction stops looking there — so nothing can promise that what a rule names is not further down. The record was not written. Flatten what it carries, or redact that value before it reaches the writer.', $levels));

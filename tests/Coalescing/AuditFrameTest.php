@@ -679,6 +679,66 @@ final class AuditFrameTest extends TestCase
         );
     }
 
+    public function testAReleaseThatCouldNotBeWrittenLeavesNothingForTheNextMessage(): void
+    {
+        // The leak path at its worst, and the one scenario in this area worth a test of
+        // its own: a frame somebody left open, a record staged by an actor boundary, a
+        // comparator that fails at close, and a cluster that refuses the write. What the
+        // buffer keeps for one operation — staged, held, and the comparator failures kept
+        // for the writer — has to go with that operation even when the write throws on
+        // the way out, because whatever is left here is what the NEXT message writes,
+        // under its own name. That is the bug that reads afterwards as "why does this
+        // request have an audit record for the one before it".
+        $broken = new class implements \Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                if ($field === 'note') {
+                    throw new \RuntimeException('the comparator is broken');
+                }
+
+                return null;
+            }
+        };
+
+        $this->buffer = new FrameBuffer(new \Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator([$broken]), maxHeld: 4, throwOnOverflow: true);
+        $this->writer = $this->writer(FailurePolicy::Throw);
+        $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
+
+        $this->frame->begin();
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)], actor: 'alice');
+        // The actor boundary ends alice's record early; under on_overflow: throw that
+        // record is staged rather than written where it happened.
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(2, 3)], actor: 'bob');
+        // And this one will make the comparator throw while the frame closes.
+        $this->writer->record('stock', 2, AuditEvent::UPDATE, ['note' => new Change('a', 'b')], actor: 'bob');
+
+        self::assertSame(3, $this->buffer->count(), 'one staged, two held');
+
+        $this->gateway->failWith = new \RuntimeException('the cluster went away mid-release');
+
+        try {
+            // Nobody closed the frame: this is the safety net the middleware runs after
+            // every message — and the write it does fails.
+            $this->frame->release();
+            self::fail('the failed write should have surfaced under the throw policy');
+        } catch (WriteFailedException) {
+        }
+
+        self::assertSame([], $this->gateway->documents, 'nothing of it was written');
+        self::assertFalse($this->frame->isOpen());
+        self::assertSame(0, $this->buffer->count(), 'and nothing of it is still held or staged');
+        self::assertSame([], $this->buffer->takeFinalizeFailures(), 'the comparator failure went with the operation it belonged to');
+
+        // The next message, on a cluster that answers again.
+        $this->gateway->failWith = null;
+
+        $this->frame->coalesce(function (): void {
+            $this->writer->record('stock', 9, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+        });
+
+        self::assertSame([9], array_column($this->gateway->documents['audit_log'], 'objectId'), 'its own record, and only its own');
+    }
+
     /**
      * A frame that refuses rather than releases, with room for exactly one object.
      */

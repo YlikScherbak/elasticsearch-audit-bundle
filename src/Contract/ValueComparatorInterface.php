@@ -12,6 +12,24 @@ namespace Borsche\ElasticsearchAuditBundle\Contract;
  * application whose data treats some values as the same — null, '' and 0 for a
  * stock quantity, say — registers a comparator for those fields. Implementations
  * are picked up automatically and asked in order; the first opinion wins.
+ *
+ * An opinion is about a field this comparator knows; everything else is deferred:
+ *
+ *   public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+ *   {
+ *       if ($objectType !== 'order' || $field !== 'shippedAt') {
+ *           return null;                  // not ours — ask the next one
+ *       }
+ *
+ *       return $this->sameDay($old, $new);
+ *   }
+ *
+ * Returning false for a field it has no opinion about is the mistake worth naming:
+ * false is an answer, it ends the chain, and it says "these differ" about every
+ * field of every entity — so nothing is ever dropped as noise again and every step
+ * of an operation gets a record. The chain is walked once per value, so this is
+ * asked often; it is also asked while a flush is in progress, and like a
+ * representer it should be deterministic and free of side effects.
  */
 interface ValueComparatorInterface
 {

@@ -16,6 +16,9 @@ final class AuditEntry
      * @param array<string, mixed> $attributes top-level fields beyond the base ones
      * @param array<string, mixed> $extra      added by RecordDecorators, never stored
      * @param list<mixed>          $sort       the sort values Elasticsearch returned — the cursor
+     * @param list<string>         $warnings   what this entry had to invent while reading the
+     *                                         document, in plain words; empty for every document
+     *                                         the bundle itself wrote
      */
     public function __construct(
         public readonly string $id,
@@ -28,7 +31,21 @@ final class AuditEntry
         public readonly array $attributes = [],
         public readonly array $extra = [],
         public readonly array $sort = [],
+        public readonly array $warnings = [],
     ) {
+    }
+
+    /**
+     * Whether anything in this entry was invented rather than read.
+     *
+     * Leniency has a cost that was being paid silently: a timestamp nobody can parse
+     * reads as the epoch, and the epoch is a real-looking date — it sorts, it exports,
+     * it draws on a chart, and nothing about it says "this document was damaged". A
+     * screen can now say so, and an export can leave those rows out.
+     */
+    public function isComplete(): bool
+    {
+        return $this->warnings === [];
     }
 
     /**
@@ -37,7 +54,9 @@ final class AuditEntry
      * index actually holds (documents from another tool, a mangling reindex, a legacy
      * format), and one bad document must not turn a page of good ones into an
      * exception. A missing field reads as its empty value, and a timestamp that cannot
-     * be parsed reads as the epoch — present, visibly wrong, and not in the way.
+     * be parsed reads as the epoch — present, out of the way, and named in $warnings,
+     * because the epoch is a real-looking date and a reader who is not told will take
+     * it for one.
      *
      * @param array<string, mixed> $hit one element of hits.hits
      */
@@ -48,8 +67,23 @@ final class AuditEntry
         // page, and array_diff_key() on a string would have broken the page anyway —
         // the check the rest of this method already applies to every field, applied to
         // the envelope holding them.
-        $source = \is_array($hit['_source'] ?? null) ? $hit['_source'] : [];
+        $readable = \is_array($hit['_source'] ?? null);
+        $source = $readable ? $hit['_source'] : [];
         $base = AuditRecord::reservedFields();
+
+        // What had to be invented, said out loud. The values below are unchanged — a
+        // page of history still renders — but "we could not read this" is a fact about
+        // the record, and keeping it to ourselves is how a damaged document passes for
+        // an ordinary one.
+        $warnings = [];
+
+        if (!$readable) {
+            $warnings[] = 'The document has no readable body, so every field of this entry is empty.';
+        }
+
+        if (!self::isReadableTimestamp($source['loggedAt'] ?? null)) {
+            $warnings[] = 'The logged-at value could not be read, so this entry is dated 1970-01-01. It is not when this happened.';
+        }
 
         return new self(
             id: self::text($hit['_id'] ?? null),
@@ -63,7 +97,27 @@ final class AuditEntry
             changes: \is_array($source['changes'] ?? null) ? $source['changes'] : [],
             attributes: array_diff_key($source, array_fill_keys($base, true)),
             sort: array_values(\is_array($hit['sort'] ?? null) ? $hit['sort'] : []),
+            warnings: $warnings,
         );
+    }
+
+    /**
+     * Whether the stored timestamp is one that can be read at all — asked separately
+     * from reading it, because the answer is what the entry has to admit to.
+     */
+    private static function isReadableTimestamp(mixed $stored): bool
+    {
+        if (!\is_string($stored) || $stored === '') {
+            return false;
+        }
+
+        try {
+            new \DateTimeImmutable($stored, new \DateTimeZone('UTC'));
+        } catch (\Exception) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -103,7 +157,7 @@ final class AuditEntry
      */
     public function withChanges(array $changes): self
     {
-        return new self($this->id, $this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $changes, $this->attributes, $this->extra, $this->sort);
+        return new self($this->id, $this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $changes, $this->attributes, $this->extra, $this->sort, $this->warnings);
     }
 
     /**
@@ -114,7 +168,7 @@ final class AuditEntry
      */
     public function withExtra(array $extra): self
     {
-        return new self($this->id, $this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $this->attributes, array_replace($this->extra, $extra), $this->sort);
+        return new self($this->id, $this->objectType, $this->objectId, $this->event, $this->loggedAt, $this->actor, $this->changes, $this->attributes, array_replace($this->extra, $extra), $this->sort, $this->warnings);
     }
 
     public function attribute(string $name, mixed $default = null): mixed
@@ -164,6 +218,11 @@ final class AuditEntry
             'loggedAt' => $this->loggedAt->format(\DATE_ATOM),
             'actor' => $this->actor,
             'changes' => $this->changes,
-        ] + $this->extra + $this->attributes;
+        ]
+            // Only when there is something to say. Every document this bundle wrote
+            // reads back complete, so the key would otherwise be an empty list on every
+            // row of every page — and a shape that is always there stops being read.
+            + ($this->warnings === [] ? [] : ['warnings' => $this->warnings])
+            + $this->extra + $this->attributes;
     }
 }

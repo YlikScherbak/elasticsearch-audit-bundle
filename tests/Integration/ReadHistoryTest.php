@@ -58,12 +58,6 @@ final class ReadHistoryTest extends ElasticsearchTestCase
         self::client()->indices()->refresh(['index' => $this->index.','.$this->userIndex]);
     }
 
-    protected function tearDown(): void
-    {
-        $this->dropIndex($this->index);
-        $this->dropIndex($this->userIndex);
-    }
-
     public function testFiltersCombineAndTheTotalIsExact(): void
     {
         $page = $this->reader->find(

@@ -28,6 +28,10 @@ interface AuditableInterface
      *
      *   ['title' => null, 'author' => fn (User $u) => $u->getName(), 'tags' => fn (Tag $t) => $t->getLabel()]
      *
+     * Those callables are called while a flush is in progress, and are expected to be
+     * deterministic and free of side effects: same object in, same value out, and
+     * nothing changed on the way. See AuditField for what that rules out and why.
+     *
      * @return array<string, (callable(object): mixed)|null>
      */
     public function getAuditedFields(): array;

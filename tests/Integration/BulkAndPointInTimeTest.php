@@ -45,12 +45,6 @@ final class BulkAndPointInTimeTest extends ElasticsearchTestCase
         $this->gateway->createIndex($this->authIndex, (new IndexDefinition())->toArray());
     }
 
-    protected function tearDown(): void
-    {
-        $this->dropIndex($this->index);
-        $this->dropIndex($this->authIndex);
-    }
-
     public function testOneBulkRequestWritesToSeveralIndices(): void
     {
         $result = $this->gateway->bulk([

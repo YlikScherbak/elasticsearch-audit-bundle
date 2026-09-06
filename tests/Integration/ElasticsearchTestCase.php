@@ -32,12 +32,28 @@ abstract class ElasticsearchTestCase extends TestCase
             ->build();
     }
 
+    /** @var list<string> indices this test asked for, dropped when it ends */
+    private array $scratch = [];
+
     /**
      * A throwaway index name unique to the test, so parallel or repeated runs never collide.
+     *
+     * Cleaning them up is this class's job rather than each test's: a setUp() that skips
+     * before it has named its index left the subclass's tearDown() reaching for a
+     * property nobody set, and the error stood where the skip should have been.
      */
     protected function scratchIndex(): string
     {
-        return 'audit_test_'.bin2hex(random_bytes(6));
+        return $this->scratch[] = 'audit_test_'.bin2hex(random_bytes(6));
+    }
+
+    protected function tearDown(): void
+    {
+        foreach ($this->scratch as $index) {
+            $this->dropIndex($index);
+        }
+
+        $this->scratch = [];
     }
 
     protected function dropIndex(string $index): void

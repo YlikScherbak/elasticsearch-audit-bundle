@@ -131,7 +131,7 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{fields: list<string>, placeholder: string} $redact
+     * @param array{fields: list<string>, placeholder: string, max_depth: int, max_nodes: int} $redact
      */
     private function registerRedaction(array $redact, ContainerBuilder $container): void
     {
@@ -141,7 +141,7 @@ final class ElasticsearchAuditExtension extends Extension
 
         // Not an enricher: the writer applies it on the way out, after the enrichers and after
         // a frame closed, so redaction cannot hide from coalescing that a field moved.
-        $container->setDefinition(ChangeRedactor::class, new Definition(ChangeRedactor::class, [$redact['fields'], $redact['placeholder']]));
+        $container->setDefinition(ChangeRedactor::class, new Definition(ChangeRedactor::class, [$redact['fields'], $redact['placeholder'], $redact['max_depth'], $redact['max_nodes']]));
     }
 
     /**
@@ -343,7 +343,7 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{fields: list<string>, placeholder: string, failure_details: ?string} $redact
+     * @param array{fields: list<string>, placeholder: string, max_depth: int, max_nodes: int, failure_details: ?string} $redact
      */
     private function registerWriter(string $onFailure, int $batchSize, array $redact, ContainerBuilder $container): void
     {

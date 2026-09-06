@@ -235,6 +235,41 @@ final class AuditReaderTest extends TestCase
         self::assertSame(['2026-08-26 10:00:00', 'a', 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
     }
 
+    public function testADocumentThatCannotBeReadSaysSoRatherThanLookingOrdinary(): void
+    {
+        // Leniency had a cost that was being paid in silence. A timestamp nobody can
+        // parse reads as the epoch, and the epoch is a real-looking date: it sorts, it
+        // exports, it draws on a chart, and nothing about the entry said the document
+        // was damaged. The values are unchanged — a page still renders — and the entry
+        // now admits what it invented.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 2], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => 'the day before yesterday', 'source' => '7', 'changes' => []]],
+            ['_id' => 'b', 'sort' => ['2026-08-26 10:00:01', 'b', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 2, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:01', 'source' => '7', 'changes' => []]],
+        ]]];
+
+        [$damaged, $ordinary] = $this->reader()->find(AuditQuery::for('order'))->entries;
+
+        self::assertFalse($damaged->isComplete());
+        self::assertSame('1970-01-01', $damaged->loggedAt->format('Y-m-d'), 'the value is still there, and still out of the way');
+        self::assertStringContainsString('logged-at', $damaged->warnings[0]);
+        self::assertArrayHasKey('warnings', $damaged->toArray());
+
+        self::assertTrue($ordinary->isComplete(), 'and a document the bundle wrote says nothing at all');
+        self::assertArrayNotHasKey('warnings', $ordinary->toArray(), 'a key that is always there stops being read');
+    }
+
+    public function testADocumentWithNoBodyAtAllSaysThatToo(): void
+    {
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 1], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => 'this is not a document'],
+        ]]];
+
+        $entry = $this->reader()->find(AuditQuery::for('order'))->entries[0];
+
+        self::assertFalse($entry->isComplete());
+        self::assertCount(2, $entry->warnings, 'no body, and therefore no timestamp either');
+    }
+
     private static function narrowingTo(string ...$actors): QueryExtensionInterface
     {
         return new class($actors) implements QueryExtensionInterface {

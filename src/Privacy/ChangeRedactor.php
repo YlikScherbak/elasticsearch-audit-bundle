@@ -47,14 +47,26 @@ use Borsche\ElasticsearchAuditBundle\Model\Change;
 final class ChangeRedactor
 {
     /**
-     * How deep a rule is followed into a value the application built.
+     * How deep a rule is followed into a value the application built, and how many
+     * places it looks on the way.
      *
-     * A bound is needed — this walks data the bundle did not make — and past it the
-     * record is refused rather than written half-checked. Sixteen levels inside one
-     * audited field is not a shape any of this was written for, so the bound is a
-     * boundary rather than a limit anybody meets.
+     * Bounds are needed — this walks data the bundle did not make — and past either of
+     * them the record is refused rather than written half-checked. Depth alone was not
+     * the whole question: a flat array of a million elements is one level deep and still
+     * a walk nobody asked for, on the request's own time, before anything is written.
+     *
+     * Both are defaults rather than rules: sixteen levels and ten thousand nodes inside
+     * one record is not a shape any of this was written for, and a domain that disagrees
+     * says so in configuration (redact.max_depth, redact.max_nodes) rather than by
+     * losing records or by walking forever.
      */
-    private const MAX_DEPTH = 16;
+    public const DEFAULT_MAX_DEPTH = 16;
+    public const DEFAULT_MAX_NODES = 10_000;
+
+    /**
+     * What is left of this record's node budget. Reset by redact(), spent by scrub().
+     */
+    private int $budget = self::DEFAULT_MAX_NODES;
 
     /**
      * @param list<string> $fields      field names, optionally scoped as "objectType.field"
@@ -63,7 +75,13 @@ final class ChangeRedactor
     public function __construct(
         private readonly array $fields,
         private readonly string $placeholder = '***',
+        private readonly int $maxDepth = self::DEFAULT_MAX_DEPTH,
+        private readonly int $maxNodes = self::DEFAULT_MAX_NODES,
     ) {
+        if ($maxDepth < 1 || $maxNodes < 1) {
+            throw new \InvalidArgumentException(sprintf('Redaction needs room to look: max_depth and max_nodes are at least 1, %d and %d given.', $maxDepth, $maxNodes));
+        }
+
         foreach ($fields as $rule) {
             $field = str_contains($rule, '.') ? substr($rule, (int) strpos($rule, '.') + 1) : $rule;
 
@@ -105,6 +123,11 @@ final class ChangeRedactor
      */
     public function redact(AuditRecord $record): AuditRecord
     {
+        // One budget for the whole record rather than one per value: what matters is how
+        // much work a single write can ask for, and a record with a thousand small
+        // structures costs the same as one with a single large one.
+        $this->budget = $this->maxNodes;
+
         $changes = [];
         $touched = false;
 
@@ -196,13 +219,22 @@ final class ChangeRedactor
             return $value; // nothing a rule could name
         }
 
-        if ($depth >= self::MAX_DEPTH) {
+        if ($depth >= $this->maxDepth) {
             // Fail closed. Leaving the rest of the structure alone was the DoS-safe
             // choice for a data transformer and the wrong one for this: a rule that reads
             // as "this name, anywhere" would stop applying at a depth nobody thinks
             // about, and the value it exists to remove would be written in full. The
             // record does not go out; the writer's failure policy says so out loud.
-            throw RedactionLimitExceeded::deeperThan(self::MAX_DEPTH);
+            throw RedactionLimitExceeded::deeperThan($this->maxDepth);
+        }
+
+        // Spent per place to look rather than per value visited: what costs the request
+        // is the walk itself, and a flat array of a hundred thousand entries is one
+        // value and a hundred thousand places.
+        $this->budget -= \count($inside);
+
+        if ($this->budget < 0) {
+            throw RedactionLimitExceeded::pastNodes($this->maxNodes);
         }
 
         $out = [];

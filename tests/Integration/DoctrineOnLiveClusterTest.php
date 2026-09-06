@@ -85,11 +85,6 @@ final class DoctrineOnLiveClusterTest extends ElasticsearchTestCase
         $this->reader = new AuditReader($this->gateway, $resolver);
     }
 
-    protected function tearDown(): void
-    {
-        $this->dropIndex($this->index);
-    }
-
     public function testTheLifeOfAnEntityWithItsRelationsReadsBackFromTheIndex(): void
     {
         $author = new Author('alice');

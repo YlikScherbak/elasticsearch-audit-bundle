@@ -61,12 +61,6 @@ final class WriteAndReadBackTest extends ElasticsearchTestCase
         };
     }
 
-    protected function tearDown(): void
-    {
-        $this->dropIndex($this->index);
-        $this->dropIndex($this->authIndex);
-    }
-
     public function testCreateWriteFilterAndCheck(): void
     {
         $create = new CommandTester(new CreateIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->enricher]));

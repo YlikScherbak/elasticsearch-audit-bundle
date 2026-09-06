@@ -128,6 +128,42 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, \JSON_THROW_ON_ERROR));
     }
 
+    public function testAValueWithTooMuchToLookThroughIsRefusedRatherThanWritten(): void
+    {
+        // Depth was bounded and breadth was not, and they are the same question asked
+        // twice: a flat list of a hundred thousand entries is one level deep, and
+        // walking it happens on the request, before anything is written. The budget is
+        // per record rather than per value, because what matters is what one write can
+        // ask for.
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log, [], maxNodes: 50);
+
+        $writer->record('user', 7, 'update', ['metadata' => new Change(null, range(1, 500))]);
+
+        self::assertSame([], $gateway->documents, 'nothing half-checked reaches the index');
+        self::assertStringContainsString('more than 50 places to look', implode("\n", $logs));
+    }
+
+    public function testTheLimitsAreTheApplicationsToChoose(): void
+    {
+        // A domain whose records really are that shape says so, rather than losing them.
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Throw, [], maxDepth: 32, maxNodes: 100_000);
+
+        $deep = ['password' => self::SECRET];
+
+        for ($i = 0; $i < 20; ++$i) {
+            $deep = ['level'.$i => $deep];
+        }
+
+        $writer->record('user', 7, 'update', ['metadata' => new Change(null, $deep)]);
+
+        self::assertCount(1, $gateway->documents['audit_log']);
+        self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, \JSON_THROW_ON_ERROR), 'and the deeper rule still applies all the way down');
+    }
+
     public function testAValueTooDeepToCheckIsRefusedRatherThanWritten(): void
     {
         // The bound has to exist — this walks data the bundle did not make — and past it
@@ -713,7 +749,7 @@ final class NothingLeavesUnredactedTest extends TestCase
      * @param list<string>                     $redact
      * @param list<AuditEnricherInterface>     $enrichers
      */
-    private function writer(InMemoryGateway $gateway, array $redact, ?EventDispatcherInterface $events = null, array &$logs = [], FailurePolicy $policy = FailurePolicy::Throw, array $enrichers = []): AuditWriter
+    private function writer(InMemoryGateway $gateway, array $redact, ?EventDispatcherInterface $events = null, array &$logs = [], FailurePolicy $policy = FailurePolicy::Throw, array $enrichers = [], int $maxDepth = ChangeRedactor::DEFAULT_MAX_DEPTH, int $maxNodes = ChangeRedactor::DEFAULT_MAX_NODES): AuditWriter
     {
         $transport = new SyncTransport($gateway);
         $logger = new class($logs) extends \Psr\Log\AbstractLogger {
@@ -729,7 +765,7 @@ final class NothingLeavesUnredactedTest extends TestCase
             }
         };
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $logger, $events, null, new ChangeRedactor($redact, '***'));
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $logger, $events, null, new ChangeRedactor($redact, '***', $maxDepth, $maxNodes));
     }
 }
 
