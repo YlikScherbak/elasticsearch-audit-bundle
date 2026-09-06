@@ -8,6 +8,9 @@ use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
+use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Schema\Schema;
+use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Symfony\Component\Console\Attribute\AsCommand;
@@ -43,6 +46,9 @@ final class CheckCommand extends Command
         private readonly IndexDefinition $definition,
         private readonly iterable $enrichers = [],
         private readonly int $maxResultWindow = AuditQuery::DEFAULT_MAX_WINDOW,
+        private readonly ?object $outboxQueue = null,
+        private readonly ?Connection $auditedConnection = null,
+        private readonly string $outboxQueueName = '',
     ) {
         parent::__construct();
     }
@@ -85,7 +91,60 @@ final class CheckCommand extends Command
             }
         }
 
+        $healthy = $this->checkTheOutbox($io) && $healthy;
+
         return $healthy ? self::SUCCESS : self::FAILURE;
+    }
+
+    /**
+     * Whether the outbox queue is where the guarantee needs it to be.
+     *
+     * The boot checks this whenever the DSN can be read, and the DSN that most
+     * production applications write cannot be: it comes from an environment variable,
+     * and until that is resolved the configuration says nothing at all. This is where
+     * it is asked of the resolved services instead - of the queue itself, which knows
+     * which connection it holds.
+     *
+     * Asked through configureSchema(), whose whole contract is "add your table if this
+     * is your connection": a queue that answers with a table shares it, one that
+     * answers with nothing does not. Nothing is written and nothing is created - the
+     * schema exists only to be asked.
+     */
+    private function checkTheOutbox(SymfonyStyle $io): bool
+    {
+        if ($this->outboxQueue === null || $this->auditedConnection === null) {
+            return true; // any transport but the outbox
+        }
+
+        if (!$this->outboxQueue instanceof DoctrineTransport) {
+            $io->text(sprintf('<comment>%s</comment>: not a Doctrine transport, so its records are not committed with the changes they describe.', $this->outboxQueueName));
+
+            return false;
+        }
+
+        // Both shapes of the method: it returned void and mutated the schema before
+        // Symfony 7, and returns one now. The object handed in is mutated either way.
+        $given = new Schema();
+        $answered = $this->outboxQueue->configureSchema($given, $this->auditedConnection, static fn (): bool => false);
+        $schema = $answered instanceof Schema ? $answered : $given;
+
+        if ($schema->getTables() === []) {
+            $io->text(sprintf('<error>%s</error>: the queue is on a different Doctrine connection from the entities being audited. Two connections are two transactions even against one database, so a record and the change it describes commit separately - which is the one thing transport: outbox exists to prevent.', $this->outboxQueueName));
+
+            return false;
+        }
+
+        try {
+            $waiting = $this->outboxQueue->getMessageCount();
+        } catch (\Throwable $e) {
+            $io->text(sprintf('<error>%s</error>: the queue table cannot be read (%s). It is created by a migration and never by the bundle - auto_setup would run DDL, which on MySQL commits the transaction it is standing in.', $this->outboxQueueName, $e::class));
+
+            return false;
+        }
+
+        $io->text(sprintf('Outbox <info>%s</info>: on the audited connection, %d record(s) waiting for a worker', $this->outboxQueueName, $waiting));
+
+        return true;
     }
 
     /**

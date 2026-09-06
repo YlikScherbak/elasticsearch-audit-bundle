@@ -1204,9 +1204,13 @@ and leaves the transaction perfectly committable, and a veto never touches the d
 **What it still does not promise.** The record is durable and will be delivered; it is not
 searchable by the time `run()` returns. Elasticsearch cannot be part of a database transaction,
 and nothing here pretends otherwise — what changed is that the record can no longer be lost, only
-delayed. Redelivery is harmless: every document carries the id it was queued with, and the index
-it was routed to is fixed then rather than resolved later, so a retry under a rolling alias
-overwrites itself instead of landing in a second backing index. And the guarantee covers what the
+delayed. Redelivery is harmless within one index: every document carries the id it was queued with, and the
+index it was routed to is decided when it is queued rather than when it is delivered. **That is an
+index name, and if the name is a write alias it stays an alias** — so a redelivery after a rollover
+resolves to whatever the alias points at then, which may be a different backing index, where the id
+it was written under means nothing and the document lands a second time. Deduplication is exact for
+concrete index names, and best-effort under a rolling alias; if you need it exact there, route the
+records to indices you name. And the guarantee covers what the
 bundle can see: entities audited by their declarations and records the application writes itself.
 A DQL bulk update, a native `DELETE`, another application on the same database — none of those
 pass through here, with or without an outbox.
@@ -1214,6 +1218,24 @@ pass through here, with or without an outbox.
 Without `AuditTransaction`, `transport: outbox` refuses to write at all: the row would be durable
 whether or not the change it describes ever happened, which is the opposite of what turning it on
 asks for. `outbox.require_transaction: false` accepts that weaker promise deliberately.
+
+**Turning it on in an application that already writes records**, in this order, because the
+default refuses everything that is not inside a transaction and an existing application is full of
+flushes that are not:
+
+1. create the queue table with a migration, and add the transport with `auto_setup=false`;
+2. switch `transport: outbox` on together with `outbox.require_transaction: false`. Every record
+   still reaches Elasticsearch through the worker; what you do not have yet is the atomicity;
+3. move the operations that need the guarantee into `AuditTransaction`, one at a time. Each one
+   gains it as it moves;
+4. set `require_transaction: true` when the flushes that remain outside a transaction are ones you
+   are content to lose on a crash — or when there are none.
+
+Doing 2 and 4 together instead means the first thing you see is an empty history and a log full of
+refusals: everything outside an `AuditTransaction` stops being recorded at that moment.
+
+Run `audit:check` after step 1. It asks the queue which connection it is holding — the question the
+boot cannot answer when the DSN comes from an environment variable, which is most of the time.
 
 ## When Elasticsearch is down
 

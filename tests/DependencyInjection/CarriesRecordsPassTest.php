@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\DependencyInjection\Compiler\CarriesRecords
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\Compiler\CheckExceptionOnInvalidReferenceBehaviorPass;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -140,14 +141,71 @@ final class CarriesRecordsPassTest extends TestCase
         self::assertTrue(true, 'a placeholder says nothing at compile time');
     }
 
-    private static function outboxContainer(string $dsn): ContainerBuilder
+    /**
+     * The four combinations Symfony can be given, and what its own merge makes of
+     * them: query, then options, then defaults - so the DSN wins where both speak.
+     *
+     * @return iterable<string, array{string, array<string, mixed>, bool}>
+     */
+    public static function autoSetupSpellings(): iterable
+    {
+        yield 'off in options alone' => ['doctrine://default?table_name=audit_outbox', ['auto_setup' => false], true];
+        yield 'said nowhere at all' => ['doctrine://default?table_name=audit_outbox', [], false];
+        yield 'on in the DSN, off in options' => ['doctrine://default?table_name=audit_outbox&auto_setup=true', ['auto_setup' => false], false];
+        yield 'off in the DSN, on in options' => ['doctrine://default?table_name=audit_outbox&auto_setup=false', ['auto_setup' => true], true];
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    #[DataProvider('autoSetupSpellings')]
+    public function testAutoSetupIsReadTheWaySymfonyReadsIt(string $dsn, array $options, bool $accepted): void
+    {
+        // A transport that spells auto_setup in its options rather than in the DSN is
+        // ordinary Messenger configuration, and the first version of this check refused
+        // it for a setting it had switched off.
+        $container = self::outboxContainer($dsn, $options);
+
+        if (!$accepted) {
+            $this->expectException(NotConfiguredException::class);
+            $this->expectExceptionMessageMatches('/auto_setup on/');
+        }
+
+        (new CarriesRecordsPass())->process($container);
+
+        if ($accepted) {
+            self::assertTrue(true, 'accepted, as Symfony would');
+        }
+    }
+
+    public function testARefusedDsnIsNotRepeatedIntoTheMessage(): void
+    {
+        // A DSN carries credentials often enough that repeating one into an exception -
+        // which ends up in a deploy log, a CI annotation, an error tracker - is a way
+        // of publishing them.
+        $container = self::outboxContainer('amqp://audit:sup3rs3cret@broker:5672/audit');
+
+        try {
+            (new CarriesRecordsPass())->process($container);
+            self::fail('a broker is not a transaction');
+        } catch (NotConfiguredException $refused) {
+            self::assertStringNotContainsString('sup3rs3cret', $refused->getMessage());
+            self::assertStringNotContainsString('broker:5672', $refused->getMessage());
+            self::assertStringContainsString('"amqp" scheme', $refused->getMessage(), 'the scheme says everything this needs to say');
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    private static function outboxContainer(string $dsn, array $options = []): ContainerBuilder
     {
         $container = new ContainerBuilder();
         $container->setParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_PROMISED, false);
         $container->setParameter(ElasticsearchAuditExtension::PARAMETER_OUTBOX_QUEUE, 'audit_outbox');
         $container->setParameter(ElasticsearchAuditExtension::PARAMETER_OUTBOX_CONNECTION, 'default');
 
-        $container->setDefinition('messenger.transport.audit_outbox', new Definition(\stdClass::class, [$dsn]));
+        $container->setDefinition('messenger.transport.audit_outbox', new Definition(\stdClass::class, [$dsn, $options]));
 
         return $container;
     }

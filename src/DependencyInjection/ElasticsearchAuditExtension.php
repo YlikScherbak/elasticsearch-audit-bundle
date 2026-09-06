@@ -142,7 +142,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerWriter($config['on_failure'], $config['batch_size'], $config['redact'], $container);
         $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
-        $this->registerCommands($container, $config['reader']['max_result_window']);
+        $this->registerCommands($container, $config['reader']['max_result_window'], $config['transport'] === 'outbox' ? ($config['outbox']['transport'] ?? null) : null, $config['doctrine']['connection']);
     }
 
     /**
@@ -484,7 +484,7 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
 
-    private function registerCommands(ContainerBuilder $container, int $maxResultWindow): void
+    private function registerCommands(ContainerBuilder $container, int $maxResultWindow, ?string $queue, string $connection): void
     {
         if (!class_exists(Command::class)) {
             return;
@@ -512,6 +512,12 @@ final class ElasticsearchAuditExtension extends Extension
             // reader.max_result_window: the check owns the comparison with each
             // index's own window, because the two must move together.
             $maxResultWindow,
+            // The outbox, when there is one. What the boot could not read - a DSN that
+            // is an environment variable until it is resolved - this asks of the
+            // resolved services instead.
+            $queue === null ? null : new Reference('messenger.transport.'.$queue),
+            $queue === null ? null : new Reference(sprintf('doctrine.dbal.%s_connection', $connection)),
+            $queue ?? '',
         ]))->addTag('console.command'));
     }
 }

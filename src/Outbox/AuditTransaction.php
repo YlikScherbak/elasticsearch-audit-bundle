@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Outbox;
 
 use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
+use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Doctrine\DBAL\Connection;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -65,7 +66,11 @@ final class AuditTransaction
      *
      * @return T
      *
-     * @throws OutboxException the history could not be kept, so the change was rolled back
+     * @throws OutboxException      the history could not be kept, so the change was rolled back
+     * @throws WriteFailedException the same outcome under on_failure: throw, where a failed
+     *                              record surfaces as the writer's own exception rather than
+     *                              as this one - code that catches only OutboxException
+     *                              would miss it, and both mean the operation did not happen
      */
     public function run(callable $operation): mixed
     {

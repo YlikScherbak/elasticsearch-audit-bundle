@@ -12,6 +12,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [1.1.0] - 2026-09-06
 
 ### Fixed
+- **`audit:check` answers the question the boot cannot.** The compile-time check reads the DSN, and
+  the DSN most production applications write is an environment variable — unreadable until it is
+  resolved, which is to say silent exactly where it matters. The command asks the queue itself
+  which connection it is holding, whether its table exists, and how many records are waiting. The
+  comment that claimed this already existed was wrong when it was written
+- **A transport that spells `auto_setup` in its options was refused.** Symfony merges a Doctrine
+  transport's configuration as query, then options, then defaults; the check read the DSN alone
+  and rejected an ordinary configuration for a setting it had switched off
+- **A refused DSN was repeated into the exception.** A DSN carries credentials often enough that
+  putting one into a message which ends up in a deploy log or an error tracker is a way of
+  publishing them. The scheme says everything that message needs to say
 - **The outbox refuses a queue that is not on the connection being audited.** Two connections are
   two transactions even against the same database, and the failure is silent in the worst way:
   everything works, every record arrives, and the one thing the outbox is for quietly does not

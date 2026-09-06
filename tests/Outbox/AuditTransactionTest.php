@@ -9,7 +9,9 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
+use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -492,6 +494,104 @@ final class AuditTransactionTest extends TestCase
         self::assertSame(0, $this->shipments());
     }
 
+    public function testCatchingTheWritersOwnExceptionDoesNotBuyACommit(): void
+    {
+        // Under on_failure: throw a record that cannot even be built reaches the
+        // operation as an exception - from complete(), inside the flush, which is the
+        // only failure that happens while the callback is running: an atomic frame
+        // holds everything else until end(). An operation that catches its own
+        // exceptions, and most do, would otherwise carry on to a commit whose history
+        // is short by exactly that record.
+        $this->rebuildWith(policy: FailurePolicy::Throw, enrichers: [new RefusesShipments()]);
+
+        try {
+            $this->transaction->run(function (): void {
+                try {
+                    $this->em->persist(new Shipment('SH-1'));
+                    $this->em->flush();
+                } catch (\Throwable) {
+                    // "the audit log is not my problem"
+                }
+            });
+            self::fail('the commit should have been refused');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('was not committed', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments(), 'the change went back with the record that was never built');
+    }
+
+    public function testUnderThrowTheWritersOwnExceptionIsWhatSurfaces(): void
+    {
+        // Worth pinning because it is the one place two exception types mean the same
+        // thing: with on_failure: throw a failure at end() comes out as the writer's
+        // WriteFailedException rather than as OutboxException. Both mean the operation
+        // did not happen; code that catches only the second would miss this one.
+        $this->connection->executeStatement('DROP TABLE audit_outbox');
+        $this->rebuildWith(policy: FailurePolicy::Throw);
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+            });
+            self::fail('the operation should have failed');
+        } catch (WriteFailedException) {
+        }
+
+        self::assertSame(0, $this->shipments());
+        self::assertFalse($this->connection->isTransactionActive());
+    }
+
+    public function testTheOperationAfterAFailedOneIsUnaffected(): void
+    {
+        // Whatever the failure left behind - a spoiled context, a frame holding
+        // records, a transaction - has to be gone by the time the next message runs.
+        $sender = new FailsAfter(0, new QueueSender($this->queue()));
+        $this->rebuildWith(sender: $sender);
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+            });
+        } catch (OutboxException) {
+        }
+
+        $this->em->clear();
+
+        self::assertNull($this->context->spoiledBecause(), 'nothing is remembered');
+        self::assertFalse($this->frame->isOpen(), 'and nothing is held');
+        self::assertFalse($this->connection->isTransactionActive(), 'and no transaction is left open');
+
+        // The same wiring, a queue that works: the next operation goes through.
+        $this->rebuildWith();
+
+        $this->transaction->run(function (): void {
+            $this->em->persist(new Shipment('SH-2'));
+            $this->em->flush();
+        });
+
+        self::assertSame(1, $this->shipments());
+        self::assertSame(1, $this->queued());
+    }
+
+    public function testTheBatchesOfALongOperationReallyReachTheQueue(): void
+    {
+        // The sizes are asserted against a remembering sender elsewhere; this one goes
+        // through the real queue, so what is counted is rows a worker would find.
+        $this->rebuildWith(batchSize: 2);
+
+        $this->transaction->run(function (): void {
+            $this->writer->writeAll(array_map(
+                static fn (int $i): AuditRecord => new AuditRecord('order', $i, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]),
+                range(1, 5),
+            ));
+        });
+
+        self::assertSame(3, $this->queued(), 'three messages, committed');
+    }
+
     /**
      * @return iterable<string, array{FailurePolicy}>
      */
@@ -573,7 +673,10 @@ final class AuditTransactionTest extends TestCase
      * The same wiring as setUp(), with one piece replaced - the redactor, the event
      * dispatcher or the queue itself.
      */
-    private function rebuildWith(?ChangeRedactor $redactor = null, ?EventDispatcher $events = null, ?SenderInterface $sender = null, int $maxHeld = 10000, FailurePolicy $policy = FailurePolicy::Log, int $batchSize = 500): void
+    /**
+     * @param list<AuditEnricherInterface> $enrichers
+     */
+    private function rebuildWith(?ChangeRedactor $redactor = null, ?EventDispatcher $events = null, ?SenderInterface $sender = null, int $maxHeld = 10000, FailurePolicy $policy = FailurePolicy::Log, int $batchSize = 500, array $enrichers = []): void
     {
         $queue = $this->queue();
 
@@ -581,7 +684,7 @@ final class AuditTransactionTest extends TestCase
         $immediate = new ImmediateTransportGuard(new SyncTransport($this->gateway), $this->context);
 
         $buffer = new FrameBuffer(maxHeld: $maxHeld);
-        $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $events, $buffer, $redactor, $batchSize, null, $this->context);
+        $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, $policy, null, $events, $buffer, $redactor, $batchSize, null, $this->context);
 
         foreach (array_filter(
             $this->em->getEventManager()->getListeners(Events::postFlush),
@@ -632,5 +735,27 @@ final class FailsAfter implements SenderInterface
         ++$this->sent;
 
         return $this->inner->send($envelope);
+    }
+}
+
+/**
+ * An enricher that cannot do its job for one type: the ordinary way a record fails
+ * while it is still being built, before any transport has seen it.
+ */
+final class RefusesShipments implements AuditEnricherInterface
+{
+    public function supports(AuditRecord $record): bool
+    {
+        return $record->objectType === 'shipment';
+    }
+
+    public function enrich(AuditRecord $record): AuditRecord
+    {
+        throw new \RuntimeException('the enricher could not read what it needed');
+    }
+
+    public function mapping(): array
+    {
+        return [];
     }
 }

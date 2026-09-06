@@ -58,8 +58,10 @@ final class CarriesRecordsPass implements CompilerPassInterface
      *
      * Read fail-open, like the bus check beside it: a DSN built from an environment
      * variable or a parameter says nothing at compile time, and refusing what cannot be
-     * read would refuse the ordinary way of configuring Symfony. What that leaves is
-     * audit:check, which asks the database instead of the configuration.
+     * read would refuse the ordinary way of configuring Symfony - which is most
+     * production applications, so this check is silent exactly where it is needed most.
+     * `audit:check` asks the same question of the resolved services, and that is where
+     * an environment-built DSN is finally answerable.
      */
     private function assertTheOutboxSharesTheConnection(ContainerBuilder $container): void
     {
@@ -90,7 +92,13 @@ final class CarriesRecordsPass implements CompilerPassInterface
         }
 
         if (!str_starts_with($dsn, 'doctrine://')) {
-            throw new NotConfiguredException(sprintf('borsche_elasticsearch_audit.outbox.transport names "%s", whose DSN is "%s". The outbox writes its records with one INSERT on the connection the audited entities are on, so that both commit together - which only a Doctrine transport does. Give that transport a doctrine://<connection> DSN, or use transport: messenger, which asks nothing of where the queue lives.', $queue, $dsn));
+            // The scheme, not the DSN. A DSN carries credentials often enough that
+            // repeating one into an exception - which ends up in a deploy log, a CI
+            // annotation, an error tracker - is a way of publishing them, and the
+            // name and the scheme say everything this message needs to say.
+            $scheme = \is_array($parts = parse_url($dsn)) && \is_string($parts['scheme'] ?? null) ? $parts['scheme'] : 'an unreadable one';
+
+            throw new NotConfiguredException(sprintf('borsche_elasticsearch_audit.outbox.transport names "%s", whose DSN has the "%s" scheme. The outbox writes its records with one INSERT on the connection the audited entities are on, so that both commit together - which only a Doctrine transport does. Give that transport a doctrine://<connection> DSN, or use transport: messenger, which asks nothing of where the queue lives.', $queue, $scheme));
         }
 
         $parts = parse_url($dsn);
@@ -103,10 +111,19 @@ final class CarriesRecordsPass implements CompilerPassInterface
         $query = [];
         parse_str(\is_array($parts) ? ($parts['query'] ?? '') : '', $query);
 
-        // Accepted in every spelling Symfony accepts: it reads the value with
-        // FILTER_VALIDATE_BOOL, so "0", "no" and "off" are all off.
-        if (!\array_key_exists('auto_setup', $query) || filter_var($query['auto_setup'], \FILTER_VALIDATE_BOOL)) {
-            throw new NotConfiguredException(sprintf('The outbox queue "%s" has auto_setup on. Creating its table runs DDL, and on MySQL DDL commits the transaction it is standing in - so the first record ever written would commit the operation around it, half-done. Add auto_setup=false to the DSN and create the table with a migration.', $queue));
+        // The DSN is not the whole configuration. Messenger lets a transport carry an
+        // options array beside it, and Symfony merges the two as query + options +
+        // defaults - so a perfectly ordinary transport that spells auto_setup in
+        // options was being refused for a setting it had switched off. Read the same
+        // way round, and the same way as Symfony reads it: with FILTER_VALIDATE_BOOL,
+        // so "0", "no" and "off" are off here exactly as they are there.
+        $options = $container->getDefinition($id)->getArgument(1);
+        $options = \is_array($options) ? $options : [];
+
+        $autoSetup = $query['auto_setup'] ?? $options['auto_setup'] ?? true;
+
+        if (filter_var($autoSetup, \FILTER_VALIDATE_BOOL)) {
+            throw new NotConfiguredException(sprintf('The outbox queue "%s" has auto_setup on. Creating its table runs DDL, and on MySQL DDL commits the transaction it is standing in - so the first record ever written would commit the operation around it, half-done. Switch auto_setup off, in the DSN or in the transport\'s options, and create the table with a migration.', $queue));
         }
     }
 
