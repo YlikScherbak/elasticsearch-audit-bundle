@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Coalescing;
 
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameNestingException;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -168,6 +169,16 @@ final class AuditFrame
      */
     public function reset(): bool
     {
+        // Not from inside somebody else's frame. What the buffer holds belongs to every
+        // level at once - the records of one object are merged whoever recorded them -
+        // so a nested reset() dropped the enclosing operation's history too, set the
+        // depth to zero and closed its frame. What that operation recorded afterwards
+        // then went to the index unmerged, out of a frame it believed was still open,
+        // and its own held records were simply gone. All of that silently.
+        if ($this->buffer->isNested()) {
+            throw FrameNestingException::cannotResetFromInside();
+        }
+
         return $this->drop('An audit frame was left open and has been reset; {held} held record(s) were dropped. Pair begin() with end() in a try/finally, or use coalesce().');
     }
 

@@ -1179,8 +1179,9 @@ retry of its own, so under `on_failure: log` such a record is logged and gone),
 `RequestRejectedException` (it answered and refused — a document that does not
 fit the mapping, missing permissions; retrying will not help), `InvalidQueryException`
 (a query the bundle or Elasticsearch rejected), `PartialResultException` (the cluster answered
-with part of a result), `RedactionLimitExceeded` (a record carried a value nested deeper than
-redaction follows, so it was not written), `WriteFailedException`.
+with part of a result), `RedactionLimitExceeded` (a record carried a value redaction could not see the bottom of, so it
+was not written), `FrameNestingException` (something only the outermost level of a frame may do
+was asked for inside a nested one), `WriteFailedException`.
 
 ## The document
 

@@ -215,6 +215,16 @@ final class FrameBuffer
     }
 
     /**
+     * Whether a frame is open inside another one. What the buffer holds belongs to all
+     * of them at once, which is what makes some things only the outermost level's to
+     * decide.
+     */
+    public function isNested(): bool
+    {
+        return $this->depth > 1;
+    }
+
+    /**
      * How many records this frame is keeping from the log right now — held and staged
      * alike. Both are records the caller cannot see yet, which is what the warnings
      * about a leaked or dropped frame are counting.

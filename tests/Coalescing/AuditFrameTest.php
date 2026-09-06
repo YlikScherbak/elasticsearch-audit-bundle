@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Coalescing\Messenger\FrameResetMiddleware;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameNestingException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -737,6 +738,48 @@ final class AuditFrameTest extends TestCase
         });
 
         self::assertSame([9], array_column($this->gateway->documents['audit_log'], 'objectId'), 'its own record, and only its own');
+    }
+
+    public function testAResetFromInsideANestedFrameIsRefusedRatherThanTakingTheOuterOneWithIt(): void
+    {
+        // A service that opens its own frame and decides to drop what it recorded - a
+        // dry run, an operation it rolled back by hand. It cannot: the buffer is one,
+        // and the records of an object are merged whoever recorded them, so "its own"
+        // history is not a thing that exists. Dropping everything is what it used to
+        // do, and that took the caller's records with it, set the depth to zero and
+        // closed the caller's frame - after which everything the caller recorded went
+        // to the index unmerged, out of a frame it believed was still open.
+        $this->frame->begin();
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+        $this->frame->begin();
+        $this->writer->record('stock', 9, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+        try {
+            $this->frame->reset();
+            self::fail('a nested reset should have been refused');
+        } catch (FrameNestingException $e) {
+            self::assertStringContainsString('nested frame', $e->getMessage());
+        }
+
+        // The caller's frame is untouched: still open, still holding, and its end()
+        // writes what the whole operation did.
+        self::assertTrue($this->frame->isOpen());
+
+        $this->frame->end();   // the inner level
+        $this->frame->end();   // the outer one writes
+
+        self::assertSame([1, 9], array_column($this->gateway->documents['audit_log'], 'objectId'));
+    }
+
+    public function testTheOutermostLevelMayStillResetItsOwnFrame(): void
+    {
+        $this->frame->begin();
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+        self::assertTrue($this->frame->reset());
+        self::assertFalse($this->frame->isOpen());
+        self::assertSame([], $this->gateway->documents, 'what it dropped was its own');
     }
 
     /**

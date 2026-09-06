@@ -9,6 +9,32 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-06
+
+Three ways a record could be lost, two of them added by 1.0.1.
+
+### Fixed
+- **`reset()` from inside a nested frame destroyed the frame around it.** Frames nest and the
+  buffer behind them does not: a nested `reset()` dropped everything held — the enclosing
+  operation's records included — set the depth to zero and closed that frame. What the caller
+  recorded afterwards went to the index unmerged, out of a frame it believed was still open,
+  and its own held records were simply gone. A service doing a dry run inside somebody else's
+  operation deleted that operation's history, silently. It is refused now
+  (`FrameNestingException`): the records of one object are merged whoever recorded them, so a
+  nested level has no "its own" history to drop. `release()` is unaffected, which is what
+  `FrameResetMiddleware` uses
+- **A record could be refused as circular when it was nothing of the kind, and lost.** The cycle
+  check added in 1.0.1 remembered `spl_object_id()` and let the object go — and a wrapper that
+  builds the next one while being serialised is freed the moment the walk moves past it, so PHP
+  handed its id to the object built next. A finite chain three links long was refused every time,
+  and refusal here means the record is not written at all. The objects are held in an
+  `SplObjectStorage` now, so their ids stay theirs
+- **`redact.max_nodes` counted only what was nested.** The record's own change fields, its
+  attributes and the keys of a pair were read without being counted, so the widest records were
+  the ones that walked free: fifty thousand fields under a budget of ten. Every key this class
+  reads is spent from one place now. Values were masked correctly throughout — this is the bound
+  on the work, not on what leaves
+
 ## [1.0.1] - 2026-09-06
 
 ### Fixed

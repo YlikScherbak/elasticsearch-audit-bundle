@@ -128,6 +128,13 @@ final class ChangeRedactor
         // structures costs the same as one with a single large one.
         $this->budget = $this->maxNodes;
 
+        // The record's own keys are places to look like any other. Counting only what
+        // was nested left the widest records free: fifty thousand change fields, or a
+        // pair with fifty thousand keys beside its two sides, walked in full under a
+        // budget of ten. The values were masked correctly - this is the bound on the
+        // work, which is the half that runs on the request.
+        $this->spend(\count($record->changes) + \count($record->attributes));
+
         $changes = [];
         $touched = false;
 
@@ -188,6 +195,8 @@ final class ChangeRedactor
     private function scrubChange(string $objectType, mixed $change): mixed
     {
         if ($change instanceof Change) {
+            $this->spend(2); // the two sides, like the two keys of the pair below
+
             $old = $this->scrub($objectType, $change->old);
             $new = $this->scrub($objectType, $change->new);
 
@@ -221,6 +230,8 @@ final class ChangeRedactor
      */
     private function scrubPair(string $objectType, array $pair): array
     {
+        $this->spend(\count($pair));
+
         $out = [];
 
         foreach ($pair as $key => $value) {
@@ -268,11 +279,7 @@ final class ChangeRedactor
         // Spent per place to look rather than per value visited: what costs the request
         // is the walk itself, and a flat array of a hundred thousand entries is one
         // value and a hundred thousand places.
-        $this->budget -= \count($inside);
-
-        if ($this->budget < 0) {
-            throw RedactionLimitExceeded::pastNodes($this->maxNodes);
-        }
+        $this->spend(\count($inside));
 
         $out = [];
         $touched = false;
@@ -302,6 +309,23 @@ final class ChangeRedactor
     }
 
     /**
+     * Takes places to look out of this record's budget, and refuses the record when it
+     * runs out.
+     *
+     * Every key this class reads goes through here - the record's own change fields and
+     * attributes, the keys of a pair, and everything nested below them - because the
+     * budget is a bound on the walk, and a walk is a walk wherever it starts.
+     */
+    private function spend(int $places): void
+    {
+        $this->budget -= $places;
+
+        if ($this->budget < 0) {
+            throw RedactionLimitExceeded::pastNodes($this->maxNodes);
+        }
+    }
+
+    /**
      * What a rule could match inside this value, or null when there is nothing.
      *
      * Arrays are obvious. Objects are the case that was missing, and it was not an
@@ -323,7 +347,14 @@ final class ChangeRedactor
         // record of where it had been, so an object whose jsonSerialize() answers with
         // itself - or two that answer with each other - exhausted memory before either
         // limit was consulted. The hops are counted now, and the objects remembered.
-        $seen = [];
+        //
+        // Remembered as objects, and that is the whole of it. Keeping spl_object_id()
+        // alone remembered a number and let the object go: a wrapper that builds the
+        // next one while being serialised is freed the moment the walk moves on, PHP
+        // hands its id straight to the object built next, and a perfectly finite chain
+        // was refused as a circle - which, this being fail-closed, meant the record was
+        // not written at all. SplObjectStorage holds them, so the ids stay theirs.
+        $seen = new \SplObjectStorage();
 
         while (true) {
             if (\is_array($value)) {
@@ -334,14 +365,14 @@ final class ChangeRedactor
                 return null;
             }
 
-            if (isset($seen[spl_object_id($value)])) {
+            if ($seen->contains($value)) {
                 // Fail closed, like the other two limits: a value that leads back into
                 // itself cannot be seen to the bottom, so nothing can promise that what
                 // a rule names is not somewhere in it.
                 throw RedactionLimitExceeded::goingInCircles();
             }
 
-            $seen[spl_object_id($value)] = true;
+            $seen->attach($value);
 
             if (!$value instanceof \JsonSerializable) {
                 return get_object_vars($value);
@@ -360,9 +391,7 @@ final class ChangeRedactor
             // A wrapper that serialises to a DTO is followed rather than trusted - and
             // the hop costs a node, so a long chain runs out of budget like anything
             // else does.
-            if (--$this->budget < 0) {
-                throw RedactionLimitExceeded::pastNodes($this->maxNodes);
-            }
+            $this->spend(1);
 
             $value = $serialized;
         }

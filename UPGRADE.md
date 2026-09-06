@@ -9,6 +9,20 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 
 ---
 
+## To 1.0.2
+
+**`AuditFrame::reset()` now refuses to run inside a nested frame**, where it used to drop the
+enclosing operation's records and close its frame. If your code calls `reset()` from a service
+that may run inside somebody else's frame — a dry run, an operation rolled back by hand — it
+will now raise `FrameNestingException` instead of quietly deleting history that was not its
+own. There is no way to drop only your part: the records of one object are merged whoever
+recorded them. Let the nested level `end()` and leave the decision to whoever opened the
+outermost frame, or arrange for your unit of work not to be nested inside one.
+
+`release()` is unchanged, and so is `reset()` on the outermost frame.
+
+---
+
 ## To 1.0.0
 
 A pre-release audit found things that had to be right before the surface froze, so 1.0 is not

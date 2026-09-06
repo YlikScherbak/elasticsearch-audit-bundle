@@ -189,6 +189,59 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, \JSON_THROW_ON_ERROR));
     }
 
+    public function testAChainOfWrappersIsFollowedRatherThanTakenForACircle(): void
+    {
+        // What "remember where you have been" costs when it remembers a number instead
+        // of an object. A wrapper that builds the next one while being serialised is
+        // freed the moment the walk moves on; PHP hands its spl_object_id() to the
+        // object built next; and a chain three links long was refused as a circle -
+        // which, this being fail-closed, meant the record was not written at all. Not a
+        // race and not a rarity: it happened every time.
+        $gateway = new InMemoryGateway();
+        $writer = $this->writer($gateway, ['password']);
+
+        $writer->record('user', 7, 'update', ['payload' => new BuildsTheNextWrapper(3)]);
+
+        self::assertCount(1, $gateway->documents['audit_log'], 'a finite chain is a value like any other');
+        self::assertSame(
+            ['password' => '***', 'kept' => 'value'],
+            $gateway->documents['audit_log'][0]['changes']['payload'],
+            'and the rule still applies at the end of it',
+        );
+    }
+
+    public function testTheBudgetCountsTheRecordsOwnKeysAsWell(): void
+    {
+        // The bound is on the walk, and the widest records were the ones walking free:
+        // only nested structures were counted, so a record whose changes are fifty
+        // thousand fields - or a pair with fifty thousand keys beside its two sides -
+        // was read in full under a budget of ten.
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log, [], maxNodes: 10);
+
+        $wide = ['old' => 1, 'new' => 2];
+
+        for ($i = 0; $i < 50; ++$i) {
+            $wide['extra'.$i] = $i;
+        }
+
+        $writer->record('user', 7, 'update', ['profile' => $wide]);
+
+        $flat = [];
+
+        for ($i = 0; $i < 50; ++$i) {
+            $flat['field'.$i] = $i;
+        }
+
+        $writer->record('user', 8, 'update', $flat);
+
+        self::assertSame([], $gateway->documents, 'neither record was walked in full');
+        // Two lines per refused record rather than one: reporting the failure redacts
+        // the record for the log, and that pass runs out of budget too.
+        self::assertNotEmpty(array_filter($logs, static fn (string $line): bool => str_contains($line, 'places to look')));
+    }
+
     public function testAValueThatLeadsBackIntoItselfIsRefusedRatherThanFollowedForever(): void
     {
         // The limits are read where a structure is walked, and following a wrapper to
@@ -826,5 +879,23 @@ final class SerialisesToItself implements \JsonSerializable
     public function jsonSerialize(): mixed
     {
         return $this;
+    }
+}
+
+/**
+ * A finite chain, built as it is walked: every link is a new object, and every link
+ * but the last is rubbish the moment the walk moves past it.
+ */
+final class BuildsTheNextWrapper implements \JsonSerializable
+{
+    public function __construct(private readonly int $left)
+    {
+    }
+
+    public function jsonSerialize(): mixed
+    {
+        return $this->left > 0
+            ? new self($this->left - 1)
+            : ['password' => 'the secret', 'kept' => 'value'];
     }
 }
