@@ -730,21 +730,12 @@ the dependency range.
   message on the synchronous bus, so exactly the requests that produce the most audit records were
   the ones still waiting for Elasticsearch — and nothing said so
 - **Documented rather than implied**: what redaction does *not* cover (records already written,
-  the actor field, `_source` under `dynamic: false`, values nested in free-form arrays); that
+  the actor field, `_source` under `dynamic: false`, a *path* rather than a name); that
   `RecordFailedEvent` reports a failed hand-over, and with the messenger transport an indexing
   failure surfaces in the worker's failure transport instead; that a UUID v7 is random within its
   millisecond rather than ordered by write; and that the existence check before a write is a good
   error rather than a guarantee — `action.auto_create_index` on the cluster is the guarantee, and
   the README now asks for it as part of installing the bundle
-
-- **Claims narrowed to what the code actually guarantees**: `RecordId` said a cursor "never steps
-  over a record", which holds over a result set that is not moving and not over a live index — a
-  record written into a millisecond a page already covered gets a random id that may sort before
-  the cursor. The README now says so, and points at `iterate(consistent: true)` for the cases
-  where exactness is the point. `doctrine.enabled` said `auto` and `true` depend on doctrine/orm;
-  they have needed DoctrineBundle too since that check was fixed. `MessengerSupport` offered
-  "wire the handlers to your own bus yourself" as a way out, which the bundle does not allow —
-  the refusal happens before the handlers are registered
 - **Claims narrowed to what the code actually guarantees.** `RecordId` said a cursor "never steps
   over a record" — true over a result set that is not moving, and not over a live index: a record
   written into a millisecond a page already covered gets a random id that may sort before the

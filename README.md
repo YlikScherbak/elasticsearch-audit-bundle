@@ -1162,17 +1162,13 @@ redaction follows, so it was not written), `WriteFailedException`.
 is always UTC in `yyyy-MM-dd HH:mm:ss`. Everything after `changes` is an attribute added by an
 enricher.
 
-## Roadmap
+## After 1.0
 
-| Release | Adds |
-|---|---|
-| 0.1 | Recording arbitrary actions, sync and Messenger transports, enrichers, index commands — done |
-| 0.2 | Automatic Doctrine entity auditing (`AuditableInterface`, `#[Auditable]`), PSR-14 events — done |
-| 0.3 | Reading: `AuditQuery` / `AuditReader` with filters, pagination, `search_after`, decorators — done |
-| 0.4 | Coalescing many small changes into one record — done |
-| 0.5 | Redaction, PII and retention docs, ILM recipe, level 8 + strict rules, coverage floor — done |
-| 0.6 | Bulk indexing, point-in-time exports |
-| 1.0 | The API settles |
+There is no roadmap any more, and that is the point of the version: within `1.x` nothing under
+[What counts as the public API](#what-counts-as-the-public-api) changes in a way that breaks you.
+What comes next is fixes, and features that add rather than move — a new setting arrives with the
+default that keeps today's behaviour. How the line got here, release by release and with the
+reasoning, is [CHANGELOG.md](CHANGELOG.md).
 
 ## Audit records and personal data
 
