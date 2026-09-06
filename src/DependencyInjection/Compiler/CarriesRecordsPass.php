@@ -40,6 +40,74 @@ final class CarriesRecordsPass implements CompilerPassInterface
     {
         $this->assertTheListenerHearsFlushes($container);
         $this->assertTheBusCarriesHandlers($container);
+        $this->assertTheOutboxSharesTheConnection($container);
+    }
+
+    /**
+     * Whether the queue the outbox writes into is on the connection whose entities are
+     * being audited.
+     *
+     * The whole guarantee is one transaction. Two connections to the same database are
+     * two transactions, and the failure is silent in the worst way: everything works,
+     * every record arrives, and the one thing turning the outbox on was for - the row
+     * and its record committing together - quietly does not happen.
+     *
+     * A Doctrine transport's DSN names the connection rather than a host
+     * (doctrine://<connection>), and the factory resolves it through Doctrine's
+     * registry, so comparing the two names compares the two services.
+     *
+     * Read fail-open, like the bus check beside it: a DSN built from an environment
+     * variable or a parameter says nothing at compile time, and refusing what cannot be
+     * read would refuse the ordinary way of configuring Symfony. What that leaves is
+     * audit:check, which asks the database instead of the configuration.
+     */
+    private function assertTheOutboxSharesTheConnection(ContainerBuilder $container): void
+    {
+        if (!$container->hasParameter(ElasticsearchAuditExtension::PARAMETER_OUTBOX_QUEUE)) {
+            return; // any transport but the outbox
+        }
+
+        $queue = $container->getParameter(ElasticsearchAuditExtension::PARAMETER_OUTBOX_QUEUE);
+        $expected = $container->getParameter(ElasticsearchAuditExtension::PARAMETER_OUTBOX_CONNECTION);
+
+        if (!\is_string($queue) || !\is_string($expected)) {
+            return; // the extension writes strings; anything else was put there by somebody else
+        }
+        $id = 'messenger.transport.'.$queue;
+
+        if (!$container->hasDefinition($id)) {
+            return; // the missing service is its own error, raised where it is resolved
+        }
+
+        $dsn = $container->getDefinition($id)->getArgument(0);
+
+        // The shape Symfony's own parameter bag looks for, rather than any per cent
+        // sign: a DSN may legitimately contain one - amqp://…/%2f/audit is a vhost -
+        // and reading that as "unresolved" would skip the check on exactly the
+        // configuration it exists to refuse.
+        if (!\is_string($dsn) || preg_match('/%[^%\s]++%/', $dsn) === 1) {
+            return; // a placeholder: nothing readable until it is resolved
+        }
+
+        if (!str_starts_with($dsn, 'doctrine://')) {
+            throw new NotConfiguredException(sprintf('borsche_elasticsearch_audit.outbox.transport names "%s", whose DSN is "%s". The outbox writes its records with one INSERT on the connection the audited entities are on, so that both commit together - which only a Doctrine transport does. Give that transport a doctrine://<connection> DSN, or use transport: messenger, which asks nothing of where the queue lives.', $queue, $dsn));
+        }
+
+        $parts = parse_url($dsn);
+        $named = \is_array($parts) ? ($parts['host'] ?? '') : '';
+
+        if ($named !== $expected) {
+            throw new NotConfiguredException(sprintf('borsche_elasticsearch_audit.outbox.transport writes into "%s", which is on the "%s" Doctrine connection, while the entities being audited are on "%s" (borsche_elasticsearch_audit.doctrine.connection). Two connections are two transactions even against the same database, so the record and the change it describes would commit separately - which is the one thing the outbox exists to prevent. Point them at the same connection.', $queue, $named, $expected));
+        }
+
+        $query = [];
+        parse_str(\is_array($parts) ? ($parts['query'] ?? '') : '', $query);
+
+        // Accepted in every spelling Symfony accepts: it reads the value with
+        // FILTER_VALIDATE_BOOL, so "0", "no" and "off" are all off.
+        if (!\array_key_exists('auto_setup', $query) || filter_var($query['auto_setup'], \FILTER_VALIDATE_BOOL)) {
+            throw new NotConfiguredException(sprintf('The outbox queue "%s" has auto_setup on. Creating its table runs DDL, and on MySQL DDL commits the transaction it is standing in - so the first record ever written would commit the operation around it, half-done. Add auto_setup=false to the DSN and create the table with a migration.', $queue));
+        }
     }
 
     private function assertTheListenerHearsFlushes(ContainerBuilder $container): void

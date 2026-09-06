@@ -1147,10 +1147,12 @@ on to Elasticsearch afterwards, with the retries and the failure transport Messe
 framework:
     messenger:
         transports:
-            # A Doctrine transport on the SAME connection as the audited entities, and
-            # auto_setup off: creating the table runs DDL, and DDL commits the
-            # transaction it is standing in on MySQL. The table comes from a migration.
-            audit_outbox: '%env(DATABASE_URL)%?table_name=audit_outbox&auto_setup=false'
+            # doctrine://<connection>, where <connection> is the name of a DBAL
+            # connection — not a host. It has to be the connection the audited
+            # entities are on, or the record and the change are in two transactions.
+            # auto_setup off because creating the table runs DDL, and DDL commits the
+            # transaction it is standing in on MySQL; the table comes from a migration.
+            audit_outbox: 'doctrine://default?table_name=audit_outbox&auto_setup=false'
 
 borsche_elasticsearch_audit:
     transport: outbox

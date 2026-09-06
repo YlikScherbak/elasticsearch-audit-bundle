@@ -12,6 +12,19 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [1.1.0] - 2026-09-06
 
 ### Fixed
+- **The outbox refuses a queue that is not on the connection being audited.** Two connections are
+  two transactions even against the same database, and the failure is silent in the worst way:
+  everything works, every record arrives, and the one thing the outbox is for quietly does not
+  happen. A Doctrine transport's DSN names a connection rather than a host, so the boot compares
+  the two — and refuses a non-Doctrine transport, and one with `auto_setup` on, whose DDL would
+  commit the transaction it is standing in. A DSN built from an environment variable says nothing
+  at compile time and is left alone
+- **`write($record, immediately: true)` is refused by the writer**, not only by the transport that
+  would carry it. That transport is a service an application can redefine, and a rule that lives
+  where somebody can replace it is a rule with a way around it
+- **The README's outbox DSN was wrong.** `%env(DATABASE_URL)%?table_name=…` is not a Doctrine
+  transport at all — the factory takes `doctrine://<connection>`, where the host part is the name
+  of a DBAL connection. Anybody copying it would have got a transport the outbox cannot use
 - **A failure before the transaction refused the transaction's commit.** `reportFailure()` marks
   the outbox context for every record that fails, and under `require_transaction` a plain flush
   outside a transaction fails by design — so the mark sat there waiting, and the next

@@ -95,6 +95,14 @@ final class ElasticsearchAuditExtension extends Extension
     /** Whether doctrine.enabled was an explicit true — a promise — rather than "auto". */
     public const PARAMETER_DOCTRINE_PROMISED = 'borsche_elasticsearch_audit.doctrine.promised';
 
+    /**
+     * The queue the outbox writes into and the connection it has to share, left where
+     * a compiler pass can read them: the pass runs on a container every extension has
+     * finished building, and by then nothing else says which transport was configured.
+     */
+    public const PARAMETER_OUTBOX_QUEUE = 'borsche_elasticsearch_audit.outbox.queue';
+    public const PARAMETER_OUTBOX_CONNECTION = 'borsche_elasticsearch_audit.outbox.connection';
+
     private readonly ?DoctrineSupport $doctrineSupport;
     private readonly ?MessengerSupport $messengerSupport;
 
@@ -367,6 +375,9 @@ final class ElasticsearchAuditExtension extends Extension
             }
 
             $queue = $outbox['transport'] ?? '';
+
+            $container->setParameter(self::PARAMETER_OUTBOX_QUEUE, $queue);
+            $container->setParameter(self::PARAMETER_OUTBOX_CONNECTION, $connection);
 
             $container->setDefinition(self::SERVICE_OUTBOX_CONTEXT, (new Definition(OutboxContext::class))
                 // A worker reuses this service between messages; the tag is how Symfony

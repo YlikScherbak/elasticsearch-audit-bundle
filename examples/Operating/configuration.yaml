@@ -63,7 +63,7 @@ borsche_elasticsearch_audit:
     #     #   framework:
     #     #       messenger:
     #     #           transports:
-    #     #               audit_outbox: '%env(DATABASE_URL)%?table_name=audit_outbox&auto_setup=false'
+    #     #               audit_outbox: 'doctrine://default?table_name=audit_outbox&auto_setup=false'
     #     transport: audit_outbox
     #
     #     # true (default): a record may only be queued inside AuditTransaction,

@@ -76,6 +76,82 @@ final class CarriesRecordsPassTest extends TestCase
         }
     }
 
+    public function testAQueueOnAnotherConnectionIsRefused(): void
+    {
+        // The failure that is silent in the worst way: everything works, every record
+        // arrives, and the one thing the outbox is for - the row and its record in one
+        // commit - quietly does not happen. Two connections are two transactions even
+        // against the same database, which is why the DSN is compared and not the URL.
+        $container = self::outboxContainer('doctrine://reporting?table_name=audit_outbox&auto_setup=false');
+
+        try {
+            (new CarriesRecordsPass())->process($container);
+            self::fail('a queue on another connection should have been refused');
+        } catch (NotConfiguredException $refused) {
+            self::assertStringContainsString('Two connections are two transactions', $refused->getMessage());
+        }
+    }
+
+    public function testAQueueThatIsNotADoctrineTransportIsRefused(): void
+    {
+        // A record that travels to a broker is not part of anybody's SQL transaction,
+        // however durable the broker is.
+        $container = self::outboxContainer('amqp://guest:guest@localhost:5672/%2f/audit');
+
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessageMatches('/only a Doctrine transport does/');
+
+        (new CarriesRecordsPass())->process($container);
+    }
+
+    public function testAQueueThatWouldCreateItsOwnTableIsRefused(): void
+    {
+        // Creating the table is DDL, and on MySQL DDL commits the transaction it is
+        // standing in - so the first record ever written would commit half an operation.
+        $container = self::outboxContainer('doctrine://default?table_name=audit_outbox');
+
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessageMatches('/auto_setup on/');
+
+        (new CarriesRecordsPass())->process($container);
+    }
+
+    public function testEverySpellingOfOffIsOff(): void
+    {
+        // Symfony reads it with FILTER_VALIDATE_BOOL, so a check that only knows
+        // "false" would refuse a configuration Symfony is perfectly happy with.
+        foreach (['false', '0', 'no', 'off'] as $spelling) {
+            $container = self::outboxContainer('doctrine://default?table_name=audit_outbox&auto_setup='.$spelling);
+
+            (new CarriesRecordsPass())->process($container);
+        }
+
+        self::assertTrue(true, 'none of them was refused');
+    }
+
+    public function testADsnNobodyCanReadYetIsLeftAlone(): void
+    {
+        // The ordinary way of configuring Symfony. Refusing what cannot be read would
+        // refuse that; audit:check asks the database instead.
+        $container = self::outboxContainer('%env(AUDIT_OUTBOX_DSN)%');
+
+        (new CarriesRecordsPass())->process($container);
+
+        self::assertTrue(true, 'a placeholder says nothing at compile time');
+    }
+
+    private static function outboxContainer(string $dsn): ContainerBuilder
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_PROMISED, false);
+        $container->setParameter(ElasticsearchAuditExtension::PARAMETER_OUTBOX_QUEUE, 'audit_outbox');
+        $container->setParameter(ElasticsearchAuditExtension::PARAMETER_OUTBOX_CONNECTION, 'default');
+
+        $container->setDefinition('messenger.transport.audit_outbox', new Definition(\stdClass::class, [$dsn]));
+
+        return $container;
+    }
+
     private static function containerWithoutAnEntityManager(bool $promised): ContainerBuilder
     {
         $container = new ContainerBuilder();

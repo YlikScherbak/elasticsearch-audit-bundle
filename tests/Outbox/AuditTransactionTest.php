@@ -13,6 +13,8 @@ use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Symfony\Component\Messenger\Envelope;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
@@ -201,6 +203,48 @@ final class AuditTransactionTest extends TestCase
         }
 
         self::assertSame([], $this->gateway->documents, 'and nothing reached the index');
+    }
+
+    public function testAnImmediateWriteIsRefusedEvenWithNothingGuardingTheTransport(): void
+    {
+        // The reason the rule lives in the writer rather than only in the transport that
+        // would carry the record: an application can redefine
+        // borsche_elasticsearch_audit.transport.immediate, and a rule that lives in a
+        // service somebody can replace is a rule with a way around it. Here the immediate
+        // transport is the plain synchronous one, with no guard at all.
+        $gateway = new InMemoryGateway();
+        $queue = new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $this->connection);
+        $buffer = new FrameBuffer();
+
+        $writer = new AuditWriter(
+            new OutboxTransport(new QueueSender($queue), $this->context),
+            new SyncTransport($gateway),
+            new IndexResolver('audit_log'),
+            new ChainActorResolver([], 'system'),
+            new FrozenClock(),
+            [],
+            FailurePolicy::Log,
+            null,
+            null,
+            $buffer,
+            null,
+            500,
+            null,
+            $this->context,
+        );
+
+        $transaction = new AuditTransaction($this->connection, new AuditFrame($buffer, $writer, null, $this->context), $this->context);
+
+        try {
+            $transaction->run(static function () use ($writer): void {
+                $writer->write(new AuditRecord('order', 1, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]), immediately: true);
+            });
+            self::fail('the writer should have refused it');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('immediately: true', $e->getMessage());
+        }
+
+        self::assertSame([], $gateway->documents, 'the transport was never reached');
     }
 
     public function testTheSameCallIsFineOutsideTheTransaction(): void
@@ -449,18 +493,95 @@ final class AuditTransactionTest extends TestCase
     }
 
     /**
+     * @return iterable<string, array{FailurePolicy}>
+     */
+    public static function policies(): iterable
+    {
+        yield 'on_failure: log' => [FailurePolicy::Log];
+        yield 'on_failure: throw' => [FailurePolicy::Throw];
+    }
+
+    #[DataProvider('policies')]
+    public function testAQueueThatFailsHalfwayLeavesNothingBehind(FailurePolicy $policy): void
+    {
+        // The scenario the first test could not reach: it dropped the table, so the
+        // very first insert failed. Here two batches are already in the queue when the
+        // third is refused - rows that exist, inside the transaction, and have to go
+        // back with it.
+        //
+        // Both policies, because they fail differently and must end the same way: under
+        // log the writer swallows it and the context stops the commit, under throw the
+        // exception comes out of end(). And it matters on both DBAL majors - 3 can mark
+        // a nested rollback as rollback-only where 4 uses savepoints - which is why the
+        // assertion is about the rows rather than about which call raised.
+        $sender = new FailsAfter(2, new QueueSender($this->queue()));
+        $this->rebuildWith(sender: $sender, policy: $policy, batchSize: 2);
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+
+                $this->writer->writeAll(array_map(
+                    static fn (int $i): AuditRecord => new AuditRecord('order', $i, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]),
+                    range(1, 5),
+                ));
+            });
+            self::fail('a queue that failed halfway should have failed the operation');
+        } catch (\Throwable $e) {
+            self::assertNotInstanceOf(\Error::class, $e);
+        }
+
+        self::assertSame(2, $sender->sent, 'two batches had gone in before the third was refused');
+        self::assertSame(0, $this->queued(), 'and both went back with the transaction');
+        self::assertSame(0, $this->shipments(), 'as did the change they described');
+    }
+
+    public function testEveryBatchOfALongOperationIsQueuedExactlyOnce(): void
+    {
+        $sender = new RememberingSender();
+        $this->rebuildWith(sender: $sender, batchSize: 2);
+
+        $this->transaction->run(function (): void {
+            $this->writer->writeAll(array_map(
+                static fn (int $i): AuditRecord => new AuditRecord('order', $i, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]),
+                range(1, 5),
+            ));
+        });
+
+        $sizes = array_map(
+            static fn (object $message): int => $message instanceof IndexAuditRecords ? \count($message->items) : 1,
+            $sender->sent,
+        );
+
+        self::assertSame([2, 2, 1], $sizes, 'three messages, and the last one is the remainder');
+
+        $ids = [];
+
+        foreach ($sender->sent as $message) {
+            self::assertInstanceOf(IndexAuditRecords::class, $message);
+
+            foreach ($message->items as $item) {
+                $ids[] = $item['document']['objectId'];
+            }
+        }
+
+        self::assertSame([1, 2, 3, 4, 5], $ids, 'every record once, in order');
+    }
+
+    /**
      * The same wiring as setUp(), with one piece replaced - the redactor, the event
      * dispatcher or the queue itself.
      */
-    private function rebuildWith(?ChangeRedactor $redactor = null, ?EventDispatcher $events = null, ?SenderInterface $sender = null, int $maxHeld = 10000): void
+    private function rebuildWith(?ChangeRedactor $redactor = null, ?EventDispatcher $events = null, ?SenderInterface $sender = null, int $maxHeld = 10000, FailurePolicy $policy = FailurePolicy::Log, int $batchSize = 500): void
     {
-        $queue = new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $this->connection);
+        $queue = $this->queue();
 
         $transport = new OutboxTransport($sender ?? new QueueSender($queue), $this->context);
         $immediate = new ImmediateTransportGuard(new SyncTransport($this->gateway), $this->context);
 
         $buffer = new FrameBuffer(maxHeld: $maxHeld);
-        $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, $events, $buffer, $redactor, 500, null, $this->context);
+        $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], $policy, null, $events, $buffer, $redactor, $batchSize, null, $this->context);
 
         foreach (array_filter(
             $this->em->getEventManager()->getListeners(Events::postFlush),
@@ -474,6 +595,11 @@ final class AuditTransactionTest extends TestCase
         $this->transaction = new AuditTransaction($this->connection, $this->frame, $this->context);
     }
 
+    private function queue(): QueueConnection
+    {
+        return new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $this->connection);
+    }
+
     private function queued(): int
     {
         return (int) $this->connection->fetchOne('SELECT COUNT(*) FROM audit_outbox');
@@ -482,5 +608,29 @@ final class AuditTransactionTest extends TestCase
     private function shipments(): int
     {
         return (int) $this->connection->fetchOne('SELECT COUNT(*) FROM Shipment');
+    }
+}
+
+/**
+ * A sender that works, and then stops: what a queue does when the row it is asked
+ * for is one the database will not take.
+ */
+final class FailsAfter implements SenderInterface
+{
+    public int $sent = 0;
+
+    public function __construct(private readonly int $howMany, private readonly SenderInterface $inner)
+    {
+    }
+
+    public function send(Envelope $envelope): Envelope
+    {
+        if ($this->sent >= $this->howMany) {
+            throw new \RuntimeException('the queue would not take it');
+        }
+
+        ++$this->sent;
+
+        return $this->inner->send($envelope);
     }
 }

@@ -18,6 +18,11 @@ use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
  * that may still roll back, and nothing could take it back afterwards — the index has
  * no transaction to belong to.
  *
+ * The writer refuses this itself, which is where the rule belongs: a rule that lives
+ * only in a service the application can redefine is a rule with a way around it. This
+ * stays as the second line — anything that reaches the immediate transport inside a
+ * transaction, by whatever route, is refused here too.
+ *
  * Refusing is the only honest answer. Queueing it instead would be quieter and would
  * mean the opposite of what the caller asked for, and letting it through would put a
  * record of something that never happened into the one place that is read as

@@ -11,6 +11,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
+use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
@@ -115,6 +116,16 @@ final class AuditWriter
      */
     public function write(AuditRecord $record, bool $immediately = false): void
     {
+        if ($immediately && $this->outbox?->isOpen() === true) {
+            // Here rather than only in the transport that would carry it. This is the
+            // writer's rule - the record must not reach Elasticsearch describing a
+            // change the transaction may still undo - and a rule that lives in a
+            // service the application can redefine is a rule with a way around it.
+            $this->outbox->spoil('a record was written with immediately: true inside the transaction, which would have reached Elasticsearch before the commit');
+
+            throw OutboxException::immediateWriteInsideATransaction();
+        }
+
         $released = null;
 
         // Building the record is this record's business, so a failure here is reported
