@@ -11,7 +11,48 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [1.1.0] - 2026-09-06
 
+### Added
+- **`transport: outbox` — one commit for the change and its history.** Every other transport
+  writes to Elasticsearch after the database has committed, and a process that dies in that window
+  leaves a change nobody can account for. The outbox puts the finished document into a SQL queue
+  on the application's own connection, inside the same transaction as the rows it describes, and a
+  worker moves it on afterwards with the retries Messenger already has. It sends to Symfony's
+  Doctrine transport directly rather than through a bus, so no middleware stands between the
+  record and the INSERT — `DispatchAfterCurrentBusMiddleware` would hold it past the commit and
+  `DoctrineTransactionMiddleware` would flush on the way through
+- **`AuditTransaction`** owns that boundary: an atomic frame, `BEGIN`, the operation, the records
+  into the queue, `COMMIT`. **It refuses to commit a history it knows is short** — a record that
+  could not be redacted, one a listener vetoed, a queue that would not take the row. Under
+  `on_failure: log` none of those reach the caller, and nothing else would stop the commit: a
+  failed insert rolls back its own savepoint and leaves the transaction committable, and a veto
+  never touches the database. Four things it refuses outright: a transaction somebody else opened,
+  nesting, a frame opened outside it, and `write($record, immediately: true)`, which would reach
+  Elasticsearch describing a change that may still roll back
+- **`outbox.require_transaction`** (default `true`): the outbox writes only where something holds
+  the transaction the row will be committed by. Turning the outbox on reads as "the history is
+  atomic with the data now", and outside a transaction it is not; the weaker promise is asked for
+  explicitly
+
+- **An operation can ask to be atomic, without a deployment-wide setting.**
+  `AuditFrame::begin(atomic: true)` and `coalesce($operation, atomic: true)` say what the caller
+  actually wants — nothing of this operation leaves before I close it, and a refusal is better
+  than a fragment — which is what the transaction recipe needs and what `on_overflow: throw` was
+  being flipped for. That setting is a deployment's answer about the valve, and turning it on
+  everywhere changed the behaviour of every frame in the application to fix one recipe.
+  The argument only tightens: a frame opened without it follows the configuration, and one opened
+  inside an atomic frame is atomic whatever it asked for. It must be the outermost frame
+  (`FrameNestingException`) — the promise is about records the enclosing frame also owns, and that
+  frame may already have published some of them — and it is refused when `coalescing.enabled` is
+  false (`NotConfiguredException`), where frames hold nothing at all
+
 ### Fixed
+- **Collecting the changes of a tracked collection was quadratic in its elements.** Replacing what
+  an element said last time scanned everything the owner had collected so far — for every element,
+  including the first pass in `onFlush`, where there is nothing to replace — and the merge itself
+  copied the whole of it again. One owner with ten thousand tracked lines spent **4.2 s** in the
+  flush; it spends **0.2 s** now. The scan happens only where it is for: the second pass, after an
+  element's own `preUpdate` may have corrected it. Measured on 1 000 / 3 000 / 10 000 lines:
+  54 / 412 / 4216 ms before, 17 / 69 / 200 ms after
 - **A refused queue was remembered as an answered question.** The check that asks the queue which
   connection it holds marked itself done *before* reading the verdict, so a worker that caught the
   refusal and took the next message skipped it entirely — and ran the operation against a queue
@@ -82,49 +123,6 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   had asked for, so one leaked atomic frame made every later message in the worker atomic: removes
   and actor boundaries stopped publishing where they happen, and an overflow began refusing
   operations that had asked for nothing of the sort
-
-### Added
-- **`transport: outbox` — one commit for the change and its history.** Every other transport
-  writes to Elasticsearch after the database has committed, and a process that dies in that window
-  leaves a change nobody can account for. The outbox puts the finished document into a SQL queue
-  on the application's own connection, inside the same transaction as the rows it describes, and a
-  worker moves it on afterwards with the retries Messenger already has. It sends to Symfony's
-  Doctrine transport directly rather than through a bus, so no middleware stands between the
-  record and the INSERT — `DispatchAfterCurrentBusMiddleware` would hold it past the commit and
-  `DoctrineTransactionMiddleware` would flush on the way through
-- **`AuditTransaction`** owns that boundary: an atomic frame, `BEGIN`, the operation, the records
-  into the queue, `COMMIT`. **It refuses to commit a history it knows is short** — a record that
-  could not be redacted, one a listener vetoed, a queue that would not take the row. Under
-  `on_failure: log` none of those reach the caller, and nothing else would stop the commit: a
-  failed insert rolls back its own savepoint and leaves the transaction committable, and a veto
-  never touches the database. Four things it refuses outright: a transaction somebody else opened,
-  nesting, a frame opened outside it, and `write($record, immediately: true)`, which would reach
-  Elasticsearch describing a change that may still roll back
-- **`outbox.require_transaction`** (default `true`): the outbox writes only where something holds
-  the transaction the row will be committed by. Turning the outbox on reads as "the history is
-  atomic with the data now", and outside a transaction it is not; the weaker promise is asked for
-  explicitly
-
-- **An operation can ask to be atomic, without a deployment-wide setting.**
-  `AuditFrame::begin(atomic: true)` and `coalesce($operation, atomic: true)` say what the caller
-  actually wants — nothing of this operation leaves before I close it, and a refusal is better
-  than a fragment — which is what the transaction recipe needs and what `on_overflow: throw` was
-  being flipped for. That setting is a deployment's answer about the valve, and turning it on
-  everywhere changed the behaviour of every frame in the application to fix one recipe.
-  The argument only tightens: a frame opened without it follows the configuration, and one opened
-  inside an atomic frame is atomic whatever it asked for. It must be the outermost frame
-  (`FrameNestingException`) — the promise is about records the enclosing frame also owns, and that
-  frame may already have published some of them — and it is refused when `coalescing.enabled` is
-  false (`NotConfiguredException`), where frames hold nothing at all
-
-### Fixed
-- **Collecting the changes of a tracked collection was quadratic in its elements.** Replacing what
-  an element said last time scanned everything the owner had collected so far — for every element,
-  including the first pass in `onFlush`, where there is nothing to replace — and the merge itself
-  copied the whole of it again. One owner with ten thousand tracked lines spent **4.2 s** in the
-  flush; it spends **0.2 s** now. The scan happens only where it is for: the second pass, after an
-  element's own `preUpdate` may have corrected it. Measured on 1 000 / 3 000 / 10 000 lines:
-  54 / 412 / 4216 ms before, 17 / 69 / 200 ms after
 
 ## [1.0.2] - 2026-09-06
 
