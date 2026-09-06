@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\Configuration;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
+use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Symfony\Component\Messenger\Envelope;
@@ -21,6 +22,7 @@ use Doctrine\ORM\Events;
 use PHPUnit\Framework\TestCase;
 use Symfony\Bundle\FrameworkBundle\FrameworkBundle;
 use Symfony\Component\Config\Loader\LoaderInterface;
+use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\HttpKernel\Kernel;
@@ -323,6 +325,39 @@ final class FullKernelBootTest extends TestCase
         $kernel->shutdown();
     }
 
+    public function testTheOutboxContextIsHandedBackEmptyBetweenMessages(): void
+    {
+        // A worker keeps its services between messages, and this one carries the two
+        // facts the whole guarantee rests on: whether a transaction is open, and
+        // whether anything has gone wrong inside it. A message that dies in the middle
+        // of an audit transaction must not leave either of them behind for the next.
+        //
+        // What is asserted here is the wiring rather than Symfony: that the tag is
+        // collected, that the resetter knows about this service, and that resetting is
+        // what a worker does between messages.
+        $kernel = new FullKernel($this->cacheDir, outbox: true);
+        $kernel->boot();
+
+        $container = $kernel->getContainer();
+
+        /** @var OutboxContext $context */
+        $context = $container->get('test.outbox_context');
+
+        // What a message that failed halfway leaves: a level still open and a reason
+        // to refuse a commit.
+        $context->enter();
+        $context->spoil('the message died');
+
+        self::assertTrue($context->isOpen());
+
+        $container->get('services_resetter')->reset();
+
+        self::assertFalse($context->isOpen(), 'the next message starts outside a transaction');
+        self::assertNull($context->spoiledBecause(), 'and with nothing held against it');
+
+        $kernel->shutdown();
+    }
+
     private static function chainOf(?\Throwable $e): string
     {
         $said = [];
@@ -388,6 +423,25 @@ final class FullKernel extends Kernel
             'prefix' => 'Borsche\\ElasticsearchAuditBundle\\Tests\\Fixtures',
             'is_bundle' => false,
         ]];
+    }
+
+    protected function build(ContainerBuilder $container): void
+    {
+        if (!$this->outbox) {
+            return;
+        }
+
+        // FrameworkBundle's resetter, which does not exist yet while the configuration
+        // is being read: a pass runs after every extension, which is where a private
+        // service can be asked for by a test.
+        $container->addCompilerPass(new class implements CompilerPassInterface {
+            public function process(ContainerBuilder $container): void
+            {
+                if ($container->hasDefinition('services_resetter')) {
+                    $container->getDefinition('services_resetter')->setPublic(true);
+                }
+            }
+        });
     }
 
     public function registerContainerConfiguration(LoaderInterface $loader): void
@@ -498,6 +552,7 @@ final class FullKernel extends Kernel
             if ($outbox) {
                 $container->setAlias('test.transport', ElasticsearchAuditExtension::SERVICE_TRANSPORT)->setPublic(true);
                 $container->setAlias('test.audit_transaction', ElasticsearchAuditExtension::SERVICE_AUDIT_TRANSACTION)->setPublic(true);
+                $container->setAlias('test.outbox_context', ElasticsearchAuditExtension::SERVICE_OUTBOX_CONTEXT)->setPublic(true);
             }
 
             if ($twoBuses) {

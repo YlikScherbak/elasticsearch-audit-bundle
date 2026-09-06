@@ -41,6 +41,8 @@ use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\DriverManager;
+use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
+use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\EntityManagerInterface;
@@ -592,6 +594,85 @@ final class AuditTransactionTest extends TestCase
         self::assertSame(3, $this->queued(), 'three messages, committed');
     }
 
+    public function testARealSqlFailureHalfwayTakesTheInsertedRowsWithIt(): void
+    {
+        // The same shape as the test below, and the interesting half of it: there the
+        // sender refuses before touching the database, here two rows are genuinely
+        // inserted and the third statement is refused by the driver. What is being
+        // asked is whether a transaction that has already written to the queue takes
+        // those writes back - a duplicate key, a deadlock or a packet too large all
+        // arrive this way.
+        $sender = new BreaksTheTableAfter(2, new QueueSender($this->queue()), $this->connection);
+        $this->rebuildWith(sender: $sender, batchSize: 2);
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+
+                $this->writer->writeAll(array_map(
+                    static fn (int $i): AuditRecord => new AuditRecord('order', $i, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]),
+                    range(1, 5),
+                ));
+            });
+            self::fail('a statement the database refused should have failed the operation');
+        } catch (\Throwable $e) {
+            self::assertNotInstanceOf(\Error::class, $e);
+        }
+
+        self::assertSame(2, $sender->sent, 'two batches were really written before the third was refused');
+        self::assertSame(0, $this->shipments(), 'and the change went back');
+
+        // The queue table is gone, so counting rows would say nothing; what matters is
+        // that the transaction did not commit, which the business table shows.
+        self::assertFalse($this->connection->isTransactionActive());
+    }
+
+    public function testAQueueOnAnotherConnectionIsRefusedBeforeAnythingHappens(): void
+    {
+        // The boot compares the DSN, which says nothing when it is an environment
+        // variable - most production applications - and describes a connection rather
+        // than being one. This asks the queue itself, once, before the first operation.
+        $elsewhere = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true]);
+        $queue = new DoctrineTransport(
+            new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $elsewhere),
+            new PhpSerializer(),
+        );
+
+        $transaction = new AuditTransaction($this->connection, $this->frame, $this->context, null, $queue);
+
+        try {
+            $transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+            });
+            self::fail('a queue on another connection should have been refused');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('different Doctrine connection', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments(), 'nothing was attempted at all');
+        self::assertFalse($this->connection->isTransactionActive());
+    }
+
+    public function testAQueueOnThisConnectionIsAcceptedOnce(): void
+    {
+        $queue = new DoctrineTransport(
+            new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $this->connection),
+            new PhpSerializer(),
+        );
+
+        $transaction = new AuditTransaction($this->connection, $this->frame, $this->context, null, $queue);
+
+        $transaction->run(function (): void {
+            $this->em->persist(new Shipment('SH-1'));
+            $this->em->flush();
+        });
+
+        self::assertSame(1, $this->shipments());
+        self::assertSame(1, $this->queued());
+    }
+
     /**
      * @return iterable<string, array{FailurePolicy}>
      */
@@ -757,5 +838,36 @@ final class RefusesShipments implements AuditEnricherInterface
     public function mapping(): array
     {
         return [];
+    }
+}
+
+/**
+ * Writes, and then makes the next statement fail in the database rather than in PHP:
+ * the table goes away between one insert and the next, which is what a duplicate key
+ * or a deadlock looks like from here.
+ */
+final class BreaksTheTableAfter implements SenderInterface
+{
+    public int $sent = 0;
+
+    public function __construct(
+        private readonly int $howMany,
+        private readonly SenderInterface $inner,
+        private readonly \Doctrine\DBAL\Connection $connection,
+    ) {
+    }
+
+    public function send(Envelope $envelope): Envelope
+    {
+        if ($this->sent === $this->howMany) {
+            $this->connection->executeStatement('DROP TABLE audit_outbox');
+        }
+
+        // Counted after the fact, so the number is what reached the database rather than
+        // what was attempted.
+        $answer = $this->inner->send($envelope);
+        ++$this->sent;
+
+        return $answer;
     }
 }

@@ -12,6 +12,12 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [1.1.0] - 2026-09-06
 
 ### Fixed
+- **The queue is asked which connection it holds, before the first operation.** The boot compares
+  DSNs, which says nothing when the DSN is an environment variable — most production applications —
+  and a DSN describes a connection rather than being one: a factory of somebody's own could hand
+  back a different one while spelling the same string. `AuditTransaction` now asks the transport
+  itself, once per process, through the one question that has an exact answer and no side effects:
+  `configureSchema()` adds a table only for the connection it is holding
 - **`audit:check` answers the question the boot cannot.** The compile-time check reads the DSN, and
   the DSN most production applications write is an environment variable — unreadable until it is
   resolved, which is to say silent exactly where it matters. The command asks the queue itself

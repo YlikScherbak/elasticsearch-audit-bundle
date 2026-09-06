@@ -416,6 +416,10 @@ final class ElasticsearchAuditExtension extends Extension
                 new Reference(self::SERVICE_FRAME),
                 new Reference(self::SERVICE_OUTBOX_CONTEXT),
                 new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+                // Asked once, before the first operation, whether it is holding this
+                // connection - the question a DSN can only describe and an environment
+                // variable cannot answer at all.
+                new Reference('messenger.transport.'.$queue),
             ]));
             $container->setAlias(AuditTransaction::class, self::SERVICE_AUDIT_TRANSACTION);
         } else {

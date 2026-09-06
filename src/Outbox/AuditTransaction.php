@@ -8,8 +8,10 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Schema\Schema;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
 
 /**
  * One commit for the change and its history.
@@ -48,14 +50,25 @@ final class AuditTransaction
 {
     private readonly LoggerInterface $logger;
 
+    /**
+     * @param object|null $queue the Messenger transport the records are written into,
+     *                           asked once whether it is holding this connection
+     */
     public function __construct(
         private readonly Connection $connection,
         private readonly AuditFrame $frame,
         private readonly OutboxContext $context,
         ?LoggerInterface $logger = null,
+        private readonly ?object $queue = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
+
+    /**
+     * Whether the queue has been asked which connection it holds. Once per process is
+     * enough: services do not change connections between operations.
+     */
+    private bool $connectionChecked = false;
 
     /**
      * Runs the operation, and commits only if its history is whole.
@@ -74,6 +87,8 @@ final class AuditTransaction
      */
     public function run(callable $operation): mixed
     {
+        $this->assertTheQueueIsOnThisConnection();
+
         // The nested case first, because it is the more precise answer to the same
         // observation: a transaction is open, and this is the one that opened it.
         if ($this->context->isOpen()) {
@@ -126,6 +141,46 @@ final class AuditTransaction
             throw $e;
         } finally {
             $this->context->leave();
+        }
+    }
+
+    /**
+     * Asks the queue itself which connection it is holding, before the first operation
+     * rather than after it.
+     *
+     * The boot compares the DSN, which is the right check where a DSN can be read and
+     * no check at all where it comes from an environment variable — which is most
+     * production applications. And a DSN is a description of a connection rather than
+     * the connection: a factory of somebody's own could hand back a different one
+     * while spelling the same string.
+     *
+     * So this asks the object. configureSchema() means "add your table to this schema
+     * if this is your connection", and the closure that would let it say "near enough,
+     * same database" answers no — so a table in the schema means the same connection
+     * instance and nothing else does. Nothing is written, nothing is created, nothing
+     * is even sent to the database.
+     *
+     * Fail-open for anything that cannot answer: a transport of somebody's own is not
+     * something to refuse on the grounds that it is unfamiliar, and audit:check reports
+     * that case in words.
+     *
+     * @throws OutboxException
+     */
+    private function assertTheQueueIsOnThisConnection(): void
+    {
+        if ($this->connectionChecked || !$this->queue instanceof DoctrineTransport) {
+            return;
+        }
+
+        $this->connectionChecked = true;
+
+        // The schema handed in is the one to read: the method returns void on Symfony
+        // 6.4 and a Schema on 7, and fills in what it was given on both.
+        $schema = new Schema();
+        $this->queue->configureSchema($schema, $this->connection, static fn (): bool => false);
+
+        if ($schema->getTables() === []) {
+            throw OutboxException::queueOnAnotherConnection();
         }
     }
 

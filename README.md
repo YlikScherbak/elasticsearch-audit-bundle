@@ -1143,6 +1143,20 @@ finished document goes into a SQL queue on the application's own connection, ins
 transaction as the rows it describes — so both commit, or neither does. A worker moves the queue
 on to Elasticsearch afterwards, with the retries and the failure transport Messenger already has.
 
+**What each transport actually promises**, because turning the outbox on is easy to read as
+"everything is atomic now" and the transport alone is not the boundary:
+
+| Configuration | What is guaranteed |
+|---|---|
+| `transport: sync` | the record is written after the flush commits; a process that dies in between loses it |
+| `transport: messenger` | the record is dispatched after the flush commits, and delivered eventually; the same window, moved |
+| `transport: outbox`, on its own | the record is a row in your database, committed by whatever transaction happens to be open — which is none, unless you opened one |
+| `transport: outbox` + `AuditTransaction` | the change and its record are one commit, or neither happened |
+
+The last row is the one people mean. `outbox.require_transaction: true` (the default) is what stops
+the third row being mistaken for it: without a transaction, the write is refused rather than made
+under a promise nobody is keeping.
+
 ```yaml
 framework:
     messenger:
