@@ -14,6 +14,13 @@ borsche_elasticsearch_audit:
         # service: my.elasticsearch.client    # the id of a Client you already have
         ssl_verification: true                # false only against a development cluster
 
+        # Writes ask the cluster to keep a document it refused out of the error it
+        # answers with. Elasticsearch has known that parameter since 8.18 and
+        # answers a 400 before it, so `auto` asks the cluster its version once per
+        # process and sends it only where it lands. `false` sends it to every
+        # cluster, `true` to none; both spend no info() call.
+        include_source_on_error: auto         # auto | false | true
+
     # ── Where records go ──────────────────────────────────────────────────────
     indices:
         default: audit_log

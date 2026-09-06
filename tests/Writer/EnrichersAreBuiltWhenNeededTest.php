@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Coalescing\NumericNullAsZeroComparator;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\MergedRecordEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\DoctrineSupport;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -84,6 +85,23 @@ final class EnrichersAreBuiltWhenNeededTest extends TestCase
 
         self::assertSame(2, $consulted, 'the second record was written without asking the enricher');
         self::assertSame(['acme', 'acme'], array_column($this->gateway->documents['audit_log'], 'tenant'));
+    }
+
+    public function testTheSecondWalkOfOneRecordStillFindsTheMergedEnrichers(): void
+    {
+        // The narrow case the test above cannot see. One record is walked twice, not
+        // once: complete() takes the ordinary enrichers and prepare() takes the merged
+        // ones, and prepare() is the walk that would come back empty if the list were
+        // read afresh each time instead of remembered. Nothing fails when it does — the
+        // record is written, it is simply written without the attribute the application
+        // filters its history by, which is the quiet kind of wrong.
+        $writer = $this->writer((static function (): \Generator {
+            yield new MergedOnlyEnricher();
+        })());
+
+        $writer->record('order', 1, 'update', ['status' => new Change('new', 'paid')]);
+
+        self::assertSame(['acme'], array_column($this->gateway->documents['audit_log'], 'tenant'));
     }
 
     public function testBuildingTheComparatorChainBuildsNoComparators(): void
@@ -197,5 +215,23 @@ final class WriterDependentEnricher implements AuditEnricherInterface
     public function mapping(): array
     {
         return [];
+    }
+}
+
+final class MergedOnlyEnricher implements MergedRecordEnricherInterface
+{
+    public function supports(AuditRecord $record): bool
+    {
+        return true;
+    }
+
+    public function enrich(AuditRecord $record): AuditRecord
+    {
+        return $record->withAttributes(['tenant' => 'acme']);
+    }
+
+    public function mapping(): array
+    {
+        return ['tenant' => ['type' => 'keyword']];
     }
 }

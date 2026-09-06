@@ -483,6 +483,10 @@ final class AuditWriter
         // Whatever a frame merged is what these see, and they run before redaction so
         // that what they add is redacted like the rest.
         foreach ($this->enrichers() as $enricher) {
+            if (!EnricherScope::covers($enricher, $record->objectType)) {
+                continue;
+            }
+
             if ($enricher instanceof MergedRecordEnricherInterface && $enricher->supports($record)) {
                 $record = $enricher->enrich($record);
             }
@@ -563,6 +567,14 @@ final class AuditWriter
             // The merged ones wait for prepare(): what they say is about the record that
             // will be stored, not about the step that is being recorded right now.
             if ($enricher instanceof MergedRecordEnricherInterface) {
+                continue;
+            }
+
+            // Asked before supports(), and it is the same question the index commands
+            // ask: an enricher that named its object types has already said no to this
+            // record, and a field it would add here is one the index was told not to
+            // expect.
+            if (!EnricherScope::covers($enricher, $record->objectType)) {
                 continue;
             }
 

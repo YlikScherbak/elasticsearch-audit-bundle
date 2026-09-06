@@ -9,6 +9,70 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Added
+- **`ScopedEnricherInterface`** — an enricher can name the object types it is for, and `[]` (or
+  not implementing it) still means all of them. `supports()` answers about a record, which is a
+  question the index commands cannot ask, so every enricher's fields went into every index: an
+  application routing `auth` to its own index had the order fields declared there, `audit:check`
+  reported them missing from indices those records never reach, and `audit:index:sync` added
+  them — a mapping that stops describing what is in the index, and a check that could not be
+  green without making that worse. `audit:index:create`, `audit:index:sync` and `audit:check` now
+  work out each index's fields separately, and `--dump` prints one definition per index (keyed by
+  index name; a single-index configuration prints exactly what it printed before). The writer
+  reads the same declaration before calling `supports()`, so the fields written and the fields
+  mapped cannot drift apart
+
+### Changed
+- **Elasticsearch clusters older than 8.18 are supported again.** Writes carry
+  `include_source_on_error=false`, which asks the cluster to keep a document it refused out of the
+  error it answers with — a parameter that has existed since 8.18, and one an older cluster
+  answers with a 400. Sending it unconditionally made that a hard floor on the *cluster*, which
+  no `composer.json` can express and nothing but `audit:check` on a live cluster could tell you:
+  installation succeeded and every audit record was refused. The bundle now asks the cluster its
+  version once per process and sends the parameter only where it is understood. That floor was
+  also stricter than its own reason: the parameter is the first line against a refused audit
+  document appearing in a log, and the second holds without it — a refusal is described by error
+  type and field name and nothing else, and under the default `redact.failure_details: cause` the
+  cluster's own exception never travels into what is logged, raised or dispatched. On a cluster
+  below 8.18 the difference is visible only if `failure_details` is set to `full`, which means
+  "repeat what other people's code said" in the first place
+- **`client.include_source_on_error`** (`auto` by default) decides that without asking the
+  cluster: `false` sends the parameter always, `true` never sends it. Either spends no `info()`
+  call, which is the one an `auto` deployment makes per process
+- **A node that refuses the parameter gets the write again without it.** Version detection asks
+  one node and believes it about the cluster, which stops being true during a rolling upgrade: the
+  node that answers `info()` can be 8.18 while the next write lands on 8.17, and that is a 400 —
+  a dropped record under `on_failure: log`, for the length of the upgrade. A refusal that names
+  the parameter is now read as one, remembered, and the write is sent again without it; nothing
+  was written the first time, so it is a retry rather than a second document. The same net covers
+  a proxy or a hosted offering that rejects the parameter whatever the version behind it says. A
+  deployment that set `include_source_on_error` explicitly is not overruled, and a refused
+  *document* — also a 400 — is not mistaken for a refused parameter
+- **A cluster that refused it is asked again later, and the moment is logged.** The answer is
+  remembered for five minutes rather than for the life of the process, because of the process it
+  lives in: a command runs for seconds and `messenger:consume` runs for weeks, so a worker that
+  met one 8.17 node mid-upgrade would have written without the parameter long after the upgrade
+  finished, and a restart nobody knew was needed would have been the only way back. Being wrong
+  the other way costs one write per window that is refused and immediately sent again. A positive
+  answer never expires: a cluster that takes the parameter does not stop.
+
+  **How often it is asked and how often it is news are separate.** Deciding to stop sending it is
+  a `warning` naming what the cluster answered, when it will be asked again, and the setting that
+  stops it being asked at all — a guarantee going quiet should not go quiet quietly. The same
+  answer on the next window is `debug`: not every cluster below the line is mid-upgrade, some are
+  staying there, and one warning per window is 288 a day per worker about a fact nobody can act on
+  differently — which reads as an outage in progress and buries the real warning next to it. An
+  answer that changes is a warning again, and a cluster that starts taking the parameter says so
+  at `info`, so an upgrade shows both ends in the log
+- **`audit:check` says it plainly when the two dangerous settings meet**: a cluster below 8.18
+  quotes a refused document back, and `redact.failure_details: full` repeats what other code said,
+  so together they can put a refused audit record in the log. Both are deliberate choices, so it
+  is said rather than failed
+- **`audit:check` no longer fails on an old cluster**, which made it unusable as a health check
+  on the clusters it was reporting about. It says what is different about one — errors quote the
+  refused document back — and fails only where writes really would: a deployment that set
+  `include_source_on_error: false` and pointed it at a cluster that does not know the parameter
+
 ## [1.1.1] - 2026-09-06
 
 ### Fixed

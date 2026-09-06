@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Command;
 
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClusterVersion;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
@@ -12,6 +13,7 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Schema\Schema;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
+use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -39,6 +41,9 @@ final class CheckCommand extends Command
      * @param int                              $maxResultWindow reader.max_result_window — checked against
      *                                                          every index's own, because the two must
      *                                                          move together or a deep page is refused
+     * @param bool|null                        $sourceOnError   client.include_source_on_error as the gateway
+     *                                                          reads it: null decides from the version, a
+     *                                                          boolean was decided by the deployment
      */
     public function __construct(
         private readonly GatewayInterface $gateway,
@@ -49,6 +54,11 @@ final class CheckCommand extends Command
         private readonly ?object $outboxQueue = null,
         private readonly ?Connection $auditedConnection = null,
         private readonly string $outboxQueueName = '',
+        // Appended rather than placed with the other cluster-facing arguments: every
+        // caller passes these positionally, and a parameter added in the middle is
+        // silently a different argument to all of them.
+        private readonly ?bool $sourceOnError = null,
+        private readonly FailureDetails $failureDetails = FailureDetails::Cause,
     ) {
         parent::__construct();
     }
@@ -69,21 +79,37 @@ final class CheckCommand extends Command
 
         $io->text(sprintf('Cluster <info>%s</info>, Elasticsearch <info>%s</info>', $info['cluster_name'] ?? $info['name'] ?? '?', $version));
 
-        $expected = EnricherMapping::apply($this->definition, $this->enrichers)->properties();
         $healthy = true;
 
-        // The floor was a composer constraint and an integration test, neither of which
-        // is looking at the cluster this application writes to. Below it every write is
-        // refused for a query parameter the cluster does not know, which reads as "the
-        // mapping is wrong" for as long as nobody thinks to compare versions.
-        if (!self::isSupported($version)) {
-            $io->text(sprintf('<error>Elasticsearch %s is below the supported floor of %d.%d</error>: writes are sent with include_source_on_error=false, which this cluster does not know, and an unknown query parameter is answered with a 400 — every audit record would be refused. Upgrade the cluster, or pin this bundle to a version that does not send it.', $version, GatewayInterface::MINIMUM_VERSION[0], GatewayInterface::MINIMUM_VERSION[1]));
+        // Two different things can be true of an old cluster, and only one of them is a
+        // failure. Left to itself the bundle withholds a parameter this cluster does not
+        // know and carries on; told to send it anyway, it sends it, and an unknown query
+        // parameter is a 400 on every single write. A check that called both "unhealthy"
+        // could not be used as a health check at all on a cluster below 8.18 — which is
+        // most of them — and one that called both fine would say nothing about a
+        // deployment refusing every record.
+        if (!ClusterVersion::knowsIncludeSourceOnError($version)) {
+            if ($this->sourceOnError === false) {
+                $io->text(sprintf('<error>Elasticsearch %s does not know include_source_on_error</error> (%d.%d and later do), and client.include_source_on_error is false, which sends it regardless: an unknown query parameter is answered with a 400, so every audit record would be refused. Set it to "auto", or upgrade the cluster.', $version, GatewayInterface::MINIMUM_VERSION[0], GatewayInterface::MINIMUM_VERSION[1]));
 
-            $healthy = false;
+                $healthy = false;
+            } elseif ($this->failureDetails === FailureDetails::Full) {
+                // The combination that actually costs something, said as a fact rather
+                // than as the conditional above: this cluster quotes a refused document
+                // back, and this deployment has asked for foreign messages to be
+                // repeated. Not a failure - it is a choice, and both halves of it were
+                // configured on purpose - but it is the one an operator wants to meet
+                // here rather than in a log.
+                $io->text(sprintf('<comment>Elasticsearch %s predates include_source_on_error</comment> (%d.%d and later know it), so a document it refuses is quoted back in its own error - and redact.failure_details is "full", which repeats what other code said. On this cluster that means a refused audit record can reach your logs, your failure events and the exceptions you catch. Set failure_details to "cause" for the version-independent guarantee, or upgrade the cluster.', $version, GatewayInterface::MINIMUM_VERSION[0], GatewayInterface::MINIMUM_VERSION[1]));
+            } else {
+                $io->text(sprintf('<comment>Elasticsearch %s predates include_source_on_error</comment> (%d.%d and later know it), so writes do not carry it and a document this cluster refuses is quoted back in its own error. The bundle does not repeat that error — it names the type and the field and nothing else, and redact.failure_details: "cause", the default, keeps that exception out of what is logged, raised and dispatched. Setting it to "full" on this cluster means a refused audit record can appear in your logs.', $version, GatewayInterface::MINIMUM_VERSION[0], GatewayInterface::MINIMUM_VERSION[1]));
+            }
         }
 
         foreach ($this->indexResolver->all() as $index) {
             try {
+                $expected = EnricherMapping::forIndex($this->definition, $this->enrichers, $this->indexResolver, $index)->properties();
+
                 $healthy = $this->checkIndex($io, $index, $expected) && $healthy;
             } catch (AuditException $e) {
                 $io->text(sprintf('<error>%s</error>: %s', $index, self::diagnostic($e)));
@@ -155,16 +181,6 @@ final class CheckCommand extends Command
      * can see, and inventing a failure out of a string nobody recognised would be worse
      * than saying nothing about it.
      */
-    private static function isSupported(string $version): bool
-    {
-        if (preg_match('~^(\d+)\.(\d+)~', $version, $found) !== 1) {
-            return true;
-        }
-
-        [$major, $minor] = GatewayInterface::MINIMUM_VERSION;
-
-        return (int) $found[1] > $major || ((int) $found[1] === $major && (int) $found[2] >= $minor);
-    }
 
     /**
      * @param array<string, array<string, mixed>> $expected

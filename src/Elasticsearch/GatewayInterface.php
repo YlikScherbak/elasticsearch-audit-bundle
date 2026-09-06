@@ -29,13 +29,20 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 interface GatewayInterface
 {
     /**
-     * The oldest Elasticsearch this bundle writes to, as [major, minor].
+     * The oldest Elasticsearch that knows `include_source_on_error`, as [major, minor].
      *
-     * Not a preference: writes carry `include_source_on_error=false`, which asks the
-     * cluster to keep a refused document out of the error it answers with. The parameter
-     * does not exist before 8.18, and an unknown query parameter is a 400 — which this
-     * bundle reads as a permanent refusal, so on an older cluster every audit record
-     * would be dropped by the line meant to protect it.
+     * That parameter asks the cluster to keep a refused document out of the error it
+     * answers with, and an unknown query parameter is a 400 — so a write carries it only
+     * where it is understood, and this is where "understood" is written down. It was a
+     * floor once, which was stricter than the reason for it: what the parameter protects
+     * is also protected on the way out, by describing a refusal structurally and by
+     * keeping the cluster's own exception out of what the bundle logs, raises and
+     * dispatches. The parameter is the first line of that, not the only one.
+     *
+     * Older clusters are supported, then, with one difference worth knowing: their error
+     * quotes the document back, so an application that sets redact.failure_details to
+     * "full" — which means "repeat what other people's code said" — can see a refused
+     * audit record in its logs. audit:check says so when it meets one.
      */
     public const MINIMUM_VERSION = [8, 18];
 

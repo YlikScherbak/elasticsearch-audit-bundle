@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Examples\Extending;
 
-use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\ScopedEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 
 /**
@@ -21,17 +21,40 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
  * `audit:index:create` and `audit:check` both read this method.
  *
  * Implementations are picked up automatically.
+ *
+ * This one implements ScopedEnricherInterface rather than AuditEnricherInterface,
+ * which adds one method: the object types it is for. It matters as soon as the
+ * application routes an object type to an index of its own — audit:index:create has
+ * no records to ask supports() about, so without the declaration it would map
+ * salesChannel into every index, and audit:check would report it missing from the
+ * ones no order is ever written to. It also means supports() has one less thing to
+ * repeat.
  */
-final class SalesChannelEnricher implements AuditEnricherInterface
+final class SalesChannelEnricher implements ScopedEnricherInterface
 {
+    /**
+     * Read by the index commands, and by the writer before it asks supports(). `[]`
+     * — or plain AuditEnricherInterface — means every object type.
+     *
+     * @return list<string>
+     */
+    public function objectTypes(): array
+    {
+        return ['order'];
+    }
+
     /** @param array<int, string> $channelByOrderId stands for a repository */
     public function __construct(private readonly array $channelByOrderId)
     {
     }
 
+    /**
+     * The object type is already answered by objectTypes(), so what is left here is
+     * whatever else this enricher needs to be true — nothing, in this case.
+     */
     public function supports(AuditRecord $record): bool
     {
-        return $record->objectType === 'order';
+        return true;
     }
 
     /**

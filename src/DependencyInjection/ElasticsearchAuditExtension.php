@@ -52,12 +52,14 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Extension\Extension;
+use Symfony\Component\DependencyInjection\Parameter;
 use Symfony\Component\DependencyInjection\Reference;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
 
 final class ElasticsearchAuditExtension extends Extension
 {
+    public const PARAMETER_SOURCE_ON_ERROR = 'borsche_elasticsearch_audit.include_source_on_error';
     public const TAG_ENRICHER = 'borsche_elasticsearch_audit.enricher';
     public const TAG_ACTOR_RESOLVER = 'borsche_elasticsearch_audit.actor_resolver';
     public const TAG_QUERY_EXTENSION = 'borsche_elasticsearch_audit.query_extension';
@@ -142,7 +144,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerWriter($config['on_failure'], $config['batch_size'], $config['redact'], $container);
         $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
-        $this->registerCommands($container, $config['reader']['max_result_window'], $config['transport'] === 'outbox' ? ($config['outbox']['transport'] ?? null) : null, $config['doctrine']['connection']);
+        $this->registerCommands($container, $config['reader']['max_result_window'], $config['transport'] === 'outbox' ? ($config['outbox']['transport'] ?? null) : null, $config['doctrine']['connection'], self::failureDetails($config['redact']));
     }
 
     /**
@@ -279,7 +281,18 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{hosts: list<string>, service: ?string, ssl_verification: bool} $client
+     * The setting as the gateway wants it: null for "auto", the boolean otherwise. One
+     * reading, because the command and the gateway have to agree about it.
+     *
+     * @param array{include_source_on_error: string|bool} $client
+     */
+    private static function sourceOnError(array $client): ?bool
+    {
+        return \is_bool($client['include_source_on_error']) ? $client['include_source_on_error'] : null;
+    }
+
+    /**
+     * @param array{hosts: list<string>, service: ?string, ssl_verification: bool, include_source_on_error: string|bool} $client
      */
     private function registerClient(array $client, ContainerBuilder $container): void
     {
@@ -295,8 +308,21 @@ final class ElasticsearchAuditExtension extends Extension
                 ]));
         }
 
-        $container->setDefinition(self::SERVICE_GATEWAY, new Definition(ElasticsearchGateway::class, [new Reference(self::SERVICE_CLIENT)]));
+        $container->setDefinition(self::SERVICE_GATEWAY, new Definition(ElasticsearchGateway::class, [
+            new Reference(self::SERVICE_CLIENT),
+            self::sourceOnError($client),
+            // The clock, because a "this cluster does not take the parameter" has to
+            // expire - a worker lives for weeks - and the logger, because what expires
+            // is a guarantee and its going quiet must not be quiet itself.
+            new Reference(self::SERVICE_CLOCK),
+            new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+        ]));
         $container->setAlias(GatewayInterface::class, self::SERVICE_GATEWAY);
+
+        // Read by audit:check as well, which has to tell a cluster that is old from a
+        // deployment that has been told to send the parameter to it anyway - the first
+        // is a note, the second is every write refused.
+        $container->setParameter(self::PARAMETER_SOURCE_ON_ERROR, self::sourceOnError($client));
     }
 
     /**
@@ -452,6 +478,17 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
+     * Said explicitly, or "cause" — the writer's own default, spelled out rather than
+     * left to a null two callers would each have to interpret.
+     *
+     * @param array{failure_details: ?string} $redact
+     */
+    private static function failureDetails(array $redact): FailureDetails
+    {
+        return $redact['failure_details'] !== null ? FailureDetails::from($redact['failure_details']) : FailureDetails::Cause;
+    }
+
+    /**
      * @param array{fields: list<string>, placeholder: string, max_depth: int, max_nodes: int, failure_details: ?string} $redact
      */
     private function registerWriter(string $onFailure, int $batchSize, array $redact, ContainerBuilder $container): void
@@ -475,11 +512,7 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(self::SERVICE_FRAME_BUFFER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             new Reference(ChangeRedactor::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             $batchSize,
-            // Said explicitly, or "cause" — the writer's own default, spelled out here
-            // rather than left to a null the container would have to interpret.
-            $redact['failure_details'] !== null
-                ? FailureDetails::from($redact['failure_details'])
-                : FailureDetails::Cause,
+            self::failureDetails($redact),
             // Present only under transport: outbox, and null everywhere else. It is how a
             // swallowed failure reaches the transaction that must not commit without the
             // record - the ones that never touch the transport included.
@@ -488,7 +521,7 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
 
-    private function registerCommands(ContainerBuilder $container, int $maxResultWindow, ?string $queue, string $connection): void
+    private function registerCommands(ContainerBuilder $container, int $maxResultWindow, ?string $queue, string $connection, FailureDetails $failureDetails): void
     {
         if (!class_exists(Command::class)) {
             return;
@@ -522,6 +555,14 @@ final class ElasticsearchAuditExtension extends Extension
             $queue === null ? null : new Reference('messenger.transport.'.$queue),
             $queue === null ? null : new Reference(sprintf('doctrine.dbal.%s_connection', $connection)),
             $queue ?? '',
+            // What the deployment decided about include_source_on_error, so the check can
+            // tell "this cluster is old" from "this cluster is old and the bundle was told
+            // to send it the parameter regardless".
+            new Parameter(self::PARAMETER_SOURCE_ON_ERROR),
+            // And what the deployment decided about repeating foreign messages: on a
+            // cluster that quotes a refused document back, that setting is the whole
+            // difference between a fact worth knowing and a record in the log.
+            $failureDetails,
         ]))->addTag('console.command'));
     }
 }

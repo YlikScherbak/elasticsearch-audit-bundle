@@ -9,6 +9,43 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 
 ---
 
+## To 1.2.0
+
+**Nothing is required.** Both changes below are additive, and an application that changes nothing
+behaves as it did on 1.1 — with one thing worth reading if you route object types to their own
+indices, and one if your cluster is older than your client package.
+
+**Elasticsearch clusters below 8.18 work again.** 1.0 made 8.18 a floor on the cluster, not only
+on the client package, because writes always carried `include_source_on_error=false` and an older
+cluster answers an unknown query parameter with a 400. The parameter is now sent only where it is
+understood, which costs one `info()` call per process. Set `client.include_source_on_error` to
+`false` (always send) or `true` (never send) to skip that call and decide yourself. On a cluster
+below 8.18, an error about a refused document quotes the document back; the bundle still does not
+repeat it, and under the default `redact.failure_details: cause` the cluster's own exception is
+not carried into logs, events or raised exceptions either. `audit:check` no longer fails on such
+a cluster — it fails only if you told the bundle to send the parameter to one that cannot take it.
+
+**If you route object types to separate indices, say which types your enrichers are for.** Add
+`ScopedEnricherInterface` to the ones that only apply to some types:
+
+```php
+public function objectTypes(): array
+{
+    return ['order'];
+}
+```
+
+Without it nothing breaks and nothing changes — an enricher that says nothing is about every type,
+exactly as before. With it, `audit:index:create` stops declaring order fields on the auth index,
+`audit:check` stops reporting them missing from indices those records never reach, and
+`audit:index:sync` stops adding them there. `audit:index:create --dump` prints one definition per
+index, keyed by index name, when the configuration has more than one; with a single index it
+prints what it always printed. Existing indices are not touched: a field already added to an
+index it does not belong in stays there, harmlessly, until you remove it yourself — a mapping
+cannot drop a field, so that would mean a reindex, and it costs nothing to leave.
+
+---
+
 ## To 1.1.0
 
 **Nothing is required.** Everything below is additive; an application that changes no

@@ -13,6 +13,10 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Elastic\Elasticsearch\Client;
 use Elastic\Elasticsearch\Exception\ClientResponseException;
 use Elastic\Elasticsearch\Response\Elasticsearch;
+use Psr\Clock\ClockInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+use Borsche\ElasticsearchAuditBundle\Writer\SystemClock;
 
 /**
  * GatewayInterface over the official client. The same calls work on the 8.x and
@@ -38,8 +42,215 @@ final class ElasticsearchGateway implements GatewayInterface
     /** @var array<string, true> indices known to exist */
     private array $known = [];
 
-    public function __construct(private readonly Client $client)
+    /**
+     * @param bool|null $sourceOnError what the cluster should do with a document it
+     *                                 refuses: false asks it to keep the document out of
+     *                                 the error, true leaves its own default alone, and
+     *                                 null decides from its version
+     */
+    public function __construct(
+        private readonly Client $client,
+        private readonly ?bool $sourceOnError = null,
+        ?ClockInterface $clock = null,
+        ?LoggerInterface $logger = null,
+    ) {
+        $this->clock = $clock ?? new SystemClock();
+        $this->logger = $logger ?? new NullLogger();
+    }
+
+    private readonly ClockInterface $clock;
+    private readonly LoggerInterface $logger;
+
+    /**
+     * How long a "this cluster does not know it" is believed for.
+     *
+     * A positive answer is kept for the life of the process: a cluster that knows the
+     * parameter is not going to stop. A negative one has to expire, and the reason is
+     * the process it lives in. A command runs for seconds; `messenger:consume` runs for
+     * weeks. A worker that met one 8.17 node during a rolling upgrade would go on
+     * writing without the parameter long after the upgrade finished — the first line
+     * off, until somebody restarted it, and nowhere saying so.
+     *
+     * The cost of being wrong the other way is one write per window that is refused and
+     * immediately sent again. On a cluster that really is old, that is the price of not
+     * having said so in the configuration — which is what client.include_source_on_error
+     * is for, and what the warning below points at.
+     */
+    private const RETRY_THE_PARAMETER_AFTER = 300;
+
+    /** Whether this cluster knows the parameter; asked once, on the first write. */
+    private ?bool $clusterKnowsIt = null;
+
+    /** When a negative answer was reached, so it can be asked again later. */
+    private ?\DateTimeImmutable $decidedAt = null;
+
+    /** The reason last given for not sending it, so an unchanged one is not announced twice. */
+    private ?string $stoppedBecause = null;
+
+    /**
+     * Whether a write carries `include_source_on_error=false`.
+     *
+     * Elasticsearch echoes the offending document back in a parsing error unless told
+     * not to, and an audit document is exactly the one whose values must not travel
+     * into an error message, a log or an exception. The parameter is the first line
+     * against that; the second is that a refused document is described structurally
+     * (see DocumentRefusal) and, under the default redact.failure_details, the
+     * cluster's own exception is not carried along at all.
+     *
+     * Which is why this is a question rather than a constant. The parameter has existed
+     * since 8.18, and an unknown query parameter is a 400 — so sending it unconditionally
+     * made every write fail on an older cluster, for a first line whose second line was
+     * holding anyway. The version is asked for once per process and remembered: clusters
+     * do not move between operations, and a rolling upgrade is answered by the next
+     * process.
+     */
+    private function suppressesSource(): bool
     {
+        if ($this->sourceOnError !== null) {
+            return $this->sourceOnError === false;
+        }
+
+        if ($this->clusterKnowsIt === true) {
+            return true;
+        }
+
+        if ($this->clusterKnowsIt === false && !$this->staleDecision()) {
+            return false;
+        }
+
+        try {
+            $info = $this->info();
+        } catch (AuditException) {
+            // Not remembered: a cluster that could not be reached has not answered the
+            // question, and the write about to happen will fail on its own terms anyway.
+            // Until one does answer, keep the protection rather than drop it.
+            return true;
+        }
+
+        $version = \is_array($info['version'] ?? null) && \is_string($info['version']['number'] ?? null)
+            ? $info['version']['number']
+            : '';
+
+        if (ClusterVersion::knowsIncludeSourceOnError($version)) {
+            if ($this->stoppedBecause !== null) {
+                // The other bracket. Something changed for the better — an upgrade
+                // finished, a proxy was fixed — and the line that said the guarantee had
+                // gone quiet deserves the line that says it is back.
+                $this->logger->info('Audit writes to Elasticsearch carry include_source_on_error again: the cluster reports version {version}.', ['version' => $version]);
+            }
+
+            $this->clusterKnowsIt = true;
+            $this->decidedAt = null;
+            $this->stoppedBecause = null;
+
+            return true;
+        }
+
+        $this->stopSending(sprintf('it reports version %s, and the parameter has existed since %d.%d', $version === '' ? '?' : $version, self::MINIMUM_VERSION[0], self::MINIMUM_VERSION[1]));
+
+        return false;
+    }
+
+    /**
+     * Remembers that this cluster does not take the parameter, and says so.
+     *
+     * Out loud, because what it turns off is a guarantee. The bundle's second line still
+     * holds — a refused document is described by error type and field name, and under
+     * the default redact.failure_details the cluster's own exception does not travel —
+     * but the first line going quiet is exactly the kind of thing that should not happen
+     * without a line in the log naming the moment.
+     */
+    private function stopSending(string $because): void
+    {
+        // Once per answer, not once per window. The window is how often to ask, and the
+        // two are separate decisions: on a cluster that is never going to be upgraded —
+        // and those exist, not everybody can move — the same warning every five minutes
+        // is 288 a day per worker about a fact that has not changed. That reads as an
+        // outage in progress, and a log nobody can bear to read is where a real warning
+        // standing next to it goes unseen. A changed answer is an event again, and says
+        // so at the same level.
+        $repeat = $this->stoppedBecause === $because;
+
+        $this->clusterKnowsIt = false;
+        $this->decidedAt = $this->clock->now();
+        $this->stoppedBecause = $because;
+
+        if ($repeat) {
+            $this->logger->debug('Audit writes to Elasticsearch still do not carry include_source_on_error: {because}.', ['because' => $because]);
+
+            return;
+        }
+
+        $this->logger->warning('Audit writes to Elasticsearch will not carry include_source_on_error: {because}. A document this cluster refuses is quoted back in its own error; the bundle does not repeat it, and redact.failure_details: "cause" keeps it out of what is logged and dispatched. This is asked again in {seconds}s, so a cluster that is upgraded starts getting the parameter without a restart. Set client.include_source_on_error to stop asking.', [
+            'because' => $because,
+            'seconds' => self::RETRY_THE_PARAMETER_AFTER,
+        ]);
+    }
+
+    private function staleDecision(): bool
+    {
+        return $this->decidedAt === null
+            || $this->clock->now()->getTimestamp() - $this->decidedAt->getTimestamp() >= self::RETRY_THE_PARAMETER_AFTER;
+    }
+
+    /**
+     * Runs a write, and runs it once more without the parameter if that is what the
+     * cluster refused.
+     *
+     * Version detection asks one node and believes it about the cluster, which is true
+     * of a cluster that is not being upgraded. During a rolling 8.17 to 8.18 the node
+     * that answers info() can be the new one while the next write lands on an old one:
+     * a 400, and under on_failure: log a record dropped, for the whole length of the
+     * upgrade. So the refusal is read rather than assumed. Nothing was written — that
+     * is what a 400 for an unknown query parameter means — so sending it again is a
+     * retry and not a second document.
+     *
+     * The same net catches a proxy or a hosted offering that rejects the parameter
+     * whatever the version behind it says, which no amount of version reading would.
+     *
+     * @template T
+     *
+     * @param callable(bool): T $write given whether to carry the parameter
+     *
+     * @return T
+     */
+    private function write(callable $write, ?string $index = null): mixed
+    {
+        $suppressing = $this->suppressesSource();
+
+        try {
+            return $this->call(fn () => $write($suppressing), $index);
+        } catch (RequestRejectedException $e) {
+            // Only where the bundle chose: a deployment that set include_source_on_error
+            // explicitly has said which cluster it is talking to, and quietly doing the
+            // other thing would be an answer to a question it already answered.
+            if (!$suppressing || $this->sourceOnError !== null || !self::refusedTheParameter($e->getPrevious())) {
+                throw $e;
+            }
+
+            $this->stopSending('a node refused it, whatever version the cluster reports');
+
+            return $this->call(fn () => $write(false), $index);
+        }
+    }
+
+    /**
+     * Whether this refusal is about the parameter rather than about the document.
+     *
+     * Read from the cluster's own wording, which is the only place it is said — and
+     * read narrowly: a status, a phrase and the parameter's name. A wording this does
+     * not recognise costs a retry that would have worked, which is where the bundle
+     * already was, and never mistakes a refused document for a refused parameter.
+     */
+    private static function refusedTheParameter(?\Throwable $e): bool
+    {
+        if (!$e instanceof ClientResponseException || $e->getResponse()->getStatusCode() !== 400) {
+            return false;
+        }
+
+        $body = (string) $e->getResponse()->getBody();
+
+        return str_contains($body, 'include_source_on_error') && str_contains($body, 'unrecognized parameter');
     }
 
     public function index(string $index, array $document, ?string $id = null, bool $refresh = false): void
@@ -48,25 +259,27 @@ final class ElasticsearchGateway implements GatewayInterface
             throw IndexNotFoundException::forIndex($index);
         }
 
-        // Elasticsearch echoes the offending document back in a parsing error unless
-        // told not to, and an audit document is exactly the one whose values must not
-        // travel into an error message, a log or an exception. Stripping the preview
-        // afterwards is a second line; this is the first.
-        $params = ['index' => $index, 'body' => $document, 'include_source_on_error' => false];
-
-        if ($id !== null) {
-            $params['id'] = $id;
-        }
-
-        if ($refresh) {
-            $params['refresh'] = 'true';
-        }
-
         try {
             // The response body is not read, but answer() still guards it: an
             // asynchronous client returns a promise nobody here waits on, and dropping
             // it would report a write that may never have happened as success.
-            $this->call(fn () => self::answer($this->client->index($params)), $index);
+            $this->write(function (bool $suppressing) use ($index, $document, $id, $refresh): mixed {
+                $params = ['index' => $index, 'body' => $document];
+
+                if ($suppressing) {
+                    $params['include_source_on_error'] = false;
+                }
+
+                if ($id !== null) {
+                    $params['id'] = $id;
+                }
+
+                if ($refresh) {
+                    $params['refresh'] = 'true';
+                }
+
+                return self::answer($this->client->index($params));
+            }, $index);
         } catch (IndexNotFoundException $e) {
             // The index went away since we last saw it (dropped under a long-running
             // worker): forget it, so the next write checks again instead of trusting
@@ -112,7 +325,19 @@ final class ElasticsearchGateway implements GatewayInterface
             }
         }
 
-        $response = $this->call(fn () => self::answer($this->client->bulk(['body' => $body, 'include_source_on_error' => false]))->asArray());
+        // A bulk request refused whole is refused before anything in it was written, so
+        // this retry is the same request rather than a second copy of its documents.
+        // Per-item refusals are not this: they come back inside a 200 and are read by
+        // BulkResult.
+        $response = $this->write(function (bool $suppressing) use ($body): array {
+            $params = ['body' => $body];
+
+            if ($suppressing) {
+                $params['include_source_on_error'] = false;
+            }
+
+            return self::answer($this->client->bulk($params))->asArray();
+        });
         $result = BulkResult::fromResponse($response, \count($items), array_map(strval(...), array_column($items, 'id')));
 
         // The same forgetting index() does on its 404: an index that answered "not

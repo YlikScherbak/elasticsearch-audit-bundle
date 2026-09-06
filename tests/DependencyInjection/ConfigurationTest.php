@@ -24,10 +24,22 @@ final class ConfigurationTest extends TestCase
         self::assertSame('log', $config['on_failure']);
         self::assertSame('system', $config['actor']['fallback']);
         self::assertTrue($config['client']['ssl_verification']);
+        self::assertSame('auto', $config['client']['include_source_on_error'], 'the cluster decides, unless a deployment says otherwise');
         self::assertSame(['enabled' => 'auto', 'skip_empty_updates' => true, 'connection' => 'default'], $config['doctrine']);
         self::assertSame(['enabled' => true, 'object_types' => [], 'numeric_fields' => [], 'max_held' => 10000, 'on_overflow' => 'release'], $config['coalescing']);
         self::assertSame(500, $config['batch_size']);
         self::assertSame(['max_limit' => 1000, 'max_result_window' => 10000, 'point_in_time_keep_alive' => '1m'], $config['reader']);
+    }
+
+    public function testTheSourceOnErrorSettingTakesBooleansAsWellAsAuto(): void
+    {
+        // Three states in one node, and two of them are booleans, so YAML hands them
+        // over as booleans rather than as the strings "true" and "false". A node that
+        // only knew strings would have refused the two answers a deployment actually
+        // writes down.
+        self::assertFalse($this->process(['client' => ['hosts' => ['http://localhost:9200'], 'include_source_on_error' => false]])['client']['include_source_on_error']);
+        self::assertTrue($this->process(['client' => ['hosts' => ['http://localhost:9200'], 'include_source_on_error' => true]])['client']['include_source_on_error']);
+        self::assertSame('auto', $this->process(['client' => ['hosts' => ['http://localhost:9200'], 'include_source_on_error' => 'auto']])['client']['include_source_on_error']);
     }
 
     public function testWritingTheDefaultOutExplicitlyIsNotAnError(): void

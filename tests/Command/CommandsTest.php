@@ -9,8 +9,10 @@ use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Command\SyncIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
+use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
+use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Command\Command;
@@ -68,20 +70,72 @@ final class CommandsTest extends TestCase
         self::assertStringContainsString('refused', $tester->getDisplay());
     }
 
-    public function testCheckSaysWhenTheClusterIsTooOldToWriteTo(): void
+    public function testAnOldClusterIsSaidToBeOldWithoutFailingTheCheck(): void
     {
-        // The floor was a composer constraint and an integration test, and neither of
-        // those is looking at the cluster this application writes to. Below 8.18 every
-        // write is refused for a query parameter the cluster does not know — which reads
-        // as "the mapping is wrong" for as long as nobody thinks to compare versions.
+        // It used to be a failure, and that made audit:check unusable as a health check
+        // on every cluster below 8.18 — which is most of them — while the bundle was
+        // perfectly able to write to one. What is left is the difference an operator
+        // actually has to know: their errors quote the refused document back.
         $this->gateway->version = '8.17.4';
         $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
         $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
 
         $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
 
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+
+        $display = $tester->getDisplay();
+
+        self::assertStringContainsString('predates include_source_on_error', $display);
+        self::assertStringContainsString('failure_details', $display, 'and where the guarantee lives instead');
+    }
+
+    public function testAnOldClusterToldToTakeTheParameterAnywayFailsTheCheck(): void
+    {
+        // The other half of the same fact. A deployment can insist on the parameter, and
+        // on this cluster that is not a preference honoured quietly: an unknown query
+        // parameter is a 400, so every record would be refused. Silence here would be a
+        // check reporting health about a bundle writing nothing at all.
+        $this->gateway->version = '8.17.4';
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [], AuditQuery::DEFAULT_MAX_WINDOW, null, null, '', false));
+
         self::assertSame(Command::FAILURE, $tester->execute([]));
-        self::assertStringContainsString('below the supported floor of 8.18', $tester->getDisplay());
+        self::assertStringContainsString('does not know include_source_on_error', $tester->getDisplay());
+    }
+
+    public function testAnOldClusterAndFullDetailsIsSaidAsAFact(): void
+    {
+        // Two settings that are each fine and together are not: this cluster quotes a
+        // refused document back, and this deployment repeats what other code said. The
+        // conditional sentence the other branch prints would be describing something
+        // that has already happened here.
+        $this->gateway->version = '8.17.4';
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [], AuditQuery::DEFAULT_MAX_WINDOW, null, null, '', null, FailureDetails::Full));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]), 'a choice made on purpose is not a failed check');
+
+        $display = $tester->getDisplay();
+
+        self::assertStringContainsString('failure_details is "full"', $display);
+        self::assertStringContainsString('can reach your logs', $display);
+    }
+
+    public function testAModernClusterIsNotToldAnythingAboutTheParameter(): void
+    {
+        $this->gateway->version = '8.19.0';
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+        self::assertStringNotContainsString('include_source_on_error', $tester->getDisplay());
     }
 
     public function testCheckPassesWhenEverythingIsThere(): void

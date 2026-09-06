@@ -45,11 +45,15 @@ final class SyncIndexCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
-        $expected = EnricherMapping::apply($this->definition, $this->enrichers)->properties();
         $healthy = true;
 
         foreach ($this->indexResolver->all() as $index) {
             try {
+                // Per index, not once for all of them: an enricher that named its object
+                // types belongs to the indices they route to, and adding its fields to
+                // the others is a mapping that describes what cannot happen.
+                $expected = EnricherMapping::forIndex($this->definition, $this->enrichers, $this->indexResolver, $index)->properties();
+
                 $healthy = $this->sync($io, $index, $expected) && $healthy;
             } catch (AuditException $e) {
                 $io->text(sprintf('<error>%s</error>: %s', $index, self::diagnostic($e)));

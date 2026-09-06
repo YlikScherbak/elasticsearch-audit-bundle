@@ -46,24 +46,34 @@ final class CreateIndexCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
-        $definition = EnricherMapping::apply($this->definition, $this->enrichers);
+        $indices = $this->indexResolver->all();
 
         if ($input->getOption('dump') === true) {
-            $output->writeln((string) json_encode($definition->toArray(), \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES));
+            // One index, one definition — which is what this printed before there was
+            // anything to tell apart. Several, and they are no longer the same
+            // definition, so each is printed under the name it belongs to rather than
+            // one of them standing in for all.
+            $dump = [];
+
+            foreach ($indices as $index) {
+                $dump[$index] = $this->definitionFor($index)->toArray();
+            }
+
+            $output->writeln((string) json_encode(\count($dump) === 1 ? reset($dump) : $dump, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES));
 
             return self::SUCCESS;
         }
 
         $failed = false;
 
-        foreach ($this->indexResolver->all() as $index) {
+        foreach ($indices as $index) {
             try {
                 if ($this->gateway->indexExists($index)) {
                     $io->text(sprintf('<comment>%s</comment> already exists, left untouched', $index));
                     continue;
                 }
 
-                $this->gateway->createIndex($index, $definition->toArray());
+                $this->gateway->createIndex($index, $this->definitionFor($index)->toArray());
                 $io->text(sprintf('<info>%s</info> created', $index));
             } catch (AuditException $e) {
                 $io->error(sprintf('%s: %s', $index, self::diagnostic($e)));
@@ -72,6 +82,16 @@ final class CreateIndexCommand extends Command
         }
 
         return $failed ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * The definition for one index: the base plus the fields of the enrichers whose
+     * records are routed here. An enricher that named no object types is about every
+     * record, so its fields are in every index.
+     */
+    private function definitionFor(string $index): IndexDefinition
+    {
+        return EnricherMapping::forIndex($this->definition, $this->enrichers, $this->indexResolver, $index);
     }
 
     /**

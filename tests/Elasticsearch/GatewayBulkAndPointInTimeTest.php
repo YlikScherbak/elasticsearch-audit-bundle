@@ -265,7 +265,13 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
         }
     }
 
-    private function gateway(callable $respond): ElasticsearchGateway
+    /**
+     * @param bool|null $sourceOnError false by default, so these read the way they did
+     *                                 when the parameter was unconditional: what they are
+     *                                 about is elsewhere, and "auto" would put an info()
+     *                                 call in the middle of every request count
+     */
+    private function gateway(callable $respond, ?bool $sourceOnError = false): ElasticsearchGateway
     {
         $http = new class($respond) implements ClientInterface {
             /** @param callable(RequestInterface): ResponseInterface $respond */
@@ -279,7 +285,7 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
             }
         };
 
-        return new ElasticsearchGateway(ClientBuilder::create()->setHosts(['http://es.test:9200'])->setHttpClient($http)->build());
+        return new ElasticsearchGateway(ClientBuilder::create()->setHosts(['http://es.test:9200'])->setHttpClient($http)->build(), $sourceOnError);
     }
 
     /**

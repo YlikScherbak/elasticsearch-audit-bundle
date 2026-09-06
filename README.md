@@ -65,19 +65,31 @@ skips both the frame and the queue, for the one record that must be visible befo
 
 - PHP 8.1+
 - Symfony 6.4, 7.x or 8.x
-- Elasticsearch 8.18+ or 9 (`elasticsearch/elasticsearch` `^8.18 || ^9.0`). The client's major
-  version must match the cluster's: a 9.x client is refused by an 8.x cluster
-  (`Accept version must be either version 8 or 7`), so pin it —
-  `composer require elasticsearch/elasticsearch:^8.18` for an 8.x cluster.
-  The floor is 8.18 rather than 8.0 because writes are sent with
-  `include_source_on_error=false`, asking the cluster to keep the refused document out of
-  the error it returns. Earlier 8.x releases do not know the parameter, and an unknown
-  query parameter is a 400 — which the bundle reads as a permanent refusal, so on those
-  every audit record would be dropped by the line meant to protect it. Measured on 8.19
-  and 9.1, the parameter suppresses the document *source* and leaves the
-  `Preview of field's value: '…'` fragment of a mapping conflict exactly where it was;
-  that fragment is cut by the bundle itself, before it reaches an exception, a log line
-  or a failure event
+- Elasticsearch 8 or 9. The **client package** is `^8.18 || ^9.0`, and its major version has to
+  match the cluster's: a 9.x client is refused by an 8.x cluster (`Accept version must be either
+  version 8 or 7`), so pin it — `composer require elasticsearch/elasticsearch:^8.18` for an 8.x
+  cluster. That floor is about the client package and not only about the cluster: an 8.x client
+  below 8.18 builds each endpoint's query string from a fixed list of parameters it knows, and
+  drops the rest without a word — `include_source_on_error` among them — so the protection below
+  would be absent with nothing to say so. The **cluster** may be older than that (since 1.2). Writes ask for
+  `include_source_on_error=false` — keep the refused document out of the error you answer with —
+  which Elasticsearch has known since 8.18 and answers with a 400 before that, so the bundle asks
+  the cluster its version once per process and sends the parameter only where it is understood.
+  `client.include_source_on_error: false` sends it to every cluster and spends no `info()` call;
+  `true` never sends it. A cluster that refuses the parameter anyway — one node of a rolling
+  upgrade, a proxy that filters it — has the write sent again without it, and that decision is
+  reconsidered five minutes later, so an upgraded cluster gets the parameter back without
+  restarting a worker. Each distinct answer is logged once as a warning and repeats at debug: a
+  cluster that is staying below 8.18 should not fill a worker's log with the same sentence every
+  five minutes. Coming back is logged too. Below 8.18 the difference shows only when a document is refused: that
+  cluster's error quotes the document back. The bundle does not repeat that error — it names the
+  error type and the field and nothing else — and under the default `redact.failure_details:
+  cause` the cluster's own exception is not carried into a log line, a failure event or a raised
+  exception either, so what reaches you is the same on both. `audit:check` says which one you are
+  talking to. Measured on 8.19 and 9.1, the parameter suppresses the document *source* and leaves
+  the `Preview of field's value: '…'` fragment of a mapping conflict exactly where it was; that
+  fragment is cut by the bundle itself, before it reaches an exception, a log line or a failure
+  event
 - With the version 9 client, a PSR-18 HTTP client — it no longer ships one:
   `composer require guzzlehttp/guzzle`
 
@@ -763,6 +775,23 @@ is not part of that identity, so `page()`, `limit` and `after()` itself change f
 screen that lets somebody change a filter has to drop the cursor it was holding and read that
 query from the start.
 
+**Catch it around building the query, not only around reading.** `afterToken()` is where a token
+is parsed, so a stale, foreign or damaged one raises there — before `AuditReader` is called at all.
+A controller with only the read inside its `try` turns a bad token into a 500 when it meant to
+answer 400:
+
+```php
+$token = (string) $request->query->get('cursor', '');
+
+try {
+    $query = AuditQuery::create()->forType('order');
+    $query = $token === '' ? $query : $query->afterToken($token);   // an empty token is not a page
+    $page = $reader->find($query);                                  // both inside, or the token is not covered
+} catch (InvalidQueryException $e) {
+    throw new BadRequestHttpException('That page link has expired — start from the first page.', $e);
+}
+```
+
 The cursor is the sort value of the last entry: `loggedAt` plus the record's id, a time-ordered
 UUID (millisecond precision), which breaks ties in time order and — unlike Elasticsearch's `_doc` — does not move when
 segments merge. It stays valid while new records arrive. To stream everything — an XLSX export,
@@ -1059,6 +1088,36 @@ final class OrderAttributesEnricher implements AuditEnricherInterface
     }
 }
 ```
+
+**Say which object types an enricher is for** when the application routes some of them to
+indices of their own (`ScopedEnricherInterface`, **since 1.2**). `supports()` answers about one
+record, which is a question `audit:index:create` cannot ask — it has no records — so without this
+every enricher's fields go into every index: `orderCountry` declared on the auth index, and
+`audit:check` reporting it missing from indices no `order` record is ever written to. Naming the
+types answers both:
+
+```php
+use Borsche\ElasticsearchAuditBundle\Contract\ScopedEnricherInterface;
+
+final class OrderAttributesEnricher implements ScopedEnricherInterface
+{
+    public function objectTypes(): array
+    {
+        return ['order'];   // [] — or not implementing this — means every type
+    }
+
+    public function supports(AuditRecord $record): bool
+    {
+        return true;        // the object type has already been answered
+    }
+
+    // enrich() and mapping() as above
+}
+```
+
+The declaration is read everywhere, not only by the commands: the writer skips the enricher for
+records of other types before asking `supports()`, so the fields written and the fields mapped
+cannot drift apart. With one index, nothing changes either way.
 
 **When an enricher runs matters.** An `AuditEnricherInterface` runs the moment a record is
 created — before a frame merges it with the other saves of the same operation. That is right for
@@ -1626,7 +1685,7 @@ receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditOrigin`, `AuditQuery`, 
 
 **Implement these**
 `AuditableInterface` · `TracksCollectionElementsInterface` · `AuditEnricherInterface` ·
-`MergedRecordEnricherInterface` · `ActorResolverInterface` ·
+`MergedRecordEnricherInterface` · `ScopedEnricherInterface` · `ActorResolverInterface` ·
 `QueryExtensionInterface` · `RecordDecoratorInterface` · `ValueComparatorInterface` ·
 `TransportInterface` / `BatchTransportInterface` · `GatewayInterface`, if you have a reason to
 speak to Elasticsearch differently.
