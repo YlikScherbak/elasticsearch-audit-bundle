@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Borsche\ElasticsearchAuditBundle\Transport\Outbox;
+namespace Borsche\ElasticsearchAuditBundle\Outbox;
 
 /**
  * Whether an audit transaction is running in this process, and whether anything has

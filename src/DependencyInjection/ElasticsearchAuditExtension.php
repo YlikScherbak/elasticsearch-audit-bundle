@@ -32,7 +32,9 @@ use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
-use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxContext;
+use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
+use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
+use Borsche\ElasticsearchAuditBundle\Transport\Outbox\ImmediateTransportGuard;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
@@ -69,7 +71,9 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_GATEWAY = 'borsche_elasticsearch_audit.gateway';
     public const SERVICE_TRANSPORT = 'borsche_elasticsearch_audit.transport';
     public const SERVICE_SYNC_TRANSPORT = 'borsche_elasticsearch_audit.transport.sync';
+    public const SERVICE_IMMEDIATE_TRANSPORT = 'borsche_elasticsearch_audit.transport.immediate';
     public const SERVICE_OUTBOX_CONTEXT = 'borsche_elasticsearch_audit.outbox.context';
+    public const SERVICE_AUDIT_TRANSACTION = 'borsche_elasticsearch_audit.outbox.transaction';
     public const SERVICE_INDEX_RESOLVER = 'borsche_elasticsearch_audit.index_resolver';
     public const SERVICE_INDEX_DEFINITION = 'borsche_elasticsearch_audit.index_definition';
     public const SERVICE_ACTOR_RESOLVER = 'borsche_elasticsearch_audit.actor_resolver';
@@ -123,7 +127,7 @@ final class ElasticsearchAuditExtension extends Extension
 
         $this->registerClient($config['client'], $container);
         $this->registerIndices($config['indices'], $container);
-        $this->registerTransport($config['transport'], $config['message_bus'], $config['outbox'], $container);
+        $this->registerTransport($config['transport'], $config['message_bus'], $config['outbox'], $config['doctrine']['connection'], $container);
         $this->registerActor($config['actor'], $container);
         $this->registerRedaction($config['redact'], $container);
         $this->registerCoalescing($config['coalescing'], $container);
@@ -303,7 +307,7 @@ final class ElasticsearchAuditExtension extends Extension
     /**
      * @param array{transport: string|null, require_transaction: bool} $outbox
      */
-    private function registerTransport(string $transport, string $busId, array $outbox, ContainerBuilder $container): void
+    private function registerTransport(string $transport, string $busId, array $outbox, string $connection, ContainerBuilder $container): void
     {
         $container->setDefinition(self::SERVICE_SYNC_TRANSPORT, new Definition(SyncTransport::class, [new Reference(self::SERVICE_GATEWAY)]));
 
@@ -350,8 +354,32 @@ final class ElasticsearchAuditExtension extends Extension
                 ->addTag('messenger.message_handler'));
             $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
                 ->addTag('messenger.message_handler'));
+
+            // The one call that would reach Elasticsearch before the commit, refused
+            // while a transaction is open. The sync transport is still what it wraps:
+            // outside a transaction, immediately: true means what it always meant.
+            $container->setDefinition(self::SERVICE_IMMEDIATE_TRANSPORT, new Definition(ImmediateTransportGuard::class, [
+                new Reference(self::SERVICE_SYNC_TRANSPORT),
+                new Reference(self::SERVICE_OUTBOX_CONTEXT),
+            ]));
+
+            // The boundary itself. Its connection is the one the listener is attached to:
+            // the entities being audited, the queue their records go into and the
+            // transaction that commits both have to be the same connection, or the
+            // guarantee is about two transactions rather than one.
+            $container->setDefinition(self::SERVICE_AUDIT_TRANSACTION, new Definition(AuditTransaction::class, [
+                new Reference(sprintf('doctrine.dbal.%s_connection', $connection)),
+                new Reference(self::SERVICE_FRAME),
+                new Reference(self::SERVICE_OUTBOX_CONTEXT),
+                new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            ]));
+            $container->setAlias(AuditTransaction::class, self::SERVICE_AUDIT_TRANSACTION);
         } else {
             $container->setAlias(self::SERVICE_TRANSPORT, self::SERVICE_SYNC_TRANSPORT);
+        }
+
+        if (!$container->has(self::SERVICE_IMMEDIATE_TRANSPORT)) {
+            $container->setAlias(self::SERVICE_IMMEDIATE_TRANSPORT, self::SERVICE_SYNC_TRANSPORT);
         }
 
         $container->setAlias(TransportInterface::class, self::SERVICE_TRANSPORT);
@@ -388,7 +416,7 @@ final class ElasticsearchAuditExtension extends Extension
 
         $container->setDefinition(self::SERVICE_WRITER, new Definition(AuditWriter::class, [
             new Reference(self::SERVICE_TRANSPORT),
-            new Reference(self::SERVICE_SYNC_TRANSPORT),
+            new Reference(self::SERVICE_IMMEDIATE_TRANSPORT),
             new Reference(self::SERVICE_INDEX_RESOLVER),
             new Reference(self::SERVICE_ACTOR_RESOLVER),
             new Reference(self::SERVICE_CLOCK),

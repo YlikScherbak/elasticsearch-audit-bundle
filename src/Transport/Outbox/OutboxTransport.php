@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Transport\Outbox;
 
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\BulkResult;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
+use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Transport\BatchTransportInterface;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;

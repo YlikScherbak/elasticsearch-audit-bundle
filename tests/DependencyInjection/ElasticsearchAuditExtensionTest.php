@@ -27,7 +27,13 @@ use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
+use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
+use Borsche\ElasticsearchAuditBundle\Tests\Transport\RememberingSender;
+use Borsche\ElasticsearchAuditBundle\Transport\Outbox\ImmediateTransportGuard;
+use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
+use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Driver\PDO\SQLite\Driver;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use PHPUnit\Framework\TestCase;
@@ -312,6 +318,61 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
         self::assertTrue($definitions->getDefinition(IndexAuditRecordHandler::class)->hasTag('messenger.message_handler'));
         self::assertTrue($definitions->getDefinition(IndexAuditRecordsHandler::class)->hasTag('messenger.message_handler'), 'the batch handler too — the one a worker meets only on a large flush');
+    }
+
+    public function testTheOutboxTransportIsBuiltAroundTheNamedQueue(): void
+    {
+        // The queue is named in configuration and referenced by the id FrameworkBundle
+        // gives a configured transport, so an application that names one it does not
+        // have finds out while the container is being built.
+        $container = $this->build(
+            [
+                'client' => ['hosts' => ['http://localhost:9200']],
+                'transport' => 'outbox',
+                'outbox' => ['transport' => 'audit_outbox'],
+            ],
+            static function (ContainerBuilder $c): void {
+                $c->setDefinition('messenger.transport.audit_outbox', new Definition(RememberingSender::class));
+                $c->setDefinition('doctrine.dbal.default_connection', new Definition(Connection::class, [
+                    ['driver' => 'pdo_sqlite', 'memory' => true],
+                    new Definition(Driver::class),
+                ]));
+            },
+        );
+
+        self::assertInstanceOf(OutboxTransport::class, $container->get(TransportInterface::class));
+    }
+
+    public function testTheOutboxGuardsImmediateWritesAndOffersATransaction(): void
+    {
+        $definitions = $this->load([
+            'client' => ['hosts' => ['http://localhost:9200']],
+            'transport' => 'outbox',
+            'outbox' => ['transport' => 'audit_outbox'],
+        ]);
+
+        // The transport immediately: true uses is wrapped rather than replaced: outside
+        // a transaction that call means exactly what it always meant.
+        self::assertSame(
+            ImmediateTransportGuard::class,
+            $definitions->getDefinition(ElasticsearchAuditExtension::SERVICE_IMMEDIATE_TRANSPORT)->getClass(),
+        );
+
+        self::assertTrue($definitions->hasAlias(AuditTransaction::class), 'and the boundary is there to be injected');
+
+        // Its connection is the one the listener is attached to. Two connections to one
+        // database are two transactions, and the guarantee is about one.
+        $arguments = $definitions->getDefinition(ElasticsearchAuditExtension::SERVICE_AUDIT_TRANSACTION)->getArguments();
+
+        self::assertSame('doctrine.dbal.default_connection', (string) $arguments[0]);
+    }
+
+    public function testWithoutTheOutboxNothingGuardsImmediateWrites(): void
+    {
+        $definitions = $this->load(['client' => ['hosts' => ['http://localhost:9200']]]);
+
+        self::assertTrue($definitions->hasAlias(ElasticsearchAuditExtension::SERVICE_IMMEDIATE_TRANSPORT), 'it is the sync transport, as it always was');
+        self::assertFalse($definitions->hasAlias(AuditTransaction::class), 'and there is no transaction to inject');
     }
 
     public function testEnrichersAreCollectedByAutoconfiguration(): void

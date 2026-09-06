@@ -7,7 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Transport;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;
-use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxContext;
+use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\DriverManager;
