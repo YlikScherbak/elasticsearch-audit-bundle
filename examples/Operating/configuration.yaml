@@ -1,0 +1,139 @@
+# Every setting the bundle has, with its default and the reason it exists.
+#
+# Copy the parts you need — none of this is required. The defaults are what an
+# application gets by writing nothing but `client.hosts`, and they are chosen to be
+# the safe answer rather than the fast one.
+#
+# config/packages/borsche_elasticsearch_audit.yaml
+
+borsche_elasticsearch_audit:
+
+    # ── How to reach Elasticsearch ────────────────────────────────────────────
+    client:
+        hosts: ['%env(ELASTICSEARCH_URL)%']   # one or more; ignored when `service` is set
+        # service: my.elasticsearch.client    # the id of a Client you already have
+        ssl_verification: true                # false only against a development cluster
+
+    # ── Where records go ──────────────────────────────────────────────────────
+    indices:
+        default: audit_log
+
+        # A chatty object type can have its own index without the application
+        # knowing about indices. Names are used as written — an object type is a
+        # name you chose, not a config key to be tidied up.
+        routing:
+            auth: audit_auth_log
+            warehouse-stock: audit_stock_log
+
+        # keyword fits any identifier (UUIDs, external ids). "long" allows range
+        # queries on numeric ids; "integer" does too and stops at 2147483647,
+        # which a bigint key outgrows. Only change it if EVERY audited type has
+        # numeric ids — the mapping is one field for all of them.
+        object_id_type: keyword
+
+        # Applied by audit:index:create, and given WHOLE rather than merged: what
+        # you write here replaces the defaults, so a block naming only
+        # number_of_replicas drops number_of_shards with it. One replica by
+        # default — an audit trail is the last data anyone wants on a single node.
+        # On a one-node development cluster a replica can never be assigned, so
+        # set it to 0 there and repeat number_of_shards beside it.
+        settings:
+            number_of_shards: 1
+            number_of_replicas: 1
+
+    # ── How records get there ─────────────────────────────────────────────────
+    # sync: the request waits for Elasticsearch. messenger: the record travels as
+    # a message and a worker writes it, which is what a busy application wants —
+    # route both IndexAuditRecord and IndexAuditRecords, or the batch message a
+    # flush produces stays on the synchronous bus.
+    transport: sync
+    # message_bus: messenger.bus.default    # when the default bus is not the one
+
+    # Records per _bulk request, and per Messenger message.
+    batch_size: 500
+
+    # log: a failed write is logged and the business operation carries on — the
+    # audit log can never take an order down. throw: WriteFailedException reaches
+    # the caller. "log" is the default for the same reason it is the right one.
+    on_failure: log
+
+    # ── Who did it ────────────────────────────────────────────────────────────
+    actor:
+        # Recorded when nobody is authenticated: workers, console commands, imports.
+        fallback: system
+
+    # ── Reading ───────────────────────────────────────────────────────────────
+    reader:
+        # Largest page find() will read. Raise it for screens showing thousands of
+        # rows — and remember a decorator then receives that many entries at once.
+        max_limit: 1000
+
+        # How deep page × limit may reach. Must not exceed the cluster's own
+        # index.max_result_window: raise both together, or page with a cursor,
+        # which has no ceiling and does not skip records.
+        max_result_window: 10000
+
+        # How long a point in time opened by iterate() stays alive between two
+        # batches. Long enough for the slowest consumer of one batch.
+        point_in_time_keep_alive: 1m
+
+    # ── What must never be stored ─────────────────────────────────────────────
+    redact:
+        # Plainly ("password") or per object type ("user.email"). Matched by name
+        # at any depth inside changes and attributes — but a dot is an object
+        # type, never a path into an array.
+        fields: [password, token, 'customer.cardNumber']
+
+        # A side that was null or empty stays as it was, so "had none, now has
+        # one" is still readable.
+        placeholder: '***'
+
+        # How far a rule is followed into a value the application built, and how
+        # many places it looks in one record. Past either bound the record is
+        # refused rather than written half-checked.
+        max_depth: 16
+        max_nodes: 10000
+
+        # How much of a failed write's cause the bundle repeats. "cause" (the
+        # default): the class, plus messages the bundle wrote itself — the
+        # original stays reachable through WriteFailedException::getPrevious().
+        # "full": the cause's message too, which a cluster or an enricher may have
+        # quoted a value into.
+        failure_details: cause
+
+    # ── One operation, one record ─────────────────────────────────────────────
+    coalescing:
+        enabled: true
+
+        # Types held while a frame is open; empty means every type.
+        object_types: []
+
+        # Fields where null, '' and 0 are the same value when deciding whether
+        # anything changed. "quantity" everywhere, "stock.quantity" on one type.
+        numeric_fields: [quantity, reserve]
+
+        # The safety valve, counting everything a frame keeps back — held and
+        # staged alike.
+        max_held: 10000
+
+        # What the valve does. "release": write what the frame holds and carry on
+        # — every record kept, the one-record promise ended for this operation.
+        # "throw": refuse the operation, writing nothing of it. It does not undo
+        # the database, so it is only meaningful where the caller has a
+        # transaction to roll back.
+        on_overflow: release
+
+    # ── Doctrine entities ─────────────────────────────────────────────────────
+    doctrine:
+        # "auto": attach the listener when doctrine/orm AND doctrine-bundle are
+        # both installed, and stay quiet otherwise. "true": require them, and fail
+        # the boot when they are missing — which is what an application counting
+        # on entity auditing wants, because a silent skip surfaces months later as
+        # the history that was never written.
+        enabled: auto
+
+        # Do not record an update whose audited fields did not change.
+        skip_empty_updates: true
+
+        # The connection the listener is attached to.
+        connection: default

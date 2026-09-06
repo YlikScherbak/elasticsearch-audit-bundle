@@ -28,11 +28,19 @@ interface AuditableInterface
      *
      *   ['title' => null, 'author' => fn (User $u) => $u->getName(), 'tags' => fn (Tag $t) => $t->getLabel()]
      *
-     * Those callables are called while a flush is in progress, and are expected to be
-     * deterministic and free of side effects: same object in, same value out, and
-     * nothing changed on the way. See AuditField for what that rules out and why.
+     * Those callables are called with the related object — one argument, whatever is
+     * on the other side of that association — while a flush is in progress, and are
+     * expected to be deterministic and free of side effects: same object in, same
+     * value out, and nothing changed on the way. See AuditField for what that rules
+     * out and why.
      *
-     * @return array<string, (callable(object): mixed)|null>
+     * The type below says `callable` rather than `callable(object): mixed`, which
+     * would describe the call exactly and then refuse the line above it: a closure
+     * typed for its own related class is narrower than `object`, and contravariance
+     * forbids that, so an application on PHPStan level 8 had to choose between the
+     * documented idiom and a green analysis. The prose is the contract here.
+     *
+     * @return array<string, callable|null>
      */
     public function getAuditedFields(): array;
 
