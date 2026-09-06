@@ -9,6 +9,18 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-06
+
+### Fixed
+- **An enricher may depend on the writer again.** 1.1.0 read the enrichers in the writer's
+  constructor, which is exactly what a tagged iterator exists not to do: building the writer built
+  every enricher, so an enricher that reaches back to the writer — a Doctrine listener that
+  collects changes and records them, which is an ordinary thing to write — sent the container
+  round the same cycle until the stack was gone. No exception, no trace: the process died inside
+  `cache:warmup`, and with it `doctrine:migrations:migrate` and anything else that warms a
+  container. The list is now read the first time a record needs it, still exactly once. The
+  comparator chain read its comparators the same way and is fixed the same way
+
 ## [1.1.0] - 2026-09-06
 
 ### Added

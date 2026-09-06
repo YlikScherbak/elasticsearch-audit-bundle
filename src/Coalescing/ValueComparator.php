@@ -19,25 +19,41 @@ use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
  */
 final class ValueComparator implements ValueComparatorInterface
 {
-    /** @var list<ValueComparatorInterface> */
-    private readonly array $comparators;
+    /** @var iterable<ValueComparatorInterface> */
+    private readonly iterable $comparators;
+    /** @var list<ValueComparatorInterface>|null */
+    private ?array $materialized = null;
 
     /**
      * @param iterable<ValueComparatorInterface> $comparators
      */
     public function __construct(iterable $comparators = [])
     {
-        // Read once, for the same reason the writer reads its enrichers once: the chain
-        // is walked again for every value compared, and a Generator would be exhausted
-        // after the first one — agreeing with nothing, silently, from then on. The
-        // parameter stays iterable because a tagged iterator is one; what the class
-        // supports and what its signature accepts are now the same thing.
-        $this->comparators = \is_array($comparators) ? array_values($comparators) : iterator_to_array($comparators, false);
+        // Kept as it arrived, and read once when the first value is compared — see
+        // comparators(), and the writer's enrichers() for why not here. A comparator is
+        // as entitled as an enricher to depend on something that leads back to this
+        // chain: an EntityManager whose listeners audit, most obviously.
+        $this->comparators = $comparators;
+    }
+
+    /**
+     * The chain, read the first time a value is compared.
+     *
+     * Once, because it is walked again for every value: a Generator would be exhausted
+     * after the first one and agree with nothing, silently, from then on.
+     *
+     * @return list<ValueComparatorInterface>
+     */
+    private function comparators(): array
+    {
+        return $this->materialized ??= \is_array($this->comparators)
+            ? array_values($this->comparators)
+            : iterator_to_array($this->comparators, false);
     }
 
     public function equals(string $objectType, string $field, mixed $old, mixed $new): bool
     {
-        foreach ($this->comparators as $comparator) {
+        foreach ($this->comparators() as $comparator) {
             $opinion = $comparator->equals($objectType, $field, $old, $new);
 
             if ($opinion !== null) {

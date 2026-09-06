@@ -64,12 +64,16 @@ final class AuditWriter
             throw new \InvalidArgumentException(sprintf('A batch holds at least one record, %d given.', $batchSize));
         }
 
-        // Read once. The parameter says iterable because a tagged iterator is one, and
-        // that happens to be rewindable — but a plain Generator is iterable too, and this
-        // list is walked again for every record: the second walk would find it exhausted
-        // and quietly enrich nothing. What the signature accepts and what the class
-        // supports are now the same thing.
-        $this->enrichers = \is_array($enrichers) ? array_values($enrichers) : iterator_to_array($enrichers, false);
+        // Kept as it arrived. Reading it here is what 1.1.0 did, and it cost an
+        // application its boot: a tagged iterator is lazy on purpose, and an enricher is
+        // allowed to reach back to this writer — a Doctrine listener that collects
+        // changes and records them, say. Walking the iterable during construction builds
+        // every enricher while this writer is half-built, so one of them asks the
+        // container for the writer, the container starts a second construction, that one
+        // walks the iterable again, and it recurses until the stack is gone. No
+        // exception, no trace, and nothing to read: the process dies inside
+        // cache:warmup. See enrichers() for how the list is read instead.
+        $this->enrichers = $enrichers;
         $this->logger = $logger ?? new NullLogger();
         // "Cause" unless somebody asks for more, whether or not anything is redacted.
         // The two used to be tied together — no redactor meant a raw cause — and they
@@ -83,8 +87,10 @@ final class AuditWriter
         $this->failureDetails = $failureDetails ?? FailureDetails::Cause;
     }
 
-    /** @var list<AuditEnricherInterface> */
-    private readonly array $enrichers;
+    /** @var iterable<AuditEnricherInterface> */
+    private readonly iterable $enrichers;
+    /** @var list<AuditEnricherInterface>|null */
+    private ?array $materialized = null;
     private readonly LoggerInterface $logger;
     private readonly FailureDetails $failureDetails;
 
@@ -450,6 +456,25 @@ final class AuditWriter
     }
 
     /**
+     * The enrichers, read the first time one is wanted rather than in the constructor.
+     *
+     * Read once, though. The parameter says iterable because a tagged iterator is one,
+     * and that happens to be rewindable — but a plain Generator is iterable too, and
+     * this list is walked for every record, twice for each of them (complete() and
+     * prepare() take different halves of it). The second walk would find a Generator
+     * exhausted and quietly enrich nothing. So: read once, and not a moment before it
+     * is needed.
+     *
+     * @return list<AuditEnricherInterface>
+     */
+    private function enrichers(): array
+    {
+        return $this->materialized ??= \is_array($this->enrichers)
+            ? array_values($this->enrichers)
+            : iterator_to_array($this->enrichers, false);
+    }
+
+    /**
      * The last steps before a record leaves: redaction, then the RecordCreated event.
      * Null when a listener vetoed it.
      */
@@ -457,7 +482,7 @@ final class AuditWriter
     {
         // Whatever a frame merged is what these see, and they run before redaction so
         // that what they add is redacted like the rest.
-        foreach ($this->enrichers as $enricher) {
+        foreach ($this->enrichers() as $enricher) {
             if ($enricher instanceof MergedRecordEnricherInterface && $enricher->supports($record)) {
                 $record = $enricher->enrich($record);
             }
@@ -534,7 +559,7 @@ final class AuditWriter
             $record = $record->withId(RecordId::v7($record->loggedAt ?? throw new \LogicException('unreachable: the timestamp was just set')));
         }
 
-        foreach ($this->enrichers as $enricher) {
+        foreach ($this->enrichers() as $enricher) {
             // The merged ones wait for prepare(): what they say is about the record that
             // will be stored, not about the step that is being recorded right now.
             if ($enricher instanceof MergedRecordEnricherInterface) {
