@@ -195,31 +195,47 @@ final class ChangeRedactor
         }
 
         if (Change::isPair($change)) {
-            // Every key, not only the two sides. `+ $change` kept whatever else the
-            // caller had put beside old and new — a manual record or an enricher may
-            // build the pair by hand — and those keys went to the index unread: a rule
-            // naming one of them did not apply, and a secret nested inside one was never
-            // looked at. The sides keep their meaning (they are values, and a rule
-            // naming "old" or "new" would blank every change in the log); everything
-            // else is treated exactly as it would be anywhere else in a record.
-            $out = [];
-
-            foreach ($change as $key => $value) {
-                if ($key === 'old' || $key === 'new') {
-                    $out[$key] = $this->scrub($objectType, $value);
-
-                    continue;
-                }
-
-                $out[$key] = \is_string($key) && $this->redacts($objectType, $key)
-                    ? $this->mask($value)
-                    : $this->scrub($objectType, $value);
-            }
-
-            return $out;
+            return $this->scrubPair($objectType, $change);
         }
 
         return $this->scrub($objectType, $change);
+    }
+
+    /**
+     * A change stored as its pair, with every key of it read.
+     *
+     * `+ $change` kept whatever else the caller had put beside old and new - `changes`
+     * takes mixed, so a manual record or an enricher may build the pair by hand - and
+     * those keys went to the index unread: a rule naming one of them did not apply, and
+     * a secret nested inside one was never looked at. The two sides keep their meaning,
+     * because a rule named "old" or "new" would otherwise blank every change in the
+     * log; everything else is treated exactly as it would be anywhere else in a record.
+     *
+     * The parameter is typed loosely on purpose. A pair is not a sealed shape, and an
+     * analyser told that it is walks this loop and concludes that no other key can
+     * exist - which is the belief that let those keys through in the first place.
+     *
+     * @param array<array-key, mixed> $pair
+     *
+     * @return array<array-key, mixed>
+     */
+    private function scrubPair(string $objectType, array $pair): array
+    {
+        $out = [];
+
+        foreach ($pair as $key => $value) {
+            if ($key === 'old' || $key === 'new') {
+                $out[$key] = $this->scrub($objectType, $value);
+
+                continue;
+            }
+
+            $out[$key] = \is_string($key) && $this->redacts($objectType, $key)
+                ? $this->mask($value)
+                : $this->scrub($objectType, $value);
+        }
+
+        return $out;
     }
 
     /**
