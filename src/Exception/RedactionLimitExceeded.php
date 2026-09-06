@@ -24,6 +24,11 @@ final class RedactionLimitExceeded extends \RuntimeException implements AuditExc
         parent::__construct($message);
     }
 
+    public static function goingInCircles(): self
+    {
+        return new self('An audited value leads back into itself, so redaction cannot see the bottom of it and nothing can promise that what a rule names is not somewhere inside. The record was not written. This is a value the application built: an object whose jsonSerialize() answers with itself, or two that answer with each other.');
+    }
+
     public static function pastNodes(int $nodes): self
     {
         return new self(sprintf('An audited value has more than %d places to look inside, and redaction stops there — so nothing can promise that what a rule names is not in the rest of it. The record was not written. Record less in one go, or raise redact.max_nodes if this shape is what the application really keeps.', $nodes));

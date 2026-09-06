@@ -224,8 +224,10 @@ final class AuditSubscriber
 
         foreach ($uow->getScheduledEntityUpdates() as $element) {
             // Taken for every update, not only the audited ones: deciding that here
-            // would mean reading each entity's declaration twice per flush, and an
-            // array of scalars costs nothing to keep.
+            // would mean reading each entity's declaration first. What it costs is
+            // measured rather than assumed - about 60 bytes per entity, the array's own
+            // structure, because PHP shares the values rather than copying them. The
+            // figure and the flush it came from are in the README.
             $this->changeSets[spl_object_id($element)] = $uow->getEntityChangeSet($element);
             $this->rememberContext($em, $element);
 
@@ -349,6 +351,15 @@ final class AuditSubscriber
 
     public function postUpdate(PostUpdateEventArgs $args): void
     {
+        // Before the record, and for every updated entity rather than the audited
+        // ones: an element of a tracked collection is usually not audited itself, and
+        // this is the only moment its final change set can be read.
+        $manager = self::entityManagerOf($args->getObjectManager());
+
+        if ($manager !== null) {
+            $this->refreshElementChanges($manager, $args->getObject());
+        }
+
         $record = $this->recordFor($args, AuditEvent::UPDATE);
 
         if ($record === null) {
@@ -602,6 +613,39 @@ final class AuditSubscriber
     private static function entityManagerOf(ObjectManager $manager): ?EntityManagerInterface
     {
         return $manager instanceof EntityManagerInterface ? $manager : null;
+    }
+
+    /**
+     * What an element did, asked again after its own preUpdate has had its say.
+     *
+     * Element changes are collected in onFlush, which is before Doctrine builds the
+     * UPDATE - and a preUpdate listener may still correct the value, which Doctrine
+     * merges in through recomputeSingleEntityChangeSet(). An audited entity's own
+     * fields already survive that, because its record is built from the change set the
+     * unit of work holds at postUpdate; its lines did not. The history then said a line
+     * went to 7 while the row took 5, which is the one kind of wrong an audit trail
+     * must not be: not thin, but confidently mistaken.
+     *
+     * Only when the change set actually moved. A correction in preUpdate is rare, and
+     * walking every element of every flush to discover that nothing changed is work
+     * every application would pay for the few that need it.
+     */
+    private function refreshElementChanges(EntityManagerInterface $em, object $element): void
+    {
+        $current = $em->getUnitOfWork()->getEntityChangeSet($element);
+        $snapshot = $this->changeSets[spl_object_id($element)] ?? null;
+
+        // An empty current set is the unit of work having been emptied under us - by a
+        // listener's own flush - and not a correction. Replacing the snapshot with it
+        // would take the audited entity's record down with it.
+        if ($snapshot === null || $current === [] || $current === $snapshot) {
+            return;
+        }
+
+        // Merged rather than replaced, and for the same reason the owner's own fields
+        // are: what the row went FROM is only in the snapshot.
+        $this->changeSets[spl_object_id($element)] = self::sidesFrom($current, $snapshot);
+        $this->collectElementChanges($em, $element);
     }
 
     /**
@@ -982,14 +1026,42 @@ final class AuditSubscriber
                 continue;
             }
 
-            $changes = (new ChangeSetBuilder($em, $this->comparator))->elementChanges($metadata->objectType, $field, $element, $id, $wanted);
+            // From the snapshot rather than the unit of work: it is the same change set
+            // while nothing has corrected the element, and the corrected one - with the
+            // row's own old side - once something has.
+            $changes = (new ChangeSetBuilder($em, $this->comparator))->elementChanges(
+                $metadata->objectType,
+                $field,
+                $element,
+                $id,
+                $wanted,
+                $this->changeSets[spl_object_id($element)] ?? null,
+            );
 
-            if ($changes === []) {
+            // What this element said before is dropped rather than merged under the
+            // new answer. Asked a second time (after its preUpdate), a corrected value
+            // has to replace the planned one - and a value put back where it started
+            // has to disappear rather than linger as the change that never happened.
+            // Only this element's keys: the same owner holds its other lines here too.
+            $prefix = ElementKey::of($field, $id).'.';
+            $held = array_filter(
+                $this->elementChanges[$key][1] ?? [],
+                static fn (string $name): bool => !str_starts_with($name, $prefix),
+                \ARRAY_FILTER_USE_KEY,
+            );
+
+            $merged = array_replace($held, $changes);
+
+            if ($merged === []) {
+                // Present but empty reads as "something changed inside" to
+                // hasElementChanges(), which is how an update with no changes at all
+                // becomes a record.
+                unset($this->elementChanges[$key]);
+
                 continue;
             }
 
-            $held = $this->elementChanges[$key][1] ?? [];
-            $this->elementChanges[$key] = [$owner, array_replace($held, $changes)];
+            $this->elementChanges[$key] = [$owner, $merged];
         }
     }
 
@@ -1139,7 +1211,42 @@ final class AuditSubscriber
             return self::asTheEntityNowStands($em, $entity, $snapshot);
         }
 
-        return $current + $snapshot;
+        return self::sidesFrom($current, $snapshot);
+    }
+
+    /**
+     * Each side from where it is true: the old from the snapshot onFlush took, the new
+     * from the change set as it finally stands.
+     *
+     * Doctrine does not keep the row's own value around for this. computeChangeSet()
+     * ends by writing the current values into originalEntityData, so a preUpdate
+     * listener that corrects a field and calls recomputeSingleEntityChangeSet() gets a
+     * change set whose "old" is the value that was planned a moment ago - never in the
+     * database, never true. Taking the current set whole then wrote a record saying the
+     * row went from a value it never held.
+     *
+     * @param array<string, mixed> $current  what the unit of work says now
+     * @param array<string, mixed> $snapshot what onFlush saw, before any correction
+     *
+     * @return array<string, mixed>
+     */
+    private static function sidesFrom(array $current, array $snapshot): array
+    {
+        $merged = $snapshot;
+
+        foreach ($current as $field => $sides) {
+            $planned = $snapshot[$field] ?? null;
+
+            if (!\is_array($sides) || !\is_array($planned)) {
+                $merged[$field] = $sides;
+
+                continue;
+            }
+
+            $merged[$field] = [$planned[0] ?? null, $sides[1] ?? null];
+        }
+
+        return $merged;
     }
 
     /**

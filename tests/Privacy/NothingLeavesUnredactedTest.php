@@ -164,6 +164,47 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, \JSON_THROW_ON_ERROR), 'and the deeper rule still applies all the way down');
     }
 
+    public function testAKeyBesideOldAndNewIsRedactedLikeAnyOther(): void
+    {
+        // A change does not have to be a Change: `changes` takes mixed, and a manual
+        // record or an enricher may build the pair by hand. Whatever sat beside old and
+        // new was copied through unread - the rule naming it did not apply, and a
+        // secret nested inside it was never looked at.
+        $gateway = new InMemoryGateway();
+        $writer = $this->writer($gateway, ['password']);
+
+        $writer->record('user', 7, 'update', ['profile' => [
+            'old' => 'before',
+            'new' => 'after',
+            'password' => self::SECRET,
+            'nested' => ['password' => self::SECRET],
+        ]]);
+
+        $written = $gateway->documents['audit_log'][0]['changes']['profile'];
+
+        self::assertSame('before', $written['old'], 'the sides keep their meaning');
+        self::assertSame('after', $written['new']);
+        self::assertSame('***', $written['password']);
+        self::assertSame(['password' => '***'], $written['nested']);
+        self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, \JSON_THROW_ON_ERROR));
+    }
+
+    public function testAValueThatLeadsBackIntoItselfIsRefusedRatherThanFollowedForever(): void
+    {
+        // The limits are read where a structure is walked, and following a wrapper to
+        // what it serialises to was not that walk: it spent no depth, no budget and kept
+        // no record of where it had been, so an object answering with itself exhausted
+        // memory before either limit was consulted.
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log);
+
+        $writer->record('user', 7, 'update', ['payload' => new SerialisesToItself()]);
+
+        self::assertSame([], $gateway->documents, 'nothing half-checked reaches the index');
+        self::assertStringContainsString('leads back into itself', implode("\n", $logs));
+    }
+
     public function testAValueTooDeepToCheckIsRefusedRatherThanWritten(): void
     {
         // The bound has to exist — this walks data the bundle did not make — and past it
@@ -776,3 +817,14 @@ final class SelfDeclaredSafeException extends \RuntimeException implements \Bors
 {
 }
 
+/**
+ * A wrapper that answers with itself: legal PHP, and an endless walk for anything
+ * that follows jsonSerialize() without counting.
+ */
+final class SerialisesToItself implements \JsonSerializable
+{
+    public function jsonSerialize(): mixed
+    {
+        return $this;
+    }
+}

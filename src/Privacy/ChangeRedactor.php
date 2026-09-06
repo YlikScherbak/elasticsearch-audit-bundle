@@ -195,7 +195,28 @@ final class ChangeRedactor
         }
 
         if (Change::isPair($change)) {
-            return ['old' => $this->scrub($objectType, $change['old']), 'new' => $this->scrub($objectType, $change['new'])] + $change;
+            // Every key, not only the two sides. `+ $change` kept whatever else the
+            // caller had put beside old and new — a manual record or an enricher may
+            // build the pair by hand — and those keys went to the index unread: a rule
+            // naming one of them did not apply, and a secret nested inside one was never
+            // looked at. The sides keep their meaning (they are values, and a rule
+            // naming "old" or "new" would blank every change in the log); everything
+            // else is treated exactly as it would be anywhere else in a record.
+            $out = [];
+
+            foreach ($change as $key => $value) {
+                if ($key === 'old' || $key === 'new') {
+                    $out[$key] = $this->scrub($objectType, $value);
+
+                    continue;
+                }
+
+                $out[$key] = \is_string($key) && $this->redacts($objectType, $key)
+                    ? $this->mask($value)
+                    : $this->scrub($objectType, $value);
+            }
+
+            return $out;
         }
 
         return $this->scrub($objectType, $change);
@@ -213,7 +234,7 @@ final class ChangeRedactor
      */
     private function scrub(string $objectType, mixed $value, int $depth = 0): mixed
     {
-        $inside = self::keysInside($value);
+        $inside = $this->keysInside($value);
 
         if ($inside === null) {
             return $value; // nothing a rule could name
@@ -279,29 +300,56 @@ final class ChangeRedactor
      *
      * @return array<array-key, mixed>|null
      */
-    private static function keysInside(mixed $value): ?array
+    private function keysInside(mixed $value): ?array
     {
-        if (\is_array($value)) {
-            return $value;
-        }
+        // Following a wrapper to what it serialises to is a walk of its own, and it used
+        // to be an unbounded one: the recursion spent no depth, no budget and kept no
+        // record of where it had been, so an object whose jsonSerialize() answers with
+        // itself - or two that answer with each other - exhausted memory before either
+        // limit was consulted. The hops are counted now, and the objects remembered.
+        $seen = [];
 
-        if (!\is_object($value) || $value instanceof \DateTimeInterface || $value instanceof \UnitEnum) {
-            return null;
-        }
+        while (true) {
+            if (\is_array($value)) {
+                return $value;
+            }
 
-        if ($value instanceof \JsonSerializable) {
+            if (!\is_object($value) || $value instanceof \DateTimeInterface || $value instanceof \UnitEnum) {
+                return null;
+            }
+
+            if (isset($seen[spl_object_id($value)])) {
+                // Fail closed, like the other two limits: a value that leads back into
+                // itself cannot be seen to the bottom, so nothing can promise that what
+                // a rule names is not somewhere in it.
+                throw RedactionLimitExceeded::goingInCircles();
+            }
+
+            $seen[spl_object_id($value)] = true;
+
+            if (!$value instanceof \JsonSerializable) {
+                return get_object_vars($value);
+            }
+
             $serialized = $value->jsonSerialize();
 
             if (\is_array($serialized)) {
                 return $serialized;
             }
 
-            // A scalar, or another object: read it the same way again, so a wrapper that
-            // serialises to a DTO is followed rather than trusted.
-            return \is_object($serialized) ? self::keysInside($serialized) : null;
-        }
+            if (!\is_object($serialized)) {
+                return null;
+            }
 
-        return get_object_vars($value);
+            // A wrapper that serialises to a DTO is followed rather than trusted - and
+            // the hop costs a node, so a long chain runs out of budget like anything
+            // else does.
+            if (--$this->budget < 0) {
+                throw RedactionLimitExceeded::pastNodes($this->maxNodes);
+            }
+
+            $value = $serialized;
+        }
     }
 
     /**

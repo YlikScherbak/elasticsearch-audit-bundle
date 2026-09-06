@@ -169,16 +169,21 @@ final class ChangeSetBuilder
      * "collection.field", without the id, because a rule about quantities is about
      * quantities and not about element 42.
      *
-     * @param bool|list<string> $wanted true for every field of the element that changed
+     * @param bool|list<string>         $wanted    true for every field of the element that changed
+     * @param array<string, mixed>|null $changeSet what changed in the element, when the caller
+     *                                             knows better than the unit of work does
      *
      * @return array<string, Change>
      */
-    public function elementChanges(string $objectType, string $collectionField, object $element, int|string $elementId, bool|array $wanted): array
+    public function elementChanges(string $objectType, string $collectionField, object $element, int|string $elementId, bool|array $wanted, ?array $changeSet = null): array
     {
         $classMetadata = $this->em->getClassMetadata($element::class);
         $changes = [];
 
-        foreach ($this->em->getUnitOfWork()->getEntityChangeSet($element) as $field => $sides) {
+        // The caller's change set when it has one. It is what the unit of work said,
+        // with the old side of anything a preUpdate listener corrected taken from before
+        // the correction - which the unit of work itself no longer knows.
+        foreach ($changeSet ?? $this->em->getUnitOfWork()->getEntityChangeSet($element) as $field => $sides) {
             if (!\is_array($sides) || $classMetadata->hasAssociation($field)) {
                 continue;
             }

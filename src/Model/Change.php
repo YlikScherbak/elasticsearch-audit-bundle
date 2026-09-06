@@ -30,7 +30,12 @@ final class Change
      * Recognises the array shape a Change is stored as, so documents read back
      * from Elasticsearch (or built by hand) can be handled the same way.
      *
-     * @phpstan-assert-if-true array{old: mixed, new: mixed} $value
+     * The shape is unsealed on purpose: a pair may carry more than its two sides —
+     * `changes` takes mixed, so a manual record or an enricher can build one by hand —
+     * and a sealed shape here was not only wrong, it was the mental model that let
+     * redaction copy those extra keys through unread.
+     *
+     * @phpstan-assert-if-true array{old: mixed, new: mixed, ...} $value
      */
     public static function isPair(mixed $value): bool
     {
@@ -42,11 +47,22 @@ final class Change
      * form as loggedAt); enums by their value or, for a pure enum, their name — which
      * json_encode would refuse, and a record it refuses is a record lost. Everything
      * else is left to json_encode.
+     *
+     * A fractional second is kept when there is one, and that is not cosmetic: the
+     * comparator that decides whether a date moved reads it to the microsecond, so
+     * seconds-only storage produced records whose two sides were the same string. "It
+     * changed from 10:00:00 to 10:00:00" is a line that makes a reader distrust the
+     * whole trail, and it was the record disagreeing with itself rather than with the
+     * database. Nothing here is indexed — `changes` is stored with indexing disabled —
+     * so the longer form costs nothing but the characters, and a date without a
+     * fractional part is written exactly as it always was.
      */
     private static function normalize(mixed $value): mixed
     {
         if ($value instanceof \DateTimeInterface) {
-            return \DateTimeImmutable::createFromInterface($value)->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+            $utc = \DateTimeImmutable::createFromInterface($value)->setTimezone(new \DateTimeZone('UTC'));
+
+            return $utc->format($utc->format('u') === '000000' ? 'Y-m-d H:i:s' : 'Y-m-d H:i:s.u');
         }
 
         if ($value instanceof \UnitEnum) {

@@ -50,4 +50,32 @@ final class ChangeTest extends TestCase
         self::assertFalse(Change::isPair(['old' => 1]));
         self::assertFalse(Change::isPair('scalar'));
     }
+
+    public function testADateKeepsTheFractionTheComparatorJudgedItBy(): void
+    {
+        // The two halves have to agree about what a value is. ValueComparator reads a
+        // date to the microsecond when deciding whether it moved, so seconds-only
+        // storage wrote records whose sides were the same string: "it changed from
+        // 10:00:00 to 10:00:00", which reads as a bug in the trail rather than as the
+        // sub-second change it was.
+        $pair = (new Change(
+            new \DateTimeImmutable('2026-09-06 10:00:00.100000', new \DateTimeZone('UTC')),
+            new \DateTimeImmutable('2026-09-06 10:00:00.900000', new \DateTimeZone('UTC')),
+        ))->toArray();
+
+        self::assertSame('2026-09-06 10:00:00.100000', $pair['old']);
+        self::assertSame('2026-09-06 10:00:00.900000', $pair['new']);
+        self::assertNotSame($pair['old'], $pair['new'], 'a record must not say a value changed into itself');
+    }
+
+    public function testADateWithoutAFractionIsWrittenExactlyAsItAlwaysWas(): void
+    {
+        $pair = (new Change(
+            new \DateTimeImmutable('2026-09-06 10:00:00', new \DateTimeZone('UTC')),
+            new \DateTimeImmutable('2026-09-07 11:30:00', new \DateTimeZone('UTC')),
+        ))->toArray();
+
+        self::assertSame('2026-09-06 10:00:00', $pair['old']);
+        self::assertSame('2026-09-07 11:30:00', $pair['new']);
+    }
 }

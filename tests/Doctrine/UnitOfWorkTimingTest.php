@@ -219,6 +219,97 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
     }
 
     /**
+     * The value the row went FROM, when a preUpdate listener corrected the one it was
+     * going TO.
+     *
+     * Doctrine keeps no memory of it: computeChangeSet() ends by writing the current
+     * values into originalEntityData, so the recomputed set a correction produces says
+     * the field went from the value that was planned a moment earlier - a value the
+     * database never held. Taken whole, that set wrote a record about a transition that
+     * never happened.
+     */
+    public function testTheOldSideIsWhatTheRowHeldAndNotWhatWasPlanned(): void
+    {
+        $shipment = new Shipment('SH-1');
+        $this->em->persist($shipment);
+        $this->em->flush();
+
+        $corrects = new class {
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof Shipment && $entity->reference === 'SH-PLANNED') {
+                    $entity->reference = 'SH-CORRECTED';
+
+                    $em = $args->getObjectManager();
+                    $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(Shipment::class), $entity);
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], $corrects);
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment->reference = 'SH-PLANNED';
+        $this->em->flush();
+
+        self::assertSame(
+            ['old' => 'SH-1', 'new' => 'SH-CORRECTED'],
+            $this->lastDocument()['changes']['reference'],
+            'the row went from SH-1 to SH-CORRECTED, and SH-PLANNED was never in it',
+        );
+    }
+
+    /**
+     * The same correction, one level down: inside an element of a tracked collection.
+     *
+     * An audited entity's own fields survived it, because its record is built from what
+     * the unit of work holds at postUpdate. Its lines did not: element changes were
+     * turned into Change objects in onFlush, before the element's preUpdate had run at
+     * all, so the history said a line went to 7 while the row took 5. A record that
+     * disagrees with the row is worse than one that says nothing.
+     */
+    public function testACorrectionInsideAnElementReachesTheOwnersRecord(): void
+    {
+        $shipment = new Shipment('SH-1');
+        $shipment->add($line = new ShipmentLine('SKU-1', 1));
+        $this->em->persist($shipment);
+        $this->em->flush();
+
+        $corrects = new class {
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof ShipmentLine && $entity->quantity === 7) {
+                    $entity->quantity = 5;
+
+                    $em = $args->getObjectManager();
+                    $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(ShipmentLine::class), $entity);
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], $corrects);
+        $this->attachListener(FailurePolicy::Log);
+
+        $line->quantity = 7;
+        $this->em->flush();
+
+        $this->em->clear();
+        $reloaded = $this->em->find(ShipmentLine::class, $line->id);
+        self::assertNotNull($reloaded);
+        self::assertSame(5, $reloaded->quantity, 'the row holds the corrected value');
+
+        self::assertSame(
+            ['old' => 1, 'new' => 5],
+            $this->lastDocument()['changes'][sprintf('lines.%d.quantity', $line->id)],
+            'and so does the history, on both sides',
+        );
+    }
+
+    /**
      * The two defences meeting each other: a preUpdate listener corrects a value after
      * the onFlush snapshot was taken, and another listener then flushes, which empties
      * the unit of work's change sets — of this flush too. The record is then built from
