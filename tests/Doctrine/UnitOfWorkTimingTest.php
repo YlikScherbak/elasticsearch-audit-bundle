@@ -310,6 +310,47 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
     }
 
     /**
+     * The other half of asking twice: a preUpdate listener that puts the value back
+     * where it started.
+     *
+     * The row does not change, so the record must not say it did. What was collected in
+     * onFlush has to disappear rather than linger as the change that never happened -
+     * and it is the only element on this owner, so the owner has nothing to record
+     * either.
+     */
+    public function testAnElementPutBackWhereItStartedLeavesNoChangeBehind(): void
+    {
+        $shipment = new Shipment('SH-1');
+        $shipment->add($line = new ShipmentLine('SKU-1', 1));
+        $this->em->persist($shipment);
+        $this->em->flush();
+
+        $before = \count($this->documents());
+
+        $reverts = new class {
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof ShipmentLine && $entity->quantity === 7) {
+                    $entity->quantity = 1;
+
+                    $em = $args->getObjectManager();
+                    $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(ShipmentLine::class), $entity);
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], $reverts);
+        $this->attachListener(FailurePolicy::Log);
+
+        $line->quantity = 7;
+        $this->em->flush();
+
+        self::assertCount($before, $this->documents(), 'nothing changed in the end, so there is nothing to record');
+    }
+
+    /**
      * The two defences meeting each other: a preUpdate listener corrects a value after
      * the onFlush snapshot was taken, and another listener then flushes, which empties
      * the unit of work's change sets — of this flush too. The record is then built from

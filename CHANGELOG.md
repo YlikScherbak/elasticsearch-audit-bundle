@@ -9,6 +9,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Fixed
+- **Collecting the changes of a tracked collection was quadratic in its elements.** Replacing what
+  an element said last time scanned everything the owner had collected so far — for every element,
+  including the first pass in `onFlush`, where there is nothing to replace — and the merge itself
+  copied the whole of it again. One owner with ten thousand tracked lines spent **4.2 s** in the
+  flush; it spends **0.2 s** now. The scan happens only where it is for: the second pass, after an
+  element's own `preUpdate` may have corrected it. Measured on 1 000 / 3 000 / 10 000 lines:
+  54 / 412 / 4216 ms before, 17 / 69 / 200 ms after
+
 ## [1.0.2] - 2026-09-06
 
 Three ways a record could be lost, two of them added by 1.0.1.

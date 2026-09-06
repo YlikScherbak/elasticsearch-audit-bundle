@@ -645,7 +645,7 @@ final class AuditSubscriber
         // Merged rather than replaced, and for the same reason the owner's own fields
         // are: what the row went FROM is only in the snapshot.
         $this->changeSets[spl_object_id($element)] = self::sidesFrom($current, $snapshot);
-        $this->collectElementChanges($em, $element);
+        $this->collectElementChanges($em, $element, replacing: true);
     }
 
     /**
@@ -656,7 +656,7 @@ final class AuditSubscriber
      * already loaded, so this asks nothing of the database. A failure here is reported
      * like any other: an element that cannot be read must not fail the flush.
      */
-    private function collectElementChanges(EntityManagerInterface $em, object $element, ?bool $added = null): void
+    private function collectElementChanges(EntityManagerInterface $em, object $element, ?bool $added = null, bool $replacing = false): void
     {
         try {
             $elementMetadata = $em->getClassMetadata($element::class);
@@ -673,8 +673,8 @@ final class AuditSubscriber
                 // element's own reference — so neither collection is dirty and, without
                 // reading the change set, both owners stay silent about it.
                 if (\array_key_exists($association, $changeSet) && \is_array($changeSet[$association])) {
-                    $this->holdMembership($em, $element, $changeSet[$association][0] ?? null, $association, added: false);
-                    $this->holdMembership($em, $element, $current, $association, added: true);
+                    $this->holdMembership($em, $element, $changeSet[$association][0] ?? null, $association, added: false, replacing: $replacing);
+                    $this->holdMembership($em, $element, $current, $association, added: true, replacing: $replacing);
 
                     // Its own fields are left out of this flush on purpose: the owner it
                     // arrived at never held the value it is arriving from.
@@ -694,12 +694,12 @@ final class AuditSubscriber
                         ? $deletedChangeSet[$association][0] ?? null
                         : ($em->getUnitOfWork()->getOriginalEntityData($element)[$association] ?? $current);
 
-                    $this->holdMembership($em, $element, $owner, $association, added: false);
+                    $this->holdMembership($em, $element, $owner, $association, added: false, replacing: $replacing);
 
                     continue;
                 }
 
-                $this->holdMembership($em, $element, $current, $association, $added);
+                $this->holdMembership($em, $element, $current, $association, $added, $replacing);
             }
         } catch (\Throwable $e) {
             $this->writer->reportFailure($e, null);
@@ -934,7 +934,7 @@ final class AuditSubscriber
      * Holds what this element did against one owner, if that owner is audited and tracks
      * the collection this element belongs to.
      */
-    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, ?bool $added): void
+    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, ?bool $added, bool $replacing = false): void
     {
         if (!\is_object($owner)) {
             return; // no owner on that side: nothing to write a history against
@@ -960,10 +960,10 @@ final class AuditSubscriber
         $this->assertAuditedFieldsAreThere($em, $owner, $metadata);
         $this->assertTrackedCollectionsAreServable($em, $owner, $metadata);
 
-        $this->holdElementChanges($em, $element, $owner, $metadata, $association, $added);
+        $this->holdElementChanges($em, $element, $owner, $metadata, $association, $added, $replacing);
     }
 
-    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, ?bool $added = null): void
+    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, ?bool $added = null, bool $replacing = false): void
     {
         $ownerMetadata = $em->getClassMetadata($owner::class);
 
@@ -1038,21 +1038,27 @@ final class AuditSubscriber
                 $this->changeSets[spl_object_id($element)] ?? null,
             );
 
-            // What this element said before is dropped rather than merged under the
-            // new answer. Asked a second time (after its preUpdate), a corrected value
-            // has to replace the planned one - and a value put back where it started
-            // has to disappear rather than linger as the change that never happened.
-            // Only this element's keys: the same owner holds its other lines here too.
-            $prefix = ElementKey::of($field, $id).'.';
-            $held = array_filter(
-                $this->elementChanges[$key][1] ?? [],
-                static fn (string $name): bool => !str_starts_with($name, $prefix),
-                \ARRAY_FILTER_USE_KEY,
-            );
+            // Replacing rather than adding, and only then. Asked a second time (after
+            // the element's preUpdate) a corrected value has to replace the planned one,
+            // and a value put back where it started has to disappear rather than linger
+            // as the change that never happened - so this element's keys go first. Only
+            // this element's: the same owner holds its other lines here too.
+            //
+            // The scan is worth avoiding when there is nothing to replace, which is every
+            // element of every ordinary flush. It walks everything the owner has
+            // collected so far, so ten thousand lines of one order cost fifty million
+            // prefix comparisons to discover that none of them matched.
+            if ($replacing) {
+                $prefix = ElementKey::of($field, $id).'.';
 
-            $merged = array_replace($held, $changes);
+                foreach (array_keys($this->elementChanges[$key][1] ?? []) as $name) {
+                    if (str_starts_with($name, $prefix)) {
+                        unset($this->elementChanges[$key][1][$name]);
+                    }
+                }
+            }
 
-            if ($merged === []) {
+            if ($changes === [] && ($this->elementChanges[$key][1] ?? []) === []) {
                 // Present but empty reads as "something changed inside" to
                 // hasElementChanges(), which is how an update with no changes at all
                 // becomes a record.
@@ -1061,7 +1067,16 @@ final class AuditSubscriber
                 continue;
             }
 
-            $this->elementChanges[$key] = [$owner, $merged];
+            // Written key by key rather than through array_replace(), which copies the
+            // whole of what the owner has collected every time another element arrives:
+            // the same quadratic cost, in memcpy instead of callbacks.
+            if (!isset($this->elementChanges[$key])) {
+                $this->elementChanges[$key] = [$owner, []];
+            }
+
+            foreach ($changes as $name => $change) {
+                $this->elementChanges[$key][1][$name] = $change;
+            }
         }
     }
 
