@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Privacy;
 
+use Borsche\ElasticsearchAuditBundle\Exception\RedactionLimitExceeded;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 
@@ -45,6 +46,16 @@ use Borsche\ElasticsearchAuditBundle\Model\Change;
  */
 final class ChangeRedactor
 {
+    /**
+     * How deep a rule is followed into a value the application built.
+     *
+     * A bound is needed — this walks data the bundle did not make — and past it the
+     * record is refused rather than written half-checked. Sixteen levels inside one
+     * audited field is not a shape any of this was written for, so the bound is a
+     * boundary rather than a limit anybody meets.
+     */
+    private const MAX_DEPTH = 16;
+
     /**
      * @param list<string> $fields      field names, optionally scoped as "objectType.field"
      * @param string       $placeholder what the value is replaced with
@@ -179,14 +190,25 @@ final class ChangeRedactor
      */
     private function scrub(string $objectType, mixed $value, int $depth = 0): mixed
     {
-        if (!\is_array($value) || $depth >= 16) {
-            return $value;
+        $inside = self::keysInside($value);
+
+        if ($inside === null) {
+            return $value; // nothing a rule could name
+        }
+
+        if ($depth >= self::MAX_DEPTH) {
+            // Fail closed. Leaving the rest of the structure alone was the DoS-safe
+            // choice for a data transformer and the wrong one for this: a rule that reads
+            // as "this name, anywhere" would stop applying at a depth nobody thinks
+            // about, and the value it exists to remove would be written in full. The
+            // record does not go out; the writer's failure policy says so out loud.
+            throw RedactionLimitExceeded::deeperThan(self::MAX_DEPTH);
         }
 
         $out = [];
         $touched = false;
 
-        foreach ($value as $key => $item) {
+        foreach ($inside as $key => $item) {
             if (\is_string($key) && $this->redacts($objectType, $key)) {
                 $out[$key] = $this->mask($item);
                 $touched = true;
@@ -199,7 +221,55 @@ final class ChangeRedactor
             $out[$key] = $scrubbed;
         }
 
-        return $touched ? $out : $value;
+        if (!$touched) {
+            return $value; // untouched, and in the shape it arrived in
+        }
+
+        // Rebuilt only when something had to be removed. An object is handed back as an
+        // object where that is possible, so a record that needed no redaction and one
+        // that did are written the same way — json_encode turns both into the same
+        // object, and an empty array is not an empty object.
+        return $value instanceof \stdClass ? (object) $out : $out;
+    }
+
+    /**
+     * What a rule could match inside this value, or null when there is nothing.
+     *
+     * Arrays are obvious. Objects are the case that was missing, and it was not an
+     * exotic one: `changes` takes `mixed` by contract, so a DTO or a `stdClass` is a
+     * legal thing to record — and it went past redaction untouched, straight into
+     * json_encode, which then wrote every property of it. What is read here is what the
+     * document will hold: JsonSerializable answers for itself, anything else by its
+     * public properties, exactly as json_encode would.
+     *
+     * Dates and enums are values rather than structures — they carry no key a rule could
+     * name — and are left alone; Change::normalize() turns them into what is stored.
+     *
+     * @return array<array-key, mixed>|null
+     */
+    private static function keysInside(mixed $value): ?array
+    {
+        if (\is_array($value)) {
+            return $value;
+        }
+
+        if (!\is_object($value) || $value instanceof \DateTimeInterface || $value instanceof \UnitEnum) {
+            return null;
+        }
+
+        if ($value instanceof \JsonSerializable) {
+            $serialized = $value->jsonSerialize();
+
+            if (\is_array($serialized)) {
+                return $serialized;
+            }
+
+            // A scalar, or another object: read it the same way again, so a wrapper that
+            // serialises to a DTO is followed rather than trusted.
+            return \is_object($serialized) ? self::keysInside($serialized) : null;
+        }
+
+        return get_object_vars($value);
     }
 
     /**

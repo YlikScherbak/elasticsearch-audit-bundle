@@ -19,9 +19,11 @@ use Borsche\ElasticsearchAuditBundle\Exception\SafeMessage;
  * into a log line puts the value in the one place redaction was meant to keep it out
  * of.
  *
- * So it is a choice, with the default following the declaration the application has
- * already made: redaction configured means Cause, no redaction means Full. Either can
- * be set explicitly (redact.failure_details).
+ * So it is a choice, and the answer nobody gives is Cause. It used to follow whether
+ * redaction was configured, and those are two different questions: redaction covers
+ * what the record holds, this covers the message of an exception written by code the
+ * bundle did not write, and an application that declared no sensitive fields has said
+ * nothing about those. Full is asked for explicitly (redact.failure_details).
  */
 enum FailureDetails: string
 {

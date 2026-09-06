@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -271,6 +273,60 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame('SH-CORRECTED', $this->lastDocument()['changes']['reference']['new'], 'the record says what the database took');
+    }
+
+    public function testWhatAPostUpdateListenerDoesToTheEntityIsNotWhatTheRecordSays(): void
+    {
+        // postUpdate runs after the row was written, and Doctrine says plainly that
+        // changes made in post events are not part of that flush's persistence. The
+        // record read the association off the live object all the same, so a listener
+        // reassigning it there put a related object into the history that the row does
+        // not point at — and the always-recorded context beside it described a state
+        // nobody could find either.
+        $author = new Author('alice');
+        $next = new Author('bob');
+        $meddled = new Author('charlie');
+        $this->em->persist($author);
+        $this->em->persist($next);
+        $this->em->persist($meddled);
+
+        $article = new Article('Hello');
+        $article->author = $author;
+        $this->em->persist($article);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $meddler = new class($meddled) {
+            public function __construct(private readonly Author $meddled)
+            {
+            }
+
+            public function postUpdate(PostUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof Article && $entity->author?->name === 'bob') {
+                    $entity->author = $this->meddled;
+                    $entity->status = 'meddled';
+                }
+            }
+        };
+
+        // Registered before the audit listener, which is the shape that matters: a
+        // listener the bundle cannot outrank, doing its work first.
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $meddler);
+        $this->attachListener(FailurePolicy::Log);
+
+        $article->author = $next;
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame(['old' => 'alice', 'new' => 'bob'], $changes['author'], 'the related object the row points at');
+        self::assertSame(['old' => 'draft', 'new' => 'draft'], $changes['status'], 'and the context the row holds');
+        self::assertSame((string) $next->id, (string) $this->em->getConnection()->fetchOne('SELECT author_id FROM article WHERE id = ?', [$article->id]));
+        self::assertSame('draft', $this->em->getConnection()->fetchOne('SELECT status FROM article WHERE id = ?', [$article->id]));
     }
 
     private function flushFromPostPersist(): void

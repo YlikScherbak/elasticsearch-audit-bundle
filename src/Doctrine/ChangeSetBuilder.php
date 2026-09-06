@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
+use Doctrine\Common\Collections\Collection;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\PersistentCollection;
 
@@ -37,13 +38,18 @@ final class ChangeSetBuilder
     }
 
     /**
-     * @param array<string, mixed>|null $changeSet Doctrine's change set, when the caller
+     * @param array<string, mixed>|null   $changeSet
+     * @param array<string, list<object>> $emptied   what an owning collection held before this flush
+     *                                               emptied it, by field: the one source left once
+     *                                               clear() has taken its own empty snapshot
+     * @param array<string, mixed>        $asFlushed what the always-recorded fields held when the
+     *                                               flush began, for the ones it did not write Doctrine's change set, when the caller
      *                                             already holds one; read from the unit of
      *                                             work when null
      *
      * @return array<string, Change>
      */
-    public function build(object $entity, AuditMetadata $metadata, ?array $changeSet = null): array
+    public function build(object $entity, AuditMetadata $metadata, ?array $changeSet = null, array $emptied = [], array $asFlushed = []): array
     {
         $classMetadata = $this->em->getClassMetadata($entity::class);
 
@@ -60,12 +66,29 @@ final class ChangeSetBuilder
                 // is dirty in memory whenever an element was added properly, which the
                 // membership path already records. Comparing it here told the same
                 // change twice, and invented one for a relation that was never saved.
-                $change = $classMetadata->isAssociationInverseSide($field)
-                    ? null
-                    : $this->collectionChange($classMetadata->getFieldValue($entity, $field), $represent);
+                // A collection the flush is emptying answers from what it held, which
+                // the listener took before this flush could destroy it: clear() leaves an
+                // empty snapshot and a collection that says it is not dirty, and a
+                // replaced collection leaves a new one whose snapshot never held the old
+                // members. Both produced a record that said nothing while the join rows
+                // were deleted, or one whose "old" side was empty.
+                $change = match (true) {
+                    $classMetadata->isAssociationInverseSide($field) => null,
+                    \array_key_exists($field, $emptied) => new Change(
+                        self::representAll($emptied[$field], $represent),
+                        self::representAll(self::contentsOf($classMetadata->getFieldValue($entity, $field)), $represent),
+                    ),
+                    default => $this->collectionChange($classMetadata->getFieldValue($entity, $field), $represent),
+                };
             } elseif ($classMetadata->isSingleValuedAssociation($field)) {
+                // Both sides out of the change set, like a scalar. The new side used to be
+                // read off the entity, which is not the same thing after postUpdate: a
+                // listener that reassigns the association there changes nothing in the
+                // database — Doctrine documents post events as irrelevant to that flush's
+                // persistence — and the record then named a related object the row does
+                // not point at.
                 $change = \array_key_exists($field, $changeSet) && \is_array($changeSet[$field])
-                    ? new Change(self::represent($changeSet[$field][0] ?? null, $represent), self::represent($classMetadata->getFieldValue($entity, $field), $represent))
+                    ? new Change(self::represent($changeSet[$field][0] ?? null, $represent), self::represent($changeSet[$field][1] ?? null, $represent))
                     : null;
             } elseif (\array_key_exists($field, $changeSet) && \is_array($changeSet[$field])) {
                 $change = new Change($changeSet[$field][0] ?? null, $changeSet[$field][1] ?? null);
@@ -85,7 +108,7 @@ final class ChangeSetBuilder
             }
         }
 
-        return $this->withAlwaysRecorded($entity, $metadata, $changes);
+        return $this->withAlwaysRecorded($entity, $metadata, $changes, $asFlushed, $changeSet);
     }
 
     /**
@@ -96,10 +119,12 @@ final class ChangeSetBuilder
      * reads on its own" has to hold for those too.
      *
      * @param array<string, Change|mixed> $changes
+     * @param array<string, mixed>        $asFlushed what these fields held when the flush began
+     * @param array<string, mixed>        $changeSet what the flush wrote, where it wrote them
      *
      * @return array<string, Change|mixed>
      */
-    public function withAlwaysRecorded(object $entity, AuditMetadata $metadata, array $changes): array
+    public function withAlwaysRecorded(object $entity, AuditMetadata $metadata, array $changes, array $asFlushed = [], array $changeSet = []): array
     {
         if ($changes === [] || $metadata->alwaysRecorded === []) {
             return $changes;
@@ -108,10 +133,28 @@ final class ChangeSetBuilder
         $classMetadata = $this->em->getClassMetadata($entity::class);
 
         foreach ($metadata->alwaysRecorded as $field) {
-            if (!isset($changes[$field]) && !$classMetadata->hasAssociation($field)) {
-                $value = $classMetadata->getFieldValue($entity, $field);
-                $changes[$field] = new Change($value, $value);
+            if (isset($changes[$field]) || $classMetadata->hasAssociation($field)) {
+                continue;
             }
+
+            // The value the row holds, which is not always the value the object holds.
+            //
+            // In order: what the flush wrote, when this field was part of it — that
+            // covers a preUpdate listener correcting it, because Doctrine recomputes the
+            // change set for exactly that; then what the field held when the flush began,
+            // which is what the row kept if the flush did not write it; and the live
+            // object last, for a record built outside a flush.
+            //
+            // Reading the object first was the mistake: a postUpdate listener that
+            // touches the entity changes nothing in the database, and the context beside
+            // the change then described a state nobody can find.
+            $value = match (true) {
+                \array_key_exists($field, $changeSet) && \is_array($changeSet[$field]) => $changeSet[$field][1] ?? null,
+                \array_key_exists($field, $asFlushed) => $asFlushed[$field],
+                default => $classMetadata->getFieldValue($entity, $field),
+            };
+
+            $changes[$field] = new Change($value, $value);
         }
 
         return $changes;
@@ -159,6 +202,33 @@ final class ChangeSetBuilder
     /**
      * @param (callable(object): mixed)|null $represent
      */
+    /**
+     * Each element as the history should show it.
+     *
+     * @param list<object>                 $elements
+     * @param (callable(object): mixed)|null $represent
+     *
+     * @return list<mixed>
+     */
+    private static function representAll(array $elements, ?callable $represent): array
+    {
+        return array_values(array_map(static fn (object $element): mixed => self::represent($element, $represent), $elements));
+    }
+
+    /**
+     * What a to-many field holds right now, whatever kind of collection it is.
+     *
+     * @return list<object>
+     */
+    private static function contentsOf(mixed $collection): array
+    {
+        if (!$collection instanceof Collection) {
+            return [];
+        }
+
+        return array_values(array_filter($collection->toArray(), static fn (mixed $element): bool => \is_object($element)));
+    }
+
     private function collectionChange(mixed $collection, ?callable $represent): ?Change
     {
         if (!$collection instanceof PersistentCollection || !$collection->isDirty()) {

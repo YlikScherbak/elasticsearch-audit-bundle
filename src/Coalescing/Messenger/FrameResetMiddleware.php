@@ -21,6 +21,16 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
  * once the transaction committed), so those changes are in the database whether the
  * handler reached its end or not. The warning names the missing try/finally.
  *
+ * What it does *not* do, said here because the difference is easy to miss: a frame that
+ * is already open when a message arrives is left alone. That is what makes a caller's
+ * own frame survive a message dispatched from inside it — the middleware sits before
+ * SendMessageMiddleware and would otherwise cut the operation in half — and it is also
+ * why a frame leaked by an earlier message is not cleaned up before the next one:
+ * ownership is read from "is a frame open", which cannot tell the two apart. The next
+ * message's history then joins the leaked frame and leaves with it. The cure is the
+ * try/finally the warning asks for; there is a test that states this outcome rather
+ * than hiding it.
+ *
  * Add it to the bus, after the handler-facing middleware:
  *
  *   framework:

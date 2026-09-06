@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Doctrine\Common\Collections\ArrayCollection;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Comment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
@@ -105,6 +106,71 @@ final class DoctrineAuditTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame(['old' => ['php'], 'new' => ['php', 'elasticsearch']], $this->lastDocument()['changes']['tags']);
+    }
+
+    public function testClearingAnOwningCollectionIsRecordedRatherThanPassedOver(): void
+    {
+        // The join rows go; the history said nothing. PersistentCollection::clear()
+        // schedules the collection for deletion and then takes a fresh snapshot of the
+        // now-empty collection, which also resets isDirty() — so everything the record
+        // was built from says nothing happened, while Doctrine deletes every row.
+        $php = new Tag('php');
+        $es = new Tag('elasticsearch');
+        $this->em->persist($php);
+        $this->em->persist($es);
+
+        $article = new Article('Hello');
+        $article->tags->add($php);
+        $article->tags->add($es);
+        $this->persisted($article);
+        $this->gateway->documents = [];
+
+        $article->tags->clear();
+        $article->title = 'Hello again';
+        $this->em->flush();
+
+        self::assertSame(['old' => ['php', 'elasticsearch'], 'new' => []], $this->lastDocument()['changes']['tags']);
+        self::assertSame([], $this->em->getConnection()->fetchAllAssociative('SELECT * FROM article_tag'), 'and the rows really are gone');
+    }
+
+    public function testReplacingAnOwningCollectionKeepsTheSideItReplaced(): void
+    {
+        // The other way to take a collection away. Doctrine schedules the old collection
+        // for deletion and puts a fresh one in the property, whose snapshot never held
+        // the old members — so the old side came out empty, or the whole change went
+        // missing when the replacement was empty too.
+        $php = new Tag('php');
+        $es = new Tag('elasticsearch');
+        $this->em->persist($php);
+        $this->em->persist($es);
+
+        $article = new Article('Hello');
+        $article->tags->add($php);
+        $this->persisted($article);
+        $this->gateway->documents = [];
+
+        $article->tags = new ArrayCollection([$es]);
+        $article->title = 'Hello again';
+        $this->em->flush();
+
+        self::assertSame(['old' => ['php'], 'new' => ['elasticsearch']], $this->lastDocument()['changes']['tags']);
+    }
+
+    public function testReplacingAnOwningCollectionWithAnEmptyOneIsRecordedToo(): void
+    {
+        $php = new Tag('php');
+        $this->em->persist($php);
+
+        $article = new Article('Hello');
+        $article->tags->add($php);
+        $this->persisted($article);
+        $this->gateway->documents = [];
+
+        $article->tags = new ArrayCollection();
+        $article->title = 'Hello again';
+        $this->em->flush();
+
+        self::assertSame(['old' => ['php'], 'new' => []], $this->lastDocument()['changes']['tags']);
     }
 
     public function testARepresenterDescribesTheObjectAsItStandsWhenTheRecordIsBuilt(): void

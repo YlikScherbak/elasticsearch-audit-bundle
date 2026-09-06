@@ -41,11 +41,43 @@ final class SafeMessage
         IndexNotFoundException::class => true,
         NotConfiguredException::class => true,
         PartialResultException::class => true,
+        RedactionLimitExceeded::class => true,
     ];
 
     public static function vouchedFor(\Throwable $e): bool
     {
-        return $e instanceof SafeExceptionMessage && isset(self::OURS[$e::class]);
+        return $e instanceof SafeExceptionMessage && isset(self::OURS[$e::class]) && self::builtInsideTheBundle($e);
+    }
+
+    /**
+     * Whether the sentence was written here.
+     *
+     * The class alone does not say so. Two of these classes are built with free-form
+     * prose — a declaration mistake, a configuration refusal — so an enricher reusing
+     * one to report a problem of its own ("cannot enrich with token abc") would have its
+     * message repeated everywhere `redact.failure_details: cause` exists to keep foreign
+     * messages out of. That is a mistake somebody makes while trying to be helpful, not
+     * an attack.
+     *
+     * An exception records where it was created, and nothing outside this package can
+     * make PHP name a file inside it: `getFile()` is set by the engine at `new`, from
+     * the file the `new` is written in. So the question "did the bundle write this
+     * sentence" has an answer that does not depend on anybody's good behaviour.
+     *
+     * A factory called from outside with a value of the caller's own would still pass —
+     * `IndexNotFoundException::forIndex($secret)` names what it was given. The factories
+     * take names of things, not values, and the constructors of the classes that have
+     * factories are private, which is as far as the language goes.
+     */
+    private static function builtInsideTheBundle(\Throwable $e): bool
+    {
+        static $here = null;
+
+        // dirname(__DIR__) is this package's src/, whatever it was installed as: a
+        // vendor directory, a path repository, a symlink resolved by the autoloader.
+        $here ??= \dirname(__DIR__).\DIRECTORY_SEPARATOR;
+
+        return str_starts_with($e->getFile(), $here);
     }
 
     /**
@@ -68,7 +100,7 @@ final class SafeMessage
 
         return match (true) {
             $e instanceof TransportUnavailableException => TransportUnavailableException::saying($e->getMessage()),
-            $e instanceof IndexNotFoundException => new IndexNotFoundException($e->getMessage(), $e->getCode()),
+            $e instanceof IndexNotFoundException => IndexNotFoundException::saying($e->getMessage()),
             // Anything else is not a shape this method knows how to rebuild, and passing
             // it on as it is would be the leak this exists to close.
             default => FailureReason::keepingTheMessageOf($e),

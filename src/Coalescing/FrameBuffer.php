@@ -225,6 +225,38 @@ final class FrameBuffer
     }
 
     /**
+     * Whether this frame keeps back everything, including the types it does not
+     * coalesce.
+     *
+     * That is what `on_overflow: throw` means once the frame is open: the operation is
+     * atomic or it is refused, and a record cannot be atomic and already written. Under
+     * `release` the answer is no — that mode never promised the operation was one thing.
+     */
+    public function stagesEverything(): bool
+    {
+        return $this->enabled && $this->throwOnOverflow && $this->isOpen();
+    }
+
+    /**
+     * Takes a record the frame does not coalesce and keeps it with the rest until the
+     * outermost close.
+     *
+     * `object_types` says what is *merged*, and it was also deciding what could be
+     * published while an atomic frame was open: a type outside the list went straight
+     * to the index from write(), and disappeared with the refused operation from
+     * writeAll(). The same three records gave two different histories depending on which
+     * method the caller used.
+     */
+    public function stage(AuditRecord $record): void
+    {
+        if ($this->poisoned) {
+            return;
+        }
+
+        $this->handOver([$record]);
+    }
+
+    /**
      * Whether records of this type are held while a frame is open.
      */
     public function accepts(string $objectType): bool
@@ -273,7 +305,7 @@ final class FrameBuffer
             // Releasing keeps every record and gives up the promise: an object let go
             // early can produce a second record for an operation whose net effect was
             // nothing. A deployment that reads the trail for that promise says so.
-            if (\count($this->held) >= $this->maxHeld && $this->throwOnOverflow) {
+            if ($this->count() >= $this->maxHeld && $this->throwOnOverflow) {
                 // Refused here, where it is raised, and not where somebody catches it:
                 // coalesce() catches this exception and a manual begin()/end() pair does
                 // not, and both have to end with the operation unpublished.
@@ -336,6 +368,15 @@ final class FrameBuffer
 
         foreach ($records as $record) {
             $this->staged[] = $record;
+        }
+
+        // The valve counts what the frame is keeping from the log, and staged records
+        // are exactly that. Counting only the held ones left a way past it that needs no
+        // new object at all: one object, alternating actors, and every boundary staged
+        // another record — max_held: 1 and ten thousand records in memory, which is the
+        // number this setting exists to be.
+        if ($this->count() > $this->maxHeld) {
+            throw FrameOverflowException::past($this->maxHeld, $this->refuse());
         }
 
         return [];

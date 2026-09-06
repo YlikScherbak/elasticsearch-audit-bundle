@@ -76,6 +76,15 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_METADATA_FACTORY = 'borsche_elasticsearch_audit.doctrine.metadata_factory';
     public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
 
+    /**
+     * Where the entity listener sits among the application's own.
+     *
+     * High rather than highest: an application that has a reason to run before the audit
+     * listener can still say so, and a number nobody can outrank would be this bundle
+     * deciding it knows better than the code using it.
+     */
+    public const LISTENER_PRIORITY = 512;
+
     /** Whether doctrine.enabled was an explicit true — a promise — rather than "auto". */
     public const PARAMETER_DOCTRINE_PROMISED = 'borsche_elasticsearch_audit.doctrine.promised';
 
@@ -230,7 +239,17 @@ final class ElasticsearchAuditExtension extends Extension
         ]);
 
         foreach (AuditSubscriber::EVENTS as $event) {
-            $listener->addTag('doctrine.event_listener', ['event' => $event, 'connection' => $doctrine['connection']]);
+            // Ahead of the application's own listeners, which register at priority 0.
+            //
+            // It matters twice. In postFlush, a listener that throws stops every listener
+            // behind it — the event manager has no catch-and-continue — and this one
+            // publishes there: the transaction has already committed, so being skipped
+            // means the database moved and the history did not (there is a recovery for
+            // that in the listener, and not being skipped in the first place is better).
+            // In postUpdate, running first is what makes the record describe the row that
+            // was written rather than whatever a later listener does to the entity
+            // afterwards.
+            $listener->addTag('doctrine.event_listener', ['event' => $event, 'connection' => $doctrine['connection'], 'priority' => self::LISTENER_PRIORITY]);
         }
 
         $container->setDefinition(self::SERVICE_DOCTRINE_LISTENER, $listener);

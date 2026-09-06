@@ -59,10 +59,22 @@ final class CheckCommand extends Command
             return self::FAILURE;
         }
 
-        $io->text(sprintf('Cluster <info>%s</info>, Elasticsearch <info>%s</info>', $info['cluster_name'] ?? $info['name'] ?? '?', $info['version']['number'] ?? '?'));
+        $version = \is_string($info['version']['number'] ?? null) ? $info['version']['number'] : '?';
+
+        $io->text(sprintf('Cluster <info>%s</info>, Elasticsearch <info>%s</info>', $info['cluster_name'] ?? $info['name'] ?? '?', $version));
 
         $expected = EnricherMapping::apply($this->definition, $this->enrichers)->properties();
         $healthy = true;
+
+        // The floor was a composer constraint and an integration test, neither of which
+        // is looking at the cluster this application writes to. Below it every write is
+        // refused for a query parameter the cluster does not know, which reads as "the
+        // mapping is wrong" for as long as nobody thinks to compare versions.
+        if (!self::isSupported($version)) {
+            $io->text(sprintf('<error>Elasticsearch %s is below the supported floor of %d.%d</error>: writes are sent with include_source_on_error=false, which this cluster does not know, and an unknown query parameter is answered with a 400 — every audit record would be refused. Upgrade the cluster, or pin this bundle to a version that does not send it.', $version, GatewayInterface::MINIMUM_VERSION[0], GatewayInterface::MINIMUM_VERSION[1]));
+
+            $healthy = false;
+        }
 
         foreach ($this->indexResolver->all() as $index) {
             try {
@@ -74,6 +86,24 @@ final class CheckCommand extends Command
         }
 
         return $healthy ? self::SUCCESS : self::FAILURE;
+    }
+
+    /**
+     * Whether a cluster this old can be written to at all.
+     *
+     * A version it cannot read is not called unsupported: `audit:check` reports what it
+     * can see, and inventing a failure out of a string nobody recognised would be worse
+     * than saying nothing about it.
+     */
+    private static function isSupported(string $version): bool
+    {
+        if (preg_match('~^(\d+)\.(\d+)~', $version, $found) !== 1) {
+            return true;
+        }
+
+        [$major, $minor] = GatewayInterface::MINIMUM_VERSION;
+
+        return (int) $found[1] > $major || ((int) $found[1] === $major && (int) $found[2] >= $minor);
     }
 
     /**

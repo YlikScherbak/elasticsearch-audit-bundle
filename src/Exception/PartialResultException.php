@@ -19,6 +19,17 @@ namespace Borsche\ElasticsearchAuditBundle\Exception;
  */
 final class PartialResultException extends \RuntimeException implements AuditException, SafeExceptionMessage
 {
+    /**
+     * Private on purpose: every message this class carries is one the bundle wrote, and
+     * that is what lets it be repeated where a foreign message would not be. A public
+     * constructor is a way for anybody to put anything into a sentence the bundle
+     * vouches for.
+     */
+    private function __construct(string $message, int $code = 0, ?\Throwable $previous = null)
+    {
+        parent::__construct($message, $code, $previous);
+    }
+
     public static function shardsFailed(int $failed, int $total): self
     {
         return new self(sprintf('Elasticsearch answered with a partial result: %d of %d shard(s) failed, so the records returned are not all the records there are. Read again once the cluster is healthy — an audit answer that is quietly incomplete is worse than no answer.', $failed, $total));

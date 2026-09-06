@@ -466,6 +466,82 @@ final class TransactionSafetyTest extends DoctrineTestCase
      * A listener of its own, not registered with the event manager, so the test decides
      * which events it sees and in which order.
      */
+    public function testAFlushThatCommittedIsNotDroppedBecauseSomebodyElsesPostFlushThrew(): void
+    {
+        // The worst shape an audit bug can take: the database moved and the history did
+        // not. Doctrine commits, then dispatches postFlush; the event manager runs
+        // listeners in order and does not catch anything, so a listener registered before
+        // this one throwing means this one never runs. The state it had collected then
+        // sat there until the next flush, which read it as "a flush that never committed"
+        // and dropped it — with a log line saying those changes never reached the
+        // database, which was exactly wrong.
+        //
+        // The manager tells the two apart: UnitOfWork::commit() closes it on every
+        // failure inside its try. Still open means the transaction went through.
+        $this->attachListener(FailurePolicy::Log);
+
+        $boom = new class {
+            public bool $armed = true;
+
+            public function postFlush(): void
+            {
+                if ($this->armed) {
+                    $this->armed = false;
+
+                    throw new \RuntimeException('somebody else exploded in postFlush');
+                }
+            }
+        };
+
+        $article = new Article('before');
+        $this->em->persist($article);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $this->beforeTheAuditListener($boom);
+
+        $article->title = 'committed';
+
+        try {
+            $this->em->flush();
+            self::fail('the foreign listener should have thrown');
+        } catch (\RuntimeException) {
+        }
+
+        self::assertSame('committed', $this->em->getConnection()->fetchOne('SELECT title FROM article WHERE id = ?', [$article->id]), 'the row is in the database');
+
+        // Anything at all afterwards: the record must not be thrown away by it.
+        $this->em->persist(new Article('the next flush'));
+        $this->em->flush();
+
+        $titles = array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents());
+
+        self::assertContains('committed', $titles, 'the committed change is in the history, late rather than never');
+        self::assertContains('the next flush', $titles, 'and so is the flush that followed it');
+    }
+
+    /**
+     * Registers a listener ahead of the audit one, which is what makes it able to stop
+     * the audit listener from running at all.
+     */
+    private function beforeTheAuditListener(object $listener): void
+    {
+        $ours = array_values(array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $registered): bool => $registered instanceof AuditSubscriber,
+        ));
+
+        foreach ($ours as $audit) {
+            $this->em->getEventManager()->removeEventListener([Events::postFlush], $audit);
+        }
+
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $listener);
+
+        foreach ($ours as $audit) {
+            $this->em->getEventManager()->addEventListener([Events::postFlush], $audit);
+        }
+    }
+
     private function detachedListener(): AuditSubscriber
     {
         return new AuditSubscriber($this->writer(FailurePolicy::Log), new AuditMetadataFactory(), skipEmptyUpdates: true);

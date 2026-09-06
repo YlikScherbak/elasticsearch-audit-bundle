@@ -6,8 +6,6 @@ namespace Borsche\ElasticsearchAuditBundle\DependencyInjection\Compiler;
 
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
-use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
-use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
 use Symfony\Component\DependencyInjection\Argument\IteratorArgument;
 use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -113,24 +111,6 @@ final class CarriesRecordsPass implements CompilerPassInterface
         }
 
         self::assertTheBusDeliversAnything($container, $bus, $resolved);
-
-        // And the handlers are attached to *this* bus rather than to every bus in the
-        // application. Without the attribute Symfony makes a handler available on all of
-        // them, which is a strange shape for a bundle that names one bus and checks it:
-        // an audit record dispatched to somebody else's bus by mistake would be handled
-        // there and written, and nothing would ever say the routing was wrong.
-        foreach ([IndexAuditRecordHandler::class, IndexAuditRecordsHandler::class] as $handler) {
-            if (!$container->hasDefinition($handler)) {
-                continue;
-            }
-
-            $definition = $container->getDefinition($handler);
-            $definition->clearTag('messenger.message_handler');
-            // The canonical id, not what the configuration wrote: MessengerPass matches a
-            // handler's bus attribute against the tagged bus service, and
-            // messenger.default_bus is an alias for messenger.bus.default.
-            $definition->addTag('messenger.message_handler', ['bus' => $resolved]);
-        }
     }
 
     /**
@@ -161,15 +141,22 @@ final class CarriesRecordsPass implements CompilerPassInterface
         foreach ($middleware->getValues() as $entry) {
             $id = $entry instanceof Reference ? (string) $entry : null;
 
-            // The two that leave the process: send_message hands the envelope to a
-            // transport, handle_message calls the handlers. Matched by the end of the id
-            // because FrameworkBundle names them per bus ("<bus>.middleware.send_message").
-            if ($id !== null && (str_ends_with($id, '.middleware.send_message') || str_ends_with($id, '.middleware.handle_message'))) {
+            // handle_message, and only that one. It is what calls a handler, and every
+            // road an audit record can take ends at one: dispatched synchronously it is
+            // handled in the request, and routed to a transport it comes back through
+            // this same bus in the worker — Messenger consumes on the bus the message was
+            // dispatched to. send_message alone proves nothing at all, because
+            // SendMessageMiddleware passes an envelope with no sender straight to the
+            // next middleware (allow_no_senders is true by default), so a bus with
+            // send_message and no routing for these two messages delivers exactly
+            // nothing. Matched by the end of the id because FrameworkBundle names the
+            // middleware per bus ("<bus>.middleware.handle_message").
+            if ($id !== null && str_ends_with($id, '.middleware.handle_message')) {
                 return;
             }
         }
 
-        throw new NotConfiguredException(sprintf('borsche_elasticsearch_audit.message_bus is "%s"%s, and that bus has neither the send_message nor the handle_message middleware — with default_middleware disabled and nothing equivalent put back, dispatching to it succeeds, answers with an Envelope and delivers the record nowhere. Give the bus Symfony\'s default middleware, or name a bus that has it, or set transport to "sync".', $bus, $resolved === $bus ? '' : ' (which resolves to "'.$resolved.'")'));
+        throw new NotConfiguredException(sprintf('borsche_elasticsearch_audit.message_bus is "%s"%s, and that bus has no handle_message middleware — so nothing on it ever calls a handler, in the request or in a worker, and a record dispatched there is answered with an Envelope and delivered nowhere. Give the bus Symfony\'s default middleware, or name a bus that has it, or set transport to "sync".', $bus, $resolved === $bus ? '' : ' (which resolves to "'.$resolved.'")'));
     }
 
     /**
@@ -207,8 +194,16 @@ final class CarriesRecordsPass implements CompilerPassInterface
         }
 
         $arguments = $container->getDefinition($manager)->getArguments();
-        $reference = isset($arguments[0]) ? (string) $arguments[0] : '';
+        $reference = $arguments[0] ?? null;
 
-        return preg_match('~^doctrine\.dbal\.(.+)_connection$~', $reference, $found) === 1 ? $found[1] : null;
+        // Read as a reference or not at all. This is DoctrineBundle's own shape — the
+        // connection is argument #0 of the entity manager — and casting whatever is
+        // there to a string would turn a future change of that shape into a TypeError
+        // during compilation instead of "this detection no longer applies".
+        if (!$reference instanceof Reference) {
+            return null;
+        }
+
+        return preg_match('~^doctrine\.dbal\.(.+)_connection$~', (string) $reference, $found) === 1 ? $found[1] : null;
     }
 }

@@ -15,6 +15,17 @@ namespace Borsche\ElasticsearchAuditBundle\Exception;
  */
 final class FrameOverflowException extends \RuntimeException implements AuditException, SafeExceptionMessage
 {
+    /**
+     * Private on purpose: every message this class carries is one the bundle wrote, and
+     * that is what lets it be repeated where a foreign message would not be. A public
+     * constructor is a way for anybody to put anything into a sentence the bundle
+     * vouches for.
+     */
+    private function __construct(string $message, int $code = 0, ?\Throwable $previous = null)
+    {
+        parent::__construct($message, $code, $previous);
+    }
+
     private int $dropped = 0;
 
     public static function past(int $maxHeld, int $dropped = 0): self

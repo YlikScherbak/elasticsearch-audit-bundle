@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
+use Borsche\ElasticsearchAuditBundle\Exception\PartialResultException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -87,6 +88,67 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertStringNotContainsString(self::SECRET, json_encode($document, \JSON_THROW_ON_ERROR));
         self::assertSame('acme', $document['metadata']['tenant']);
         self::assertSame('***', $document['metadata']['credentials']['password']);
+    }
+
+    public function testASecretInsideAnObjectIsFoundToo(): void
+    {
+        // `changes` takes mixed by contract, so an object is a legal thing to record —
+        // and redaction only walked arrays. The object went past untouched into
+        // json_encode, which then wrote every property of it. Redaction has to see the
+        // same shape the document will hold.
+        $gateway = new InMemoryGateway();
+        $writer = $this->writer($gateway, ['password']);
+
+        $writer->record('user', 7, 'update', [
+            'profile' => new Change(null, (object) ['name' => 'John', 'password' => self::SECRET]),
+        ]);
+
+        $document = $gateway->documents['audit_log'][0];
+
+        self::assertStringNotContainsString(self::SECRET, json_encode($document, \JSON_THROW_ON_ERROR));
+        self::assertSame('John', $document['changes']['profile']['new']->name ?? $document['changes']['profile']['new']['name']);
+    }
+
+    public function testASecretInsideWhatAnObjectSerialisesToIsFoundToo(): void
+    {
+        // And the object that decides its own shape: what json_encode would write is
+        // what redaction reads, so a DTO cannot hide a value behind jsonSerialize().
+        $gateway = new InMemoryGateway();
+        $writer = $this->writer($gateway, ['password']);
+
+        $credentials = new class implements \JsonSerializable {
+            public function jsonSerialize(): array
+            {
+                return ['user' => 'john', 'password' => NothingLeavesUnredactedTest::secret()];
+            }
+        };
+
+        $writer->record('user', 7, 'update', ['profile' => new Change(null, $credentials)]);
+
+        self::assertStringNotContainsString(self::SECRET, json_encode($gateway->documents, \JSON_THROW_ON_ERROR));
+    }
+
+    public function testAValueTooDeepToCheckIsRefusedRatherThanWritten(): void
+    {
+        // The bound has to exist — this walks data the bundle did not make — and past it
+        // the answer was "leave the rest alone", which is a rule that reads as "this
+        // name, anywhere" quietly stopping at a depth nobody thinks about. The record is
+        // refused instead, and the failure policy says so.
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log);
+
+        $deep = ['password' => self::SECRET];
+
+        for ($i = 0; $i < 20; ++$i) {
+            $deep = ['level'.$i => $deep];
+        }
+
+        $writer->record('user', 7, 'update', ['metadata' => new Change(null, $deep)]);
+
+        self::assertSame([], $gateway->documents, 'nothing half-checked reaches the index');
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
+        self::assertStringContainsString('nested more than', implode("\n", $logs), 'and the reason names the limit');
     }
 
     public function testATypedAttributeIsNotMaskedIntoSomethingTheMappingRefuses(): void
@@ -333,22 +395,47 @@ final class NothingLeavesUnredactedTest extends TestCase
         self::assertStringNotContainsString(self::SECRET, implode("\n", $logs));
     }
 
-    public function testTheBundlesOwnWordsAboutADeclarationAreStillSaidInFull(): void
+    public function testTheBundlesOwnWordsAreStillSaidInFull(): void
     {
-        // The other half: a declaration mistake is the bundle's own sentence, built
-        // from class and field names, and losing it would make a common misconfiguration
-        // unreadable. It says so about itself rather than being guessed at.
+        // The other half: a sentence this bundle wrote is built from names, counts and
+        // statuses and never from a value, and losing it would make a common problem
+        // unreadable. Raised through the factory, which is inside the package — that is
+        // what makes it the bundle's own.
         $gateway = new InMemoryGateway();
         $logs = [];
         $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Throw);
 
         try {
-            $writer->write((new AuditRecord('user', 7, 'update'))->withChanges(['x' => new Change(1, 2)]));
-            $writer->reportFailure(new \Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake('"nope" is listed as always recorded but is not an audited field.'), new AuditRecord('user', 7, 'update'));
+            $writer->reportFailure(PartialResultException::shardsFailed(2, 5), new AuditRecord('user', 7, 'update'));
             self::fail('expected a failure');
         } catch (WriteFailedException $e) {
-            self::assertStringContainsString('"nope" is listed as always recorded', $e->getMessage());
+            self::assertStringContainsString('2 of 5 shard(s) failed', $e->getMessage());
         }
+    }
+
+    public function testOneOfOurOwnExceptionClassesBuiltElsewhereIsNotOurOwnSentence(): void
+    {
+        // The gap left by the allowlist. Two of the trusted classes carry free-form
+        // prose, and an enricher reusing one to report a problem of its own — which is a
+        // helpful thing to try — had its message repeated in the log, the failure event
+        // and the exception, past the policy that exists to keep foreign messages out.
+        //
+        // An exception records the file it was created in, and nothing outside the
+        // package can make PHP name a file inside it. So "did we write this sentence"
+        // has an answer that does not rely on anybody's good behaviour.
+        $gateway = new InMemoryGateway();
+        $logs = [];
+        $writer = $this->writer($gateway, ['password'], null, $logs, FailurePolicy::Log);
+
+        $writer->reportFailure(
+            new \Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake('cannot enrich with token '.self::SECRET),
+            new AuditRecord('user', 7, 'update'),
+        );
+
+        $said = implode("\n", $logs);
+
+        self::assertStringNotContainsString(self::SECRET, $said);
+        self::assertStringContainsString('DeclarationMistake', $said, 'the class still names what failed');
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('rulesThatCouldNeverMatch')]

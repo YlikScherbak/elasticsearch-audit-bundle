@@ -127,6 +127,14 @@ final class AuditWriter
             // a full buffer hands back records that have to go out right now.
             if (!$immediately && $this->frame !== null && $this->frame->accepts($record->objectType)) {
                 $released = $this->frame->hold($record);
+            } elseif (!$immediately && $this->frame !== null && $this->frame->stagesEverything()) {
+                // A type the frame does not coalesce, inside a frame that publishes
+                // nothing until it closes. It is not merged with anything — object_types
+                // decides that — it simply waits, so that write() and writeAll() answer
+                // the same way and a refused operation really has no history.
+                $this->frame->stage($record);
+
+                $released = [];
             }
         } catch (FrameOverflowException $e) {
             // A deliberate refusal (coalescing.on_overflow: throw), not a failed write:
@@ -173,6 +181,12 @@ final class AuditWriter
                     foreach ($this->frame->hold($record) as $released) {
                         $outgoing[] = $released;
                     }
+
+                    continue;
+                }
+
+                if ($this->frame !== null && $this->frame->stagesEverything()) {
+                    $this->frame->stage($record);
 
                     continue;
                 }

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Model;
 
+use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
+
 /**
  * One page of history plus what is needed to render pagination or fetch the next
  * page: the total, the page/limit the query used, whether anything follows, how far
@@ -127,7 +129,26 @@ final class AuditPage
             throw new \LogicException('This page was not produced by AuditReader::find(), so it does not know which query it is a page of, and a cursor token that cannot name its query is one nothing can check when it comes back. Use nextCursor() with AuditQuery::after(), or build the page with the reader.');
         }
 
-        return Cursor::encode($cursor, $this->query);
+        try {
+            return Cursor::encode($cursor, $this->query);
+        } catch (InvalidQueryException $refused) {
+            // A position this page cannot be continued from — the sort tuple of a record
+            // written before audit records carried ids, which two records can share.
+            //
+            // On a numbered page that is not an error: the bundle's own advice for those
+            // indices is to page by number, and `page + 1` still works. Answering with
+            // "there is more, and no cursor for it" is the honest shape, and it keeps
+            // toArray() — which asks for a token whether or not anybody wanted one —
+            // from breaking a page that is perfectly readable.
+            //
+            // A page already being read by cursor has nowhere to fall back to: there is
+            // no page number to move to from here, so the refusal stands.
+            if ($this->usesCursor) {
+                throw $refused;
+            }
+
+            return null;
+        }
     }
 
     /**

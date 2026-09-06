@@ -17,6 +17,7 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\OnFlushEventArgs;
 use Doctrine\ORM\Event\PostFlushEventArgs;
@@ -88,6 +89,52 @@ final class AuditSubscriber
 
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
     private array $pendingIndexByEntity = [];
+
+    /**
+     * What the always-recorded fields of an audited entity held when the flush began,
+     * keyed by object id.
+     *
+     * Context beside a change has to describe the row, and the object stops describing
+     * the row the moment a postUpdate listener touches it — post events are explicitly
+     * not part of that flush's persistence. A field the flush itself wrote is read from
+     * the change set instead, which is recomputed when a preUpdate listener corrects it;
+     * this is for the ones it did not write, where the row keeps what it had.
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private array $contextAsFlushed = [];
+
+    /**
+     * The entity manager the flush on the stack belongs to, held weakly.
+     *
+     * Read when a later flush finds that state still there, to tell two situations
+     * apart that look identical from here: a flush abandoned before it committed, and a
+     * flush that committed and then never reached this listener's postFlush because
+     * somebody else's postFlush listener threw first. `UnitOfWork::commit()` closes the
+     * manager on any failure inside its try — that is where a rollback happens — so a
+     * manager still open is a manager whose transaction went through.
+     */
+    /** @var \WeakReference<EntityManagerInterface>|null */
+    private ?\WeakReference $flushingManager = null;
+
+    /**
+     * What an owning collection held before this flush empties it, keyed by the owner's
+     * object id and then by field.
+     *
+     * Doctrine has two ways of taking a whole collection away, and neither leaves the
+     * usual trace. `clear()` schedules the collection for deletion and then calls
+     * takeSnapshot(), so by the time anything can look the collection is empty, its
+     * snapshot is empty and isDirty() is false — the record was built from that and said
+     * nothing at all, while the join rows were deleted. Assigning a fresh collection
+     * over the property schedules the old one for deletion too, and the new one's
+     * snapshot starts empty, so the old side went missing the same way.
+     *
+     * Both are visible in onFlush, and only there: the deletion list is cleared with the
+     * rest of the unit of work when the flush ends.
+     *
+     * @var array<int, array<string, list<object>>>
+     */
+    private array $emptiedCollections = [];
 
     /**
      * Doctrine's change sets as they stood in onFlush, keyed by object id.
@@ -180,6 +227,7 @@ final class AuditSubscriber
             // would mean reading each entity's declaration twice per flush, and an
             // array of scalars costs nothing to keep.
             $this->changeSets[spl_object_id($element)] = $uow->getEntityChangeSet($element);
+            $this->rememberContext($em, $element);
 
             $this->collectElementChanges($em, $element);
         }
@@ -192,12 +240,97 @@ final class AuditSubscriber
             // create whose postPersist runs after somebody's nested flush would
             // otherwise say an entity appeared with no values at all.
             $this->changeSets[spl_object_id($element)] = $uow->getEntityChangeSet($element);
+            $this->rememberContext($em, $element);
 
             $this->collectElementChanges($em, $element, added: true);
         }
 
         foreach ($uow->getScheduledEntityDeletions() as $element) {
             $this->collectElementChanges($em, $element, added: false);
+        }
+
+        $this->rememberWhatIsBeingEmptied($em);
+    }
+
+    /**
+     * Keeps the always-recorded fields as the flush found them.
+     *
+     * Only what a declaration names, and only for audited entities — the declaration is
+     * read here anyway, a line further down, for the elements this entity may own.
+     */
+    private function rememberContext(EntityManagerInterface $em, object $entity): void
+    {
+        try {
+            $metadata = $this->metadataFactory->for($entity);
+        } catch (\Throwable) {
+            // A declaration this listener cannot read is reported where it always was —
+            // on the path that builds the record, through the failure policy. Raising it
+            // here would take the flush down for a mistake the policy is allowed to log.
+            return;
+        }
+
+        if ($metadata === null || $metadata->alwaysRecorded === []) {
+            return;
+        }
+
+        $classMetadata = $em->getClassMetadata($entity::class);
+        $context = [];
+
+        foreach ($metadata->alwaysRecorded as $field) {
+            if ($classMetadata->hasField($field)) {
+                $context[$field] = $classMetadata->getFieldValue($entity, $field);
+            }
+        }
+
+        $this->contextAsFlushed[spl_object_id($entity)] = $context;
+    }
+
+    /**
+     * Keeps what a collection scheduled for deletion held, before the flush deletes it.
+     *
+     * The snapshot answers whenever there is one — a collection replaced by another
+     * still remembers what it had. `clear()` is the case that has nothing left: it takes
+     * a fresh (empty) snapshot on its way out, so the only place the old membership
+     * still exists is the database, and the rows are still there because this runs
+     * before the flush opens its transaction. One SELECT, and only for an audited
+     * collection somebody actually emptied.
+     */
+    private function rememberWhatIsBeingEmptied(EntityManagerInterface $em): void
+    {
+        $uow = $em->getUnitOfWork();
+
+        foreach ($uow->getScheduledCollectionDeletions() as $collection) {
+            try {
+                $owner = $collection->getOwner();
+
+                if ($owner === null) {
+                    continue;
+                }
+
+                $metadata = $this->metadataFactory->for($owner);
+                $mapping = $collection->getMapping();
+                /** @var string $field */
+                $field = \is_array($mapping) ? $mapping['fieldName'] : $mapping->fieldName;
+
+                if ($metadata === null || !\array_key_exists($field, $metadata->fields)) {
+                    continue; // not audited: nothing to say about it
+                }
+
+                $held = $collection->getSnapshot();
+
+                if ($held === []) {
+                    $held = $uow->getCollectionPersister($mapping)->slice($collection, 0, null);
+                }
+
+                $this->emptiedCollections[spl_object_id($owner)][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
+            } catch (\Throwable $e) {
+                // Reading the old membership back is the one part of this listener that
+                // asks the database a question of its own, and a question that fails must
+                // not take the flush with it. The record then says what it can — which is
+                // what it said before this existed — and the failure is reported like any
+                // other.
+                $this->writer->reportFailure($e, null);
+            }
         }
     }
 
@@ -293,7 +426,7 @@ final class AuditSubscriber
         // then, so the next flush would not read it as abandoned either, and somebody
         // else's operation would publish these records as its own.
         try {
-            $this->publish($args, $em);
+            $this->publish($args->getObjectManager(), $em);
         } finally {
             $this->forgetThisFlush();
         }
@@ -302,7 +435,7 @@ final class AuditSubscriber
     /**
      * @param \Doctrine\ORM\EntityManagerInterface|null $em
      */
-    private function publish(PostFlushEventArgs $args, ?EntityManagerInterface $em): void
+    private function publish(ObjectManager $manager, ?EntityManagerInterface $em): void
     {
         $records = $this->pending;
 
@@ -318,7 +451,7 @@ final class AuditSubscriber
         // escaping would come out of flush() for a database change that is already
         // real. What the policy cannot do here is undo it: "throw" tells the caller,
         // it does not rewind the flush.
-        foreach ($this->elementsByOwner($args->getObjectManager()) as [$owner, $changes]) {
+        foreach ($this->elementsByOwner($manager) as [$owner, $changes]) {
             $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
 
             try {
@@ -329,7 +462,7 @@ final class AuditSubscriber
                     continue;
                 }
 
-                $record = $this->recordForOwner($args->getObjectManager(), $owner, $changes);
+                $record = $this->recordForOwner($manager, $owner, $changes);
 
                 if ($record !== null) {
                     $records[] = $record;
@@ -355,6 +488,8 @@ final class AuditSubscriber
         $this->elementMembership = [];
         $this->flushDepths = [];
         $this->changeSets = [];
+        $this->emptiedCollections = [];
+        $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
     }
 
@@ -399,21 +534,43 @@ final class AuditSubscriber
         $level = $em->getConnection()->getTransactionNestingLevel();
 
         if ($this->flushDepths !== [] && $level <= $this->flushDepths[array_key_last($this->flushDepths)]) {
-            // Not nested inside the flush on the stack: that one never reached its
-            // transaction, so it never committed and never will. What it collected
-            // describes rows the database does not have.
-            $this->logger->warning('A flush was abandoned before it committed — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped. They describe changes the database never took.', ['count' => \count($this->pending) + \count($this->pendingRemovals)]);
+            // Not nested inside the flush on the stack: that one is over, and it did not
+            // come back through postFlush. Two very different things end that way.
+            $abandoned = $this->flushingManager?->get();
+            $abandoned = $abandoned instanceof EntityManagerInterface ? $abandoned : null;
 
-            $this->pending = [];
-            $this->pendingRemovals = [];
-            $this->pendingIndexByEntity = [];
-            $this->elementChanges = [];
-            $this->elementMembership = [];
-            $this->changeSets = [];
-            $this->reportedLostChangeSets = false;
-            $this->flushDepths = [];
+            if ($abandoned !== null && $abandoned->isOpen() && ($this->pending !== [] || $this->pendingRemovals !== [])) {
+                // Its manager is still open, so UnitOfWork::commit() did not fail — every
+                // failure inside its try closes the manager on the way out. The
+                // transaction committed and something else swallowed the rest of the
+                // event: a postFlush listener registered before this one threw, and this
+                // listener never ran. The rows are in the database; dropping the records
+                // would be the audit trail losing what actually happened, which is the
+                // one outcome it must not choose.
+                $this->logger->warning('A flush committed without reaching this listener — a postFlush listener registered before it threw — so its {count} audit record(s) are being written now, late. Give the audit listener a higher priority than listeners that may fail, or handle the failure in that listener.', ['count' => \count($this->pending) + \count($this->pendingRemovals)]);
+
+                $this->flushDepths = [];
+
+                try {
+                    $this->publish($abandoned, $abandoned);
+                } catch (\Throwable $e) {
+                    $this->writer->reportFailure($e, null);
+                } finally {
+                    $this->forgetThisFlush();
+                }
+            } else {
+                // Nothing was collected, or the manager is gone: closed by
+                // UnitOfWork::commit() after a failure, or replaced by the application
+                // afterwards. Either way nothing here can be shown to have reached the
+                // database, and history that describes rows nobody has is worse than
+                // history that is missing.
+                $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => \count($this->pending) + \count($this->pendingRemovals)]);
+
+                $this->forgetThisFlush();
+            }
         }
 
+        $this->flushingManager = \WeakReference::create($em);
         $this->flushDepths[] = $level;
     }
 
@@ -578,6 +735,8 @@ final class AuditSubscriber
             // embeddable's own name, which is exactly the name Doctrine never reports a
             // change under.
             if (\in_array($field, $classMetadata->getFieldNames(), true)) {
+                self::assertTheColumnSaysWhatTheRowHolds($entity, $classMetadata, $field);
+
                 continue;
             }
 
@@ -595,6 +754,54 @@ final class AuditSubscriber
 
         if ($checked !== null) {
             $this->checkedTracking[$checked] = true;
+        }
+    }
+
+    /**
+     * An audited scalar has to be one whose change set is what the row took.
+     *
+     * "Doctrine maps this column" is not the same statement. Three kinds of column move
+     * on their own, and for all three the change the unit of work reports is not the
+     * change the database made:
+     *
+     * - a version column is written by Doctrine itself as part of the optimistic lock,
+     *   so a record of it describes the lock and not what anybody did;
+     * - a column marked not insertable or not updatable is left out of the statement:
+     *   the property can change in PHP for the rest of the request while the row keeps
+     *   what it had, and the record would say the value moved;
+     * - a generated column is computed by the database, and what the object holds is
+     *   whatever it held before the write.
+     *
+     * Refused rather than recorded, like every other declaration that could only produce
+     * history nobody can trust. The mapping is read defensively because its shape is
+     * Doctrine's own — an array on ORM 2, an object on ORM 3.
+     *
+     * @param ClassMetadata<object> $classMetadata
+     */
+    private static function assertTheColumnSaysWhatTheRowHolds(object $entity, ClassMetadata $classMetadata, string $field): void
+    {
+        if ($classMetadata->isVersioned && $classMetadata->versionField === $field) {
+            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is the version column: Doctrine writes it itself to hold the optimistic lock, so a history line about it describes the lock rather than anything a person did.', $entity::class, $field));
+        }
+
+        $mapping = $classMetadata->fieldMappings[$field] ?? null;
+
+        if ($mapping === null) {
+            return;
+        }
+
+        // Read as an array either way: ORM 3's FieldMapping is an ArrayAccess over the
+        // same keys, and reading one shape covers both majors without asking which is
+        // installed.
+        $reason = match (true) {
+            (bool) ($mapping['notInsertable'] ?? false) => 'is mapped as not insertable, so an INSERT leaves it to the database',
+            (bool) ($mapping['notUpdatable'] ?? false) => 'is mapped as not updatable, so an UPDATE never writes it — the property can move in PHP while the row keeps what it had',
+            ($mapping['generated'] ?? null) !== null => 'is generated by the database, so what the object holds is what it held before the write',
+            default => null,
+        };
+
+        if ($reason !== null) {
+            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it %s. What Doctrine reports as its change is not what the row took, and a history line that disagrees with the database is worse than one that is missing.', $entity::class, $field, $reason));
         }
     }
 
@@ -873,7 +1080,7 @@ final class AuditSubscriber
             return $changes;
         }
 
-        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes);
+        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes, $this->contextAsFlushed[spl_object_id($owner)] ?? [], $this->changeSets[spl_object_id($owner)] ?? []);
     }
 
     /**
@@ -1026,7 +1233,7 @@ final class AuditSubscriber
             $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
 
             if ($withChanges) {
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity)));
+                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)] ?? [], $this->contextAsFlushed[spl_object_id($entity)] ?? []));
             }
 
             return $record;

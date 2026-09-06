@@ -38,6 +38,18 @@ follow `redact.fields`, so an application that redacted nothing got the cause's 
 the failure event and the exception. If you rely on that detail, ask for it: `failure_details:
 full`. The sanitized message names the setting, so nobody has to go looking.
 
+**Redaction refuses a record it cannot see the bottom of.** A value nested more than sixteen levels
+deep inside `changes` or an attribute is no longer written: it raises `RedactionLimitExceeded`,
+which the failure policy reports. Flatten what the record carries, or redact that value before it
+reaches the writer.
+
+**The bundle's own exception classes cannot be borrowed to have a message repeated.** If your code
+throws `DeclarationMistake`, `IndexNotFoundException`, `PartialResultException`,
+`FrameOverflowException` or `NotConfiguredException` to signal something of its own, the message is
+now treated like any other foreign message under `failure_details: cause` — and the four with
+factories have private constructors, so `new` on them no longer compiles. Throw an exception of
+your own.
+
 **Redaction now reaches inside the structures a record carries.** A rule like `password` matches
 that key at any depth in `changes` and in the attributes, not only a top-level field. Records will
 carry less than they did — which is the point — but if you have a legitimate field whose *name*
@@ -52,14 +64,39 @@ and build everything around them as arrays.
 the part that had already been released and raise as well. If you relied on that, `release` is the
 setting that keeps every record; `throw` is for a caller that rolls the operation back.
 
-Three consequences, if you use `throw`. A frame under it **publishes nothing before it closes** —
-a remove, or a step recorded with a different `actor:`, used to go out where it happened and now
+Four consequences, if you use `throw`. **`max_held` now counts every record the frame is keeping
+back**, including the ones an early release staged, so a frame configured tightly may refuse an
+operation it used to accept — raise `max_held` if that operation is legitimate. **A type outside
+`object_types` waits with the rest**: it is not merged, but it is not written until the frame closes
+either, which is what makes `write()` and `writeAll()` agree. And a frame under it **publishes
+nothing before it closes** — a remove, or a step recorded with a different `actor:`, used to go out where it happened and now
 waits for the outermost `end()`. A refusal **covers what the operation records afterwards**, so
 code that catches `FrameOverflowException` and carries on writes nothing more for that operation.
 And it **covers enclosing frames**: catching the exception inside an outer frame does not save that
 operation's history either, because nested frames share one buffer. The outer frame stays open and
 is still yours to close — it simply writes nothing. Under `release` (the default) none of this
 applies.
+
+**Auditing a version, non-insertable, non-updatable or generated column fails at the first flush.**
+Those columns do not move the way an audited field is assumed to: Doctrine writes the version
+itself, the statement leaves the read-only ones out, and the database computes a generated one. A
+record about them disagrees with the row, so the declaration is refused — drop the field from
+`fields`.
+
+**The Doctrine listener now registers at priority 512.** It used to register at the default 0,
+which put it among the application's own listeners in registration order. If you have a listener
+that must run before the audit one — in `postUpdate` or `postFlush` — give it a higher priority
+explicitly.
+
+**A `message_bus` needs the `handle_message` middleware.** The check used to accept `send_message`
+as well, which proves nothing: a bus with no sender for these two messages passes them to the next
+middleware, and if that is nothing they are neither sent nor handled. A bus assembled with a partial
+middleware list now fails the boot; give it Symfony's default middleware, or name a bus that has it.
+
+**Messages queued by a version before audit records carried ids should be drained before you
+upgrade.** Such a message has no id in it and none in its document, so the worker lets Elasticsearch
+invent one — and a redelivery then stores the same audit event twice. Everything queued by a current
+version carries its id and overwrites itself.
 
 **A `message_bus` with no delivery middleware fails the boot too.** A bus declared with
 `default_middleware: false` and nothing equivalent put back takes a dispatch and delivers nothing;

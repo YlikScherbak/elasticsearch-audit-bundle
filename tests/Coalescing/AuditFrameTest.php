@@ -455,8 +455,9 @@ final class AuditFrameTest extends TestCase
     {
         // And staging is not swallowing: an operation that ends the ordinary way writes
         // everything, the staged records first — they happened before what the frame was
-        // still holding, and the trail reads in the order the operation ran.
-        $this->refusing();
+        // still holding, and the trail reads in the order the operation ran. With room
+        // for both: max_held counts what the frame keeps back, staged records included.
+        $this->refusing(maxHeld: 4);
 
         $this->frame->coalesce(function (): void {
             $this->writer->record('stock', 1, AuditEvent::REMOVE);
@@ -568,12 +569,122 @@ final class AuditFrameTest extends TestCase
         self::assertSame('3', (string) $this->gateway->documents['audit_log'][0]['objectId']);
     }
 
+    public function testStagedRecordsCountTowardsMaxHeld(): void
+    {
+        // The safety valve counted objects held, and staging is another way to keep a
+        // record from the log. One object with alternating actors needs no new key at
+        // all: every boundary ends the record before it and stages it, so max_held: 1
+        // could sit on ten thousand records — the exact number the setting exists to be.
+        $this->refusing(maxHeld: 3);
+
+        try {
+            $this->frame->coalesce(function (): void {
+                for ($i = 0; $i < 50; ++$i) {
+                    $this->writer->record('stock', 1, AuditEvent::UPDATE, ['q' => new Change($i, $i + 1)], actor: $i % 2 === 0 ? 'alice' : 'system');
+                }
+            });
+            self::fail('the frame should have refused long before fifty records');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertLessThanOrEqual(3, $this->buffer->count(), 'and it stops at the number it was given');
+        self::assertSame([], $this->gateway->documents, 'a refused operation leaves no history behind');
+    }
+
+    public function testARemoveCannotGrowTheFramePastMaxHeldEither(): void
+    {
+        // The other early release, same valve: a remove is terminal, so each one stages
+        // the record it ends plus itself.
+        $this->refusing(maxHeld: 3);
+
+        try {
+            $this->frame->coalesce(function (): void {
+                for ($i = 1; $i <= 20; ++$i) {
+                    $this->writer->record('stock', $i, AuditEvent::REMOVE);
+                }
+            });
+            self::fail('the frame should have refused');
+        } catch (FrameOverflowException) {
+        }
+
+        self::assertSame([], $this->gateway->documents);
+    }
+
+    public function testATypeTheFrameDoesNotCoalesceWaitsWithTheRestUnderThrow(): void
+    {
+        // object_types says what is *merged*. It was also deciding what could be
+        // published while an atomic frame was open, and the two write paths then
+        // disagreed: through write() the untyped record was already in Elasticsearch when
+        // the refusal came, through writeAll() it disappeared with the operation. The
+        // same three records, two histories, depending on which method the caller used.
+        $written = [];
+
+        foreach (['one by one', 'as a batch'] as $how) {
+            $this->buffer = new FrameBuffer(objectTypes: ['stock'], maxHeld: 1, throwOnOverflow: true);
+            $this->writer = $this->writer(FailurePolicy::Log);
+            $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
+            $this->gateway->documents = [];
+
+            $records = [
+                new AuditRecord('auth', 1, AuditEvent::UPDATE, changes: ['ip' => new Change('a', 'b')]),
+                new AuditRecord('stock', 1, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]),
+                new AuditRecord('stock', 2, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]),
+            ];
+
+            try {
+                $this->frame->coalesce(function () use ($how, $records): void {
+                    if ($how === 'as a batch') {
+                        $this->writer->writeAll($records);
+
+                        return;
+                    }
+
+                    foreach ($records as $record) {
+                        $this->writer->write($record);
+                    }
+                });
+                self::fail('the frame should have refused the second stock object');
+            } catch (FrameOverflowException) {
+            }
+
+            $written[$how] = array_column($this->gateway->documents['audit_log'] ?? [], 'objectType');
+        }
+
+        self::assertSame(['one by one' => [], 'as a batch' => []], $written, 'a refused operation has no history, whichever way it was written');
+    }
+
+    public function testATypeTheFrameDoesNotCoalesceIsStillWrittenWhenTheFrameCloses(): void
+    {
+        // Staged, not swallowed: what the frame does not merge still leaves when the
+        // operation ends the ordinary way, and it is not coalesced on the way — two
+        // records for the same object of an untyped kind stay two records.
+        $this->buffer = new FrameBuffer(objectTypes: ['stock'], maxHeld: 10, throwOnOverflow: true);
+        $this->writer = $this->writer(FailurePolicy::Log);
+        $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
+
+        $this->frame->coalesce(function (): void {
+            $this->writer->record('auth', 1, AuditEvent::UPDATE, ['ip' => new Change('a', 'b')]);
+            $this->writer->record('auth', 1, AuditEvent::UPDATE, ['ip' => new Change('b', 'c')]);
+            $this->writer->record('stock', 1, AuditEvent::UPDATE, ['q' => new Change(1, 2)]);
+
+            self::assertSame([], $this->gateway->documents, 'and nothing left while it was open');
+        });
+
+        self::assertSame(
+            [['auth', ['old' => 'a', 'new' => 'b']], ['auth', ['old' => 'b', 'new' => 'c']], ['stock', ['old' => 1, 'new' => 2]]],
+            array_map(
+                static fn (array $d): array => [$d['objectType'], $d['changes']['ip'] ?? $d['changes']['q']],
+                $this->gateway->documents['audit_log'],
+            ),
+        );
+    }
+
     /**
      * A frame that refuses rather than releases, with room for exactly one object.
      */
-    private function refusing(): void
+    private function refusing(int $maxHeld = 1): void
     {
-        $this->buffer = new FrameBuffer(maxHeld: 1, throwOnOverflow: true);
+        $this->buffer = new FrameBuffer(maxHeld: $maxHeld, throwOnOverflow: true);
         $this->writer = $this->writer(FailurePolicy::Log);
         $this->frame = new AuditFrame($this->buffer, $this->writer, $this->logger());
     }

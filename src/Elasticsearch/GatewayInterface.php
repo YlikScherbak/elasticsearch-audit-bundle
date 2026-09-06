@@ -29,6 +29,17 @@ use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 interface GatewayInterface
 {
     /**
+     * The oldest Elasticsearch this bundle writes to, as [major, minor].
+     *
+     * Not a preference: writes carry `include_source_on_error=false`, which asks the
+     * cluster to keep a refused document out of the error it answers with. The parameter
+     * does not exist before 8.18, and an unknown query parameter is a 400 — which this
+     * bundle reads as a permanent refusal, so on an older cluster every audit record
+     * would be dropped by the line meant to protect it.
+     */
+    public const MINIMUM_VERSION = [8, 18];
+
+    /**
      * Stores one document. The index has to exist already: a write must never let
      * Elasticsearch create the index with a guessed mapping (see audit:index:create).
      *

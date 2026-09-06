@@ -252,11 +252,17 @@ final class InMemoryGateway implements GatewayInterface
         return $this->indices[$index]['mappings']['properties'] ?? [];
     }
 
+    /** What info() answers with; a test that cares about the version floor sets it. */
+    public string $version = '9.1.0';
+
     public function info(): array
     {
         $this->maybeFail();
 
-        return ['name' => 'in-memory', 'version' => ['number' => '0.0.0']];
+        // A version the bundle supports: audit:check refuses an older cluster, and a
+        // fake that answers "0.0.0" would make every command test fail for a reason
+        // that has nothing to do with what it is testing.
+        return ['name' => 'in-memory', 'version' => ['number' => $this->version]];
     }
 
     /**

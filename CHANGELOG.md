@@ -223,6 +223,106 @@ the dependency range.
   by the buffer itself, so both end with the operation unpublished, and so does the leak path:
   `release()` (what `FrameResetMiddleware` calls after every message) will not publish a refused
   operation because its frame was also left open
+- **The audit handlers are bound to the configured bus where Messenger reads it.** The tag was
+  rewritten by a compiler pass that runs after FrameworkBundle's `MessengerPass` — both register at
+  `TYPE_BEFORE_OPTIMIZATION` with priority 0, and equal priorities run in bundle-registration order.
+  So the definitions said "this bus" while the locators MessengerPass had already built gave the
+  handlers to every bus in the application; the test read the tags back and agreed with the code
+  rather than with Messenger. The scoping is its own pass now, at a higher priority, and the test
+  asks a real `HandlersLocatorInterface` on two buses
+- **A bus that can only send is refused like one that can do nothing.** The check accepted
+  `send_message` *or* `handle_message`, and `send_message` proves nothing on its own:
+  `SendMessageMiddleware` passes an envelope it has no sender for straight to the next middleware
+  (`allow_no_senders` is true by default), so a bus with routing for other messages and none for
+  these two neither sends nor handles them. `handle_message` is what ends in a handler — in the
+  request and in a worker alike — so it is what is required
+- **`audit:check` says when the cluster is too old to write to.** The 8.18 floor was a composer
+  constraint and an integration test, and neither is looking at the cluster an application actually
+  writes to. Below it every write is refused for a query parameter the cluster does not know, which
+  reads as "the mapping is wrong" for as long as nobody thinks to compare versions
+- **A bulk answer that names no document is not read by position either.** The id check skipped
+  itself when an item carried no `_id`, which is leniency about the one thing that parser exists to
+  refuse: Elasticsearch names the document in every item it reports, so an item without one is an
+  answer that cannot be accounted for, and the batch goes again
+- **`ClientLogGate` keeps scalars and nothing else.** Dropping PSR-7 objects by type closed the leak
+  this client has today, and it was a rule about somebody else's shape: a client that one day puts
+  the request in an array or a DTO of its own would have carried the audited document straight
+  through. What is kept now is what cannot carry a body
+- **`connectionOf()` reads a reference or gives up.** It cast argument #0 of an entity manager to a
+  string, which turns a future change in DoctrineBundle's own shape into a TypeError during
+  compilation rather than "this detection no longer applies"
+- **A paging-only mutation cannot launder a cursor token.** A token carries the query it was issued
+  for, and that provenance did not survive `with*()` — while the cursor itself did, deliberately,
+  for the mutations that change only how a result set is paged. So `afterToken($t)->limit(50)`, or
+  asking again for the sort order the query already had, kept the position and dropped the answer to
+  "issued for what": the reader's check found nothing to compare and let a token from one query
+  continue inside another. Provenance now lives exactly as long as the cursor does
+- **A numbered page of records without ids serialises again.** A cursor whose sort tuple carries
+  `null` cannot be continued — those records have no order to continue from — and the advice for
+  such an index is to page by number. But `toArray()` asks for a token whether or not anybody wants
+  one, so a perfectly readable numbered page raised instead of answering. It now says what is true:
+  there is more, and no cursor for it. Inside a cursor traversal, where there is no page number to
+  fall back to, the refusal stands
+- **A secret inside an object is found like one inside an array.** `changes` takes `mixed` by
+  contract, so a DTO or a `stdClass` is a legal thing to record — and redaction walked arrays only,
+  so the object went past untouched into `json_encode`, which wrote every property of it. What is
+  read now is what the document will hold: `JsonSerializable` answers for itself, anything else by
+  its public properties. An object is handed back as an object where it can be, so a record that
+  needed no redaction and one that did are written the same way
+- **Redaction that cannot see to the bottom of a value refuses the record.** Past the depth bound
+  the rest of the structure was left as it was, which is a rule that reads as "this name, anywhere"
+  quietly ceasing to apply at a depth nobody thinks about. It raises `RedactionLimitExceeded` now —
+  a gap in the history that somebody is told about, rather than a value nobody meant to keep
+- **One of the bundle's own exception classes, built elsewhere, is not one of the bundle's own
+  sentences.** The allowlist made the class the boundary, and two of the classes on it carry
+  free-form prose: an enricher reusing `DeclarationMistake` to report a problem of its own — a
+  helpful thing to try — had its message repeated wherever `failure_details: cause` exists to keep
+  foreign messages out. An exception records the file it was created in and nothing outside this
+  package can make PHP name a file inside it, so the question has an answer that does not depend on
+  anybody's good behaviour. The classes that have factories now have private constructors too
+- **`coalescing.max_held` counts what the frame is keeping back, not the objects it is merging.**
+  The valve was checked only when a new object arrived and counted only the held records, while an
+  early release under `on_overflow: throw` staged records without asking anyone. One object with
+  alternating actors needs no new key at all: every boundary stages another record, so `max_held: 1`
+  could sit on ten thousand of them — the exact number the setting exists to be
+- **`write()` and `writeAll()` answer the same way inside an atomic frame.** With `object_types`
+  narrowing what is coalesced, a type outside the list went straight to the index from `write()` and
+  disappeared with the refused operation from `writeAll()`: the same records, two histories,
+  depending on which method the caller used. `object_types` says what is *merged*; under
+  `on_overflow: throw` an open frame now keeps everything back until it closes, whether it merges it
+  or not
+- **A record describes the row, not the object as somebody left it.** The new side of a to-one
+  association was read off the live entity while both sides of a scalar came from the change set —
+  so a `postUpdate` listener reassigning the association put a related object into the history that
+  the row does not point at. Doctrine says plainly that changes made in post events are not part of
+  that flush's persistence. Both sides come from the change set now. The always-recorded context
+  beside a change had the same hole and answers in the same order: what the flush wrote, else what
+  the field held when the flush began, and the live object only for a record built outside a flush
+- **A column that moves on its own is refused rather than audited.** "Doctrine maps this column"
+  was read as "its change set is what the database took", and for three kinds of column it is not:
+  the version column, which Doctrine writes itself to hold the optimistic lock; a column mapped
+  `insertable: false` or `updatable: false`, which the statement leaves out while the property moves
+  in PHP; and a generated column, computed by the database. Each would produce a history line that
+  disagrees with the row — the thing every other declaration check exists to prevent
+- **Emptying an owning collection is recorded rather than passed over.** `$article->tags->clear()`
+  deletes every join row, and the record said nothing about it: `PersistentCollection::clear()`
+  schedules the collection for deletion and then takes a snapshot of the now-empty collection,
+  which also clears `isDirty()` — so every source the record was built from agreed that nothing
+  had happened. Replacing the property with another collection lost the same way: the new
+  collection's snapshot never held the old members, so the old side came out empty, or the change
+  vanished when the replacement was empty too. Both are visible in `onFlush`, and only there, so
+  what the collection held is taken then — from its snapshot, or from the database when `clear()`
+  has already replaced that with an empty one
+- **A flush that committed is no longer dropped because somebody else's postFlush threw.** Doctrine
+  commits, then dispatches postFlush; the event manager runs listeners in order and catches
+  nothing, so a listener registered before this one throwing means this one never runs. What it had
+  collected then sat there until the next flush, which read it as a flush that never committed and
+  dropped it — logging, wrongly, that those changes never reached the database. The manager settles
+  it: `UnitOfWork::commit()` closes it on every failure inside its try, so a manager still open is
+  one whose transaction went through, and those records are written late instead of never. The
+  listener also registers at a high priority now, so being skipped is rarer to begin with — and
+  running first in `postUpdate` is what keeps a record describing the row that was written rather
+  than what a later listener does to the entity afterwards
 - **A bus that would deliver nothing no longer passes the boot check.** The `messenger.bus` tag
   says FrameworkBundle built the bus, which is not the same as "a record dispatched here reaches
   anything": Symfony lets a bus be declared with `default_middleware: false`, and what is left

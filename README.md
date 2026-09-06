@@ -250,6 +250,11 @@ on state.
 
 What gets recorded, and what deliberately does not:
 
+- **A record describes the row the flush wrote.** Both sides of every change come from Doctrine's
+  change set, so a listener that touches the entity in `postUpdate` — where nothing reaches the
+  database any more — cannot put a value into the history that the database does not hold. The
+  listener also registers ahead of the application's own (priority 512) so that it reads the entity
+  before anybody else rearranges it.
 - **Associations are stored through their representer** — a name, an id, a small array. Storing
   the related entity itself is neither possible nor useful in a history. Represent by something
   that does not move: a representer runs when the record is built, at the end of the flush, and
@@ -461,8 +466,14 @@ which is why this setting is only meaningful inside a transaction you own (see t
 [Frames in workers](#frames-in-workers)). Records written by *earlier* operations are untouched by
 it, and so are records an earlier flush of the same operation already sent.
 
-Three things follow from "nothing of that operation", and they are worth stating (**since 1.0**):
+Five things follow from "nothing of that operation", and they are worth stating (**since 1.0**):
 
+- **`max_held` counts every record the frame is keeping back**, the ones an early release staged
+  included — the valve is about records held from the log, not about how many objects are being
+  merged;
+- **a type outside `object_types` waits with the rest.** That list says what is *merged*; under
+  `throw` nothing leaves an open frame, so `write()` and `writeAll()` give the same history for the
+  same records;
 - **a frame under `throw` publishes nothing before it closes.** A remove is terminal and a step by
   another actor ends the record before it — under `release` both go out where they happen, under
   `throw` they wait for the outermost `end()`, or never leave;
@@ -606,6 +617,13 @@ is what `toArray()` puts in `pagination.nextCursor` — and continue with `$quer
 The token is base64url, so it needs no escaping in a query string, and it is opaque on purpose: a
 client hands it back unread, which leaves what is inside it free to change. A token that comes back
 damaged is an `InvalidQueryException`, not a silently wrong page.
+
+**Between two requests, hand out the token.** `nextCursorToken()` / `afterToken()` is the pair that
+carries provenance; `nextCursor()` / `after()` is the low-level one, for a traversal a single piece
+of code owns from start to finish. A bare cursor says where to continue and not what from, so
+nothing can tell that the query moved underneath it — with a visibility extension whose boundary
+changed between two pages, the records before that position in the *new* result set are quietly
+skipped. The token is what makes that a refusal instead.
 
 A cursor is a position inside one result set, and the token knows which (**since 1.0**): continuing
 it on a query with different filters, dates, options or sort order is an `InvalidQueryException`
@@ -965,11 +983,12 @@ framework:
 ```
 
 The bus has to be one **FrameworkBundle built** — a service tagged `messenger.bus` — and one that
-still has its delivery middleware (**since 1.0**). A bus assembled by hand takes the dispatch and
+still has its `handle_message` middleware (**since 1.0**). A bus assembled by hand takes the dispatch and
 never reaches the handlers, because `MessengerPass` attaches them to the tagged buses; a bus
 declared with `default_middleware: false` and nothing equivalent put back does the same, tag or no
-tag. Both are refused at boot rather than left to deliver nothing. The handlers are bound to that
-one bus, so dispatching an audit message to another bus of yours does nothing on purpose.
+tag — and so does one that can only *send*, since a message with no sender is passed on rather than
+delivered. All three are refused at boot rather than left to deliver nothing. The handlers are bound
+to that one bus, so dispatching an audit message to another bus of yours does nothing on purpose.
 
 **Route both.** One record is sent as `IndexAuditRecord`; several at once — a closing frame,
 a flush that changed three entities — are sent as `IndexAuditRecords` and written in one
@@ -998,6 +1017,16 @@ down with it — losing one history entry is better than losing the order that e
 
 Set `on_failure: throw` when the opposite holds (compliance logs): the failure surfaces as a
 `WriteFailedException` carrying the record.
+
+**The actor and the object id are outside redaction, and that is a decision to make once.**
+A rule cannot name them — `source` and `objectId` are base fields, chosen when the record is built,
+and a rule that named one is refused rather than quietly ignored. So whatever the resolver returns
+is kept for as long as the index is: with Symfony's default `getUserIdentifier()` that is often an
+email address, and the same goes for an `objectId` passed as one. If an audit record may have to be
+erased for a person later, resolve the actor to an internal id (an `ActorResolverInterface` of your
+own, or `SecurityActorResolver` over a user whose identifier is that id) and address history by
+internal ids too. Redaction cannot undo this afterwards — nothing in the bundle rewrites documents
+that are already in the index.
 
 ### How much of a failure is repeated
 
@@ -1042,7 +1071,8 @@ did not answer, or answered 429 or 503 — backpressure is not a refusal, and a 
 retried), `RequestRejectedException` (it answered and refused — a document that does not
 fit the mapping, missing permissions; retrying will not help), `InvalidQueryException`
 (a query the bundle or Elasticsearch rejected), `PartialResultException` (the cluster answered
-with part of a result), `WriteFailedException`.
+with part of a result), `RedactionLimitExceeded` (a record carried a value nested deeper than
+redaction follows, so it was not written), `WriteFailedException`.
 
 ## The document
 

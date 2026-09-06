@@ -34,8 +34,11 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
 
             $seen = $request;
 
+            // Shaped like a real answer: Elasticsearch names the document in every item
+            // it reports, and the parser now insists on it — an answer that cannot be
+            // matched to what was sent is one to send again.
             return self::response(200, ['errors' => false, 'items' => [
-                ['index' => ['status' => 201]], ['index' => ['status' => 201]], ['index' => ['status' => 201]],
+                ['index' => ['_id' => 'a', 'status' => 201]], ['index' => ['_id' => 'b', 'status' => 201]], ['index' => ['_id' => 'c', 'status' => 201]],
             ]]);
         });
 
@@ -87,8 +90,8 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
         $gateway = $this->gateway(static fn (RequestInterface $request) => $request->getMethod() === 'HEAD'
             ? self::response(200, [])
             : self::response(200, ['errors' => true, 'items' => [
-                ['index' => ['status' => 201]],
-                ['index' => ['status' => 400, 'error' => ['type' => 'document_parsing_exception', 'reason' => "failed to parse field [email] of type [integer]. Preview of field's value: 'alice@example.com'"]]],
+                ['index' => ['_id' => 'a', 'status' => 201]],
+                ['index' => ['_id' => 'b', 'status' => 400, 'error' => ['type' => 'document_parsing_exception', 'reason' => "failed to parse field [email] of type [integer]. Preview of field's value: 'alice@example.com'"]]],
             ]]));
 
         $result = $gateway->bulk([
@@ -248,7 +251,7 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
             $seen[$request->getUri()->getPath()] = $request->getUri()->getQuery();
 
             return self::response(200, str_contains($request->getUri()->getPath(), '_bulk')
-                ? ['errors' => false, 'items' => [['index' => ['status' => 201]]]]
+                ? ['errors' => false, 'items' => [['index' => ['_id' => 'b', 'status' => 201]]]]
                 : ['_id' => 'a', 'result' => 'created']);
         });
 

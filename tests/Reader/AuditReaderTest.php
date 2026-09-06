@@ -126,6 +126,64 @@ final class AuditReaderTest extends TestCase
         self::assertSame(['2026-08-26 10:00:00', 'a', 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
     }
 
+    /**
+     * @return iterable<string, array{\Closure(AuditQuery): AuditQuery}>
+     */
+    public static function mutationsThatKeepACursor(): iterable
+    {
+        // Everything that changes how a result set is *paged* without changing what is
+        // in it. The cursor deliberately survives these, and so must the answer to
+        // "which query was this cursor issued for" — they are the same fact.
+        yield 'a bigger page' => [static fn (AuditQuery $q): AuditQuery => $q->limit(50)];
+        yield 'the sort order it already had' => [static fn (AuditQuery $q): AuditQuery => $q->newestFirst()];
+    }
+
+    /**
+     * @param \Closure(AuditQuery): AuditQuery $paging
+     */
+    #[DataProvider('mutationsThatKeepACursor')]
+    public function testAPagingOnlyMutationCannotEraseTheTokensProvenance(\Closure $paging): void
+    {
+        // with*() builds a new query and the provenance did not survive one at all, so a
+        // token could be laundered by asking for a bigger page: the cursor was kept
+        // (stillTheSameSearch says this is the same result set), the fingerprint was not,
+        // and the reader's check reads "issued for" and finds nothing.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+        ]]];
+
+        $token = $this->reader()->find(AuditQuery::for('order')->withEvents('update'))->nextCursorToken();
+
+        self::assertIsString($token);
+
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('different query');
+
+        $this->reader()->find($paging(AuditQuery::for('order')->withEvents('remove')->afterToken($token)));
+    }
+
+    /**
+     * @param \Closure(AuditQuery): AuditQuery $paging
+     */
+    #[DataProvider('mutationsThatKeepACursor')]
+    public function testThoseMutationsStillContinueTheQueryTheTokenCameFrom(\Closure $paging): void
+    {
+        // The other half: keeping the provenance must not turn a legitimate "same query,
+        // fifty at a time" into a refusal.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+        ]]];
+
+        $query = AuditQuery::for('order')->withEvents('update');
+        $token = $this->reader()->find($query)->nextCursorToken();
+
+        self::assertIsString($token);
+
+        $this->reader()->find($paging($query->afterToken($token)));
+
+        self::assertSame(['2026-08-26 10:00:00', 'a', 'audit_log'], $this->gateway->searches[1]['body']['search_after']);
+    }
+
     public function testAnExtensionDoesNotTakeTheTokensProvenanceWithIt(): void
     {
         // The check that a token belongs to the query being read was not running at all

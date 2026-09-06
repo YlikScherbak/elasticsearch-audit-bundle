@@ -40,6 +40,22 @@ final class BulkResultTest extends TestCase
         ]], 2, ['a', 'b']);
     }
 
+    public function testAnAnswerThatNamesNoDocumentIsNotReadByPositionEither(): void
+    {
+        // The lenient half of the same check, and it was leniency about the one thing
+        // this parser exists to refuse. Elasticsearch names the document in every item it
+        // reports and every document sent from here has an id, so an item without one is
+        // an answer that cannot be accounted for — which means the batch goes again,
+        // not that position 1 is assumed to be about the document sent at position 1.
+        $this->expectException(TransportUnavailableException::class);
+        $this->expectExceptionMessage('no document at all');
+
+        BulkResult::fromResponse(['errors' => false, 'items' => [
+            ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 201]],
+            ['index' => ['_index' => 'audit_log', 'status' => 201]],
+        ]], 2, ['a', 'b']);
+    }
+
     public function testAnAnswerAboutTheDocumentsThatWereSentIsRead(): void
     {
         $result = BulkResult::fromResponse(['errors' => true, 'items' => [

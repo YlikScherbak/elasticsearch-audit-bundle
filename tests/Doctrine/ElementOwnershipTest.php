@@ -15,9 +15,12 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Customer;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredTracking;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisspelledTracking;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\UntrackedInverseManyToMany;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ReadOnlyColumnOrder;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\VersionedOrder;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesMisspelledTracking;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesRepresented;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Doctrine\ORM\Events;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
@@ -288,6 +291,39 @@ final class ElementOwnershipTest extends DoctrineTestCase
 
         $basket->add(new BasketItem('apples'));
         $this->em->flush();
+    }
+
+    /**
+     * @return iterable<string, array{\Closure(): object, string}>
+     */
+    public static function columnsThatDoNotSayWhatTheRowHolds(): iterable
+    {
+        yield 'the version column' => [static fn (): object => new VersionedOrder('VO-1'), 'version column'];
+        yield 'a column no UPDATE writes' => [static fn (): object => new ReadOnlyColumnOrder('RO-1'), 'not updatable'];
+    }
+
+    /**
+     * @param \Closure(): object $entity
+     */
+    #[DataProvider('columnsThatDoNotSayWhatTheRowHolds')]
+    public function testAColumnThatMovesOnItsOwnIsRefusedRatherThanAudited(\Closure $entity, string $because): void
+    {
+        // "Doctrine maps this column" is not "the change set for it is what the database
+        // took". A version column is written by Doctrine to hold the optimistic lock; a
+        // column left out of INSERT or UPDATE keeps whatever the row had while the
+        // property moves in PHP; a generated one is computed by the database. All three
+        // would produce history that disagrees with the row, which this bundle refuses
+        // everywhere else.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist($entity());
+
+        try {
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString($because, self::chain($refused));
+        }
     }
 
     public function testASecondInstanceDeclaringSomethingElseIsCheckedToo(): void

@@ -62,7 +62,7 @@ final class ClusterSmokeTest extends ElasticsearchTestCase
         // document source and leaves "Preview of field's value: '…'" exactly where it
         // was, with or without the parameter. So the thing that actually keeps a refused
         // value out of the bundle's exception — and out of every log line and event
-        // built from it — is RequestRejectedException::withoutValuePreview(), and it is
+        // built from it — is DocumentRefusal::describe(), and it is
         // proved here against a cluster rather than against a fixture of what one says.
         $index = $this->scratchIndex();
         $gateway = new ElasticsearchGateway(self::client());

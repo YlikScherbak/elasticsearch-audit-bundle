@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Model;
 
 use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
+use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditPage;
 use Borsche\ElasticsearchAuditBundle\Model\Cursor;
 use PHPUnit\Framework\TestCase;
@@ -122,6 +123,33 @@ final class AuditPageTest extends TestCase
         self::assertSame(0, $pagination['maxReachablePage']);
         self::assertFalse($pagination['hasMore']);
         self::assertNull($pagination['nextCursor']);
+    }
+
+    public function testANumberedPageOfRecordsWithoutIdsStillSerialises(): void
+    {
+        // Two right decisions meeting badly. A cursor whose tuple carries null cannot be
+        // continued — those records have no order to continue from — and the advice for
+        // such an index is to page by number. But toArray() asks for a token whether or
+        // not anybody wants one, so a perfectly readable numbered page blew up on the
+        // way to JSON. "There is more, and no cursor for it" is the honest answer.
+        $page = new AuditPage(self::entries(20), total: 137, page: 1, limit: 20, fetched: 20, cursor: ['2026-08-30 10:00:00', null, 'audit_log'], query: 'fingerprint');
+
+        $pagination = $page->toArray()['pagination'];
+
+        self::assertTrue($pagination['hasMore'], 'page 2 is there');
+        self::assertNull($pagination['nextCursor'], 'it just cannot be reached by cursor');
+    }
+
+    public function testACursorPageOfRecordsWithoutIdsStillRefuses(): void
+    {
+        // The same tuple, read the other way: there is no page number to fall back to
+        // from inside a cursor traversal, so the refusal has to stand rather than turn
+        // into a quiet end of the list.
+        $page = new AuditPage(self::entries(20), total: 137, page: 1, limit: 20, usesCursor: true, fetched: 20, cursor: ['2026-08-30 10:00:00', null, 'audit_log'], query: 'fingerprint');
+
+        $this->expectException(InvalidQueryException::class);
+
+        $page->toArray();
     }
 
     public function testTheCursorInTheArrayFormIsAToken(): void

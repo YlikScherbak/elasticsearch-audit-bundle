@@ -387,6 +387,14 @@ final class AuditQuery
     /**
      * Continue after the entry a previous page ended with (AuditPage::nextCursor()).
      *
+     * The low-level half of the pair. A bare cursor is a position and nothing else: it
+     * does not say which query it came from, so nothing can check that the query is
+     * still the one it was taken in. That is fine for a traversal owned end to end by
+     * one piece of code, and it is not fine across two requests — a visibility extension
+     * whose boundary moved between them answers from that position in a different result
+     * set, and the records before it are missing without a word. Between requests, hand
+     * out afterToken() and take it back: that one carries the query with it.
+     *
      * @param array<mixed> $cursor the sort values of that entry, in order; keys are ignored
      */
     public function after(array $cursor): self
@@ -573,7 +581,12 @@ final class AuditQuery
         ?array $searchAfter = null,
         ?bool $nothing = null,
     ): self {
-        return new self(
+        // Whether this is still a query into the same result set. Read once, because two
+        // things ride on it and they must not drift apart: the cursor, and where the
+        // cursor came from.
+        $sameSearch = $this->stillTheSameSearch($objectIds, $events, $actors, $ids, $filters, $options, $sort, $page, $nothing);
+
+        $copy = new self(
             $this->objectType,
             $objectIds ?? $this->objectIds,
             $events ?? $this->events,
@@ -594,12 +607,25 @@ final class AuditQuery
             // after() sets it; a page number replaces it; changing the ordering, or
             // anything that decides what the query matches — a filter, a date bound, an
             // option a QueryExtension reads — abandons it.
-            $searchAfter ?? ($this->stillTheSameSearch($objectIds, $events, $actors, $ids, $filters, $options, $sort, $page, $nothing) ? $this->searchAfter : null),
+            $searchAfter ?? ($sameSearch ? $this->searchAfter : null),
             // Nothing is sticky: matchNothing() sets it, and nothing unsets it — a
             // later filter in an extension chain must not widen what an earlier
             // extension closed.
             $nothing ?? $this->nothing,
         );
+
+        // And the provenance lives exactly as long as the cursor does. It used not to
+        // survive here at all, so any mutation that keeps a cursor — limit(), or asking
+        // again for the sort order the query already had — quietly turned a token into a
+        // bare position: the reader's check reads "issued for" and finds nothing, and a
+        // token from one query is then continued inside another, which is the whole
+        // thing the fingerprint exists to catch. A mutation that abandons the cursor
+        // abandons this with it, because there is no longer a position to be from.
+        if ($sameSearch && $searchAfter === null) {
+            $copy->continuing = $this->continuing;
+        }
+
+        return $copy;
     }
 
     /**

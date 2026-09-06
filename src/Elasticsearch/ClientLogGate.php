@@ -67,9 +67,15 @@ final class ClientLogGate implements LoggerInterface
         $safe = [];
 
         foreach ($context as $key => $value) {
-            // By type rather than by the keys the client happens to use today: the
-            // point is that a message object carries a body, whatever it is called.
-            if ($value instanceof \Psr\Http\Message\MessageInterface) {
+            // Deny by default. Dropping PSR-7 messages by type closed the leak the
+            // client has today — the request object carries the audited document as its
+            // body — and it depended on the shape of somebody else's context: a client
+            // that one day passes ['request' => ['body' => …]] or a DTO of its own would
+            // have walked straight through. What is kept instead is what cannot carry a
+            // body: scalars, with strings redacted for credentials. Everything else goes,
+            // including arrays and objects, and what is lost with it is a retry count's
+            // worth of detail — method, URL and status are in the message itself.
+            if (!\is_scalar($value)) {
                 continue;
             }
 

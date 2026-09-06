@@ -107,17 +107,18 @@ final class BulkResult
             // re-sent whole rather than reported wrongly; that is safe, because every
             // document carries its id and overwrites itself.
             //
-            // Only when it names one. An answer that states no id says nothing about the
-            // order either way, and turning "did not mention it" into a permanent write
-            // failure would be a new way for the trail to go silent, against a risk this
-            // check exists to catch rather than to invent.
+            // Naming none is the same answer. Elasticsearch puts `_id` on every item it
+            // reports, and every document this bundle sends has one — so a response that
+            // leaves it out is not a response this parser can account for, and "cannot
+            // account for" has one meaning here: send the batch again. The lenient
+            // reading traded that for the hope that positions still line up.
             $answeredAbout = \is_string($action['_id'] ?? null) && $action['_id'] !== '' ? $action['_id'] : null;
 
-            if ($ids !== [] && $answeredAbout !== null && $answeredAbout !== ($ids[$position] ?? null)) {
+            if ($ids !== [] && $answeredAbout !== ($ids[$position] ?? null)) {
                 throw TransportUnavailableException::saying(sprintf(
-                    'Elasticsearch answered position %d of a bulk request with a result for document "%s", where "%s" was sent — the answer cannot be matched to the documents it is about.',
+                    'Elasticsearch answered position %d of a bulk request with a result for %s, where "%s" was sent — the answer cannot be matched to the documents it is about.',
                     $position,
-                    $answeredAbout,
+                    $answeredAbout === null ? 'no document at all' : '"'.$answeredAbout.'"',
                     $ids[$position] ?? '',
                 ));
             }

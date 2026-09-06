@@ -68,6 +68,22 @@ final class CommandsTest extends TestCase
         self::assertStringContainsString('refused', $tester->getDisplay());
     }
 
+    public function testCheckSaysWhenTheClusterIsTooOldToWriteTo(): void
+    {
+        // The floor was a composer constraint and an integration test, and neither of
+        // those is looking at the cluster this application writes to. Below 8.18 every
+        // write is refused for a query parameter the cluster does not know — which reads
+        // as "the mapping is wrong" for as long as nobody thinks to compare versions.
+        $this->gateway->version = '8.17.4';
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('below the supported floor of 8.18', $tester->getDisplay());
+    }
+
     public function testCheckPassesWhenEverythingIsThere(): void
     {
         (new CommandTester(new CreateIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$this->enricher()])))->execute([]);

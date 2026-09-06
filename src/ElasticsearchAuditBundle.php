@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle;
 
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\Compiler\CarriesRecordsPass;
+use Borsche\ElasticsearchAuditBundle\DependencyInjection\Compiler\ScopeMessengerHandlersPass;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Symfony\Component\DependencyInjection\Extension\ExtensionInterface;
+use Symfony\Component\DependencyInjection\Compiler\PassConfig;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\HttpKernel\Bundle\Bundle;
 
@@ -18,9 +20,15 @@ final class ElasticsearchAuditBundle extends Bundle
     {
         parent::build($container);
 
-        // After every extension has been loaded: what this asks — which connection has
-        // an entity manager, whether the configured bus is a Messenger bus — are answers
-        // only DoctrineBundle and FrameworkBundle can give, and they give them here.
+        // Ahead of FrameworkBundle's MessengerPass, which reads the handler tags and
+        // builds each bus's locator: rewriting a tag after that changes the definition
+        // and nothing that runs.
+        $container->addCompilerPass(new ScopeMessengerHandlersPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, ScopeMessengerHandlersPass::PRIORITY);
+
+        // And after every extension has been loaded: what this asks — which connection
+        // has an entity manager, whether the configured bus is a Messenger bus, whether
+        // that bus would deliver anything — are answers only DoctrineBundle and
+        // FrameworkBundle can give, and they give them here.
         $container->addCompilerPass(new CarriesRecordsPass());
     }
 

@@ -199,13 +199,35 @@ final class FullKernelBootTest extends TestCase
         // default_middleware disabled, and what is left carries nothing. dispatch()
         // still succeeds and still answers with an Envelope — the failure this pass
         // exists to refuse, one configuration key away from the shape it already caught.
+        //
+        // What is required is handle_message. send_message proves nothing on its own:
+        // with no sender for a message it hands the envelope straight to the next
+        // middleware, so a bus that only sends delivers exactly nothing for these two.
         $kernel = new FullKernel($this->cacheDir, messenger: true, withoutDoctrine: true, busWithoutDelivery: true);
 
         try {
             $kernel->boot();
             self::fail('a bus with no delivery middleware should not have booted');
         } catch (\Throwable $refused) {
-            self::assertStringContainsString('neither the send_message nor the handle_message middleware', self::chainOf($refused));
+            self::assertStringContainsString('no handle_message middleware', self::chainOf($refused));
+        }
+    }
+
+    public function testABusThatCanOnlySendIsRefusedToo(): void
+    {
+        // The half-measure that looks like delivery. A bus with send_message and no
+        // handle_message passes anything it has no sender for to the next middleware —
+        // allow_no_senders is true by default — so an audit record dispatched there is
+        // neither sent nor handled, and dispatch() answers with an Envelope as always.
+        // handle_message is the one that ends in a handler, in the request and in a
+        // worker alike, so it is the one required.
+        $kernel = new FullKernel($this->cacheDir, messenger: true, withoutDoctrine: true, busWithoutDelivery: true, sendOnly: true);
+
+        try {
+            $kernel->boot();
+            self::fail('a bus that can only send should not have booted');
+        } catch (\Throwable $refused) {
+            self::assertStringContainsString('no handle_message middleware', self::chainOf($refused));
         }
     }
 
@@ -215,16 +237,31 @@ final class FullKernelBootTest extends TestCase
         // shape for a bundle that names one bus and checks it: an audit record dispatched
         // to somebody else's bus by mistake would be handled there and written, and
         // nothing would ever say the routing was wrong.
-        $kernel = new FullKernel($this->cacheDir, messenger: true, withoutDoctrine: true);
+        //
+        // Asked of Messenger rather than of the tags. Rewriting a tag proves nothing
+        // about what runs — MessengerPass reads those tags and builds each bus's locator,
+        // and it had already done so by the time this bundle's pass ran, so the
+        // definitions said one thing and every bus in the application had the handlers.
+        // The locator is what a worker actually asks.
+        $kernel = new FullKernel($this->cacheDir, messenger: true, withoutDoctrine: true, twoBuses: true);
         $kernel->boot();
 
-        $tags = $kernel->getContainer()->getParameter('test.handler_buses');
+        $handlers = static function (string $locator, object $message) use ($kernel): array {
+            /** @var HandlersLocatorInterface $handlers */
+            $handlers = $kernel->getContainer()->get($locator);
+            $found = [];
 
-        self::assertSame(
-            ['messenger.bus.default', 'messenger.bus.default'],
-            $tags,
-            'both handlers, bound to the canonical id of the configured bus',
-        );
+            foreach ($handlers->getHandlers(new Envelope($message)) as $descriptor) {
+                $found[] = $descriptor->getName();
+            }
+
+            return $found;
+        };
+
+        foreach ([new IndexAuditRecord('audit_log', ['objectType' => 'order']), new IndexAuditRecords([])] as $message) {
+            self::assertCount(1, $handlers('test.handlers_locator', $message), $message::class.' is handled on the configured bus');
+            self::assertSame([], $handlers('test.handlers_locator.command', $message), $message::class.' is not handled on anybody else\'s');
+        }
 
         $kernel->shutdown();
     }
@@ -286,8 +323,10 @@ final class FullKernel extends Kernel
         private readonly bool $withoutDoctrine = false,
         private readonly bool $busWithoutDelivery = false,
         private readonly bool $namedEntityManager = false,
+        private readonly bool $twoBuses = false,
+        private readonly bool $sendOnly = false,
     ) {
-        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : ''), true);
+        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : '').($twoBuses ? 't' : '').($sendOnly ? 's' : ''), true);
     }
 
     /**
@@ -332,14 +371,18 @@ final class FullKernel extends Kernel
         $noDoctrine = $this->withoutDoctrine;
         $undelivered = $this->busWithoutDelivery;
         $namedManager = $this->namedEntityManager;
+        $twoBuses = $this->twoBuses;
+        $sendOnly = $this->sendOnly;
 
-        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager): void {
+        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager, $twoBuses, $sendOnly): void {
             $container->loadFromExtension('framework', [
                 'test' => true,
                 'http_method_override' => false,
                 'handle_all_throwables' => true,
                 'php_errors' => ['log' => true],
-                'messenger' => ['transports' => [], 'routing' => []],
+                'messenger' => $twoBuses
+                    ? ['default_bus' => 'messenger.bus.default', 'transports' => [], 'routing' => [], 'buses' => ['messenger.bus.default' => [], 'command.bus' => []]]
+                    : ['transports' => [], 'routing' => []],
             ]);
 
             if ($undelivered) {
@@ -348,8 +391,19 @@ final class FullKernel extends Kernel
                 // instead of through the configuration tree because the spelling of that
                 // key differs between the Symfony versions this bundle supports and the
                 // shape being tested does not.
+                //
+                // With $sendOnly it gets send_message and nothing else, which is the
+                // shape that looks like delivery and is not: SendMessageMiddleware hands
+                // an envelope with no sender straight to the next middleware, and there
+                // is no next middleware.
+                $middleware = $sendOnly ? [new \Symfony\Component\DependencyInjection\Reference('audit.bus.middleware.send_message')] : [];
+
+                if ($sendOnly) {
+                    $container->setDefinition('audit.bus.middleware.send_message', new \Symfony\Component\DependencyInjection\Definition(\stdClass::class));
+                }
+
                 $container->setDefinition('audit.bus', (new \Symfony\Component\DependencyInjection\Definition(\Symfony\Component\Messenger\MessageBus::class, [
-                    new \Symfony\Component\DependencyInjection\Argument\IteratorArgument([]),
+                    new \Symfony\Component\DependencyInjection\Argument\IteratorArgument($middleware),
                 ]))->addTag('messenger.bus'));
             }
 
@@ -410,6 +464,10 @@ final class FullKernel extends Kernel
             // What a test needs to look at: private by default, and the point of the
             // test is to ask the container what a worker would be handed.
             $container->setAlias('test.handlers_locator', 'messenger.bus.default.messenger.handlers_locator')->setPublic(true);
+
+            if ($twoBuses) {
+                $container->setAlias('test.handlers_locator.command', 'command.bus.messenger.handlers_locator')->setPublic(true);
+            }
 
             // And which bus each handler was bound to, read after every pass has run.
             $container->addCompilerPass(new HandlerBusesPass(), \Symfony\Component\DependencyInjection\Compiler\PassConfig::TYPE_BEFORE_REMOVING, -1000);

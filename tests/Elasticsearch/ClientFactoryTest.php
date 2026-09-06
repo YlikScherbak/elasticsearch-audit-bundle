@@ -81,6 +81,27 @@ final class ClientFactoryTest extends TestCase
         self::assertSame([], $lines, 'the level that carries bodies is not passed on at all');
     }
 
+    public function testWhatIsNotAScalarIsNotHandedOnAtAll(): void
+    {
+        // Dropping PSR-7 objects by type closed the leak this client has today, and it
+        // was a rule about somebody else's shape: a client that one day puts the request
+        // in an array — or in a DTO of its own — would have walked straight through the
+        // gate carrying the audited document with it. What is kept is what cannot carry
+        // a body.
+        $context = [];
+        $logger = $this->recordingContext($context);
+
+        (new ClientLogGate($logger))->info('Request: POST http://es:9200/_bulk', [
+            'request' => ['method' => 'POST', 'body' => '{"changes":{"password":{"new":"hunter2"}}}'],
+            'response' => new \stdClass(),
+            'retry' => 0,
+            'took' => 1.5,
+            'url' => 'http://user:s3cr3t@es:9200/_bulk',
+        ]);
+
+        self::assertSame(['retry' => 0, 'took' => 1.5, 'url' => 'http://user:***@es:9200/_bulk'], $context[0]);
+    }
+
     public function testAPsr7ObjectIsNotHandedOnEither(): void
     {
         // The info lines are the useful ones — method, URL, status — but the client puts
@@ -117,6 +138,25 @@ final class ClientFactoryTest extends TestCase
     /**
      * @param list<string> $lines
      */
+    /**
+     * @param list<array<string, mixed>> $context
+     */
+    private function recordingContext(array &$context): \Psr\Log\LoggerInterface
+    {
+        return new class($context) extends \Psr\Log\AbstractLogger {
+            /** @param list<array<string, mixed>> $context */
+            public function __construct(private array &$context)
+            {
+            }
+
+            /** @param mixed $level */
+            public function log($level, $message, array $context = []): void
+            {
+                $this->context[] = $context;
+            }
+        };
+    }
+
     private function recording(array &$lines): \Psr\Log\LoggerInterface
     {
         return new class($lines) extends \Psr\Log\AbstractLogger {
