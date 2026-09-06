@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -58,6 +59,7 @@ final class AuditTransactionTest extends TestCase
     private Connection $connection;
     private EntityManagerInterface $em;
     private OutboxContext $context;
+    private AuditFrame $frame;
     private AuditTransaction $transaction;
     private AuditWriter $writer;
     private InMemoryGateway $gateway;
@@ -94,10 +96,10 @@ final class AuditTransactionTest extends TestCase
         $buffer = new FrameBuffer();
         $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, null, $buffer, null, 500, null, $this->context);
 
-        $frame = new AuditFrame($buffer, $this->writer);
+        $this->frame = new AuditFrame($buffer, $this->writer, null, $this->context);
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory()));
 
-        $this->transaction = new AuditTransaction($this->connection, $frame, $this->context);
+        $this->transaction = new AuditTransaction($this->connection, $this->frame, $this->context);
     }
 
     public function testTheRowAndItsRecordAreCommittedTogether(): void
@@ -355,18 +357,109 @@ final class AuditTransactionTest extends TestCase
         self::assertCount(1, $this->gateway->documents['audit_log'], 'delivered twice, written once');
     }
 
+    public function testAFailureBeforeTheTransactionIsNotTheTransactionsProblem(): void
+    {
+        // The one that broke ordinary use. reportFailure() marks the context for every
+        // failed record, and a plain flush outside a transaction fails by design under
+        // require_transaction - so the mark was waiting for the next transaction, which
+        // then refused to commit an operation that had gone perfectly. In a worker that
+        // is every message after the first stray record.
+        $this->writer->record('order', 1, AuditEvent::UPDATE, ['q' => new Change(1, 2)]);
+
+        $this->transaction->run(function (): void {
+            $this->em->persist(new Shipment('SH-1'));
+            $this->em->flush();
+        });
+
+        self::assertSame(1, $this->shipments(), 'the operation committed');
+        self::assertSame(1, $this->queued(), 'with its record');
+        self::assertNull($this->context->spoiledBecause(), 'and nothing is left waiting for the next one');
+    }
+
+    public function testARefusedFrameStopsTheCommitEvenWhenTheCallerCatchesIt(): void
+    {
+        // FrameOverflowException is the one exception a caller has a reason to catch:
+        // "this operation is too big, never mind". Catching it left the frame empty,
+        // the context clean, and the commit going ahead with no history at all - the
+        // exact shape the context exists to catch, reached through the one path that
+        // deliberately skips reportFailure().
+        $this->rebuildWith(maxHeld: 1);
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+
+                try {
+                    $this->writer->record('order', 1, AuditEvent::UPDATE, ['q' => new Change(1, 2)]);
+                    $this->writer->record('order', 2, AuditEvent::UPDATE, ['q' => new Change(1, 2)]);
+                } catch (FrameOverflowException) {
+                    // "we know"
+                }
+            });
+            self::fail('a refused frame should have stopped the commit');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('max_held', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments());
+        self::assertSame(0, $this->queued());
+    }
+
+    public function testAFrameTheOperationLeftOpenStopsTheCommit(): void
+    {
+        // One end() closes one level. A nested begin() nobody closed meant the frame
+        // still held everything, close() wrote nothing, and the commit went ahead with
+        // an empty queue - and left the buffer open for whatever ran next.
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+
+                $this->frame->begin();   // and never ends it
+            });
+            self::fail('an unclosed frame should have stopped the commit');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('did not close it', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments());
+        self::assertSame(0, $this->queued());
+        self::assertFalse($this->frame->isOpen(), 'and nothing of it is left open for the next operation');
+    }
+
+    public function testDroppingTheHistoryOnPurposeStopsTheCommitToo(): void
+    {
+        // reset() at the outermost level is allowed and silent: the frame ends up empty
+        // either way, so a commit afterwards is the change with its history deliberately
+        // thrown away. Inside a transaction that is a decision the transaction hears.
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+
+                $this->frame->reset();
+            });
+            self::fail('a reset inside the transaction should have stopped the commit');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('was reset inside the transaction', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments());
+    }
+
     /**
      * The same wiring as setUp(), with one piece replaced - the redactor, the event
      * dispatcher or the queue itself.
      */
-    private function rebuildWith(?ChangeRedactor $redactor = null, ?EventDispatcher $events = null, ?SenderInterface $sender = null): void
+    private function rebuildWith(?ChangeRedactor $redactor = null, ?EventDispatcher $events = null, ?SenderInterface $sender = null, int $maxHeld = 10000): void
     {
         $queue = new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $this->connection);
 
         $transport = new OutboxTransport($sender ?? new QueueSender($queue), $this->context);
         $immediate = new ImmediateTransportGuard(new SyncTransport($this->gateway), $this->context);
 
-        $buffer = new FrameBuffer();
+        $buffer = new FrameBuffer(maxHeld: $maxHeld);
         $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, $events, $buffer, $redactor, 500, null, $this->context);
 
         foreach (array_filter(
@@ -377,7 +470,8 @@ final class AuditTransactionTest extends TestCase
         }
 
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory()));
-        $this->transaction = new AuditTransaction($this->connection, new AuditFrame($buffer, $this->writer), $this->context);
+        $this->frame = new AuditFrame($buffer, $this->writer, null, $this->context);
+        $this->transaction = new AuditTransaction($this->connection, $this->frame, $this->context);
     }
 
     private function queued(): int

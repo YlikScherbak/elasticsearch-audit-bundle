@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Coalescing;
 
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameNestingException;
+use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -34,6 +35,7 @@ final class AuditFrame
         private readonly FrameBuffer $buffer,
         private readonly AuditWriter $writer,
         ?LoggerInterface $logger = null,
+        private readonly ?OutboxContext $outbox = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
@@ -195,7 +197,29 @@ final class AuditFrame
             throw FrameNestingException::cannotResetFromInside();
         }
 
+        // Inside an audit transaction this is a decision the transaction has to hear
+        // about: dropping the history on purpose and then committing the change is the
+        // one outcome that arrangement exists to prevent, and it would otherwise be
+        // completely silent — the frame ends up empty either way.
+        $this->outbox?->spoil('the audit frame was reset inside the transaction, so the operation has no history');
+
         return $this->drop('An audit frame was left open and has been reset; {held} held record(s) were dropped. Pair begin() with end() in a try/finally, or use coalesce().');
+    }
+
+    /**
+     * Every level of the frame gone, whatever depth it was left at, and nothing
+     * written.
+     *
+     * What reset() does for a caller, without the two things a caller needs: the
+     * refusal to reach into somebody else's frame — there is nobody else here, the
+     * transaction owns the outermost level — and the mark on the context, since the
+     * transaction is already rolling back and knows why.
+     *
+     * @internal AuditTransaction's own cleanup
+     */
+    public function dropEverything(): bool
+    {
+        return $this->drop('An audit transaction was rolled back; the {held} record(s) its frame held were dropped with it.');
     }
 
     /**

@@ -180,6 +180,9 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(self::SERVICE_FRAME_BUFFER),
             new Reference(self::SERVICE_WRITER),
             new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            // Present only under transport: outbox. It is how a reset() inside a
+            // transaction stops being silent.
+            new Reference(self::SERVICE_OUTBOX_CONTEXT, ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]));
         $container->setAlias(AuditFrame::class, self::SERVICE_FRAME)->setPublic(true);
 
@@ -365,7 +368,10 @@ final class ElasticsearchAuditExtension extends Extension
 
             $queue = $outbox['transport'] ?? '';
 
-            $container->setDefinition(self::SERVICE_OUTBOX_CONTEXT, new Definition(OutboxContext::class));
+            $container->setDefinition(self::SERVICE_OUTBOX_CONTEXT, (new Definition(OutboxContext::class))
+                // A worker reuses this service between messages; the tag is how Symfony
+                // hands it back empty each time.
+                ->addTag('kernel.reset', ['method' => 'reset']));
             $container->setAlias(OutboxContext::class, self::SERVICE_OUTBOX_CONTEXT);
 
             // Referenced by the id FrameworkBundle gives a configured transport. When the

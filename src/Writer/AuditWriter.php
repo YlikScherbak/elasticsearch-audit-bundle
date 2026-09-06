@@ -142,6 +142,13 @@ final class AuditWriter
             // A deliberate refusal (coalescing.on_overflow: throw), not a failed write:
             // it reaches the caller whatever on_failure says, and nothing is reported —
             // nothing was tried.
+            //
+            // The transaction is told all the same. It is the one exception a caller has
+            // a reason to catch — "we know this operation is too big" — and catching it
+            // left the frame empty, the context clean and the commit going ahead with no
+            // history at all.
+            $this->outbox?->spoil('the audit frame refused the operation because it grew past coalescing.max_held, and dropped what it had collected');
+
             throw $e;
         } catch (\Throwable $e) {
             $this->reportFailure($e, $record);
@@ -205,7 +212,10 @@ final class AuditWriter
                 // The database is not undone by this. Those records exist because their
                 // saves committed; the transaction around the operation is what rolls
                 // them back, which is why the setting is only meaningful where there is
-                // one.
+                // one — and that transaction is told here, in case the caller catches
+                // this and carries on to a commit with no history behind it.
+                $this->outbox?->spoil('the audit frame refused the operation because it grew past coalescing.max_held, and dropped what it had collected');
+
                 throw $e;
             } catch (\Throwable $e) {
                 // Held, not reported here: under "throw" reporting raises, and raising

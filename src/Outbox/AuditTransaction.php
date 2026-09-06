@@ -92,7 +92,7 @@ final class AuditTransaction
             $this->connection->beginTransaction();
         } catch (\Throwable $e) {
             $this->context->leave();
-            $this->frame->reset();
+            $this->frame->dropEverything();
 
             throw $e;
         }
@@ -103,6 +103,14 @@ final class AuditTransaction
             // The records go into the queue here, inside the transaction. A failure is
             // the operation's failure now, not a line in a log after the fact.
             $this->frame->end();
+
+            // One end() closes one level, and the operation may have opened another and
+            // forgotten it. The frame then holds everything it collected, close() writes
+            // nothing, and without this the commit would go ahead with an empty queue
+            // and a buffer still open for whatever runs next.
+            if ($this->frame->isOpen()) {
+                throw OutboxException::frameLeftOpen();
+            }
 
             $this->commitIfTheHistoryIsWhole();
 
@@ -158,6 +166,8 @@ final class AuditTransaction
             ]);
         }
 
-        $this->frame->reset();
+        // Every level, not just the outermost: the operation may have left one open,
+        // which is one of the reasons to be here.
+        $this->frame->dropEverything();
     }
 }

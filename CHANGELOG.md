@@ -12,6 +12,23 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [1.1.0] - 2026-09-06
 
 ### Fixed
+- **A failure before the transaction refused the transaction's commit.** `reportFailure()` marks
+  the outbox context for every record that fails, and under `require_transaction` a plain flush
+  outside a transaction fails by design — so the mark sat there waiting, and the next
+  `AuditTransaction` rolled back an operation that had gone perfectly. In a worker that is every
+  message after the first stray record. Nothing is remembered while nothing is open now, and
+  entering a transaction starts from clean either way
+- **A caught `FrameOverflowException` let the commit through with no history.** It is the one
+  exception a caller has a reason to catch — "this operation is too big, never mind" — and it
+  travels a path that deliberately skips the failure policy, so the frame ended up empty, the
+  context clean and the change committed alone. The refusal marks the context now
+- **A frame the operation left open let the commit through too.** One `end()` closes one level, so
+  a nested `begin()` nobody closed meant the records stayed held, nothing reached the queue, and
+  the buffer was still open for whatever ran next. `AuditTransaction` checks that the frame it
+  opened is the frame it closed
+- **`reset()` inside a transaction was silent.** Dropping the history on purpose and then
+  committing the change is what the arrangement exists to prevent; it now marks the context, and
+  the transaction refuses. `AuditTransaction`'s own cleanup uses an internal path that does not
 - **`transport: outbox` could not boot at all.** Both compiler passes worked out which bus the
   transport dispatches to by reading its first argument — true of the messenger transport, and not
   of the outbox, whose first argument is the queue it sends to. `CarriesRecordsPass` read that as a

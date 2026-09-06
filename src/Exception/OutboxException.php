@@ -53,6 +53,11 @@ final class OutboxException extends \RuntimeException implements AuditException,
         return new self('write($record, immediately: true) bypasses the frame and the queue to make one record visible before the request ends, and inside an audit transaction that is the one thing that must not happen: the record would reach Elasticsearch describing a change this transaction may still roll back. Record it normally - it is queued with everything else and delivered by the worker - or do it outside the transaction.');
     }
 
+    public static function frameLeftOpen(): self
+    {
+        return new self('The operation opened an audit frame of its own and did not close it, so the records it collected are still being held and none of them reached the queue. A commit now would be the change without its history, which is what this transaction exists to prevent - it was rolled back. Pair every begin() with an end() in a try/finally, or use coalesce().');
+    }
+
     public static function cannotCommit(string $reason): self
     {
         return new self(sprintf('The transaction was not committed, because %s. The audit trail is what this transaction exists to keep whole, so a commit that leaves it short is refused rather than made — the business change has been rolled back and can be retried.', $reason));
