@@ -417,6 +417,15 @@ record in the same database as the change.
 > that catches exceptions around `flush()` and treats them as "the save failed" — showing an
 > error, retrying, rolling back something else — will be wrong about that. Catch
 > `WriteFailedException` separately, or keep `log` and alert on `RecordFailedEvent` instead.
+>
+> **Under `transport: outbox` it means something else again.** There the failure that reaches
+> `flush()` is a failure to reach the *queue*, which is local and in the transaction — so with
+> `AuditTransaction` it does roll the operation back, which is the whole point. What it can no
+> longer mean is "Elasticsearch refused this": by then the record is a committed row, and the
+> refusal happens in a worker, hours later if the cluster is down. That failure surfaces where
+> Messenger puts it — retries, then the failure transport — and never in the request that made
+> the change. `on_failure` describes the hand-over; under the outbox the hand-over is a database
+> insert.
 
 A mistake in an audit declaration — `alwaysRecord` naming a field that is not audited, an
 association without a representer — is handled by the same policy: logged and skipped by

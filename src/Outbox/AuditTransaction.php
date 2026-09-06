@@ -160,19 +160,29 @@ final class AuditTransaction
      * instance and nothing else does. Nothing is written, nothing is created, nothing
      * is even sent to the database.
      *
-     * Fail-open for anything that cannot answer: a transport of somebody's own is not
-     * something to refuse on the grounds that it is unfamiliar, and audit:check reports
-     * that case in words.
+     * A transport that is not a Doctrine one is refused rather than left alone. It was
+     * tempting to call that "unfamiliar, so no opinion", and it is not: a queue that
+     * writes somewhere other than this connection cannot be committed by this
+     * transaction, whatever it is, and saying nothing would leave require_transaction
+     * reporting a promise nobody is keeping.
      *
      * @throws OutboxException
      */
     private function assertTheQueueIsOnThisConnection(): void
     {
-        if ($this->connectionChecked || !$this->queue instanceof DoctrineTransport) {
+        if ($this->connectionChecked || $this->queue === null) {
             return;
         }
 
-        $this->connectionChecked = true;
+        if (!$this->queue instanceof DoctrineTransport) {
+            // Not "nothing to check": the check failed. Only a Doctrine transport writes
+            // its row on this connection, and only that row is committed by this
+            // transaction - anything else is a message going somewhere else entirely,
+            // durable or not, while require_transaction reports itself satisfied. The
+            // boot says so too when the DSN can be read, and the DSN most applications
+            // write cannot be.
+            throw OutboxException::queueIsNotTransactional($this->queue::class);
+        }
 
         // The schema handed in is the one to read: the method returns void on Symfony
         // 6.4 and a Schema on 7, and fills in what it was given on both.
@@ -182,6 +192,13 @@ final class AuditTransaction
         if ($schema->getTables() === []) {
             throw OutboxException::queueOnAnotherConnection();
         }
+
+        // Only now. Set before the verdict, a refusal would have been remembered as an
+        // answer: a worker catches the exception, takes the next message, and this
+        // returns early on a queue that was already found to be on the wrong
+        // connection - which turns a loud refusal into a silent one exactly in the
+        // long-running process the outbox exists for.
+        $this->connectionChecked = true;
     }
 
     /**

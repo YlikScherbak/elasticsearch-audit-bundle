@@ -358,6 +358,55 @@ final class FullKernelBootTest extends TestCase
         $kernel->shutdown();
     }
 
+    public function testAKernelRefusesAQueueOnAnotherConnection(): void
+    {
+        // Through a real boot rather than a hand-built container: the DSN is literal
+        // here, so the compiler pass is what answers - and what an application would
+        // meet on deploy rather than on the first audited operation.
+        $kernel = new FullKernel($this->cacheDir, outbox: true, queueElsewhere: true);
+
+        try {
+            $kernel->boot();
+            self::fail('a queue on another connection should have been refused');
+        } catch (\Throwable $e) {
+            self::assertStringContainsString('Two connections are two transactions', self::chainOf($e));
+        }
+    }
+
+    public function testATransactionThatFailedLeavesTheNextMessageAlone(): void
+    {
+        // Two messages of a worker, through the container that a worker would use: the
+        // first fails inside an audit transaction, the resetter runs between them as
+        // Messenger does, and the second has to behave as though the first never
+        // happened.
+        $kernel = new FullKernel($this->cacheDir, outbox: true);
+        $kernel->boot();
+
+        $container = $kernel->getContainer();
+
+        /** @var AuditTransaction $transaction */
+        $transaction = $container->get('test.audit_transaction');
+        /** @var OutboxContext $context */
+        $context = $container->get('test.outbox_context');
+
+        try {
+            $transaction->run(static function (): void {
+                throw new \DomainException('the first message failed');
+            });
+            self::fail('the operation should have failed');
+        } catch (\DomainException) {
+        }
+
+        $container->get('services_resetter')->reset();
+
+        // The second message: a transaction that opens, runs and commits.
+        self::assertSame('done', $transaction->run(static fn (): string => 'done'));
+        self::assertFalse($context->isOpen(), 'and it left nothing behind either');
+        self::assertNull($context->spoiledBecause());
+
+        $kernel->shutdown();
+    }
+
     private static function chainOf(?\Throwable $e): string
     {
         $said = [];
@@ -389,8 +438,9 @@ final class FullKernel extends Kernel
         private readonly bool $twoBuses = false,
         private readonly bool $sendOnly = false,
         private readonly bool $outbox = false,
+        private readonly bool $queueElsewhere = false,
     ) {
-        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : '').($twoBuses ? 't' : '').($sendOnly ? 's' : '').($this->outbox ? 'x' : ''), true);
+        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : '').($twoBuses ? 't' : '').($sendOnly ? 's' : '').($this->outbox ? 'x' : '').($this->queueElsewhere ? 'q' : ''), true);
     }
 
     /**
@@ -457,8 +507,9 @@ final class FullKernel extends Kernel
         $twoBuses = $this->twoBuses;
         $sendOnly = $this->sendOnly;
         $outbox = $this->outbox;
+        $elsewhere = $this->queueElsewhere;
 
-        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager, $twoBuses, $sendOnly, $outbox): void {
+        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager, $twoBuses, $sendOnly, $outbox, $elsewhere): void {
             $container->loadFromExtension('framework', [
                 'test' => true,
                 'http_method_override' => false,
@@ -466,7 +517,7 @@ final class FullKernel extends Kernel
                 'php_errors' => ['log' => true],
                 'messenger' => $twoBuses
                     ? ['default_bus' => 'messenger.bus.default', 'transports' => [], 'routing' => [], 'buses' => ['messenger.bus.default' => [], 'command.bus' => []]]
-                    : ['transports' => $outbox ? ['audit_outbox' => 'doctrine://default?table_name=audit_outbox&auto_setup=false'] : [], 'routing' => []],
+                    : ['transports' => $outbox ? ['audit_outbox' => sprintf('doctrine://%s?table_name=audit_outbox&auto_setup=false', $elsewhere ? 'reporting' : 'default')] : [], 'routing' => []],
             ]);
 
             if ($undelivered) {
@@ -506,7 +557,7 @@ final class FullKernel extends Kernel
             ] : [
                 // A second connection with no entity manager on it — the DBAL-only
                 // setup Symfony documents, and the one an audit listener cannot hear.
-                'dbal' => ($reporting || $namedManager)
+                'dbal' => ($reporting || $namedManager || $elsewhere)
                     ? ['default_connection' => 'default', 'connections' => [
                         'default' => ['driver' => 'pdo_sqlite', 'memory' => true],
                         'reporting' => ['driver' => 'pdo_sqlite', 'memory' => true],

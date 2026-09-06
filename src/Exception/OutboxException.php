@@ -58,6 +58,11 @@ final class OutboxException extends \RuntimeException implements AuditException,
         return new self('The operation opened an audit frame of its own and did not close it, so the records it collected are still being held and none of them reached the queue. A commit now would be the change without its history, which is what this transaction exists to prevent - it was rolled back. Pair every begin() with an end() in a try/finally, or use coalesce().');
     }
 
+    public static function queueIsNotTransactional(string $class): self
+    {
+        return new self(sprintf('The outbox queue is a %s, which is not a Doctrine transport, so its records are not written on the connection this transaction commits on - they go somewhere else entirely, and the change and its record are no longer one commit. That is the only thing transport: outbox provides over transport: messenger, which asks nothing of where the queue lives. Point outbox.transport at a Doctrine transport, or use messenger.', $class));
+    }
+
     public static function queueOnAnotherConnection(): self
     {
         return new self('The outbox queue is holding a different Doctrine connection from the one this transaction commits on. Two connections are two transactions even against the same database, so the record and the change it describes would be committed separately - which is the one thing transport: outbox exists to prevent. Point the queue\'s transport at the connection the audited entities are on; audit:check reports which one each of them is holding.');

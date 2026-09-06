@@ -12,6 +12,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [1.1.0] - 2026-09-06
 
 ### Fixed
+- **A refused queue was remembered as an answered question.** The check that asks the queue which
+  connection it holds marked itself done *before* reading the verdict, so a worker that caught the
+  refusal and took the next message skipped it entirely — and ran the operation against a queue
+  already found to be on the wrong connection. A refusal is not an answer to remember, and the
+  process this matters in is exactly the long-running one the outbox exists for
+- **A queue that is not a Doctrine transport is refused rather than ignored.** "Unfamiliar, so no
+  opinion" was the wrong reading: a broker behind an environment variable passes the boot (nothing
+  to parse), satisfies `require_transaction` (a transaction is open), and writes its records
+  somewhere no transaction of ours will ever commit
 - **The queue is asked which connection it holds, before the first operation.** The boot compares
   DSNs, which says nothing when the DSN is an environment variable — most production applications —
   and a DSN describes a connection rather than being one: a factory of somebody's own could hand

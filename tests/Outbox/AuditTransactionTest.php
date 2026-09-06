@@ -653,6 +653,49 @@ final class AuditTransactionTest extends TestCase
 
         self::assertSame(0, $this->shipments(), 'nothing was attempted at all');
         self::assertFalse($this->connection->isTransactionActive());
+
+        // And again, in the same process. A worker catches the exception, takes the
+        // next message, and asks for another transaction - which must be refused for
+        // the same reason rather than waved through because the question was already
+        // asked once. A refusal is not an answer to remember.
+        $this->expectException(OutboxException::class);
+        $this->expectExceptionMessageMatches('/different Doctrine connection/');
+
+        $transaction->run(static fn (): int => 1);
+    }
+
+    public function testAQueueThatIsNotADoctrineTransportIsRefused(): void
+    {
+        // The boot catches this when the DSN can be read, and the DSN most production
+        // applications write is an environment variable. Left alone here, a broker
+        // behind %env() would satisfy require_transaction - the context is open - while
+        // its records went somewhere no transaction of ours will ever commit.
+        $transaction = new AuditTransaction($this->connection, $this->frame, $this->context, null, new RememberingSender());
+
+        try {
+            $transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+            });
+            self::fail('a queue that is not a Doctrine transport should have been refused');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('not a Doctrine transport', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments(), 'nothing was attempted');
+    }
+
+    public function testWithoutAQueueToAskThereIsNothingToRefuse(): void
+    {
+        // null is the shape a test - or an application wiring this by hand - hands in,
+        // and it says "nobody told me", which is different from "I looked and it is
+        // wrong".
+        $this->transaction->run(function (): void {
+            $this->em->persist(new Shipment('SH-1'));
+            $this->em->flush();
+        });
+
+        self::assertSame(1, $this->shipments());
     }
 
     public function testAQueueOnThisConnectionIsAcceptedOnce(): void
