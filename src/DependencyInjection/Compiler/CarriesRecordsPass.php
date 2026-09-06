@@ -93,13 +93,15 @@ final class CarriesRecordsPass implements CompilerPassInterface
 
     private function assertTheBusCarriesHandlers(ContainerBuilder $container): void
     {
-        // Defined rather than aliased is what tells the two transports apart: with
-        // transport: sync the id is an alias to the service that writes in the request.
-        if (!$container->hasDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT)) {
-            return;
-        }
+        // Asked by class rather than by position. "Defined rather than aliased" told
+        // the transports apart while there were two of them; with the outbox there are
+        // three, and its first argument is the queue it sends to - read as a bus, that
+        // refused every outbox configuration at compile time.
+        $bus = ElasticsearchAuditExtension::busBehindTheTransport($container);
 
-        $bus = (string) $container->getDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT)->getArgument(0);
+        if ($bus === null) {
+            return; // nothing is dispatched to a bus, so there is no bus to vouch for
+        }
         $buses = array_keys($container->findTaggedServiceIds('messenger.bus'));
 
         // Through the aliases: messenger.default_bus, the default and the id everyone

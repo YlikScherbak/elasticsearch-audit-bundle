@@ -5,12 +5,17 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests;
 
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\Configuration;
+use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
+use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;
+use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
+use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Handler\HandlersLocatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\ElasticsearchAuditBundle;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
-use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;
 use Doctrine\Bundle\DoctrineBundle\DoctrineBundle;
 use Doctrine\ORM\Events;
 use PHPUnit\Framework\TestCase;
@@ -19,8 +24,6 @@ use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\HttpKernel\Kernel;
-use Symfony\Component\Messenger\Envelope;
-use Symfony\Component\Messenger\Handler\HandlersLocatorInterface;
 
 /**
  * The other half of BundleBootTest, and the half that is easy to mistake for the
@@ -295,6 +298,31 @@ final class FullKernelBootTest extends TestCase
         $kernel->shutdown();
     }
 
+    public function testAKernelWithTheOutboxBoots(): void
+    {
+        // The check this whole file exists for, applied to the newest transport. Both
+        // compiler passes used to read the transport's first argument as a bus id -
+        // true of the messenger transport and not of the outbox, whose first argument
+        // is the queue - so a perfectly ordinary outbox configuration was refused at
+        // compile time with a message about message_bus. The extension tests could not
+        // see it: they call the extension and compile without the bundle's passes.
+        $kernel = new FullKernel($this->cacheDir, outbox: true);
+        $kernel->boot();
+
+        $container = $kernel->getContainer();
+
+        self::assertInstanceOf(OutboxTransport::class, $container->get('test.transport'));
+        self::assertInstanceOf(AuditTransaction::class, $container->get('test.audit_transaction'));
+
+        // And the handlers a worker will need are on the bus it will consume with.
+        /** @var HandlersLocatorInterface $handlers */
+        $handlers = $container->get('test.handlers_locator');
+
+        self::assertNotSame([], iterator_to_array($handlers->getHandlers(new Envelope(new IndexAuditRecords([])))), 'the batch handler is reachable');
+
+        $kernel->shutdown();
+    }
+
     private static function chainOf(?\Throwable $e): string
     {
         $said = [];
@@ -325,8 +353,9 @@ final class FullKernel extends Kernel
         private readonly bool $namedEntityManager = false,
         private readonly bool $twoBuses = false,
         private readonly bool $sendOnly = false,
+        private readonly bool $outbox = false,
     ) {
-        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : '').($twoBuses ? 't' : '').($sendOnly ? 's' : ''), true);
+        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : '').($twoBuses ? 't' : '').($sendOnly ? 's' : '').($this->outbox ? 'x' : ''), true);
     }
 
     /**
@@ -373,8 +402,9 @@ final class FullKernel extends Kernel
         $namedManager = $this->namedEntityManager;
         $twoBuses = $this->twoBuses;
         $sendOnly = $this->sendOnly;
+        $outbox = $this->outbox;
 
-        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager, $twoBuses, $sendOnly): void {
+        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager, $twoBuses, $sendOnly, $outbox): void {
             $container->loadFromExtension('framework', [
                 'test' => true,
                 'http_method_override' => false,
@@ -382,7 +412,7 @@ final class FullKernel extends Kernel
                 'php_errors' => ['log' => true],
                 'messenger' => $twoBuses
                     ? ['default_bus' => 'messenger.bus.default', 'transports' => [], 'routing' => [], 'buses' => ['messenger.bus.default' => [], 'command.bus' => []]]
-                    : ['transports' => [], 'routing' => []],
+                    : ['transports' => $outbox ? ['audit_outbox' => 'doctrine://default?table_name=audit_outbox&auto_setup=false'] : [], 'routing' => []],
             ]);
 
             if ($undelivered) {
@@ -457,13 +487,18 @@ final class FullKernel extends Kernel
 
             $container->loadFromExtension(Configuration::ROOT, [
                 'client' => ['hosts' => ['http://localhost:9200']],
-                'transport' => $messenger ? 'messenger' : 'sync',
+                'transport' => $outbox ? 'outbox' : ($messenger ? 'messenger' : 'sync'),
                 'doctrine' => (($reporting || $namedManager) ? ['connection' => 'reporting'] : []) + ($insist ? ['enabled' => true] : []),
-            ] + ($ownBus ? ['message_bus' => 'app.bus'] : []) + ($undelivered ? ['message_bus' => 'audit.bus'] : []));
+            ] + ($outbox ? ['outbox' => ['transport' => 'audit_outbox']] : []) + ($ownBus ? ['message_bus' => 'app.bus'] : []) + ($undelivered ? ['message_bus' => 'audit.bus'] : []));
 
             // What a test needs to look at: private by default, and the point of the
             // test is to ask the container what a worker would be handed.
             $container->setAlias('test.handlers_locator', 'messenger.bus.default.messenger.handlers_locator')->setPublic(true);
+
+            if ($outbox) {
+                $container->setAlias('test.transport', ElasticsearchAuditExtension::SERVICE_TRANSPORT)->setPublic(true);
+                $container->setAlias('test.audit_transaction', ElasticsearchAuditExtension::SERVICE_AUDIT_TRANSACTION)->setPublic(true);
+            }
 
             if ($twoBuses) {
                 $container->setAlias('test.handlers_locator.command', 'command.bus.messenger.handlers_locator')->setPublic(true);

@@ -882,6 +882,29 @@ final class AuditFrameTest extends TestCase
         $this->frame->end();
     }
 
+    public function testAReleasedFrameTakesItsAtomicityWithItToo(): void
+    {
+        // The same property as the test above, on the path the safety net uses. A frame
+        // that leaked into the worker is closed by FrameResetMiddleware through
+        // release(), and that path did not clear what the operation had asked for - so
+        // one leaked atomic frame made every later message in the process atomic:
+        // removes stopped publishing where they happen, and an overflow began refusing
+        // operations that had asked for nothing of the sort.
+        $this->frame->begin(atomic: true);
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+
+        self::assertTrue($this->frame->release());
+
+        $before = \count($this->gateway->documents['audit_log']);
+
+        $this->frame->begin();
+        $this->writer->record('stock', 2, AuditEvent::REMOVE);
+
+        self::assertCount($before + 1, $this->gateway->documents['audit_log'], 'the next operation is an ordinary frame again');
+
+        $this->frame->end();
+    }
+
     /**
      * A frame that refuses rather than releases, with room for exactly one object.
      */

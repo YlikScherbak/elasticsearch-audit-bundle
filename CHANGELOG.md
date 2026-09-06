@@ -11,6 +11,22 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [1.1.0] - 2026-09-06
 
+### Fixed
+- **`transport: outbox` could not boot at all.** Both compiler passes worked out which bus the
+  transport dispatches to by reading its first argument — true of the messenger transport, and not
+  of the outbox, whose first argument is the queue it sends to. `CarriesRecordsPass` read that as a
+  bus id, found no `messenger.bus` tag and refused the container with a message about
+  `message_bus`; `ScopeMessengerHandlersPass` read it and quietly did nothing. The question is
+  asked once and by class now. Under the outbox the handlers deliberately stay on every bus: which
+  one carries them is decided by the worker that consumes the queue. The extension tests could not
+  see any of this — they call the extension and compile without the bundle's own passes — so
+  there is a kernel that boots with `transport: outbox` now
+- **A released frame kept its atomicity for the rest of the process.** `closeAll()` — the path
+  `FrameResetMiddleware` uses for a frame somebody left open — did not clear what that operation
+  had asked for, so one leaked atomic frame made every later message in the worker atomic: removes
+  and actor boundaries stopped publishing where they happen, and an overflow began refusing
+  operations that had asked for nothing of the sort
+
 ### Added
 - **`transport: outbox` — one commit for the change and its history.** Every other transport
   writes to Elasticsearch after the database has committed, and a process that dies in that window

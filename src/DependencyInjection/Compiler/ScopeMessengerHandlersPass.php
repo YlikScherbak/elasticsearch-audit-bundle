@@ -43,11 +43,16 @@ final class ScopeMessengerHandlersPass implements CompilerPassInterface
 
     public function process(ContainerBuilder $container): void
     {
-        if (!$container->hasDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT)) {
-            return; // transport: sync — the id is an alias, and there are no handlers
+        // Null with transport: sync (an alias, and no handlers) and with the outbox,
+        // which sends to a queue rather than to a bus. Under the outbox the handlers
+        // stay on every bus deliberately: which bus carries them is decided by the
+        // worker that consumes the queue, and this bundle does not know which that is.
+        $bus = ElasticsearchAuditExtension::busBehindTheTransport($container);
+
+        if ($bus === null) {
+            return;
         }
 
-        $bus = (string) $container->getDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT)->getArgument(0);
         $resolved = self::behindTheAliases($container, $bus);
 
         // Whether that id is a Messenger bus at all is CarriesRecordsPass's question,

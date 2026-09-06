@@ -247,6 +247,12 @@ final class FrameBuffer
 
         $this->depth = 0;
 
+        // With the operation it belonged to, exactly as close() does it. Left set, one
+        // frame that leaked and was released made every later operation in the process
+        // atomic: removes and actor boundaries stopped publishing where they happen, and
+        // an overflow began refusing operations that had asked for nothing of the sort.
+        $this->atomicRequested = false;
+
         if ($this->poisoned) {
             // A refused operation does not become history because a middleware found
             // its frame still open afterwards.

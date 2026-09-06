@@ -305,6 +305,33 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
+     * The bus the configured transport dispatches to, or null when it does not
+     * dispatch to one at all.
+     *
+     * Both compiler passes need this, and both used to work it out the same wrong way:
+     * "the transport is a definition rather than an alias, so its first argument is a
+     * bus". That held while a defined transport meant exactly one class. It stopped
+     * holding the day another one arrived - OutboxTransport's first argument is the
+     * queue it sends to - and the checks then read a Messenger transport as a bus and
+     * refused the boot. Asked by class here, once, so the next transport cannot break
+     * it by being written.
+     */
+    public static function busBehindTheTransport(ContainerBuilder $container): ?string
+    {
+        if (!$container->hasDefinition(self::SERVICE_TRANSPORT)) {
+            return null; // transport: sync - an alias to the service that writes in the request
+        }
+
+        $definition = $container->getDefinition(self::SERVICE_TRANSPORT);
+
+        if ($definition->getClass() !== MessengerTransport::class) {
+            return null; // the outbox sends to a queue directly; no bus is involved
+        }
+
+        return (string) $definition->getArgument(0);
+    }
+
+    /**
      * @param array{transport: string|null, require_transaction: bool} $outbox
      */
     private function registerTransport(string $transport, string $busId, array $outbox, string $connection, ContainerBuilder $container): void

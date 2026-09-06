@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\Compiler\CarriesRecordsPass;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\Compiler\CheckExceptionOnInvalidReferenceBehaviorPass;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -60,7 +61,10 @@ final class CarriesRecordsPassTest extends TestCase
         $container = new ContainerBuilder();
         $container->setParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_PROMISED, false);
 
-        $container->setDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT, new Definition(\stdClass::class, ['round.and.round']));
+        // The messenger transport, because that is the one whose first argument is a
+        // bus id - the pass asks by class now, having once read the outbox transport's
+        // queue as a bus and refused every outbox configuration there is.
+        $container->setDefinition(ElasticsearchAuditExtension::SERVICE_TRANSPORT, new Definition(MessengerTransport::class, ['round.and.round']));
         $container->setAlias('round.and.round', 'round.again');
         $container->setAlias('round.again', 'round.and.round');
 
