@@ -9,6 +9,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-06
+
 ### Added
 - **`ScopedEnricherInterface`** — an enricher can name the object types it is for, and `[]` (or
   not implementing it) still means all of them. `supports()` answers about a record, which is a
