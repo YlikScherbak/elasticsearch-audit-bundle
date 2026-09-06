@@ -122,11 +122,12 @@ final class CheckCommand extends Command
             return false;
         }
 
-        // Both shapes of the method: it returned void and mutated the schema before
-        // Symfony 7, and returns one now. The object handed in is mutated either way.
-        $given = new Schema();
-        $answered = $this->outboxQueue->configureSchema($given, $this->auditedConnection, static fn (): bool => false);
-        $schema = $answered instanceof Schema ? $answered : $given;
+        // Read off the schema handed in rather than off what comes back: the method
+        // returns void on Symfony 6.4 and a Schema on 7, and it fills in the object it
+        // was given in both. Using the return value is what the oldest supported version
+        // will not even let an analyser look at.
+        $schema = new Schema();
+        $this->outboxQueue->configureSchema($schema, $this->auditedConnection, static fn (): bool => false);
 
         if ($schema->getTables() === []) {
             $io->text(sprintf('<error>%s</error>: the queue is on a different Doctrine connection from the entities being audited. Two connections are two transactions even against one database, so a record and the change it describes commit separately - which is the one thing transport: outbox exists to prevent.', $this->outboxQueueName));
