@@ -38,9 +38,23 @@ final class AuditFrame
         $this->logger = $logger ?? new NullLogger();
     }
 
-    public function begin(): void
+    /**
+     * Opens a frame. `atomic: true` asks for one more thing than coalescing: that
+     * nothing of this operation leaves before it closes.
+     *
+     * Ordinarily a frame publishes some records early - a remove is terminal, a step by
+     * another actor ends the record before it, and max_held opens the valve. That is
+     * fine for a trail and fatal for a caller holding a database transaction open: what
+     * left cannot be taken back when the transaction rolls back. An atomic frame keeps
+     * all of it, and refuses the operation rather than releasing early.
+     *
+     * It must be the outermost frame: what the buffer holds belongs to every level at
+     * once, so a nested level cannot promise something about records that are not only
+     * its own.
+     */
+    public function begin(bool $atomic = false): void
     {
-        $this->buffer->open();
+        $this->buffer->open($atomic);
     }
 
     /**
@@ -69,12 +83,14 @@ final class AuditFrame
      * @template T
      *
      * @param callable(): T $operation
+     * @param bool          $atomic    nothing of this operation leaves the frame before it
+     *                                 closes; see begin()
      *
      * @return T
      */
-    public function coalesce(callable $operation): mixed
+    public function coalesce(callable $operation, bool $atomic = false): mixed
     {
-        $this->begin();
+        $this->begin($atomic);
 
         try {
             $result = $operation();

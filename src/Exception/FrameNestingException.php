@@ -30,6 +30,11 @@ final class FrameNestingException extends \LogicException implements AuditExcept
         parent::__construct($message, $code, $previous);
     }
 
+    public static function atomicMustBeOutermost(): self
+    {
+        return new self('An atomic frame promises that nothing of its operation leaves before it closes, and a frame is already open here - what that one holds is part of the same buffer, it did not make that promise, and a rollback could not take back what it has already published. Ask for atomicity where the operation begins, or let this level be an ordinary frame.');
+    }
+
     public static function cannotResetFromInside(): self
     {
         return new self('reset() drops everything the frame holds, and inside a nested frame that is somebody else\'s operation as well as yours — the records of one object are merged whoever recorded them, so there is no "yours" to drop. Let this level end() and leave the decision to whoever opened the outermost frame, or open your own frame around a unit of work that is not nested inside one.');

@@ -11,6 +11,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\Messenger\FrameResetMiddleware;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameNestingException;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -780,6 +781,105 @@ final class AuditFrameTest extends TestCase
         self::assertTrue($this->frame->reset());
         self::assertFalse($this->frame->isOpen());
         self::assertSame([], $this->gateway->documents, 'what it dropped was its own');
+    }
+
+    public function testAnAtomicFrameKeepsBackWhatAnOrdinaryOneWouldPublishEarly(): void
+    {
+        // The setting is a deployment's answer about the valve; this is a caller's answer
+        // about its own operation. Asked for here, with the configuration left as it is:
+        // a remove and a step by another actor both end a held record, and both wait.
+        $this->frame->begin(atomic: true);
+
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)], actor: 'alice');
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(2, 3)], actor: 'bob');
+        $this->writer->record('stock', 2, AuditEvent::REMOVE);
+
+        self::assertSame([], $this->gateway->documents, 'nothing of the operation has left');
+
+        $this->frame->end();
+
+        // Staged first, in the order the operation ran - alice's record and the remove
+        // both ended early - then what the frame was still holding.
+        self::assertSame([1, 2, 1], array_column($this->gateway->documents['audit_log'], 'objectId'), 'and all of it leaves at once');
+    }
+
+    public function testAnOrdinaryFrameStillPublishesEarly(): void
+    {
+        // The same operation without the argument: the default is unchanged.
+        $this->frame->begin();
+
+        $this->writer->record('stock', 1, AuditEvent::UPDATE, ['fact' => new Change(1, 2)]);
+        $this->writer->record('stock', 2, AuditEvent::REMOVE);
+
+        self::assertNotSame([], $this->gateway->documents, 'the remove went where it happened');
+
+        $this->frame->end();
+    }
+
+    public function testAnAtomicFrameMustBeTheOutermostOne(): void
+    {
+        // The promise is about records the enclosing frame also owns, and that frame did
+        // not make it - it may already have published some of them.
+        $this->frame->begin();
+
+        try {
+            $this->frame->begin(atomic: true);
+            self::fail('an atomic frame inside another frame should have been refused');
+        } catch (FrameNestingException $e) {
+            self::assertStringContainsString('already open', $e->getMessage());
+        }
+
+        self::assertTrue($this->frame->isOpen(), 'and the frame that was open is untouched');
+        $this->frame->end();
+    }
+
+    public function testAFrameOpenedInsideAnAtomicOneIsAtomicToo(): void
+    {
+        // The other direction is not a contradiction: a service that only wants its steps
+        // merged gets that, and its records wait with everybody else's. It asked for less
+        // than it is getting, and less is not something it can rely on.
+        $this->frame->begin(atomic: true);
+        $this->frame->begin();
+
+        $this->writer->record('stock', 2, AuditEvent::REMOVE);
+
+        $this->frame->end();
+
+        self::assertSame([], $this->gateway->documents, 'the inner level ended and still nothing left');
+
+        $this->frame->end();
+
+        self::assertCount(1, $this->gateway->documents['audit_log']);
+    }
+
+    public function testAtomicityIsRefusedWhenCoalescingHoldsNothing(): void
+    {
+        // "Frames still work, they just hold nothing" - so an atomic frame would promise
+        // that nothing leaves while every record went straight to the transport.
+        $this->buffer = new FrameBuffer(enabled: false);
+        $frame = new AuditFrame($this->buffer, $this->writer(FailurePolicy::Log), $this->logger());
+
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessageMatches('/coalescing.enabled/');
+
+        $frame->begin(atomic: true);
+    }
+
+    public function testWhatOneOperationAskedForSaysNothingAboutTheNext(): void
+    {
+        $this->frame->coalesce(function (): void {
+            $this->writer->record('stock', 2, AuditEvent::REMOVE);
+        }, atomic: true);
+
+        $before = \count($this->gateway->documents['audit_log']);
+
+        // The next operation did not ask, so a remove goes out where it happens again.
+        $this->frame->begin();
+        $this->writer->record('stock', 3, AuditEvent::REMOVE);
+
+        self::assertCount($before + 1, $this->gateway->documents['audit_log'], 'the flag went with the operation that set it');
+
+        $this->frame->end();
     }
 
     /**

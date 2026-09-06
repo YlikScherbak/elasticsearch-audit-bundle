@@ -6,7 +6,9 @@ namespace Borsche\ElasticsearchAuditBundle\Coalescing;
 
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
+use Borsche\ElasticsearchAuditBundle\Exception\FrameNestingException;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
@@ -78,6 +80,13 @@ final class FrameBuffer
     private bool $poisoned = false;
 
     /**
+     * Set by a caller that asked this operation to be atomic, and cleared when the
+     * outermost frame is done with - what one operation asked for says nothing about
+     * the next.
+     */
+    private bool $atomicRequested = false;
+
+    /**
      * @param list<string> $objectTypes object types to coalesce; [] means every type
      * @param int          $maxHeld     safety valve: past this many objects the buffer releases what it has
      * @param bool         $enabled     false: frames still open and close, but hold nothing
@@ -95,9 +104,45 @@ final class FrameBuffer
         }
     }
 
-    public function open(): void
+    /**
+     * Opens one level, optionally asking for this operation to be atomic.
+     *
+     * `on_overflow: throw` is a deployment-wide answer to a deployment-wide question -
+     * what the valve does when a frame grows past max_held. Asking for atomicity is a
+     * caller's answer to its own: this operation is one thing, nothing of it may leave
+     * before I close it, and a refusal is better than a fragment. They are implemented
+     * by the same flag and they are not the same question, which is why the argument
+     * says what it wants rather than naming the valve.
+     *
+     * The argument only tightens. A frame opened without it follows the configuration,
+     * and a frame opened inside an atomic one is atomic whatever it asked for: what the
+     * buffer holds belongs to every level at once, and the strictest promise made about
+     * it is the one that has to hold.
+     */
+    public function open(bool $atomic = false): void
     {
+        if ($atomic) {
+            if (!$this->enabled) {
+                throw new NotConfiguredException('An atomic frame keeps every record back until it closes, and coalescing.enabled is false, which means frames hold nothing at all - every record would go to the transport as it is made. Set coalescing.enabled: true, or do not ask for atomicity here.');
+            }
+
+            if ($this->isOpen()) {
+                throw FrameNestingException::atomicMustBeOutermost();
+            }
+
+            $this->atomicRequested = true;
+        }
+
         ++$this->depth;
+    }
+
+    /**
+     * Whether nothing may leave this frame before it closes: asked for by the caller, or
+     * settled for the whole deployment by coalescing.on_overflow.
+     */
+    private function atomic(): bool
+    {
+        return $this->atomicRequested || $this->throwOnOverflow;
     }
 
     /**
@@ -125,7 +170,10 @@ final class FrameBuffer
             return [];
         }
 
-        return $this->release();
+        $released = $this->release();
+        $this->atomicRequested = false;
+
+        return $released;
     }
 
     /**
@@ -158,6 +206,7 @@ final class FrameBuffer
         $this->staged = [];
         $this->finalizeFailures = [];
         $this->poisoned = false;
+        $this->atomicRequested = false;
     }
 
     /**
@@ -244,7 +293,7 @@ final class FrameBuffer
      */
     public function stagesEverything(): bool
     {
-        return $this->enabled && $this->throwOnOverflow && $this->isOpen();
+        return $this->enabled && $this->atomic() && $this->isOpen();
     }
 
     /**
@@ -315,7 +364,7 @@ final class FrameBuffer
             // Releasing keeps every record and gives up the promise: an object let go
             // early can produce a second record for an operation whose net effect was
             // nothing. A deployment that reads the trail for that promise says so.
-            if ($this->count() >= $this->maxHeld && $this->throwOnOverflow) {
+            if ($this->count() >= $this->maxHeld && $this->atomic()) {
                 // Refused here, where it is raised, and not where somebody catches it:
                 // coalesce() catches this exception and a manual begin()/end() pair does
                 // not, and both have to end with the operation unpublished.
@@ -372,7 +421,7 @@ final class FrameBuffer
      */
     private function handOver(array $records): array
     {
-        if (!$this->throwOnOverflow || $records === []) {
+        if (!$this->atomic() || $records === []) {
             return $records;
         }
 

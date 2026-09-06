@@ -9,6 +9,19 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Added
+- **An operation can ask to be atomic, without a deployment-wide setting.**
+  `AuditFrame::begin(atomic: true)` and `coalesce($operation, atomic: true)` say what the caller
+  actually wants — nothing of this operation leaves before I close it, and a refusal is better
+  than a fragment — which is what the transaction recipe needs and what `on_overflow: throw` was
+  being flipped for. That setting is a deployment's answer about the valve, and turning it on
+  everywhere changed the behaviour of every frame in the application to fix one recipe.
+  The argument only tightens: a frame opened without it follows the configuration, and one opened
+  inside an atomic frame is atomic whatever it asked for. It must be the outermost frame
+  (`FrameNestingException`) — the promise is about records the enclosing frame also owns, and that
+  frame may already have published some of them — and it is refused when `coalescing.enabled` is
+  false (`NotConfiguredException`), where frames hold nothing at all
+
 ### Fixed
 - **Collecting the changes of a tracked collection was quadratic in its elements.** Replacing what
   an element said last time scanned everything the owner had collected so far — for every element,

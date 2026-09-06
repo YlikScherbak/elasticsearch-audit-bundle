@@ -349,17 +349,10 @@ this — it exists to fail the day the behaviour changes, not to bless it.
 
 When the application owns the wider transaction, close the gap with a frame — the same
 `AuditFrame` that coalesces, used here for its other property, that nothing leaves until the
-frame does. **That property is a setting, not a default**, and the recipe is wrong without it:
-
-```yaml
-borsche_elasticsearch_audit:
-    coalescing:
-        enabled: true
-        on_overflow: throw    # required here: under "release" a frame is not a buffer
-```
+frame does. **Ask for that property**; it is not what an ordinary frame promises (**since 1.1**):
 
 ```php
-$this->frame->begin();
+$this->frame->begin(atomic: true);
 $this->em->getConnection()->beginTransaction();
 
 try {
@@ -377,19 +370,36 @@ try {
 $this->frame->end();
 ```
 
-**Why the setting.** Under `on_overflow: release` — the default — a frame holds records back but
-never promised to hold *all* of them. Three things end a held record early and send it where it
-happened, before `end()` and beyond the reach of `reset()`:
+`coalesce($operation, atomic: true)` says the same thing for code that can wrap a closure.
+
+**Why it has to be asked for.** An ordinary frame holds records back but never promised to hold
+*all* of them. Three things end a held record early and send it where it happened, before `end()`
+and beyond the reach of `reset()`:
 
 - a **remove**: it is terminal, so what was held for that object goes out with it;
 - a step by a **different actor** on the same object: neither record may be filed under the other's
   name, so the held one goes out as it stands;
 - **`max_held`** being reached: the valve opens and writes what the frame holds.
 
-Under `throw` all three wait for the outermost `end()` instead — a remove and an actor boundary are
-staged, and an overflow refuses the operation outright with a `FrameOverflowException`, which in
-this recipe is exactly what you want: the `catch` rolls the database back and `reset()` drops the
-history. Both behaviours are covered by tests, including the leak under `release`.
+In an atomic frame all three wait for the outermost `end()` instead — a remove and an actor
+boundary are staged, and an overflow refuses the operation outright with a
+`FrameOverflowException`, which in this recipe is exactly what you want: the `catch` rolls the
+database back and `reset()` drops the history. Both behaviours are covered by tests, including the
+leak without it.
+
+**`atomic: true` is a request, and it only tightens.** A frame opened without it follows
+`coalescing.on_overflow`, so a deployment that set `throw` globally keeps exactly what it had. A
+frame opened *inside* an atomic one is atomic too, whatever it asked for: what the buffer holds
+belongs to every level at once, and the strictest promise made about it is the one that has to
+hold — a service that only wanted its steps merged still gets that, and its records simply wait
+with everybody else's.
+
+**It must be the outermost frame**, and asking for it inside another one is refused
+(`FrameNestingException`). The promise is about records the enclosing frame also owns; that frame
+did not make it, and may already have published some of them, so a rollback could not take them
+back. Asking for it while `coalescing.enabled` is `false` is refused too, by
+`NotConfiguredException`: frames then hold nothing at all, and a promise that nothing leaves would
+be the opposite of what happens.
 
 Two more things the recipe needs: no `write($record, immediately: true)` inside it (that call
 bypasses the frame by design), and a `max_held` large enough for the operation, since it counts
@@ -524,6 +534,11 @@ borsche_elasticsearch_audit:
     max_held: 10000           # safety valve: a frame holding more objects releases what it has
     on_overflow: release      # or "throw" (since 0.10): refuse the operation instead of coalescing less
 ```
+
+`on_overflow` is the deployment's answer about the valve. A single operation can ask for more than
+the default gives it — `begin(atomic: true)` / `coalesce($fn, atomic: true)`, **since 1.1** — which
+is what an application-owned transaction needs; see
+[The transaction boundary, exactly](#the-transaction-boundary-exactly).
 
 `on_overflow: throw` means the operation is refused, not that the part which fit is kept:
 **nothing of that operation is written**, what the frame had already handed back included. The

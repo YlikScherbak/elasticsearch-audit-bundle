@@ -279,7 +279,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame([], $this->documents(), 'reset() drops what the rollback undid');
     }
 
-    public function testUnderReleaseTheFrameIsNotABufferAndTheRecipeLeaks(): void
+    public function testWithoutAtomicityTheFrameIsNotABufferAndTheRecipeLeaks(): void
     {
         // The hole in the recipe as it was written, pinned rather than argued about.
         // A frame holds records back, but on_overflow: release never promised it holds
@@ -311,16 +311,17 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame([], $this->em->getRepository(Article::class)->findAll(), 'while the database has nothing at all');
     }
 
-    public function testUnderThrowTheFrameHoldsEverythingAndTheRecipeHolds(): void
+    public function testAnAtomicFrameHoldsEverythingAndTheRecipeHolds(): void
     {
-        // The same operation with the setting the recipe requires. Under
-        // on_overflow: throw nothing leaves an open frame - a remove and an actor
-        // boundary are staged rather than written where they happen - so reset() can
-        // still take all of it back.
-        $buffer = new FrameBuffer(throwOnOverflow: true);
+        // The same operation with what the recipe asks for. In an atomic frame nothing
+        // leaves before it closes - a remove and an actor boundary are staged rather than
+        // written where they happen - so reset() can still take all of it back. The
+        // configuration is left alone: this is one operation's request, not a deployment's
+        // answer about the valve.
+        $buffer = new FrameBuffer();
         $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer));
 
-        $frame->begin();
+        $frame->begin(atomic: true);
         $this->em->getConnection()->beginTransaction();
 
         try {
