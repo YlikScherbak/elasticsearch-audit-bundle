@@ -40,6 +40,7 @@
         "phpstan/phpstan-strict-rules": "^2.0",
         "phpunit/phpunit": "^10.5 || ^11.0 || ^12.0",
         "symfony/console": "^6.4 || ^7.0 || ^8.0",
+        "symfony/doctrine-messenger": "^6.4 || ^7.0 || ^8.0",
         "symfony/event-dispatcher": "^6.4 || ^7.0 || ^8.0",
         "symfony/filesystem": "^6.4 || ^7.0 || ^8.0",
         "symfony/framework-bundle": "^6.4 || ^7.0 || ^8.0",
@@ -49,6 +50,7 @@
     },
     "suggest": {
         "doctrine/orm": "To audit Doctrine entities automatically (with doctrine/doctrine-bundle)",
+        "symfony/doctrine-messenger": "For transport: outbox — the SQL queue an audit record is committed into together with the change it describes",
         "doctrine/doctrine-bundle": "Required together with doctrine/orm: the entity listener is attached through its doctrine.event_listener tag",
         "symfony/messenger": "To write audit records asynchronously",
         "symfony/security-core": "To record the authenticated user as the actor of each change",

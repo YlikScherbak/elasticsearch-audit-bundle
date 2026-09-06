@@ -50,6 +50,28 @@ final class ConfigurationTest extends TestCase
         $this->process(['client' => ['hosts' => ['http://es:9200']], 'reader' => ['point_in_time_keep_alive' => '5 minutes']]);
     }
 
+    public function testTheOutboxHasToSayWhichQueueItWritesTo(): void
+    {
+        // No default is possible: it has to be a Doctrine transport on the same
+        // connection as the audited entities, and only the application knows which.
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage('transport: outbox needs outbox.transport');
+
+        $this->process(['client' => ['hosts' => ['http://es:9200']], 'transport' => 'outbox']);
+    }
+
+    public function testTheOutboxRequiresATransactionUnlessToldOtherwise(): void
+    {
+        $config = $this->process([
+            'client' => ['hosts' => ['http://es:9200']],
+            'transport' => 'outbox',
+            'outbox' => ['transport' => 'audit_outbox'],
+        ]);
+
+        self::assertSame('audit_outbox', $config['outbox']['transport']);
+        self::assertTrue($config['outbox']['require_transaction'], 'the promise is the default; the weaker one is asked for');
+    }
+
     public function testEitherHostsOrServiceIsRequired(): void
     {
         $this->expectException(InvalidConfigurationException::class);

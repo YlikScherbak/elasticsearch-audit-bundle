@@ -32,6 +32,8 @@ use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
+use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxContext;
+use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
@@ -67,6 +69,7 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_GATEWAY = 'borsche_elasticsearch_audit.gateway';
     public const SERVICE_TRANSPORT = 'borsche_elasticsearch_audit.transport';
     public const SERVICE_SYNC_TRANSPORT = 'borsche_elasticsearch_audit.transport.sync';
+    public const SERVICE_OUTBOX_CONTEXT = 'borsche_elasticsearch_audit.outbox.context';
     public const SERVICE_INDEX_RESOLVER = 'borsche_elasticsearch_audit.index_resolver';
     public const SERVICE_INDEX_DEFINITION = 'borsche_elasticsearch_audit.index_definition';
     public const SERVICE_ACTOR_RESOLVER = 'borsche_elasticsearch_audit.actor_resolver';
@@ -120,7 +123,7 @@ final class ElasticsearchAuditExtension extends Extension
 
         $this->registerClient($config['client'], $container);
         $this->registerIndices($config['indices'], $container);
-        $this->registerTransport($config['transport'], $config['message_bus'], $container);
+        $this->registerTransport($config['transport'], $config['message_bus'], $config['outbox'], $container);
         $this->registerActor($config['actor'], $container);
         $this->registerRedaction($config['redact'], $container);
         $this->registerCoalescing($config['coalescing'], $container);
@@ -297,7 +300,10 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(IndexDefinition::class, self::SERVICE_INDEX_DEFINITION);
     }
 
-    private function registerTransport(string $transport, string $busId, ContainerBuilder $container): void
+    /**
+     * @param array{transport: string|null, require_transaction: bool} $outbox
+     */
+    private function registerTransport(string $transport, string $busId, array $outbox, ContainerBuilder $container): void
     {
         $container->setDefinition(self::SERVICE_SYNC_TRANSPORT, new Definition(SyncTransport::class, [new Reference(self::SERVICE_GATEWAY)]));
 
@@ -313,6 +319,33 @@ final class ElasticsearchAuditExtension extends Extension
             }
 
             $container->setDefinition(self::SERVICE_TRANSPORT, new Definition(MessengerTransport::class, [new Reference($busId)]));
+            $container->setDefinition(IndexAuditRecordHandler::class, (new Definition(IndexAuditRecordHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
+                ->addTag('messenger.message_handler'));
+            $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
+                ->addTag('messenger.message_handler'));
+        } elseif ($transport === 'outbox') {
+            // The same two halves as messenger, for the same reason: the record travels
+            // as a message and a worker writes it. What differs is where it waits.
+            $support = $this->messengerSupport ?? MessengerSupport::detect($container);
+
+            if (!$support->canDispatch()) {
+                throw new NotConfiguredException('transport "outbox" cannot be used: '.$support->missing());
+            }
+
+            $queue = $outbox['transport'] ?? '';
+
+            $container->setDefinition(self::SERVICE_OUTBOX_CONTEXT, new Definition(OutboxContext::class));
+            $container->setAlias(OutboxContext::class, self::SERVICE_OUTBOX_CONTEXT);
+
+            // Referenced by the id FrameworkBundle gives a configured transport. When the
+            // application has no such transport the container says so by name at compile
+            // time, which is the right moment to find out that the queue is missing.
+            $container->setDefinition(self::SERVICE_TRANSPORT, new Definition(OutboxTransport::class, [
+                new Reference('messenger.transport.'.$queue),
+                new Reference(self::SERVICE_OUTBOX_CONTEXT),
+                $outbox['require_transaction'],
+            ]));
+
             $container->setDefinition(IndexAuditRecordHandler::class, (new Definition(IndexAuditRecordHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
                 ->addTag('messenger.message_handler'));
             $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY)]))

@@ -48,8 +48,8 @@ final class Configuration implements ConfigurationInterface
         self::indices($children->arrayNode('indices'));
 
         $children->enumNode('transport')
-            ->info('"sync" writes in the request; "messenger" dispatches a message and a worker writes it.')
-            ->values(['sync', 'messenger'])
+            ->info('How a finished record reaches Elasticsearch. "sync": inside the request. "messenger": as a message a worker writes, which takes the cluster out of response times. "outbox": into a SQL queue on the application\'s own connection, so the record is committed by the same transaction as the change it describes - see AuditTransaction, and outbox.transport for the queue it uses.')
+            ->values(['sync', 'messenger', 'outbox'])
             ->defaultValue('sync');
 
         $children->scalarNode('message_bus')
@@ -70,11 +70,21 @@ final class Configuration implements ConfigurationInterface
             ->values(array_map(static fn (FailurePolicy $p) => $p->value, FailurePolicy::cases()))
             ->defaultValue(FailurePolicy::Log->value);
 
+        self::outbox($children->arrayNode('outbox'));
         self::actor($children->arrayNode('actor'));
         self::reader($children->arrayNode('reader'));
         self::redact($children->arrayNode('redact'));
         self::coalescing($children->arrayNode('coalescing'));
         self::doctrine($children->arrayNode('doctrine'));
+
+        // Asked here rather than where the transport is built: a configuration that
+        // cannot work should fail while it is being read, with the key that is missing
+        // named, and not later as a service that could not be wired.
+        $root
+            ->validate()
+                ->ifTrue(static fn (array $c): bool => ($c['transport'] ?? null) === 'outbox' && ($c['outbox']['transport'] ?? null) === null)
+                ->thenInvalid('transport: outbox needs outbox.transport - the name of the Messenger transport to queue into. There is no default: it has to be a Doctrine transport on the same connection as the entities being audited, and only the application knows which that is.')
+            ->end();
 
         return $treeBuilder;
     }
@@ -144,6 +154,27 @@ final class Configuration implements ConfigurationInterface
             ->info('Index settings applied by audit:index:create. Given whole, not merged: what you write here REPLACES the defaults, so a settings block naming only number_of_replicas drops number_of_shards with it. One replica by default: an audit trail is the last data anyone wants on a single node. Set number_of_replicas to 0 for a one-node development cluster, where a replica can never be assigned — and repeat number_of_shards: 1 alongside it.')
             ->defaultValue(['number_of_shards' => 1, 'number_of_replicas' => 1])
             ->variablePrototype();
+    }
+
+    private static function outbox(ArrayNodeDefinition $outbox): void
+    {
+        $outbox
+            ->info('The SQL queue a record is written to under transport: outbox. It is a Messenger transport backed by Doctrine, on the same connection as the entities being audited - a different connection to the same database is not the same transaction, and the guarantee is about the transaction.')
+            ->addDefaultsIfNotSet();
+
+        $children = $outbox->children();
+
+        $children->scalarNode('transport')
+            ->info('Name of the Messenger transport to queue into, as it appears under framework.messenger.transports. Its DSN must be doctrine://<connection>?table_name=... with auto_setup=false, and its table created by a migration: auto_setup runs DDL, which on MySQL commits the transaction it is standing in.')
+            ->defaultNull()
+            ->validate()
+                ->ifTrue(static fn (mixed $v) => $v !== null && (!\is_string($v) || $v === ''))
+                ->thenInvalid('outbox.transport must be the name of a Messenger transport, not %s.')
+            ->end();
+
+        $children->booleanNode('require_transaction')
+            ->info('true (default): a record may only be written to the outbox inside AuditTransaction, where something is holding the transaction it will be committed by. false accepts the weaker promise - the record is kept durably, but not necessarily together with the change it describes.')
+            ->defaultTrue();
     }
 
     private static function actor(ArrayNodeDefinition $actor): void
