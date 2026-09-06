@@ -9,7 +9,30 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-06
+
 ### Added
+- **`transport: outbox` — one commit for the change and its history.** Every other transport
+  writes to Elasticsearch after the database has committed, and a process that dies in that window
+  leaves a change nobody can account for. The outbox puts the finished document into a SQL queue
+  on the application's own connection, inside the same transaction as the rows it describes, and a
+  worker moves it on afterwards with the retries Messenger already has. It sends to Symfony's
+  Doctrine transport directly rather than through a bus, so no middleware stands between the
+  record and the INSERT — `DispatchAfterCurrentBusMiddleware` would hold it past the commit and
+  `DoctrineTransactionMiddleware` would flush on the way through
+- **`AuditTransaction`** owns that boundary: an atomic frame, `BEGIN`, the operation, the records
+  into the queue, `COMMIT`. **It refuses to commit a history it knows is short** — a record that
+  could not be redacted, one a listener vetoed, a queue that would not take the row. Under
+  `on_failure: log` none of those reach the caller, and nothing else would stop the commit: a
+  failed insert rolls back its own savepoint and leaves the transaction committable, and a veto
+  never touches the database. Four things it refuses outright: a transaction somebody else opened,
+  nesting, a frame opened outside it, and `write($record, immediately: true)`, which would reach
+  Elasticsearch describing a change that may still roll back
+- **`outbox.require_transaction`** (default `true`): the outbox writes only where something holds
+  the transaction the row will be committed by. Turning the outbox on reads as "the history is
+  atomic with the data now", and outside a transaction it is not; the weaker promise is asked for
+  explicitly
+
 - **An operation can ask to be atomic, without a deployment-wide setting.**
   `AuditFrame::begin(atomic: true)` and `coalesce($operation, atomic: true)` say what the caller
   actually wants — nothing of this operation leaves before I close it, and a refusal is better

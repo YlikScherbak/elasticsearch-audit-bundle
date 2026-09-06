@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
+use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
@@ -56,6 +57,7 @@ final class AuditWriter
         private readonly ?ChangeRedactor $redactor = null,
         private readonly int $batchSize = 500,
         ?FailureDetails $failureDetails = null,
+        private readonly ?OutboxContext $outbox = null,
     ) {
         if ($batchSize < 1) {
             throw new \InvalidArgumentException(sprintf('A batch holds at least one record, %d given.', $batchSize));
@@ -453,6 +455,14 @@ final class AuditWriter
         $this->events->dispatch($event);
 
         if ($event->isVetoed()) {
+            // Dropping a record on purpose is a feature - a heartbeat field, a machine's
+            // own bookkeeping - and inside an audit transaction it is a contradiction:
+            // that transaction exists so that every change it makes has a record, and
+            // this one now will not. The listener is not wrong to want it; the two
+            // settings are, together, and the transaction says so rather than
+            // committing a history it was told to leave short.
+            $this->outbox?->spoil('a listener vetoed an audit record inside the transaction');
+
             return null;
         }
 
@@ -530,6 +540,14 @@ final class AuditWriter
      */
     public function reportFailure(\Throwable $e, ?AuditRecord $record = null): void
     {
+        // Said before anything else, because everything else here is about reporting
+        // and this is about not lying. Under on_failure: log this method is where a
+        // failed record stops being anybody's problem - which is the right default and
+        // the wrong one inside a transaction whose purpose is to keep the history
+        // whole. The failures that matter most never reach the transport at all: a
+        // refused redaction, an enricher that threw, a record that could not be built.
+        $this->outbox?->spoil(sprintf('an audit record was not written (%s)', $e::class));
+
         // The record may have failed before it was redacted; nothing carrying it out of
         // here — the event, the exception, the log line — may hold a value that must not
         // be stored. And the cause is part of "nothing carrying it out of here": a

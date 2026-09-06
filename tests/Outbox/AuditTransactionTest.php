@@ -13,6 +13,14 @@ use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
+use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
+use Borsche\ElasticsearchAuditBundle\Tests\Transport\RememberingSender;
+use Doctrine\ORM\Events;
+use Symfony\Component\EventDispatcher\EventDispatcher;
+use Symfony\Component\Messenger\Transport\Sender\SenderInterface;
 use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
 use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
@@ -84,7 +92,7 @@ final class AuditTransactionTest extends TestCase
         $immediate = new ImmediateTransportGuard(new SyncTransport($this->gateway), $this->context);
 
         $buffer = new FrameBuffer();
-        $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, null, $buffer);
+        $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, null, $buffer, null, 500, null, $this->context);
 
         $frame = new AuditFrame($buffer, $this->writer);
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory()));
@@ -234,6 +242,142 @@ final class AuditTransactionTest extends TestCase
 
         self::assertSame(1, $this->shipments());
         self::assertSame(1, $this->queued());
+    }
+
+    public function testARefusedRedactionStopsTheCommitEvenThoughItNeverReachesTheQueue(): void
+    {
+        // The failure the transport cannot see: the record is refused while it is being
+        // prepared, so nothing is inserted, nothing rolls back a savepoint, and under
+        // on_failure: log nothing reaches the caller either. Without the context this
+        // transaction would commit a change whose record was never written.
+        $this->rebuildWith(new ChangeRedactor(['secret'], '***', 16, 2));
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+
+                // Wider than the budget: the redactor refuses the record rather than
+                // writing one it could not check.
+                $this->writer->record('order', 1, AuditEvent::UPDATE, [
+                    'a' => new Change(1, 2),
+                    'b' => new Change(1, 2),
+                    'c' => new Change(1, 2),
+                ]);
+            });
+            self::fail('a record that could not be redacted should have stopped the commit');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('was not committed', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments(), 'the change is gone with the record that could not be kept');
+    }
+
+    public function testAVetoedRecordStopsTheCommitToo(): void
+    {
+        // Dropping a record on purpose is a feature everywhere else and a contradiction
+        // here: this transaction exists so that every change it makes has a record.
+        $dispatcher = new EventDispatcher();
+        $dispatcher->addListener(RecordCreatedEvent::class, static function (RecordCreatedEvent $event): void {
+            $event->veto();
+        });
+
+        $this->rebuildWith(null, $dispatcher);
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist(new Shipment('SH-1'));
+                $this->em->flush();
+            });
+            self::fail('a vetoed record should have stopped the commit');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('vetoed', $e->getMessage());
+        }
+
+        self::assertSame(0, $this->shipments());
+    }
+
+    public function testElasticsearchIsNotTouchedWhileTheTransactionRuns(): void
+    {
+        // The other half of the promise: the cluster being down cannot fail a business
+        // operation, because the operation never speaks to it. The queue is local.
+        $this->gateway->failWith = new \RuntimeException('the cluster is down');
+
+        $this->transaction->run(function (): void {
+            $this->em->persist(new Shipment('SH-1'));
+            $this->em->flush();
+        });
+
+        self::assertSame(1, $this->shipments(), 'committed while Elasticsearch was unreachable');
+        self::assertSame(1, $this->queued(), 'and the record is waiting for it');
+    }
+
+    public function testTheQueuedRecordCarriesTheIndexItWasResolvedTo(): void
+    {
+        // Fixed here rather than when the worker gets to it. Under an alias that rolls
+        // over, resolving late would send a redelivery to a different backing index,
+        // where the stable id it was written under means nothing.
+        $sender = new RememberingSender();
+        $this->rebuildWith(null, null, $sender);
+
+        $this->transaction->run(function (): void {
+            $this->em->persist(new Shipment('SH-1'));
+            $this->em->flush();
+        });
+
+        $queued = $sender->sent[0];
+
+        self::assertInstanceOf(IndexAuditRecords::class, $queued);
+        self::assertSame('audit_log', $queued->items[0]['index']);
+        self::assertNotNull($queued->items[0]['id'], 'and the id a redelivery overwrites itself with');
+        self::assertSame(1, $queued->items[0]['document']['objectId'], 'the identifier the database gave it');
+    }
+
+    public function testTheSameQueuedRecordDeliveredTwiceIsOneDocument(): void
+    {
+        // What a worker that died after writing but before acknowledging causes. The id
+        // travels with the record, so the second delivery overwrites the first.
+        $sender = new RememberingSender();
+        $this->rebuildWith(null, null, $sender);
+
+        $this->transaction->run(function (): void {
+            $this->em->persist(new Shipment('SH-1'));
+            $this->em->flush();
+        });
+
+        /** @var IndexAuditRecords $queued */
+        $queued = $sender->sent[0];
+        $handler = new IndexAuditRecordsHandler($this->gateway);
+
+        $handler($queued);
+        $handler($queued);
+
+        self::assertCount(1, $this->gateway->documents['audit_log'], 'delivered twice, written once');
+    }
+
+    /**
+     * The same wiring as setUp(), with one piece replaced - the redactor, the event
+     * dispatcher or the queue itself.
+     */
+    private function rebuildWith(?ChangeRedactor $redactor = null, ?EventDispatcher $events = null, ?SenderInterface $sender = null): void
+    {
+        $queue = new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $this->connection);
+
+        $transport = new OutboxTransport($sender ?? new QueueSender($queue), $this->context);
+        $immediate = new ImmediateTransportGuard(new SyncTransport($this->gateway), $this->context);
+
+        $buffer = new FrameBuffer();
+        $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, $events, $buffer, $redactor, 500, null, $this->context);
+
+        foreach (array_filter(
+            $this->em->getEventManager()->getListeners(Events::postFlush),
+            static fn (object $listener): bool => $listener instanceof AuditSubscriber,
+        ) as $previous) {
+            $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, $previous);
+        }
+
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory()));
+        $this->transaction = new AuditTransaction($this->connection, new AuditFrame($buffer, $this->writer), $this->context);
     }
 
     private function queued(): int

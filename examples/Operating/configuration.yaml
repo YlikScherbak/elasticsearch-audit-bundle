@@ -45,9 +45,32 @@ borsche_elasticsearch_audit:
     # sync: the request waits for Elasticsearch. messenger: the record travels as
     # a message and a worker writes it, which is what a busy application wants —
     # route both IndexAuditRecord and IndexAuditRecords, or the batch message a
-    # flush produces stays on the synchronous bus.
+    # flush produces stays on the synchronous bus. outbox: the record goes into a
+    # SQL queue on your own connection, so it is committed by the same transaction
+    # as the change it describes; a worker moves it on from there.
     transport: sync
     # message_bus: messenger.bus.default    # when the default bus is not the one
+
+    # ── Only under transport: outbox ──────────────────────────────────────────
+    # outbox:
+    #     # The Messenger transport to queue into, by the name it has under
+    #     # framework.messenger.transports. It must be a Doctrine transport on the
+    #     # SAME connection as the audited entities — a second connection to the
+    #     # same database is a second transaction — and its table must be created
+    #     # by a migration with auto_setup=false: auto_setup runs DDL, and DDL
+    #     # commits the transaction it is standing in on MySQL.
+    #     #
+    #     #   framework:
+    #     #       messenger:
+    #     #           transports:
+    #     #               audit_outbox: '%env(DATABASE_URL)%?table_name=audit_outbox&auto_setup=false'
+    #     transport: audit_outbox
+    #
+    #     # true (default): a record may only be queued inside AuditTransaction,
+    #     # where something is holding the transaction it will be committed by.
+    #     # false accepts the weaker promise — the record is kept durably, but not
+    #     # necessarily together with the change it describes.
+    #     require_transaction: true
 
     # Records per _bulk request, and per Messenger message.
     batch_size: 500

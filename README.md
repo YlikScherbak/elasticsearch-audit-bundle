@@ -406,9 +406,11 @@ bypasses the frame by design), and a `max_held` large enough for the operation, 
 everything the frame is keeping back, staged records included.
 
 `end()` writes what the frame held; `reset()` drops it. What this does **not** give you is
-atomicity between the database and Elasticsearch — nothing can, short of a transactional outbox,
-which is **post-1.0 work** and not present today. A cluster that is unreachable at `end()` still
-costs a history entry under `on_failure: log`.
+atomicity between the database and Elasticsearch: the records leave the frame after the commit,
+so a process that dies in between leaves a change with no history, and a cluster that is
+unreachable at `end()` costs a history entry under `on_failure: log`. Closing that gap is what
+[the outbox](#one-commit-for-the-change-and-its-history) does (**since 1.1**), by putting the
+record in the same database as the change.
 
 > **With `on_failure: throw`, read this twice.** The `WriteFailedException` surfaces from
 > `flush()` *after* the commit: the data **is** in the database, the history entry is not. Code
@@ -1129,6 +1131,88 @@ A record that must be visible before the request ends can bypass the queue:
 $this->audit->write($record, immediately: true);
 ```
 
+## One commit for the change and its history
+
+Every transport above writes to Elasticsearch *after* the database has committed. That window is
+small and it is real: a process that dies inside it leaves an order approved and nobody able to
+say who approved it. No amount of retrying closes it, because at that point the record exists only
+in the memory of a process that is gone.
+
+The outbox closes it by putting the record where the change already is (**since 1.1**). The
+finished document goes into a SQL queue on the application's own connection, inside the same
+transaction as the rows it describes — so both commit, or neither does. A worker moves the queue
+on to Elasticsearch afterwards, with the retries and the failure transport Messenger already has.
+
+```yaml
+framework:
+    messenger:
+        transports:
+            # A Doctrine transport on the SAME connection as the audited entities, and
+            # auto_setup off: creating the table runs DDL, and DDL commits the
+            # transaction it is standing in on MySQL. The table comes from a migration.
+            audit_outbox: '%env(DATABASE_URL)%?table_name=audit_outbox&auto_setup=false'
+
+borsche_elasticsearch_audit:
+    transport: outbox
+    outbox:
+        transport: audit_outbox
+```
+
+```php
+public function __construct(private AuditTransaction $transaction, private EntityManagerInterface $em) {}
+
+public function approve(Order $order): void
+{
+    $this->transaction->run(function () use ($order): void {
+        $order->status = 'approved';
+        $this->em->flush();
+
+        $order->totalCents = $this->recompute($order);
+        $this->em->flush();
+    });
+}
+```
+
+`AuditTransaction` owns the boundary: it opens an atomic frame, begins the transaction, runs the
+operation, writes the held records into the queue while the transaction is still open, and
+commits. The order is the reverse of the frame recipe above, and for the same reason — there
+closing the frame talks to Elasticsearch and must happen after the commit; here it talks to the
+same database and must happen before.
+
+**It refuses to commit a history it knows is short.** `on_failure: log` exists so that the audit
+log can never take an operation down, which is right everywhere except inside an operation whose
+purpose is to keep the history whole. Every refusal on the way — a record that could not be
+redacted, one a listener vetoed, a queue that would not take the row — is remembered, and the
+commit asks first. Nothing else would catch those: a failed insert rolls back its own savepoint
+and leaves the transaction perfectly committable, and a veto never touches the database at all.
+
+**What it asks of you, and refuses otherwise:**
+
+- **the operation owns its transaction.** `AuditTransaction` will not run inside one somebody else
+  opened — they decide when it commits, possibly after catching what this raises;
+- **it does not nest.** The frame behind it is shared, so an inner transaction would be rolling
+  back records that are not its own;
+- **no `write($record, immediately: true)` inside it.** That call exists to reach Elasticsearch
+  before the request ends, which is exactly what must not happen for a change that may roll back;
+- **the queue is on the connection being audited.** A second connection to the same database is a
+  second transaction, and the guarantee is about one;
+- **after a rollback the EntityManager is out of step with the database**, as after any hand-rolled
+  transaction. Clear or reset it.
+
+**What it still does not promise.** The record is durable and will be delivered; it is not
+searchable by the time `run()` returns. Elasticsearch cannot be part of a database transaction,
+and nothing here pretends otherwise — what changed is that the record can no longer be lost, only
+delayed. Redelivery is harmless: every document carries the id it was queued with, and the index
+it was routed to is fixed then rather than resolved later, so a retry under a rolling alias
+overwrites itself instead of landing in a second backing index. And the guarantee covers what the
+bundle can see: entities audited by their declarations and records the application writes itself.
+A DQL bulk update, a native `DELETE`, another application on the same database — none of those
+pass through here, with or without an outbox.
+
+Without `AuditTransaction`, `transport: outbox` refuses to write at all: the row would be durable
+whether or not the change it describes ever happened, which is the opposite of what turning it on
+asks for. `outbox.require_transaction: false` accepts that weaker promise deliberately.
+
 ## When Elasticsearch is down
 
 By default (`on_failure: log`) a failed write is logged at `error` level with the record's type,
@@ -1403,6 +1487,9 @@ audited rows is, and `transport: messenger` is how.
 - **A flush is one request.** The records one `flush()` produces — or one frame releases — travel
   together: one `_bulk` call with the `sync` transport, one message that becomes one `_bulk` call
   in the worker with `messenger`. Fifty audited entities in a flush cost one round-trip, not fifty.
+- **The outbox does not pay it at all.** The record goes into a table on the connection the
+  request is already using, which is one INSERT in a transaction that was open anyway; the
+  round-trip to Elasticsearch happens in a worker.
 - **The default `sync` transport still pays that round-trip inside the request.** Fine for entity
   edits at human pace; switch to `transport: messenger` for anything that writes in bulk, and the
   request pays only for the dispatch.
@@ -1485,7 +1572,7 @@ limitations rather than bugs.
 
 **Call these**
 `AuditWriter::record()`, `write()`, `writeAll()` · `AuditReader::find()`, `iterate()`, `raw()` ·
-`AuditFrame::coalesce()`, `begin()`, `end()`, `reset()`, `release()` · the models you build and
+`AuditFrame::coalesce()`, `begin()`, `end()`, `reset()`, `release()` · `AuditTransaction::run()` · the models you build and
 receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditOrigin`, `AuditQuery`, `Filter`,
 `FilterKind`, `AuditEntry`, `AuditPage`,
 `Cursor`, `BulkResult` · `FailurePolicy` · every exception under `AuditException` · the two PSR-14 events.

@@ -9,6 +9,24 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 
 ---
 
+## To 1.1.0
+
+**Nothing is required.** Everything below is additive; an application that changes no
+configuration behaves exactly as it did on 1.0.
+
+**`begin(atomic: true)` replaces flipping `coalescing.on_overflow` for the transaction recipe.**
+If you set `on_overflow: throw` globally to make the frame hold everything back — the recipe under
+"The transaction boundary, exactly" used to require it — you can set it back to `release` and ask
+per operation instead. Nothing breaks if you leave it: the argument only tightens, so a deployment
+already on `throw` keeps what it had.
+
+**The outbox is opt-in**, and asks for three things when you take it: a Doctrine Messenger
+transport on the same connection as the audited entities, its table created by a migration with
+`auto_setup=false`, and the operation wrapped in `AuditTransaction`. See "One commit for the change
+and its history" in the README.
+
+---
+
 ## To 1.0.2
 
 **`AuditFrame::reset()` now refuses to run inside a nested frame**, where it used to drop the

@@ -50,6 +50,7 @@ picks it up. The reasoning behind each behaviour is in the
 | What you want | File |
 |---|---|
 | Every setting, with its default and the reason it exists | [`Operating/configuration.yaml`](Operating/configuration.yaml) |
+| Commit the change and its history together | [`Operating/ApprovingAnOrderAtomically.php`](Operating/ApprovingAnOrderAtomically.php) |
 
 That file is not a listing anybody typed out: the test suite parses it and puts it
 through the bundle's own configuration tree, so a setting that is renamed or removed

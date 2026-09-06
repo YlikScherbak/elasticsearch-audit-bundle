@@ -432,6 +432,10 @@ final class ElasticsearchAuditExtension extends Extension
             $redact['failure_details'] !== null
                 ? FailureDetails::from($redact['failure_details'])
                 : FailureDetails::Cause,
+            // Present only under transport: outbox, and null everywhere else. It is how a
+            // swallowed failure reaches the transaction that must not commit without the
+            // record - the ones that never touch the transport included.
+            new Reference(self::SERVICE_OUTBOX_CONTEXT, ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]));
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
