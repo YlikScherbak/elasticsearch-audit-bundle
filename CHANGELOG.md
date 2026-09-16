@@ -9,6 +9,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-16
+
 ### Fixed
 - **A representer no longer decides whether the application's flush happens.** To name an element
   a tracked collection gained, the listener runs `represent` — the application's own callable — and
