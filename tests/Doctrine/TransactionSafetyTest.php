@@ -11,6 +11,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\FolderDocument;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Ledger;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\LedgerLine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vault;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Misdeclared;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Reaction;
@@ -176,6 +178,65 @@ final class TransactionSafetyTest extends DoctrineTestCase
 
         self::assertCount(1, $documents, 'one operation, one record — not the leftovers of the one that failed');
         self::assertSame('article', $documents[0]['objectType']);
+    }
+
+    public function testARepresenterCannotRefuseAFlushBecauseTheIdArrivedEarly(): void
+    {
+        // A representer is application code the listener runs to name an element, and
+        // where it runs decides what its failure costs. For an element being inserted it
+        // belongs in postFlush: the row is written, the id is final, and a failure goes
+        // through the failure policy — the application's change is kept and only the
+        // history of it is in question.
+        //
+        // Which moment that is used to be decided by asking whether the element already
+        // had an identifier, and that is not the same question. An identity column gives
+        // one out with the INSERT, so on MySQL, SQLite and Postgres under DBAL 4 an
+        // insertion has no id in onFlush and the representer waited. A sequence hands
+        // the number out at persist() time — which is how Postgres maps a generated
+        // column under DBAL 3 — and an assigned identifier, as here, is there from the
+        // constructor. Both looked like "not an insertion", so the representer ran in
+        // onFlush, before UnitOfWork opens its transaction: raising there vetoed the
+        // application's flush and the row was never written at all.
+        //
+        // The same code and the same configuration would then either keep the user's
+        // data or throw it away depending on how the database hands out identifiers.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $ledger = new Ledger('Payables');
+        $line = new LedgerLine('jan', 'January');
+        $line->unreadable = true;
+        $ledger->add($line);
+
+        try {
+            $this->em->persist($ledger);
+            $this->em->flush();
+            self::fail('the representer failure still has to reach the caller');
+        } catch (WriteFailedException) {
+        }
+
+        // The point of the test: under "throw" the caller is told either way, but the
+        // row it asked for is in the database rather than lost to an audit declaration.
+        self::assertSame(
+            1,
+            (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM Ledger'),
+            'the flush committed: a representer that fails is a problem for the history, not for the application',
+        );
+    }
+
+    public function testAnElementThatBroughtItsOwnIdIsStillNamedByItsRepresenter(): void
+    {
+        // The other side of the change above: waiting for postFlush must not cost the
+        // name. It is read there from the element, which still has everything it had.
+        $ledger = new Ledger('Payables');
+        $ledger->add(new LedgerLine('jan', 'January'));
+
+        $this->em->persist($ledger);
+        $this->em->flush();
+
+        $documents = $this->documents();
+
+        self::assertCount(1, $documents);
+        self::assertSame(['old' => null, 'new' => 'January'], $documents[0]['changes']['lines.jan'] ?? null);
     }
 
     public function testRecordsAreSentAfterTheCommit(): void

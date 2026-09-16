@@ -12,8 +12,14 @@ use Doctrine\ORM\Mapping as ORM;
 
 /**
  * Audits a collection through a representer that throws. What it stages is application
- * code failing in postFlush: the representer of a newly inserted element runs there and
- * nowhere else, because the id it reads exists only after the commit.
+ * code failing in postFlush: the representer of an element being inserted runs there,
+ * after the commit, and a failure of it is reported through the failure policy rather
+ * than taken out on the flush.
+ *
+ * Its documents get an identity column, so here the id also happens to be missing until
+ * the INSERT. Ledger stages the same insertion with the id present from the start — a
+ * sequence or an assigned identifier — because the listener used to read that as "not an
+ * insertion" and run the representer during onFlush instead.
  */
 #[ORM\Entity]
 #[Auditable(type: 'vault')]

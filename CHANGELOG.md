@@ -9,6 +9,24 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Fixed
+- **A representer no longer decides whether the application's flush happens.** To name an element
+  a tracked collection gained, the listener runs `represent` — the application's own callable — and
+  for an element being inserted that belongs after the commit: the row is written, the identifier
+  is final, and a representer that throws is reported through `on_failure` rather than taken out on
+  the flush. Which moment it was got decided by asking whether the element already had an
+  identifier, and that is not the same question. An identity column hands one out with the INSERT,
+  so on MySQL, SQLite and Postgres under DBAL 4 an insertion had no id yet and the representer
+  waited; a sequence hands the number out at `persist()` time — which is how Postgres maps a
+  generated column under DBAL 3 — and an assigned identifier is there from the constructor. Both of
+  those read as "not an insertion", so the representer ran inside `onFlush`, before Doctrine opens
+  its transaction, and under `on_failure: throw` one that raised vetoed the flush: the row the
+  application asked for was never written. The same application with the same configuration would
+  keep the user's data or discard it depending on how its database hands out identifiers. The
+  listener now asks the unit of work whether the element is being inserted, and defers on every
+  platform. A mistake in a *declaration* is unchanged — it is still raised in `onFlush`, where the
+  flush that relied on it can still be refused
+
 ## [1.2.0] - 2026-09-06
 
 ### Added

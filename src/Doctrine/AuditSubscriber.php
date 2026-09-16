@@ -993,11 +993,27 @@ final class AuditSubscriber
 
             $key = spl_object_id($owner);
 
-            // An element being inserted has no identifier yet, so what it is called in
-            // the record is settled after the flush; the object is what is held here.
+            // An element being inserted is named after the flush, not here; the object
+            // is what is held until then.
             if ($added !== null) {
                 $held = $this->elementMembership[$key][1] ?? [];
                 $identifier = $this->identifierOf($em, $element);
+
+                // Asked of the unit of work, not of the identifier. "It has no id yet"
+                // is what an insertion looks like against an identity column — MySQL,
+                // SQLite, Postgres under DBAL 4 — where the value arrives with the
+                // INSERT. A sequence hands the id out at persist() time instead
+                // (Postgres maps a generated column that way under DBAL 3), and an
+                // assigned identifier is there from the constructor. Read as "not being
+                // inserted", those two ran the representer — the application's code —
+                // right here, inside onFlush, before UnitOfWork opens its transaction:
+                // one that threw took the application's flush down with it and the row
+                // was never written, while the very same code against an identity column
+                // committed the row and reported the audit failure afterwards, through
+                // the failure policy. The same application with the same configuration
+                // must not do opposite things to the data because of how its database
+                // hands out identifiers.
+                $inserting = $identifier === null || $em->getUnitOfWork()->isScheduledForInsert($element);
 
                 $held[$field.'#'.spl_object_id($element)] = [
                     'element' => $element,
@@ -1007,12 +1023,12 @@ final class AuditSubscriber
                     // A removal is represented now, while the element still has its
                     // values: Doctrine clears a generated identifier once the row is
                     // gone, and a representer reading one would find nothing after the
-                    // flush. An insertion is the other way round — before the INSERT it
-                    // has no identifier yet, so a representer built on one ("getId")
-                    // would store null for a row that is about to have a perfectly good
-                    // id. That one waits for postFlush.
-                    'value' => $added && $identifier === null ? null : self::represent($element, $metadata->fields[$field] ?? null),
-                    'deferred' => $added && $identifier === null,
+                    // flush. An insertion is the other way round — its representer waits
+                    // for postFlush, where the row is real, the id is final whichever way
+                    // the database gave it out, and a failure travels the policy rather
+                    // than the flush.
+                    'value' => $added && $inserting ? null : self::represent($element, $metadata->fields[$field] ?? null),
+                    'deferred' => $added && $inserting,
                     'id' => $identifier,
                 ];
                 $this->elementMembership[$key] = [$owner, $held];

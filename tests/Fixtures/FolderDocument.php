@@ -36,8 +36,9 @@ class FolderDocument
 
     /**
      * A representer that fails, for staging application code that throws in postFlush:
-     * the representer of a newly inserted element runs there and nowhere else, because
-     * the id it reads exists only once the flush has committed.
+     * the representer of an element being inserted runs there, once the row is written
+     * and its id is final, so what it costs is the history of that line and not the
+     * flush the application asked for.
      */
     public function explode(): string
     {
