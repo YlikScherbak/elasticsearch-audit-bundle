@@ -87,7 +87,12 @@ final class TestConnection
 
         try {
             foreach ($tables as $table) {
-                $quoted = $connection->quoteSingleIdentifier($table);
+                // quoteSingleIdentifier() is DBAL 4; DBAL 3 has quoteIdentifier(), which
+                // is the one deprecated in 4. Asking the object rather than the version
+                // keeps this working on both without a branch on a version number.
+                $quoted = method_exists($connection, 'quoteSingleIdentifier')
+                    ? $connection->quoteSingleIdentifier($table)
+                    : $connection->quoteIdentifier($table);
 
                 $connection->executeStatement(sprintf('DROP TABLE IF EXISTS %s%s', $quoted, $mysql ? '' : ' CASCADE'));
             }
@@ -95,6 +100,19 @@ final class TestConnection
             if ($mysql) {
                 $connection->executeStatement('SET FOREIGN_KEY_CHECKS = 1');
             }
+        }
+
+        if ($mysql) {
+            return;
+        }
+
+        // Postgres keeps identity columns as sequences of their own under DBAL 3, and
+        // those are not owned by the table, so dropping the table leaves them behind and
+        // the next CREATE SEQUENCE collides. DBAL 4 writes the columns as GENERATED AS
+        // IDENTITY and there is nothing left over — which is why this only ever showed on
+        // one square of the matrix.
+        foreach ($connection->createSchemaManager()->listSequences() as $sequence) {
+            $connection->executeStatement(sprintf('DROP SEQUENCE IF EXISTS "%s" CASCADE', $sequence->getName()));
         }
     }
 }
