@@ -9,6 +9,20 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Changed
+- **What stands behind a release, rather than anything in the package.** Most of what went out with
+  1.2.1 was this, and it carried no note because none of it reaches an installed package: nothing
+  under `src/` or `config/` changed, and `tests/`, `tools/` and `.github/` are `export-ignore`d.
+  Written down here because it is what the next release is checked by — mutation testing with a
+  threshold, run in a container so the score describes the code and not the stand; a matrix of real
+  databases (MySQL 8 and Postgres 16 against DBAL 3 and 4), which is what found the representer
+  that could veto a flush; `roave/backward-compatibility-check` against the last tag; a golden file
+  for the index mapping, so changing a mapping has to be a deliberate diff; canaries that pin what
+  Doctrine does rather than what its docblocks say; one marker pushed through every channel the
+  bundle can leak a value through; and the frame buffer checked against a second implementation
+  written from the README instead of from the buffer. `infection.json5` is `export-ignore`d now
+  too — it was the one file from that work still shipping
+
 ## [1.2.1] - 2026-09-16
 
 ### Fixed
