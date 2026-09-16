@@ -170,6 +170,58 @@ final class AuditPageTest extends TestCase
     /**
      * @return list<AuditEntry>
      */
+    public function testAPageWithNoEntriesHasNoNextCursorToOffer(): void
+    {
+        // The last page of a search that matched nothing, and the one place where
+        // "where does the next page start" has no entry to answer from at all. Reaching
+        // into an empty list for it is how a reader ends up with a fatal error on the
+        // emptiest possible result.
+        $page = new AuditPage([], total: 0, page: 1, limit: 20, fetched: 0, query: 'fingerprint');
+
+        self::assertSame(0, $page->count());
+        self::assertNull($page->nextCursor());
+        self::assertNull($page->nextCursorToken());
+    }
+
+    public function testAPageCountsTheEntriesItActuallyHolds(): void
+    {
+        // total is what the query matched; count() is what this page came back with.
+        // Reading one for the other is how a "137 results" heading ends up over three
+        // rows, so both are on the page and both are read.
+        $page = new AuditPage(self::entries(7), total: 137, page: 1, limit: 20, fetched: 7, query: 'fingerprint');
+
+        self::assertSame(7, $page->count());
+        self::assertSame(137, $page->total);
+    }
+
+    public function testAnEntryWithNothingToSortByEndsTheCursorEvenWithMoreToCome(): void
+    {
+        // A page that has a next page, whose last entry has nothing to continue from —
+        // a record written before audit records carried sort values. Handing out its
+        // empty tuple would produce a token that silently restarts from the top, which
+        // an operator reads as "the history repeats itself". Null is the honest answer:
+        // there is no cursor from here, page by number instead.
+        //
+        // The page has to be one with more to come, or nextCursor() answers null before
+        // it ever looks at the entry — which is how this went untested.
+        $entries = self::entries(20);
+        $entries[19] = new AuditEntry(
+            id: 'entry-19',
+            objectType: 'order',
+            objectId: 19,
+            event: 'update',
+            loggedAt: new \DateTimeImmutable('2026-08-30 10:00:19', new \DateTimeZone('UTC')),
+            actor: 'alice',
+            sort: [],
+        );
+
+        $page = new AuditPage($entries, total: 137, page: 1, limit: 20, fetched: 20, query: 'fingerprint');
+
+        self::assertTrue($page->hasMore(), 'the page this is about is one that has a next');
+        self::assertNull($page->nextCursor());
+        self::assertNull($page->nextCursorToken());
+    }
+
     private static function entries(int $count): array
     {
         $entries = [];

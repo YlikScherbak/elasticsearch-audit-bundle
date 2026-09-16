@@ -11,3 +11,12 @@ coverage.xml
 
 # Code packed for a review conversation (tools/pack-for-review.sh)
 /review/
+
+# The tools' own dependencies and reports. Their lock files are the exception to the
+# rule above: a library does not pin its dependants' versions, but a tool that decides
+# whether CI is green does pin its own — an Infection release with new mutators would
+# otherwise move the score, and a job would go red with nothing in the code to explain it.
+/tools/infection/vendor/
+/tools/bc-check/vendor/
+!/tools/*/composer.lock
+/var/

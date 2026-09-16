@@ -237,7 +237,9 @@ final class InMemoryGateway implements GatewayInterface
 
     public function createIndex(string $index, array $definition): void
     {
-        $this->maybeFail();
+        // By name as well as by the blanket switch: a test about what audit:index:create
+        // says when the cluster refuses has to let the existence check answer first.
+        $this->maybeFail(__FUNCTION__);
         $this->indices[$index] = $definition;
     }
 
@@ -255,6 +257,13 @@ final class InMemoryGateway implements GatewayInterface
     /** What info() answers with; a test that cares about the version floor sets it. */
     public string $version = '9.1.0';
 
+    /**
+     * The cluster's name, when it has one. A real cluster answers cluster_name and
+     * every node also answers its own name, and audit:check prefers the first — a test
+     * that wants to see which is chosen sets this.
+     */
+    public ?string $clusterName = null;
+
     public function info(): array
     {
         $this->maybeFail();
@@ -262,7 +271,13 @@ final class InMemoryGateway implements GatewayInterface
         // A version the bundle supports: audit:check refuses an older cluster, and a
         // fake that answers "0.0.0" would make every command test fail for a reason
         // that has nothing to do with what it is testing.
-        return ['name' => 'in-memory', 'version' => ['number' => $this->version]];
+        $info = ['name' => 'in-memory', 'version' => ['number' => $this->version]];
+
+        if ($this->clusterName !== null) {
+            $info = ['cluster_name' => $this->clusterName] + $info;
+        }
+
+        return $info;
     }
 
     /**

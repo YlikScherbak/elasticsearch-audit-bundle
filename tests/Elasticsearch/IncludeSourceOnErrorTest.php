@@ -35,6 +35,8 @@ final class IncludeSourceOnErrorTest extends TestCase
     private array $warnings = [];
     /** @var list<string> and what it said at info */
     private array $infos = [];
+    /** @var list<string> and at debug, where an answer it has already announced goes */
+    private array $debug = [];
     private MovableClock $clock;
 
     protected function setUp(): void
@@ -326,6 +328,72 @@ final class IncludeSourceOnErrorTest extends TestCase
         self::assertContains('Audit writes to Elasticsearch carry include_source_on_error again: the cluster reports version 8.19.0.', $this->infos);
     }
 
+    public function testAClusterThatCannotSayWhichVersionItIsCountsAsUnreadable(): void
+    {
+        // info() answers, but with nothing a version can be read out of — a proxy that
+        // rewrites the body, a cluster behind something that answers for it. Unreadable
+        // is the case that already has an answer (keep the parameter, be wrong loudly
+        // rather than quietly), and the point here is that it reaches that answer
+        // instead of handing a null to something expecting a string.
+        $gateway = $this->gateway('8.19.0', info: static fn (): ResponseInterface => self::response(200, ['version' => []]));
+
+        $gateway->index('audit_log', ['objectId' => 1], 'a');
+
+        self::assertSame(['PUT /audit_log/_doc/a'], $this->writesWithTheParameter());
+        self::assertSame([], $this->warnings, 'an unreadable version is not a cluster that refused anything');
+    }
+
+    public function testTheWarningNamesTheVersionTheParameterArrivedIn(): void
+    {
+        // The number an operator needs in order to do anything about it. Without it the
+        // warning says a parameter is missing and leaves them to search for which
+        // release would have had it.
+        $this->gateway('8.5.1')->index('audit_log', ['objectId' => 1], 'a');
+
+        self::assertCount(1, $this->warnings);
+        // The whole phrase: "8.18" on its own is also inside "18.18", which is what the
+        // sentence said when it read the same half of the version twice.
+        self::assertStringContainsString('the parameter has existed since 8.18', $this->warnings[0]);
+    }
+
+    public function testAnAnswerAlreadyAnnouncedIsStillRecorded(): void
+    {
+        // Quiet is not silent. The warning is not repeated because the answer has not
+        // changed, and somebody reading at debug — working out why writes on this
+        // cluster carry no protection — still finds it said, every time it is decided.
+        $gateway = $this->gateway('8.5.1');
+
+        $gateway->index('audit_log', ['objectId' => 1], 'a');
+        $this->clock->move(301);
+        $gateway->index('audit_log', ['objectId' => 2], 'b');
+
+        self::assertCount(1, $this->warnings);
+        self::assertCount(1, $this->debug, 'the repeat left no trace at all');
+        self::assertStringContainsString('still do not carry include_source_on_error', $this->debug[0]);
+        self::assertStringContainsString('it reports version 8.5.1', $this->debug[0], 'and says which answer it is repeating');
+    }
+
+    public function testTheWindowEndsWhereItSaysItDoes(): void
+    {
+        // Exactly the window, not a second more. The number is in the warning an
+        // operator reads ("asked again in 300s"), so it is a promise rather than an
+        // implementation detail.
+        $asked = 0;
+        $gateway = $this->gateway('8.5.1', info: static function () use (&$asked): ResponseInterface {
+            ++$asked;
+
+            return self::response(200, ['version' => ['number' => '8.5.1']]);
+        });
+
+        $gateway->index('audit_log', ['objectId' => 1], 'a');
+        self::assertSame(1, $asked);
+
+        $this->clock->move(300);
+        $gateway->index('audit_log', ['objectId' => 2], 'b');
+
+        self::assertSame(2, $asked, 'the cluster was not asked again at the moment the window closed');
+    }
+
     /**
      * @return list<string>
      */
@@ -388,12 +456,14 @@ final class IncludeSourceOnErrorTest extends TestCase
 
         $warnings = &$this->warnings;
         $infos = &$this->infos;
-        $logger = new class($warnings, $infos) extends AbstractLogger {
+        $debug = &$this->debug;
+        $logger = new class($warnings, $infos, $debug) extends AbstractLogger {
             /**
              * @param list<string> $warnings
              * @param list<string> $infos
+             * @param list<string> $debug
              */
-            public function __construct(private array &$warnings, private array &$infos)
+            public function __construct(private array &$warnings, private array &$infos, private array &$debug)
             {
             }
 
@@ -416,6 +486,10 @@ final class IncludeSourceOnErrorTest extends TestCase
 
                 if ($level === LogLevel::INFO) {
                     $this->infos[] = $line;
+                }
+
+                if ($level === LogLevel::DEBUG) {
+                    $this->debug[] = $line;
                 }
             }
         };

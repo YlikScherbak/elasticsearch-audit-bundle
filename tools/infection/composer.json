@@ -1,0 +1,11 @@
+{
+    "description": "Infection, kept out of the bundle's own require-dev on purpose: it needs PHP 8.3 and the bundle supports 8.1, so a job that never runs it would have had to resolve it anyway.",
+    "require": {
+        "infection/infection": "^0.35"
+    },
+    "config": {
+        "allow-plugins": {
+            "infection/extension-installer": true
+        }
+    }
+}

@@ -12,6 +12,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
+use Borsche\ElasticsearchAuditBundle\Tests\TestConnection;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -43,7 +44,7 @@ abstract class DoctrineTestCase extends TestCase
 
     protected function setUp(): void
     {
-        if (!\extension_loaded('pdo_sqlite')) {
+        if (TestConnection::isSqlite() && !\extension_loaded('pdo_sqlite')) {
             self::markTestSkipped('pdo_sqlite is needed for the Doctrine tests.');
         }
 
@@ -59,7 +60,8 @@ abstract class DoctrineTestCase extends TestCase
             $config->enableNativeLazyObjects(true);
         }
 
-        $connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config);
+        $connection = DriverManager::getConnection(TestConnection::params(), $config);
+        TestConnection::reset($connection);
         $this->ormConfig = $config;
         $this->connection = $connection;
 

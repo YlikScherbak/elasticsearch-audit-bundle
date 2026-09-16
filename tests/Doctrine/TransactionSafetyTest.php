@@ -572,7 +572,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
         } catch (\RuntimeException) {
         }
 
-        self::assertSame('committed', $this->em->getConnection()->fetchOne('SELECT title FROM article WHERE id = ?', [$article->id]), 'the row is in the database');
+        self::assertSame('committed', $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), 'the row is in the database');
 
         // Anything at all afterwards: the record must not be thrown away by it.
         $this->em->persist(new Article('the next flush'));

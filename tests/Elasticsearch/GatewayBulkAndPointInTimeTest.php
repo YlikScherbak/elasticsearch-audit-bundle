@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Elasticsearch;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ElasticsearchGateway;
 use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\InvalidQueryException;
+use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Elastic\Elasticsearch\ClientBuilder;
 use GuzzleHttp\Psr7\Response;
@@ -126,6 +127,147 @@ final class GatewayBulkAndPointInTimeTest extends TestCase
         }
 
         self::assertSame(['HEAD /audit_log', 'HEAD /audit_auth'], $requests, 'one lookup per distinct index, and no _bulk at all');
+    }
+
+    public function testAnIndexThatAnsweredNotFoundPerItemIsCheckedAgain(): void
+    {
+        // The cache exists so a worker does not ask HEAD before every write, and it has
+        // to let go the moment the cluster says the index is gone — rotated away, deleted
+        // by a retention job. Otherwise every later write in that process goes straight
+        // to a _bulk against an index that is not there, and Elasticsearch creates it
+        // with a guessed mapping, which is the one thing the check exists to prevent.
+        $requests = [];
+        $gateway = $this->gateway(static function (RequestInterface $request) use (&$requests): ResponseInterface {
+            $requests[] = $request->getMethod().' '.$request->getUri()->getPath();
+
+            if (str_contains($request->getUri()->getPath(), '_bulk')) {
+                return self::response(200, ['errors' => true, 'items' => [
+                    ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 404, 'error' => ['type' => 'index_not_found_exception']]],
+                ]]);
+            }
+
+            return self::response(200, ['_id' => 'a', 'result' => 'created']);
+        });
+
+        $gateway->bulk([['index' => 'audit_log', 'document' => ['objectId' => 1], 'id' => 'a']]);
+        $gateway->index('audit_log', ['objectId' => 2], 'b');
+
+        self::assertSame(
+            ['HEAD /audit_log', 'POST /_bulk', 'HEAD /audit_log', 'PUT /audit_log/_doc/b'],
+            $requests,
+            'the index was still remembered as existing after the cluster said it was not',
+        );
+    }
+
+    public function testDocumentIdsAreMatchedAsTheClusterWritesThemBack(): void
+    {
+        // An audit record's id is a string by the time it is sent, but the caller hands
+        // over whatever it has — and the answer is checked against the ids position by
+        // position, strictly. An int that was never turned into a string matches nothing
+        // the cluster says, so a perfectly good batch reads as an answer about other
+        // documents and is sent again, forever.
+        $gateway = $this->gateway(static function (RequestInterface $request): ResponseInterface {
+            if (!str_contains($request->getUri()->getPath(), '_bulk')) {
+                return self::response(200, []);
+            }
+
+            return self::response(200, ['errors' => false, 'items' => [
+                ['index' => ['_index' => 'audit_log', '_id' => '7', 'status' => 201]],
+                ['index' => ['_index' => 'audit_log', '_id' => '8', 'status' => 201]],
+            ]]);
+        });
+
+        $result = $gateway->bulk([
+            ['index' => 'audit_log', 'document' => ['objectId' => 1], 'id' => 7],
+            ['index' => 'audit_log', 'document' => ['objectId' => 2], 'id' => 8],
+        ]);
+
+        self::assertFalse($result->hasFailures());
+        self::assertSame(2, $result->succeeded());
+    }
+
+    public function testWhatTheStatusOfAnExistenceCheckMeans(): void
+    {
+        // HEAD is the one request whose exception the client swallows, so this is the
+        // only place the bundle classifies a status itself — and the boundaries are the
+        // whole of it. 404 is the answer the method exists to give; 2xx is the index;
+        // everything else is somebody's problem to hear about rather than "no index".
+        self::assertTrue($this->answering(200)->indexExists('audit_log'));
+        self::assertFalse($this->answering(404)->indexExists('audit_log'));
+
+        // Just outside the range that means "yes" on either side.
+        $this->expectsFrom(299, null);
+        $this->expectsFrom(199, RequestRejectedException::class);
+        $this->expectsFrom(300, RequestRejectedException::class);
+
+        // A refusal that is worth asking again, and one that is not. 429 is the cluster
+        // asking for a moment, 5xx is the cluster being unwell, and a 403 from a role
+        // without view_index_metadata is neither — it will answer the same way forever.
+        $this->expectsFrom(429, TransportUnavailableException::class);
+        $this->expectsFrom(500, TransportUnavailableException::class);
+        $this->expectsFrom(499, RequestRejectedException::class);
+        $this->expectsFrom(403, RequestRejectedException::class);
+    }
+
+    public function testAnExistenceCheckRefusedWithoutAReasonStillSaysWhichIndex(): void
+    {
+        // The cluster is not obliged to write a sentence, and json_decode is not obliged
+        // to find one. What is left then is the status and the index, and those have to
+        // survive: an operator reading "HTTP 403" with no index name cannot act on it.
+        try {
+            $this->answering(403, ['error' => ['root_cause' => []]])->indexExists('audit_log');
+            self::fail('a refused existence check should have raised');
+        } catch (RequestRejectedException $e) {
+            self::assertStringContainsString('403', $e->getMessage());
+            self::assertStringContainsString('audit_log', $e->getMessage());
+            self::assertStringContainsString('without a reason anyone can read', $e->getMessage());
+        }
+    }
+
+    public function testAReasonIsReadFromWhicheverPlaceTheClusterPutIt(): void
+    {
+        // Two shapes for the same thing: root_cause is what a real cluster sends, and a
+        // bare error.reason is what several of its own error paths send instead. Reading
+        // only one of them means half the refusals arrive as "no reason anyone can read".
+        try {
+            $this->answering(400, ['error' => ['root_cause' => [['reason' => 'from the root cause']], 'reason' => 'from the error']])->indexExists('audit_log');
+            self::fail('expected a refusal');
+        } catch (RequestRejectedException $e) {
+            self::assertStringContainsString('from the root cause', $e->getMessage(), 'the root cause is the more specific of the two');
+        }
+
+        try {
+            $this->answering(400, ['error' => ['reason' => 'from the error']])->indexExists('audit_log');
+            self::fail('expected a refusal');
+        } catch (RequestRejectedException $e) {
+            self::assertStringContainsString('from the error', $e->getMessage());
+        }
+    }
+
+    /**
+     * @param class-string<\Throwable>|null $expected
+     */
+    private function expectsFrom(int $status, ?string $expected): void
+    {
+        try {
+            $answered = $this->answering($status)->indexExists('audit_log');
+
+            if ($expected !== null) {
+                self::fail(sprintf('HTTP %d should have raised %s', $status, $expected));
+            }
+
+            self::assertTrue($answered, sprintf('HTTP %d is inside the range that means the index is there', $status));
+        } catch (\Throwable $e) {
+            self::assertInstanceOf($expected ?? \stdClass::class, $e, sprintf('HTTP %d was classified as %s', $status, $e::class));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    private function answering(int $status, array $body = []): ElasticsearchGateway
+    {
+        return $this->gateway(static fn (): ResponseInterface => self::response($status, $body));
     }
 
     public function testAnEmptyBatchIsNoRequest(): void

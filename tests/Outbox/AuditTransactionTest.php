@@ -36,6 +36,7 @@ use Borsche\ElasticsearchAuditBundle\Transport\Outbox\ImmediateTransportGuard;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
+use Borsche\ElasticsearchAuditBundle\Tests\TestConnection;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
@@ -72,7 +73,7 @@ final class AuditTransactionTest extends TestCase
 
     protected function setUp(): void
     {
-        if (!\extension_loaded('pdo_sqlite')) {
+        if (TestConnection::isSqlite() && !\extension_loaded('pdo_sqlite')) {
             self::markTestSkipped('pdo_sqlite is needed for the outbox tests.');
         }
 
@@ -86,7 +87,8 @@ final class AuditTransactionTest extends TestCase
             $config->enableNativeLazyObjects(true);
         }
 
-        $this->connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config);
+        $this->connection = DriverManager::getConnection(TestConnection::params(), $config);
+        TestConnection::reset($this->connection);
         $this->em = new EntityManager($this->connection, $config);
         (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
 
@@ -623,8 +625,7 @@ final class AuditTransactionTest extends TestCase
         self::assertSame(2, $sender->sent, 'two batches were really written before the third was refused');
         self::assertSame(0, $this->shipments(), 'and the change went back');
 
-        // The queue table is gone, so counting rows would say nothing; what matters is
-        // that the transaction did not commit, which the business table shows.
+        self::assertSame(0, $this->queued(), 'the rows already in the queue went back with it');
         self::assertFalse($this->connection->isTransactionActive());
     }
 
@@ -903,7 +904,12 @@ final class BreaksTheTableAfter implements SenderInterface
     public function send(Envelope $envelope): Envelope
     {
         if ($this->sent === $this->howMany) {
-            $this->connection->executeStatement('DROP TABLE audit_outbox');
+            // A statement the driver refuses, and deliberately not DDL: DROP TABLE would
+            // do it on SQLite and Postgres, and on MySQL it commits everything before it
+            // implicitly — the transaction would be over before the failure happened,
+            // and the test would be asserting the platform rather than the bundle. A
+            // NOT NULL violation is refused by all three with the transaction intact.
+            $this->connection->executeStatement('INSERT INTO audit_outbox (body, headers, queue_name, created_at, available_at) VALUES (NULL, NULL, NULL, NULL, NULL)');
         }
 
         // Counted after the fact, so the number is what reached the database rather than

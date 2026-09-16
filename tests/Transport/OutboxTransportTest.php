@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecords;
 use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Doctrine\DBAL\Connection;
+use Borsche\ElasticsearchAuditBundle\Tests\TestConnection;
 use Doctrine\DBAL\DriverManager;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\Connection as QueueConnection;
@@ -31,7 +32,8 @@ final class OutboxTransportTest extends TestCase
             self::markTestSkipped('pdo_sqlite is needed for the outbox tests.');
         }
 
-        $this->connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true]);
+        $this->connection = DriverManager::getConnection(TestConnection::params());
+        TestConnection::reset($this->connection);
     }
 
     public function testARecordQueuedInsideATransactionGoesWithIt(): void

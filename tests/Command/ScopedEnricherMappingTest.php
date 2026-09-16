@@ -148,6 +148,91 @@ final class ScopedEnricherMappingTest extends TestCase
         self::assertArrayNotHasKey('orderCountry', $this->gateway->documents['audit_auth_log'][0]);
     }
 
+    public function testAnIndexThatAlreadyExistsDoesNotStopTheOnesAfterItFromBeingCreated(): void
+    {
+        // The loop skips what is already there. Leaving the loop instead of skipping one
+        // turn means a deployment that added a routed index to an existing installation
+        // creates nothing at all — and the first write into the new index is what
+        // discovers it, by having Elasticsearch invent a mapping.
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CreateIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), []));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+        self::assertArrayHasKey('audit_auth_log', $this->gateway->indices, 'the index after the existing one was never created');
+        self::assertArrayHasKey('audit_stock_log', $this->gateway->indices);
+    }
+
+    public function testAMissingFieldDoesNotHideTheFieldsAfterIt(): void
+    {
+        // The comparison walks every expected field and collects what is wrong with each.
+        // Stopping at the first missing one turns "three fields are missing" into one,
+        // and audit:index:sync then adds one field per run for as many runs as it takes.
+        $this->createEveryIndex();
+        unset(
+            $this->gateway->indices['audit_log']['mappings']['properties']['objectId'],
+            $this->gateway->indices['audit_log']['mappings']['properties']['event'],
+        );
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+
+        self::assertStringContainsString('objectId', $display);
+        self::assertStringContainsString('event', $display, 'only the first missing field was named');
+    }
+
+    public function testSyncAddsEveryMissingFieldInOnePass(): void
+    {
+        // The same list, one step later: the fields are folded into a single partial
+        // mapping and sent once. Folding only the last one leaves the rest for a second
+        // run nobody knows to make.
+        $this->createEveryIndex();
+        unset(
+            $this->gateway->indices['audit_log']['mappings']['properties']['objectId'],
+            $this->gateway->indices['audit_log']['mappings']['properties']['event'],
+        );
+
+        $tester = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), []));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+
+        $properties = $this->gateway->indices['audit_log']['mappings']['properties'];
+
+        self::assertArrayHasKey('objectId', $properties);
+        self::assertArrayHasKey('event', $properties, 'one of the missing fields was not added');
+    }
+
+    public function testSyncSaysWhichIndexIsMissingRatherThanTryingToMapIt(): void
+    {
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), []));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertSame(1, substr_count($tester->getDisplay(), 'audit_auth_log'), 'the missing index was reported twice');
+    }
+
+    public function testCreateSaysWhatTheClusterSaidAndSaysItOnce(): void
+    {
+        // The command an operator runs first, so its error is the first thing they read
+        // about this bundle. A cause chain restating itself turns one refusal into three
+        // lines that look like three problems.
+        $this->gateway->failWith = new \RuntimeException('no permission to create indices', 0, new \RuntimeException('no permission to create indices'));
+
+        $tester = new CommandTester(new CreateIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), []));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+
+        // Whitespace normalised first: the console wraps to whatever width it is given,
+        // and a test that counts a phrase would otherwise be asserting the terminal.
+        $display = (string) preg_replace('/\s+/', ' ', $tester->getDisplay());
+
+        self::assertStringContainsString('no permission to create indices', $display);
+        self::assertSame(3, substr_count($display, 'no permission to create indices'), 'once per index it could not reach, and no more');
+    }
+
     /**
      * The world the check is asked about, built by hand rather than by the command
      * that is under test here too. Built with it, these tests could not fail: a create

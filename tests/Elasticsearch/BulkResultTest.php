@@ -23,6 +23,88 @@ final class BulkResultTest extends TestCase
         self::assertSame(2, $result->attempted);
     }
 
+    public function testTwoHundredIsAWrittenDocumentAndThreeHundredIsNot(): void
+    {
+        // The boundaries of "written", from both sides. 201 is what a created document
+        // answers and is all these tests used to send, so `>= 200` could have been
+        // `> 200` and nothing would have noticed — while a bulk that updates an existing
+        // document answers 200, and every one of those would have been reported as a
+        // refusal, retried, and eventually parked in the failure transport.
+        $result = BulkResult::fromResponse(['errors' => false, 'items' => [
+            ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 200]],
+            ['index' => ['_index' => 'audit_log', '_id' => 'b', 'status' => 299]],
+        ]], 2);
+
+        self::assertFalse($result->hasFailures(), 'a document the cluster overwrote was read as refused');
+        self::assertSame(2, $result->succeeded());
+
+        // And the other end: 300 is not a success, however close it looks.
+        $refused = BulkResult::fromResponse(['errors' => true, 'items' => [
+            ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 300, 'error' => ['type' => 'illegal_argument_exception', 'reason' => 'whatever']]],
+        ]], 1);
+
+        self::assertTrue($refused->failed(0));
+    }
+
+    public function testAStatusThatArrivesAsAStringIsStillANumber(): void
+    {
+        // JSON says what it says, and a cluster (or a proxy in front of one) is free to
+        // answer "201" rather than 201. The cast is what makes the comparison below mean
+        // anything; without it the same document is read one way or the other depending
+        // on how somebody serialised a number.
+        $result = BulkResult::fromResponse(['errors' => false, 'items' => [
+            ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => '201']],
+        ]], 1);
+
+        self::assertFalse($result->hasFailures());
+        self::assertSame(1, $result->succeeded());
+
+        // And it stays a number afterwards, which is not cosmetic: the gateway asks
+        // `$failure['status'] === 404` to decide whether to forget a cached index, and
+        // that comparison is strict. A status left as a string would leave a
+        // long-lived worker skipping the existence check until somebody restarted it.
+        $refused = BulkResult::fromResponse(['errors' => true, 'items' => [
+            ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => '404', 'error' => ['type' => 'index_not_found_exception']]],
+        ]], 1);
+
+        self::assertSame(404, $refused->failures[0]['status']);
+    }
+
+    public function testItemsAreReadByPositionEvenWhenTheAnswerIsKeyed(): void
+    {
+        // Position is what everything after this is keyed by, and "position" means the
+        // order of the items rather than whatever keys the decoder happened to produce.
+        // A response decoded into a map — a proxy that re-serialises, a test fixture
+        // written by hand — would otherwise be read at keys that do not exist, and every
+        // document would look like a failure nobody can name.
+        $result = BulkResult::fromResponse(['errors' => true, 'items' => [
+            4 => ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 201]],
+            9 => ['index' => ['_index' => 'audit_log', '_id' => 'b', 'status' => 400, 'error' => ['type' => 'mapper_parsing_exception']]],
+        ]], 2, ['a', 'b']);
+
+        self::assertFalse($result->failed(0));
+        self::assertTrue($result->failed(1), 'the second item was not read as the second document');
+    }
+
+    public function testAnAnswerPastTheEndOfWhatWasSentSaysSoWithoutInventingAnId(): void
+    {
+        // More items than ids is the same untrustworthy answer as a mismatched one, and
+        // the message has to say what was sent at that position — which was nothing.
+        try {
+            BulkResult::fromResponse(['errors' => false, 'items' => [
+                ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 201]],
+                ['index' => ['_index' => 'audit_log', '_id' => 'b', 'status' => 201]],
+            ]], 2, ['a']);
+
+            self::fail('an answer about a document that was not sent should have been refused');
+        } catch (TransportUnavailableException $e) {
+            self::assertSame(
+                'Elasticsearch answered position 1 of a bulk request with a result for "b", where "" was sent — the answer cannot be matched to the documents it is about.',
+                $e->getMessage(),
+            );
+        }
+    }
+
     public function testAnAnswerAboutAnotherDocumentIsNotReadByPosition(): void
     {
         // Everything after this point is keyed by position: which record the failure
@@ -32,7 +114,9 @@ final class BulkResultTest extends TestCase
         // be matched to what was sent means the batch goes again, not that record #1
         // is told about record #2's refusal.
         $this->expectException(TransportUnavailableException::class);
-        $this->expectExceptionMessage('cannot be matched');
+        // The whole sentence, because both halves of it are read by a person deciding
+        // what happened: which document the answer was about, and which one was sent.
+        $this->expectExceptionMessage('Elasticsearch answered position 1 of a bulk request with a result for "c", where "b" was sent — the answer cannot be matched to the documents it is about.');
 
         BulkResult::fromResponse(['errors' => true, 'items' => [
             ['index' => ['_index' => 'audit_log', '_id' => 'a', 'status' => 201]],

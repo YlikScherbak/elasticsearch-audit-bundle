@@ -457,8 +457,8 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
 
         self::assertSame(['old' => 'alice', 'new' => 'bob'], $changes['author'], 'the related object the row points at');
         self::assertSame(['old' => 'draft', 'new' => 'draft'], $changes['status'], 'and the context the row holds');
-        self::assertSame((string) $next->id, (string) $this->em->getConnection()->fetchOne('SELECT author_id FROM article WHERE id = ?', [$article->id]));
-        self::assertSame('draft', $this->em->getConnection()->fetchOne('SELECT status FROM article WHERE id = ?', [$article->id]));
+        self::assertSame((string) $next->id, (string) $this->em->getConnection()->fetchOne('SELECT author_id FROM Article WHERE id = ?', [$article->id]));
+        self::assertSame('draft', $this->em->getConnection()->fetchOne('SELECT status FROM Article WHERE id = ?', [$article->id]));
     }
 
     private function flushFromPostPersist(): void

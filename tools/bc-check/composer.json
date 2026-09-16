@@ -1,0 +1,6 @@
+{
+    "description": "Roave's backward-compatibility check, kept out of the bundle's own require-dev for the same reason Infection is: it needs a newer PHP than the bundle supports, and every job in the test matrix would otherwise have to resolve a tool none of them run.",
+    "require": {
+        "roave/backward-compatibility-check": "^8.0"
+    }
+}

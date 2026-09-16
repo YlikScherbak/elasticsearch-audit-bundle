@@ -170,6 +170,172 @@ jobs:
       - name: Enforce the coverage floor
         run: php tools/coverage-floor.php coverage.xml 94
 
+  # The canaries, against the ORM as it is being written rather than as it was
+  # released. Allowed to fail: a break here is news about a future Doctrine, not a
+  # reason to stop a release of this bundle - the point is to hear about it while
+  # somebody can still say so upstream, rather than on the day an application upgrades.
+  # The three transactional suites against servers rather than SQLite, on both DBAL
+  # lines. This is the only place where the differences the outbox is written around
+  # are visible at all: DDL commits the transaction it stands in on MySQL and not on
+  # Postgres, the queue's insert goes through RETURNING on Postgres and lastInsertId()
+  # elsewhere, and a nested rollBack() takes a savepoint in DBAL 4 where DBAL 3 can
+  # mark the outer transaction rollback-only instead.
+  databases:
+    name: "Transactions (${{ matrix.database }}, DBAL ${{ matrix.dbal }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [mysql, postgres]
+        dbal: ['^3.8', '^4.0']
+
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: audit
+          MYSQL_DATABASE: audit
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -paudit"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: audit
+          POSTGRES_DB: audit
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd=pg_isready
+          --health-interval=5s --health-timeout=5s --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, pdo_pgsql, pdo_sqlite
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies with DBAL ${{ matrix.dbal }}
+        run: |
+          composer require --dev --no-update "doctrine/dbal:${{ matrix.dbal }}"
+          composer update --prefer-dist --no-progress --no-interaction
+
+      - name: Prove the pin held
+        run: composer show doctrine/dbal | head -3
+
+      # Only the suites this matrix is about. The rest of the tests say the same thing
+      # on every database and would only make the job slower to read.
+      - name: Run the transactional suites
+        env:
+          AUDIT_DB_URL: ${{ matrix.database == 'mysql' && 'mysql://root:audit@127.0.0.1:3306/audit?serverVersion=8.0' || 'postgresql://postgres:audit@127.0.0.1:5432/audit?serverVersion=16' }}
+        run: |
+          vendor/bin/phpunit             tests/Outbox             tests/Transport/OutboxTransportTest.php             tests/Doctrine/TransactionSafetyTest.php             tests/Doctrine/UnitOfWorkTimingTest.php
+
+  doctrine-tomorrow:
+    name: Doctrine canaries (dev)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies with the ORM from its main branch
+        run: |
+          composer config minimum-stability dev
+          composer config prefer-stable true
+          # The branch the next 3.x is being cut from. Named rather than starred so a
+          # break says which branch it came from; bump it when Doctrine opens the next.
+          composer require --dev --no-update "doctrine/orm:3.8.x-dev"
+          composer update --prefer-dist --no-progress --no-interaction
+
+      - name: Which ORM is this
+        run: composer show doctrine/orm | head -3
+
+      # The canaries first and on their own, because they are the ones whose failure
+      # says something specific; the rest of the Doctrine tests follow, because a
+      # listener that still passes against a changed ORM is worth knowing about too.
+      - name: Run the canaries
+        run: vendor/bin/phpunit tests/Doctrine/DoctrineCanariesTest.php
+
+      - name: Run the rest of the Doctrine tests
+        run: vendor/bin/phpunit tests/Doctrine
+
+  # What this commit would break for somebody already depending on the bundle. The
+  # answer is meant to be "nothing" inside a major line, and where it is not, the
+  # breakage should be a sentence in the CHANGELOG rather than a surprise on upgrade.
+  backward-compatibility:
+    name: Backward compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The checker compares two git references, so it needs the history and the
+          # tags - a shallow clone has neither, and it would compare against nothing.
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: intl, sodium
+          coverage: none
+          tools: composer:v2
+
+      - name: Install the checker
+        run: composer install --working-dir=tools/bc-check --prefer-dist --no-progress --no-interaction
+
+      # --install-development-dependencies because symfony/messenger is optional for
+      # this bundle: without it the checker cannot resolve the interface
+      # FrameResetMiddleware implements, and answers with seven "skipped" lines and a
+      # red exit code that say nothing about compatibility at all.
+      - name: Compare against the last tag
+        run: |
+          php tools/bc-check/vendor/bin/roave-backward-compatibility-check             --from="$(git describe --tags --abbrev=0)"             --install-development-dependencies
+
+  mutation:
+    name: Mutation testing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite
+          coverage: pcov
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      # Infection is not in require-dev: it wants PHP 8.3 and this bundle supports 8.1,
+      # so every job in the test matrix would have had to resolve a tool none of them
+      # run. Locally the same install happens inside a container - see
+      # tools/infection/Dockerfile, which exists because a workstation need not have a
+      # coverage driver and this job's pcov is the one that must agree with it.
+      - name: Install Infection
+        run: composer install --working-dir=tools/infection --prefer-dist --no-progress --no-interaction
+
+      # The floor is in infection.json5 and is raised as escaped mutants are worked
+      # through. It is a floor and not a target: a mutant that survives is a test that
+      # would not have noticed the code being wrong, and some of them are equivalent
+      # mutants that no test can kill - those are listed in the config, with the reason.
+      - name: Enforce the mutation score floor
+        run: php -d memory_limit=-1 tools/infection/vendor/bin/infection --threads=max --no-progress --no-interaction
+
   static-analysis:
     name: Static analysis
     runs-on: ubuntu-latest

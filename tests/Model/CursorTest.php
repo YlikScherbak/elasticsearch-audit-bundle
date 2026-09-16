@@ -187,4 +187,129 @@ final class CursorTest extends TestCase
         // And what decode() does accept still round-trips.
         self::assertSame(['2026-08-30 10:00:00', 7, 'audit_log'], Cursor::decode(Cursor::encode(['2026-08-30 10:00:00', 7, 'audit_log'], 'fp')));
     }
+    public function testATokenSurvivesTheWhitespaceAUrlOrAnEmailAddsToIt(): void
+    {
+        // Tokens travel by copy-paste, through mail clients that wrap lines and forms
+        // that keep the newline. Refusing one for a trailing space would read to the
+        // caller as "your page link expired", which is the one message that sends people
+        // back to page one for no reason.
+        $token = Cursor::encode(['2026-08-30 10:00:00', 'entry-19'], 'fingerprint');
+
+        self::assertSame(['2026-08-30 10:00:00', 'entry-19'], Cursor::decode("  \n".$token."\t "));
+        self::assertSame('fingerprint', Cursor::queryOf(' '.$token.' '));
+    }
+
+    public function testATokenOfExactlyTheGreatestAllowedLengthIsStillRead(): void
+    {
+        // The limit stops somebody feeding megabytes into base64_decode; it is not a
+        // boundary the longest legitimate cursor should fall on. A fingerprint grows
+        // with the query behind it — a visibility extension adds to it — so a page link
+        // that works at 4095 characters and dies at 4096 is a page link that dies when
+        // somebody adds a filter.
+        $payload = ['v' => 2, 'q' => 'f', 's' => ['2026-08-30 10:00:00', 'entry-19']];
+
+        // 3072 bytes of JSON is exactly 4096 characters of base64 with no padding.
+        while (\strlen((string) json_encode($payload)) < 3072) {
+            $payload['q'] .= 'x';
+        }
+
+        $token = self::tokenOf($payload);
+
+        self::assertSame(4096, \strlen($token), 'the token was not built to the length this is about');
+        self::assertSame(['2026-08-30 10:00:00', 'entry-19'], Cursor::decode($token));
+
+        // One character more is not read at all.
+        $this->expectException(InvalidQueryException::class);
+
+        Cursor::decode($token.'A');
+    }
+
+    public function testATokenWhoseFingerprintIsAnEmptyStringNamesNoQueryAtAll(): void
+    {
+        // An empty fingerprint is not a fingerprint. Letting it through would skip the
+        // reader's check silently, which is the exact mistake the envelope exists to
+        // prevent — a cursor answering from the middle of a different result set.
+        $token = self::tokenOf(['v' => 2, 'q' => '', 's' => ['2026-08-30 10:00:00', 'entry-19']]);
+
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('does not say which query');
+
+        Cursor::decode($token);
+    }
+
+    /**
+     * @return iterable<string, array{mixed}>
+     */
+    public static function unusableSortTuples(): iterable
+    {
+        yield 'not a list at all' => ['just a string'];
+        yield 'nothing to continue from' => [[]];
+        yield 'a map rather than a list' => [['loggedAt' => '2026-08-30 10:00:00', 'id' => 'entry-19']];
+    }
+
+    #[DataProvider('unusableSortTuples')]
+    public function testTheSortTupleHasToBeAListWithSomethingInIt(mixed $sort): void
+    {
+        $this->expectException(InvalidQueryException::class);
+
+        Cursor::decode(self::tokenOf(['v' => 2, 'q' => 'fingerprint', 's' => $sort]));
+    }
+
+    public function testReadingTheQueryOutOfSomethingThatIsNotAnEnvelopeIsNotAnError(): void
+    {
+        // queryOf() is the lenient half of the pair on purpose: it answers "no
+        // fingerprint" and leaves the refusing to decode(), which says why. A token that
+        // decodes into a scalar has no fingerprint, and reaching into it for one would
+        // be a fatal error in the middle of building a query.
+        self::assertNull(Cursor::queryOf(self::tokenOf('a bare string')));
+        self::assertNull(Cursor::queryOf(self::tokenOf(42)));
+        self::assertNull(Cursor::queryOf(self::tokenOf(['v' => 2, 's' => []])), 'an envelope with no fingerprint in it');
+        self::assertNull(Cursor::queryOf('not base64 at all !!!'));
+    }
+
+    /**
+     * @return iterable<string, array{mixed, string}>
+     */
+    public static function olderEnvelopes(): iterable
+    {
+        yield 'a number' => [0, '(0)'];
+        yield 'a string' => ['beta', '(beta)'];
+        yield 'something with no reading at all' => [['nested'], '(array)'];
+    }
+
+    #[DataProvider('olderEnvelopes')]
+    public function testAnOlderEnvelopeSaysWhichVersionItCameFrom(mixed $version, string $named): void
+    {
+        // The version goes in the message because the two directions need different
+        // answers from whoever reads it: a newer token means this reader is behind, an
+        // older one means the token predates the fingerprint. Neither is the caller's
+        // fault, and a message that says only "invalid" sends them looking at their own
+        // code.
+        try {
+            Cursor::decode(self::tokenOf(['v' => $version, 'q' => 'fingerprint', 's' => ['a']]));
+            self::fail('expected a refusal');
+        } catch (InvalidQueryException $e) {
+            self::assertStringContainsString('older version', $e->getMessage());
+            self::assertStringContainsString($named, $e->getMessage());
+        }
+    }
+
+    public function testANewerEnvelopeSaysSoTheOtherWayRound(): void
+    {
+        try {
+            Cursor::decode(self::tokenOf(['v' => 99, 'q' => 'fingerprint', 's' => ['a']]));
+            self::fail('expected a refusal');
+        } catch (InvalidQueryException $e) {
+            self::assertStringContainsString('newer version (99)', $e->getMessage());
+        }
+    }
+
+    /**
+     * A token built by hand, to say things a real encode() never would.
+     */
+    private static function tokenOf(mixed $payload): string
+    {
+        return rtrim(strtr(base64_encode((string) json_encode($payload)), '+/', '-_'), '=');
+    }
+
 }
