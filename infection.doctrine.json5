@@ -21,12 +21,77 @@
     },
     mutators: {
         "@default": true,
+
+        // Equivalent mutants, and only the ones that are equivalent *by construction* —
+        // where there is nothing to tell apart rather than no test that tells it apart.
+        // The difference matters: an ignored mutant is never generated, so a wrong claim
+        // here has nothing left to contradict it, which is exactly how two wrong claims
+        // survived in the other config until the ignores there were narrowed to lines.
+        //
+        // Everything else that escapes stays escaping. The list of those lives in the
+        // commits that work through them, not here.
+
+        // ChangeSetBuilder::representAll takes a list<object> — the type is in the
+        // signature and every call site is checked against it — and array_map over a
+        // list answers with a list. array_values() cannot change one.
+        UnwrapArrayValues: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::representAll::220", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::250"],
+        },
+
+        // collectionChange builds the list a collection is recorded as, and it is
+        // protected twice: array_values() around the map, and iterator_to_array() told
+        // not to keep keys. Either one alone makes the other redundant, so a mutation of
+        // either is invisible — Infection changes one thing at a time. Taking out both
+        // does produce the hole a removal from the middle leaves in the keys, and
+        // WhatAnElementChangeIsMadeOfTest fails on it, which is the property being
+        // pinned. Two mutants, one fact.
+        FalseValue: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::252"],
+        },
+
+        // The mapping of a to-many is an array on ORM 2 and an object on ORM 3, and the
+        // ternary reads both. This run installs one of them, so the other arm is not
+        // reachable here — it is reachable in the job that runs the ORM this one does
+        // not, which is why the arm stays.
+        Ternary: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::315"],
+        },
+
+        // The manager of the flush on the stack, read through a weak reference that is
+        // written in the same breath as the stack itself. The branch asking for it is
+        // reached only when the stack is not empty, and the stack is only ever appended
+        // to beside that reference — so it is never null where the question is asked.
+        NullSafeMethodCall: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::550"],
+        },
+
+        // Publishing a flush that committed late runs application code, so it is wrapped
+        // in a catch for Throwable that reports and swallows. Nothing can leave the try
+        // by any other road, which makes "in a finally" and "on the line after" the same
+        // thing. The finally stays because the day something is added that can escape,
+        // the flush still has to be forgotten.
+        UnwrapFinally: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::565"],
+        },
+
+        // asTheEntityNowStands walks a Doctrine change set, whose entries are always a
+        // two-element array of the old and new sides. Both of the first two guards are
+        // therefore constant: is_array() is always true and array_key_exists(1, ...)
+        // with it, so neither the index nor the way the three are joined can change the
+        // answer. They are there because the method is handed a snapshot the listener
+        // kept, and a snapshot is only as well-formed as whoever filled it.
+        DecrementInteger: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::1307"],
+        },
+        LogicalOr: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::1307"],
+        },
     },
     // Its own floor, and well below the other run's, because this listener is the code
     // the bundle calls its price of complexity: one class answering for every shape a
     // Doctrine flush can take.
     //
-    // 92 against 94.04 measured, which is the same arrangement the other file argues
+    // 93 against 95.63 measured, which is the same arrangement the other file argues
     // for: a floor set at the best observed number turns ordinary drift into a job that
     // fails for no reason, and a check nobody trusts is worse than none.
     //
@@ -34,8 +99,10 @@
     // when this was first measured honestly; the flush bookkeeping, the always-recorded
     // context, the walk over an element's owners, what a change inside an element is
     // built from and the wording of every refused declaration have been worked through
-    // since, and 40 are left. Each commit that takes a group names what remains.
-    minCoveredMsi: 92,
+    // since, and 29 are left — nine of the escaped mutants turned out to be equivalent
+    // by construction and are listed above with the reason. Each commit that takes a
+    // group names what remains.
+    minCoveredMsi: 93,
     // Six times the other run's. A test here is a schema and an EntityManager before it
     // is an assertion, so the work per mutant is a second or two rather than well under
     // one, and at 10 seconds the runner was calling eighty-eight of them timeouts — each
