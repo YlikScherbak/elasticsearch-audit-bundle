@@ -9,6 +9,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Fixed
+- **What the README says `max_held` does now matches what it does.** The prose said the valve
+  opens when `max_held` is "reached", and both diagrams on the same page said "more than
+  `max_held`" — the diagrams were right, and the sentence was wrong in a way that matters to
+  anyone sizing the setting. The valve is consulted when an object the frame is *not already
+  holding* arrives, and it opens if the frame is holding that many: it bounds how many objects are
+  held at once, not how long any one of them merges. An object already held goes on merging for as
+  long as the operation runs, whatever `max_held` is — so a frame set to 100 does not stop merging
+  the hundred-and-first save of an object it is already holding. Found by widening the frame's
+  model test until it met the valve, which is the only reason the two readings ever had to agree
+
 ### Changed
 - **What stands behind a release, rather than anything in the package.** Most of what went out with
   1.2.1 was this, and it carried no note because none of it reaches an installed package: nothing
