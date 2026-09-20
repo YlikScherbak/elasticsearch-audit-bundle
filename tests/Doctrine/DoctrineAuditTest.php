@@ -7,7 +7,11 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Doctrine\Common\Collections\ArrayCollection;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\BayNumber;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Berth;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Comment;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Pouch;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Sku;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 
 final class DoctrineAuditTest extends DoctrineTestCase
@@ -246,6 +250,46 @@ final class DoctrineAuditTest extends DoctrineTestCase
         self::assertSame('remove', $document['event']);
         self::assertSame($id, $document['objectId']);
         self::assertSame([], $document['changes']);
+    }
+
+    public function testAnIdentifierThatIsAnObjectIsRecordedAsItsStringForm(): void
+    {
+        // Uuid, Ulid, or an identifier of an application's own: the object goes into the
+        // record as the string it prints as, because that is what a document id is and
+        // what every query against the history will be written with. Handed on as the
+        // object it would reach the transport as one, and what a serializer makes of it
+        // is not something an audit trail should be finding out.
+        $pouch = new Pouch(new Sku('SKU-9000'), 'tea');
+
+        $this->em->persist($pouch);
+        $this->em->flush();
+
+        $document = $this->lastDocument();
+
+        self::assertSame('pouch', $document['objectType']);
+        self::assertSame('SKU-9000', $document['objectId']);
+    }
+
+    public function testAnIdentifierThatIsABackedEnumIsRecordedAsItsValue(): void
+    {
+        // An enum identifier is what a small fixed set of rows gets — bays, statuses,
+        // regions — and the history carries the value behind it rather than the case
+        // object, so a query written against the audit log reads the same as one written
+        // against the table.
+        //
+        // It arrives that way rather than being converted: Doctrine hands an identifier
+        // back as the backed value, which is why this reads 2 and not "2" and why the
+        // listener's own arm for a BackedEnum is never the one that answers. Measured
+        // here — the assertion was written the other way round first.
+        $berth = new Berth(BayNumber::Two, 'the night boat');
+
+        $this->em->persist($berth);
+        $this->em->flush();
+
+        $document = $this->lastDocument();
+
+        self::assertSame('berth', $document['objectType']);
+        self::assertSame(2, $document['objectId']);
     }
 
     public function testAttributeDeclaredEntitiesWorkTheSameWay(): void

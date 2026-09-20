@@ -105,12 +105,24 @@
         Continue_: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::elementChanges::188", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::holdElementChanges::1083"],
         },
+
+        // stringify's arm for a BackedEnum, which nothing reaches: Doctrine hands an
+        // identifier back as the value behind the case rather than as the case, so an
+        // enum-identified entity arrives here as the int or string it is backed by and
+        // is answered by the arm above. Measured with a fixture — Berth is identified by
+        // an int-backed enum and its record carries 2, not "2" — and the arm stays,
+        // because "the identifier is whatever the mapping hands over" is not a promise
+        // Doctrine makes in writing. The Stringable arm beside it is reached, and has a
+        // test.
+        CastString: {
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::stringify::1421"],
+        },
     },
     // Its own floor, and well below the other run's, because this listener is the code
     // the bundle calls its price of complexity: one class answering for every shape a
     // Doctrine flush can take.
     //
-    // 95 against 97.43 measured, which is the same arrangement the other file argues
+    // 95 against 97.73 measured, which is the same arrangement the other file argues
     // for: a floor set at the best observed number turns ordinary drift into a job that
     // fails for no reason, and a check nobody trusts is worse than none.
     //
@@ -118,10 +130,10 @@
     // when this was first measured honestly; the flush bookkeeping, the always-recorded
     // context, the walk over an element's owners, what a change inside an element is
     // built from, the wording of every refused declaration, what an abandoned flush
-    // counted and which keys a corrected element owns have been worked through since,
-    // and 17 are left — eleven of the escaped mutants turned out to be equivalent by
-    // construction and are listed above with the reason. Each commit that takes a group
-    // names what remains.
+    // counted, which keys a corrected element owns and what an identifier that is not a
+    // scalar becomes have been worked through since, and 15 are left — twelve of the
+    // escaped mutants turned out to be equivalent by construction and are listed above
+    // with the reason. Each commit that takes a group names what remains.
     minCoveredMsi: 95,
     // Six times the other run's. A test here is a schema and an EntityManager before it
     // is an assertion, so the work per mutant is a second or two rather than well under
