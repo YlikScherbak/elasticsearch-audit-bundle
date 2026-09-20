@@ -21,10 +21,14 @@ use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
+use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Doctrine\DBAL\DriverManager;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\Connection as QueueConnection;
 use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Stamp\ErrorDetailsStamp;
 use Symfony\Component\Messenger\Transport\Sender\SenderInterface;
 use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
 use Elastic\Elasticsearch\ClientBuilder;
@@ -240,6 +244,89 @@ final class EveryChannelSweepTest extends TestCase
         $this->channels['outbox'] = $rows;
 
         self::assertCount(1, $rows, 'nothing reached the queue, so nothing was swept');
+        $this->assertNothingLeaked();
+    }
+
+    public function testWhatTheWorkerLeavesInTheFailureTransportCarriesOnlyThePlaceholder(): void
+    {
+        // The asynchronous road, and the one channel on it that nobody else observes.
+        // A record dispatched to a queue leaves the request having succeeded; the
+        // handler runs in a worker minutes later, the cluster refuses the document, and
+        // once the retries run out Symfony keeps the failure as an ErrorDetailsStamp —
+        // built from FlattenException, which walks getPrevious() and keeps every message
+        // it finds — and serialises the whole envelope into the failure transport.
+        //
+        // Nothing in the request that made the change ever sees any of that. If the
+        // cluster quoted the refused document back, it does not arrive in a log somebody
+        // rotates: it is a row in a table with a backup, and no line anywhere says so.
+        // The queued message is swept with it, because a value that must not be logged
+        // must not be waiting in a queue either.
+        $refusal = ['error' => ['type' => 'document_parsing_exception', 'reason' => "failed to parse field [password]. Preview of field's value: '".self::MARKER."'"]];
+
+        $queued = &$this->channels['queued message'];
+        $queued = [];
+        $stored = &$this->channels['failure transport'];
+        $stored = [];
+
+        $handler = new IndexAuditRecordHandler($this->gateway($refusal));
+
+        $bus = new class($handler, $queued, $stored) implements MessageBusInterface {
+            /**
+             * @param list<array<string, mixed>> $queued
+             * @param list<array<string, mixed>> $stored
+             */
+            public function __construct(
+                private readonly IndexAuditRecordHandler $handler,
+                private array &$queued,
+                private array &$stored,
+            ) {
+            }
+
+            /**
+             * @param array<object> $stamps
+             */
+            public function dispatch(object $message, array $stamps = []): Envelope
+            {
+                $envelope = Envelope::wrap($message, $stamps);
+                $serializer = new PhpSerializer();
+
+                // The row the queue holds while the message waits its turn.
+                $this->queued[] = $serializer->encode($envelope);
+
+                try {
+                    // What the worker does on the other side of it.
+                    ($this->handler)($message);
+                } catch (\Throwable $thrown) {
+                    // And what Symfony stores once the attempts are spent.
+                    $this->stored[] = $serializer->encode($envelope->with(ErrorDetailsStamp::create($thrown)));
+                }
+
+                // An async dispatch comes back successful whatever happens later: the
+                // caller is long gone by then, which is the whole reason this channel
+                // needs sweeping rather than watching.
+                return $envelope;
+            }
+        };
+
+        $transport = new MessengerTransport($bus);
+
+        $writer = new AuditWriter(
+            $transport,
+            $transport,
+            new IndexResolver('audit_log'),
+            new ChainActorResolver([], 'tests'),
+            new FrozenClock(),
+            [],
+            FailurePolicy::Log,
+            $this->logger(),
+            $this->events(false),
+            null,
+            new ChangeRedactor(['password']),
+        );
+
+        $writer->record('user', 7, 'update', ['password' => new Change(null, self::MARKER)], ['password' => self::MARKER]);
+
+        self::assertNotSame([], $stored, 'the handler did not fail, so the channel this test is about was never written');
         $this->assertNothingLeaked();
     }
 
