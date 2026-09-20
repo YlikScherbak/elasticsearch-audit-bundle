@@ -47,23 +47,16 @@ final class NarrowingOnlyEverNarrowsTest extends TestCase
      */
     public static function seeds(): iterable
     {
-        $count = (int) ($_SERVER['AUDIT_MODEL_SEEDS'] ?? 40);
-
-        foreach (range(1, max(1, $count)) as $seed) {
-            yield 'seed '.$seed => [$seed];
-        }
+        return NarrowingChains::seeds();
     }
 
     #[DataProvider('seeds')]
     public function testANarrowingStepNeverReachesMoreThanTheStepBeforeIt(int $seed): void
     {
-        mt_srand($seed);
-
-        $documents = self::corpus();
+        $documents = NarrowingChains::corpus();
         $query = AuditQuery::for('order');
 
-        foreach (range(1, mt_rand(2, 8)) as $ignored) {
-            $step = self::aStep();
+        foreach (NarrowingChains::steps($seed) as $step) {
             $before = $query;
 
             try {
@@ -108,45 +101,6 @@ final class NarrowingOnlyEverNarrowsTest extends TestCase
                 sprintf('%s did not replace what was already there for "%s" (seed %d)', $step['name'], $step['field'], $seed),
             );
         }
-    }
-
-    /**
-     * One call, with the values it carries — and, for a replacing one, the same call
-     * with different values, which is what "replaces" is asked against.
-     *
-     * @return array{name: string, field: string, narrows: bool, apply: \Closure(AuditQuery): AuditQuery, applyOther: \Closure(AuditQuery): AuditQuery}
-     */
-    private static function aStep(): array
-    {
-        $ids = [1, 2, 3, 4];
-        $actors = ['ada', 'bob', 'cleo'];
-        $events = ['create', 'update', 'remove'];
-        $channels = ['web', 'app', 'till'];
-
-        $some = static fn (array $pool): array => array_values(array_intersect_key($pool, array_flip((array) array_rand($pool, mt_rand(1, \count($pool))))));
-
-        $steps = [
-            ['withObjectIds', 'objectId', false, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->withObjectIds(...$v), $ids],
-            ['narrowObjectIds', 'objectId', true, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->narrowObjectIds(...$v), $ids],
-            ['withActors', 'actor', false, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->withActors(...$v), $actors],
-            ['narrowActors', 'actor', true, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->narrowActors(...$v), $actors],
-            ['withEvents', 'event', false, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->withEvents(...$v), $events],
-            ['whereIn', 'channel', false, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->whereIn('channel', $v), $channels],
-            ['narrowIn', 'channel', true, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->narrowIn('channel', $v), $channels],
-            ['where', 'channel', false, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->where('channel', $v[0]), $channels],
-            ['whereExists', 'channel', false, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->whereExists('channel'), $channels],
-            ['whereNotExists', 'channel', false, static fn (array $v): \Closure => static fn (AuditQuery $q): AuditQuery => $q->whereNotExists('channel'), $channels],
-        ];
-
-        [$name, $field, $narrows, $make, $pool] = $steps[mt_rand(0, \count($steps) - 1)];
-
-        return [
-            'name' => $name,
-            'field' => $field,
-            'narrows' => $narrows,
-            'apply' => $make($some($pool)),
-            'applyOther' => $make($some($pool)),
-        ];
     }
 
     /**
@@ -263,33 +217,4 @@ final class NarrowingOnlyEverNarrowsTest extends TestCase
         self::fail('the builder produced a clause this test cannot read: '.json_encode($clause));
     }
 
-    /**
-     * @return list<array<string, mixed>>
-     */
-    private static function corpus(): array
-    {
-        $documents = [];
-        $n = 0;
-
-        foreach ([1, 2, 3, 4] as $objectId) {
-            foreach (['ada', 'bob', 'cleo'] as $actor) {
-                foreach (['create', 'update', 'remove'] as $event) {
-                    // Every fourth record has no channel at all, which is what exists()
-                    // and missing() are about.
-                    $channel = [null, 'web', 'app', 'till'][$n % 4];
-
-                    $source = ['objectType' => 'order', 'objectId' => $objectId, 'event' => $event, 'source' => $actor, 'loggedAt' => sprintf('2026-08-%02d 10:00:00', ($n % 27) + 1)];
-
-                    if ($channel !== null) {
-                        $source['channel'] = $channel;
-                    }
-
-                    $documents[] = ['_id' => 'd'.$n, '_source' => $source];
-                    ++$n;
-                }
-            }
-        }
-
-        return $documents;
-    }
 }
