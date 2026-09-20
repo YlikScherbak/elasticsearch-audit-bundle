@@ -45,6 +45,43 @@ final class WhatARemovalAndAClearRecordTest extends DoctrineTestCase
         self::assertSame([], $document['changes'], 'a removal is not an account of the row that is gone');
     }
 
+    public function testARemovalSaysNothingAboutACollectionThatMovedOnTheWayOut(): void
+    {
+        // The test above cannot show this on its own: at preRemove there is no change
+        // set yet, so a removal record built *with* the changes turned on comes out
+        // empty for an entity whose audited fields are all scalars. An owning collection
+        // is the exception — it answers from its own dirty state rather than from the
+        // change set — and this one is dirty, because the same operation took a stop off
+        // the route before deleting it.
+        //
+        // What must not happen is the removal turning into an account of that. "stops
+        // went from two to one" beside a deletion describes a row nobody can find, and
+        // an always-recorded field would arrive with it, since context is only added to
+        // a record that already has something in it.
+        $route = new Route('R-1');
+        $route->stops->add($first = new Stop('a'));
+        $route->stops->add(new Stop('b'));
+
+        $this->em->persist($first);
+        $this->em->persist($route->stops->get(1));
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $route->stops->removeElement($first);
+        $this->em->remove($route);
+        $this->em->flush();
+
+        $removals = array_values(array_filter(
+            $this->documents(),
+            static fn (array $d): bool => $d['event'] === 'remove',
+        ));
+
+        self::assertCount(1, $removals, 'the premise: the route was deleted and said so');
+        self::assertSame([], $removals[0]['changes'], 'the removal carried an account of a collection of a row that is gone');
+    }
+
     public function testClearingACollectionNobodyAuditsIsNotRememberedAtAll(): void
     {
         // detours is mapped and not audited. Emptying it is an ordinary thing for an

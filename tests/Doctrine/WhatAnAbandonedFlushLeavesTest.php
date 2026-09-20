@@ -77,6 +77,108 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         ), sprintf("the warning did not count both records; what was logged:\n%s", implode("\n", $this->logs)));
     }
 
+    public function testAFlushThatOnlyRemovedThingsIsWrittenLateToo(): void
+    {
+        // A flush whose whole contribution to the history is deletions. Its records are
+        // taken in preRemove — before there is a change set to take — and moved across in
+        // postRemove once the row is really gone, so by the time the next flush looks
+        // they are in the same list as everything else. What is being asked here is that
+        // such a flush counts as one that collected something at all: read as empty, the
+        // rows are gone from the database and the history still shows them, which is the
+        // one shape of wrong an audit trail cannot be read around.
+        $this->em->persist($article = new Article('To be deleted'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $listener = $this->silenceOurPostFlush();
+
+        $this->em->remove($article);
+        $this->em->flush();
+
+        self::assertSame([], $this->documents(), 'the premise: publishing never ran for the flush that deleted it');
+
+        $this->restorePostFlush($listener);
+
+        $this->em->persist(new Article('Next'));
+        $this->em->flush();
+
+        self::assertContains('remove', array_map(
+            static fn (array $d): mixed => $d['event'],
+            $this->documents(),
+        ), 'the deletion was dropped, so the history still shows a row that is gone');
+    }
+
+    public function testARemovalThatWasCalledOffIsStillOneOfTheRecordsCountedAndCarried(): void
+    {
+        // A deletion the application changed its mind about, which is an ordinary thing
+        // for a listener to do. preRemove has already taken the record; postRemove never
+        // runs, because no row was deleted; so it stays where preRemove put it while
+        // everything else the flush wrote sits in the other list.
+        //
+        // That is the only state in which the two lists are both occupied, and it is
+        // what the guard and the count are written for. Read as one list, the flush is
+        // reported at half its size and — worse — a flush whose *only* record is in the
+        // other one is read as having collected nothing and is dropped.
+        $this->em->persist($article = new Article('To be deleted'));
+        $this->em->flush();
+
+        $listener = $this->silenceOurPostFlush();
+
+        $this->em->persist(new Article('Written'));
+        $this->em->remove($article);
+        $this->em->persist($article); // called off
+        $this->em->flush();
+
+        $this->restorePostFlush($listener);
+
+        $this->em->persist(new Article('Next'));
+        $this->em->flush();
+
+        self::assertNotSame([], array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, '2 audit record(s) are being written now, late'),
+        ), sprintf("the warning counted one of the two lists; what was logged:
+%s", implode("
+", $this->logs)));
+    }
+
+    public function testTheDroppedWarningCountsBothListsToo(): void
+    {
+        // The same sum on the other ending, where the records are not written at all.
+        // "Nothing can vouch for this flush" is already the worst news in the file; it
+        // has to come with the right number attached.
+        $this->em->persist($article = new Article('To be deleted'));
+        $this->em->flush();
+
+        $listener = $this->silenceOurPostFlush();
+
+        $this->em->persist(new Article('Collected'));
+        $this->em->remove($article);
+        $this->em->persist($article); // called off, so its record stays where preRemove put it
+        $this->em->flush();
+
+        // Let go of the entity before the manager is replaced. Measured, not assumed:
+        // with the variable still held the old manager survives the collection and the
+        // listener takes the other branch — the records are written late instead of
+        // dropped — so the test would be asking about the wrong warning.
+        unset($article);
+
+        $this->reopen();
+        $this->restorePostFlush($listener);
+        gc_collect_cycles();
+
+        $this->em->persist(new Article('Unrelated'));
+        $this->em->flush();
+
+        self::assertNotSame([], array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, '2 audit record(s) it had collected are dropped'),
+        ), sprintf("no warning said two records were dropped; what was logged:
+%s", implode("
+", $this->logs)));
+    }
+
     public function testAFlushWhoseManagerIsGoneHasItsRecordsDroppedAndSaysHowMany(): void
     {
         // The other ending. The records were collected, but the manager that would prove
