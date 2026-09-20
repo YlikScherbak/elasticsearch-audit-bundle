@@ -14,6 +14,10 @@ use Doctrine\ORM\Mapping as ORM;
  * The second owner, and the one with something to lose: it tracks what happens inside
  * a case, so a walk that stopped at the pallet would leave this collection silent about
  * a weight nobody can explain afterwards.
+ *
+ * Two tracked fields rather than one, and for the same reason it has two owners: reading
+ * every tracked field and stopping at the first one with nothing to say look the same
+ * when there is only one to read.
  */
 #[ORM\Entity]
 #[Auditable(type: 'depot')]
@@ -27,7 +31,7 @@ class Depot
 
     /** @var Collection<int, PackingCase> */
     #[ORM\OneToMany(mappedBy: 'depot', targetEntity: PackingCase::class, cascade: ['persist'])]
-    #[AuditField(represent: 'getLabel', trackElements: ['weight'])]
+    #[AuditField(represent: 'getLabel', trackElements: ['weight', 'label'])]
     public Collection $cases;
 
     public function __construct(string $name)
