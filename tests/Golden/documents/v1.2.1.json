@@ -1,0 +1,25 @@
+{
+    "version": "v1.2.1",
+    "index": "audit_log",
+    "_id": "01a03df1-0000-7000-8000-000000000000",
+    "_source": {
+        "objectType": "order",
+        "objectId": 42,
+        "event": "update",
+        "loggedAt": "2026-08-26 11:59:58",
+        "source": "u-1",
+        "changes": {
+            "status": {
+                "old": "draft",
+                "new": "paid"
+            },
+            "total": {
+                "old": 100,
+                "new": 250
+            }
+        },
+        "id": "01a03df1-0000-7000-8000-000000000000",
+        "warehouseId": 7,
+        "note": "reconciled"
+    }
+}
