@@ -18,6 +18,7 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Doctrine\DBAL\DriverManager;
+use Doctrine\DBAL\Logging\Middleware as LoggingMiddleware;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\EntityManagerInterface;
@@ -42,6 +43,9 @@ abstract class DoctrineTestCase extends TestCase
     /** @var list<string> messages the writer logged */
     protected array $logs = [];
 
+    /** @var list<string> every statement the connection has run, newest last */
+    protected array $queries = [];
+
     protected function setUp(): void
     {
         if (TestConnection::isSqlite() && !\extension_loaded('pdo_sqlite')) {
@@ -59,6 +63,33 @@ abstract class DoctrineTestCase extends TestCase
         if (\PHP_VERSION_ID >= 80400 && method_exists($config, 'enableNativeLazyObjects')) {
             $config->enableNativeLazyObjects(true);
         }
+
+        // Every statement the connection runs, so a test can ask how many questions an
+        // operation cost. Doctrine's own logging middleware rather than a hand-written
+        // one: it is the same class on both DBAL lines this bundle supports, and it
+        // logs the transaction boundaries separately from the statements, which is what
+        // makes "how many queries" a number rather than a guess.
+        $queries = &$this->queries;
+        $queries = [];
+
+        $config->setMiddlewares([new LoggingMiddleware(new class($queries) extends AbstractLogger {
+            /** @param list<string> $queries */
+            public function __construct(private array &$queries)
+            {
+            }
+
+            /**
+             * @param mixed               $level
+             * @param mixed               $message
+             * @param array<mixed, mixed> $context
+             */
+            public function log($level, $message, array $context = []): void
+            {
+                if (\is_string($context['sql'] ?? null)) {
+                    $this->queries[] = $context['sql'];
+                }
+            }
+        })]);
 
         $connection = DriverManager::getConnection(TestConnection::params(), $config);
         TestConnection::reset($connection);
