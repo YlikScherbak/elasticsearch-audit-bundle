@@ -9,6 +9,25 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Fixed
+- **A refused rollback no longer quotes either failure into the log.** When an audit
+  transaction fails and the rollback fails too, the second failure is reported rather than
+  raised — the caller needs the reason the operation failed, and a database that cannot roll
+  back is a second problem rather than the answer to the first. That report was built from the
+  raw messages of both exceptions and carried the rollback itself in the context, where every
+  exception logger an application has unwinds the chain. Both of them are somebody else's: the
+  operation threw whatever the application throws, and applications throw exceptions that quote
+  the values they were holding; the driver quotes the statement it could not undo. This is the
+  one path where that was true — everywhere else the exception being reported is the writer's
+  own, already built through this setting — and `redact.failure_details` now governs it like the
+  rest. Under `full` both still travel, which is what that setting says
+- **A logger that throws is no longer the answer the caller gets, and no longer leaves the frame
+  holding an undone operation's records.** Reporting the refused rollback happens inside the
+  `catch` the caller is waiting on, so an exception from the logger replaced the one the
+  application threw — "your logger is down" in place of "why did my operation fail" — and the
+  frame was cleared on the line after, which that exception skipped. The records of an operation
+  that was rolled back would then have gone out under whatever ran next
+
 ## [1.2.2] - 2026-09-20
 
 ### Fixed

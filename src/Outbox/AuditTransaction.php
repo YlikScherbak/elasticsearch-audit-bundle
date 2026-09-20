@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Outbox;
 use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
+use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Schema\Schema;
 use Psr\Log\LoggerInterface;
@@ -60,6 +61,9 @@ final class AuditTransaction
         private readonly OutboxContext $context,
         ?LoggerInterface $logger = null,
         private readonly ?object $queue = null,
+        // Appended, because the ones above are passed positionally. Two foreign
+        // exceptions meet on the rollback path and this says whether either is repeated.
+        private readonly FailureDetails $failureDetails = FailureDetails::Cause,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
@@ -229,22 +233,65 @@ final class AuditTransaction
     private function undo(\Throwable $cause): void
     {
         try {
-            if ($this->connection->isTransactionActive()) {
-                $this->connection->rollBack();
+            try {
+                if ($this->connection->isTransactionActive()) {
+                    $this->connection->rollBack();
+                }
+            } catch (\Throwable $rollback) {
+                // Reported rather than raised: the caller needs the reason the operation
+                // failed, and a database that cannot even roll back is a second problem
+                // rather than the answer to the first.
+                //
+                // Both causes travel the failure policy, and neither of them is the
+                // bundle's own text. The operation threw whatever the application throws,
+                // and applications throw exceptions that quote the values they were
+                // holding; the driver quotes the statement it could not undo. Attaching
+                // either to the context would be that policy walked around one step
+                // later — every exception logger an application has serialises a chain.
+                $this->report(
+                    'The audit transaction could not roll back after {reason}: {rollback}.',
+                    [
+                        'reason' => $this->failureDetails->of($cause)->getMessage(),
+                        'rollback' => $this->failureDetails->of($rollback)->getMessage(),
+                    ],
+                    $rollback,
+                );
             }
-        } catch (\Throwable $rollback) {
-            // Reported rather than raised: the caller needs the reason the operation
-            // failed, and a database that cannot even roll back is a second problem
-            // rather than the answer to the first.
-            $this->logger->error('The audit transaction could not roll back after {reason}: {rollback}.', [
-                'reason' => $cause->getMessage(),
-                'rollback' => $rollback->getMessage(),
-                'exception' => $rollback,
-            ]);
+        } finally {
+            // Every level rather than just the outermost: the operation may have left one
+            // open, which is one of the reasons to be here.
+            //
+            // In a finally as well, and the two guards here cover different halves of the
+            // same accident. report() swallowing what the logger throws is what keeps the
+            // caller's own exception — a logger that is down is not the answer to "why did
+            // my operation fail". This finally is what keeps the frame from holding the
+            // records of an undone operation for whatever runs next. With the swallow in
+            // place nothing reaches past it, so this one is not observable on its own
+            // today; it is here for the day a line is added above it that can throw.
+            $this->frame->dropEverything();
+        }
+    }
+
+    /**
+     * Says it, and does not let saying it become the failure.
+     *
+     * The caller is already inside a catch: whatever comes out of here replaces the
+     * exception the application is waiting for, and "your logger is down" is not the
+     * answer to "why did my operation fail". Under `full` the cause still travels,
+     * because that setting says to repeat what other code said.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function report(string $message, array $context, \Throwable $cause): void
+    {
+        if ($this->failureDetails === FailureDetails::Full) {
+            $context['exception'] = $cause;
         }
 
-        // Every level, not just the outermost: the operation may have left one open,
-        // which is one of the reasons to be here.
-        $this->frame->dropEverything();
+        try {
+            $this->logger->error($message, $context);
+        } catch (\Throwable) {
+            // Nowhere left to say it.
+        }
     }
 }

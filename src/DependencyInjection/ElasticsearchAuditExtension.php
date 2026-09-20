@@ -137,7 +137,7 @@ final class ElasticsearchAuditExtension extends Extension
 
         $this->registerClient($config['client'], $container);
         $this->registerIndices($config['indices'], $container);
-        $this->registerTransport($config['transport'], $config['message_bus'], $config['outbox'], $config['doctrine']['connection'], $container);
+        $this->registerTransport($config['transport'], $config['message_bus'], $config['outbox'], $config['doctrine']['connection'], $container, self::failureDetails($config['redact']));
         $this->registerActor($config['actor'], $container);
         $this->registerRedaction($config['redact'], $container);
         $this->registerCoalescing($config['coalescing'], $container);
@@ -371,7 +371,7 @@ final class ElasticsearchAuditExtension extends Extension
     /**
      * @param array{transport: string|null, require_transaction: bool} $outbox
      */
-    private function registerTransport(string $transport, string $busId, array $outbox, string $connection, ContainerBuilder $container): void
+    private function registerTransport(string $transport, string $busId, array $outbox, string $connection, ContainerBuilder $container, FailureDetails $failureDetails): void
     {
         $container->setDefinition(self::SERVICE_SYNC_TRANSPORT, new Definition(SyncTransport::class, [new Reference(self::SERVICE_GATEWAY)]));
 
@@ -446,6 +446,9 @@ final class ElasticsearchAuditExtension extends Extension
                 // connection - the question a DSN can only describe and an environment
                 // variable cannot answer at all.
                 new Reference('messenger.transport.'.$queue),
+                // Two foreign exceptions meet on its rollback path: the operation's own
+                // and the driver's.
+                $failureDetails,
             ]));
             $container->setAlias(AuditTransaction::class, self::SERVICE_AUDIT_TRANSACTION);
         } else {
