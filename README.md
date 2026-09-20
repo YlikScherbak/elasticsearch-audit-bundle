@@ -391,7 +391,10 @@ and beyond the reach of `reset()`:
 - a **remove**: it is terminal, so what was held for that object goes out with it;
 - a step by a **different actor** on the same object: neither record may be filed under the other's
   name, so the held one goes out as it stands;
-- **`max_held`** being reached: the valve opens and writes what the frame holds.
+- **`max_held`**: an object the frame is not already holding arrives while it is holding that
+  many, and the valve opens and writes what it has. It bounds how many objects are held at once
+  and not how long any one of them merges — an object already held goes on merging for as long as
+  the operation runs, whatever `max_held` is.
 
 In an atomic frame all three wait for the outermost `end()` instead — a remove and an actor
 boundary are staged, and an overflow refuses the operation outright with a
