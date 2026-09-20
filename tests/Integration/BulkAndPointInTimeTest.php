@@ -134,6 +134,54 @@ final class BulkAndPointInTimeTest extends ElasticsearchTestCase
         self::assertSame(6, $reader->find(AuditQuery::for('order'))->total, 'a fresh search sees it');
     }
 
+    public function testAnExportAbandonedHalfwayLeavesNoViewOpenOnTheCluster(): void
+    {
+        // A point in time holds the segments it was opened over until it is closed or its
+        // keep-alive runs out, and a view left open is disk the cluster cannot reclaim.
+        // The export closes it in a finally, which a generator runs when the consumer
+        // stops early too — and "stops early" is the ordinary case: a controller that
+        // streams a page of an export, a worker killed mid-batch, a `break` in a loop.
+        //
+        // Asked of the cluster rather than of the bundle: open_contexts is the number
+        // Elasticsearch itself keeps, and a test that only asked the gateway whether it
+        // called close() would pass just as happily while the view stayed open.
+        for ($i = 1; $i <= 6; ++$i) {
+            $this->gateway->index($this->index, self::document('order', $i, sprintf('2026-08-28 10:00:%02d', $i)), (string) $i);
+        }
+        self::client()->indices()->refresh(['index' => $this->index]);
+
+        $before = self::openSearchContexts();
+
+        $reader = new AuditReader($this->gateway, $this->resolver, pointInTimeKeepAlive: '10m');
+
+        foreach ($reader->iterate(AuditQuery::for('order')->oldestFirst(), batchSize: 2) as $entry) {
+            if ($entry->objectId === 3) {
+                break; // the consumer has what it wanted and walks away
+            }
+        }
+
+        // The keep-alive is ten minutes on purpose: if the view were being left open,
+        // waiting would not help, and this cannot pass by the cluster tidying up behind
+        // a mistake.
+        self::assertSame($before, self::openSearchContexts(), 'the export left a point in time open on the cluster');
+    }
+
+    /**
+     * What Elasticsearch says it is holding open, which includes points in time.
+     */
+    private static function openSearchContexts(): int
+    {
+        $stats = self::client()->nodes()->stats(['metric' => 'indices', 'index_metric' => 'search'])->asArray();
+
+        $open = 0;
+
+        foreach ($stats['nodes'] ?? [] as $node) {
+            $open += (int) ($node['indices']['search']['open_contexts'] ?? 0);
+        }
+
+        return $open;
+    }
+
     public function testAnyExportsEveryRoutedIndexFromOnePointInTime(): void
     {
         $this->gateway->index($this->index, self::document('order', 1, '2026-08-28 10:00:01'), '1');
