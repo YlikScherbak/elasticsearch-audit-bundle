@@ -254,9 +254,15 @@ final class WhatAWorkerThatDiedLeavesBehindTest extends TestCase
 
     private function receive(): ?Envelope
     {
-        $envelopes = iterator_to_array($this->queue->get(), false);
+        // Walked rather than collected: get() promises an iterable, and which kind it
+        // hands back depends on the version — a plain array on the oldest Messenger
+        // this bundle supports, where iterator_to_array() refuses anything that is not
+        // Traversable, and a generator on the newest.
+        foreach ($this->queue->get() as $envelope) {
+            return $envelope;
+        }
 
-        return $envelopes[0] ?? null;
+        return null;
     }
 
     /**
