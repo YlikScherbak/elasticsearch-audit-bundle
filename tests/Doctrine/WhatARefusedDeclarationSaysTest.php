@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Address;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Customer;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Gauge;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisspelledTracking;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PostBox;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
@@ -28,6 +29,26 @@ use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
  */
 final class WhatARefusedDeclarationSaysTest extends DoctrineTestCase
 {
+    public function testAnIdentifierOfATypeThatCannotBeADocumentIdIsRefusedByName(): void
+    {
+        // A document is stored under a string, and the types an identifier can become
+        // one are named one by one: a string, an int, something with a string form, a
+        // backed enum, another entity. A float is none of them — two rows a hair apart
+        // would be one document as soon as anything rounded — and saying so is the
+        // difference between a history that is missing and a history nobody knows is
+        // missing.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist(new Gauge(1.5, 'nine bar'));
+
+        try {
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $e) {
+            self::assertStringContainsString('Cannot use a float as an audit object id', self::chain($e));
+        }
+    }
+
     public function testTrackingSomethingThatIsAnAssociationOfTheElement(): void
     {
         // And, in the same refusal, that the check reached this collection at all: the
