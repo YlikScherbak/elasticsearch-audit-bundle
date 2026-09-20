@@ -17,6 +17,7 @@
             "src/Command",
             "src/Elasticsearch",
             "src/Model",
+            "src/Reader",
         ],
     },
     logs: {
@@ -92,7 +93,7 @@
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::call::629"],
         },
         ReturnRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::526", "Borsche\\ElasticsearchAuditBundle\\Model\\Filter::crossed::113"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::526", "Borsche\\ElasticsearchAuditBundle\\Model\\Filter::crossed::113", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::iterate::158"],
         },
         // The model's equivalents, worked out the same way as the gateway's:
         //
@@ -119,7 +120,7 @@
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion::217", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::131"],
         },
         UnwrapArrayValues: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds::103", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents::113", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds::126", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds::219", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors::235", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn::274", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars::545", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::363", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::405", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic::267", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds::103", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents::113", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds::126", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds::219", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors::235", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn::274", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars::545", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::363", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::405", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic::267", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::iterate::155"],
         },
         Concat: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable::521", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::158", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::161"],
@@ -130,8 +131,24 @@
         Ternary: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable::521"],
         },
+        // The reader's equivalents, all four of them found the day src/Reader was added
+        // to the list above — which is also how the twenty-eight that were not equivalent
+        // were found:
+        //
+        // - array_values() on a response's hits: Elasticsearch answers them as a JSON
+        //   array, which json_decode gives back as a list, so the call is the type
+        //   assertion the static analyser wants rather than a transformation.
+        // - the early return for an empty batch: decorate() refuses an empty list of its
+        //   own accord, the cursor read below answers [] when there is no last hit, and a
+        //   count of zero is under every batch size — so the loop falls out one line
+        //   later anyway. The return is there because "no hits means the export is over"
+        //   is its own fact, not because the lines under it would misbehave.
+        // - (string) on an aggregation's name, and on a key inside one: PHP turns a
+        //   numeric-looking array key into an int, and both casts feed either a
+        //   concatenation, which converts it the same way, or a strict in_array against a
+        //   list of words, which an integer matches no better than a numeric string.
         CastString: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion::221"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion::221", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::refuseGlobalAggregations::459", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::refuseGlobalAggregations::470"],
         },
 
         // The numeric comparator's equivalents. Two reasons cover all of them, and both
