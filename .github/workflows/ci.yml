@@ -342,6 +342,35 @@ jobs:
       - name: Enforce the mutation score floor
         run: php -d memory_limit=-1 tools/infection/vendor/bin/infection --threads=max --no-progress --no-interaction
 
+  # Its own job, and not another directory in the one above, for two reasons that both
+  # come from the same place: the tests for this listener build an EntityManager and a
+  # schema apiece. They are slow, so the run takes five minutes rather than one and does
+  # not belong in the job somebody waits on; and they need a timeout six times the other
+  # one's, which at 10 seconds was calling eighty-eight mutants timeouts. A timeout
+  # counts as a kill, so that alone was reading eight points higher than the truth.
+  mutation-doctrine:
+    name: Mutation testing (the Doctrine listener)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite
+          coverage: pcov
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Install Infection
+        run: composer install --working-dir=tools/infection --prefer-dist --no-progress --no-interaction
+
+      - name: Enforce the mutation score floor for src/Doctrine
+        run: php -d memory_limit=-1 tools/infection/vendor/bin/infection --configuration=infection.doctrine.json5 --threads=max --no-progress --no-interaction
+
   static-analysis:
     name: Static analysis
     runs-on: ubuntu-latest

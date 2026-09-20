@@ -126,6 +126,10 @@ abstract class DoctrineTestCase extends TestCase
                 $this->logs[] = strtr((string) $message, [
                     '{reason}' => (string) ($context['reason'] ?? ''),
                     '{entity}' => (string) ($context['entity'] ?? ''),
+                    // How many records a warning is about is the part an operator acts
+                    // on — "two arrived late" and "two were dropped" are different sizes
+                    // of problem — so it is interpolated like the rest.
+                    '{count}' => (string) ($context['count'] ?? ''),
                 ]);
             }
         };

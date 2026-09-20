@@ -2,6 +2,7 @@
 # Mutation testing, in a container because Infection needs a coverage driver.
 #
 #   tools/infection/run.sh                       # everything infection.json5 lists
+#   tools/infection/run.sh --configuration=infection.doctrine.json5   # the listener
 #   tools/infection/run.sh --filter=BulkResult   # one class, while fixing its tests
 #   tools/infection/run.sh --show-mutations      # print each escaped mutant's diff
 #
@@ -30,6 +31,7 @@ MSYS_NO_PATHCONV=1 exec docker run --rm \
     -v "$root/examples:/app/examples" \
     -v "$root/phpunit.xml.dist:/app/phpunit.xml.dist" \
     -v "$root/infection.json5:/app/infection.json5" \
+    -v "$root/infection.doctrine.json5:/app/infection.doctrine.json5" \
     -v "$root/var:/app/var" \
     -w /app \
     es-audit-infection \

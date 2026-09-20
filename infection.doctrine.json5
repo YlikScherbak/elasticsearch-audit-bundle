@@ -1,0 +1,42 @@
+{
+    // Mutation testing for the Doctrine listener, kept apart from infection.json5.
+    //
+    // Two things make it its own run rather than another directory in that one. The
+    // tests are slow — each builds an EntityManager and a schema — so a mutant here
+    // needs a timeout that would let a genuinely looping mutant in the redactor run for
+    // a minute before anyone noticed. And the run takes minutes rather than a minute,
+    // which is fine for a job of its own and not fine for the one somebody waits on.
+    //
+    // Nothing from the other file's ignore list is repeated here, and nothing needs to
+    // be: those entries name classes this run does not mutate.
+    $schema: "tools/infection/vendor/infection/infection/resources/schema.json",
+    source: {
+        directories: [
+            "src/Doctrine",
+        ],
+    },
+    logs: {
+        text: "var/infection/doctrine-escaped.log",
+        summary: "var/infection/doctrine-summary.log",
+    },
+    mutators: {
+        "@default": true,
+    },
+    // Its own floor, and well below the other run's, because this listener is the code
+    // the bundle calls its price of complexity: one class answering for every shape a
+    // Doctrine flush can take.
+    //
+    // 89 against 91.04 measured, which is the same arrangement the other file argues
+    // for: a floor set at the best observed number turns ordinary drift into a job that
+    // fails for no reason, and a check nobody trusts is worse than none. It moves up a
+    // group of escaped mutants at a time, the way that one did — 72 escaped when this
+    // was first measured honestly, and the flush bookkeeping and the always-recorded
+    // context have been worked through since. What is left is listed in the commit that
+    // added this file.
+    minCoveredMsi: 89,
+    // Six times the other run's. A test here is a schema and an EntityManager before it
+    // is an assertion, so the work per mutant is a second or two rather than well under
+    // one, and at 10 seconds the runner was calling eighty-eight of them timeouts — each
+    // of which counts as a kill and quietly lifts the score.
+    timeout: 60,
+}
