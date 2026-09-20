@@ -228,13 +228,19 @@ jobs:
       - name: Prove the pin held
         run: composer show doctrine/dbal | head -3
 
-      # Only the suites this matrix is about. The rest of the tests say the same thing
-      # on every database and would only make the job slower to read.
-      - name: Run the transactional suites
+      # Everything that talks to a database. This used to be two files out of
+      # tests/Doctrine, on the reasoning that the rest says the same thing everywhere —
+      # which is exactly the reasoning a database disproves. An identity column and a
+      # sequence hand out identifiers at different moments, MySQL commits on DDL and
+      # Postgres does not, and the listener under tests/Doctrine is the code that cares
+      # most about both. The whole directory is 153 tests instead of 74; measured
+      # against containers on a workstation it is about a minute on Postgres and three
+      # and a half on MySQL, where every CREATE TABLE is its own transaction.
+      - name: Run the suites that touch a database
         env:
           AUDIT_DB_URL: ${{ matrix.database == 'mysql' && 'mysql://root:audit@127.0.0.1:3306/audit?serverVersion=8.0' || 'postgresql://postgres:audit@127.0.0.1:5432/audit?serverVersion=16' }}
         run: |
-          vendor/bin/phpunit             tests/Outbox             tests/Transport/OutboxTransportTest.php             tests/Doctrine/TransactionSafetyTest.php             tests/Doctrine/UnitOfWorkTimingTest.php
+          vendor/bin/phpunit tests/Outbox tests/Transport/OutboxTransportTest.php tests/Doctrine
 
   doctrine-tomorrow:
     name: Doctrine canaries (dev)
