@@ -26,6 +26,21 @@
     mutators: {
         "@default": true,
 
+        // Every ignore below names a LINE — "Class::method::123" — and not just a
+        // method. Infection matches the three forms with fnmatch, and the method form
+        // switches the mutator off for everything in that method, including whatever is
+        // added to it next year: a claim made once about one expression quietly grows to
+        // cover code nobody has looked at. Two of the claims here were already wrong
+        // (see the frame buffer, below) and the method form is why that could not
+        // surface.
+        //
+        // The cost is that editing a method above one of these lines makes the number
+        // stale, the mutant is generated again, and the mutation job goes red. That is
+        // the right way round: "this mutant is equivalent" is a statement about one
+        // expression, and it should not survive a change to the method it lives in
+        // without somebody saying so again. Re-run tools/infection/run.sh and read the
+        // escaped list for the new line.
+        //
         // Equivalent mutants, listed rather than left in the escaped pile for the next
         // person to work out again. In ClusterVersion the version is matched by (\d+),
         // so $found[1] and $found[2] are always digit strings: dropping the (int) leaves
@@ -34,7 +49,7 @@
         // digits, so (int) $found[0] and (int) $found[1] cannot differ. No test can tell
         // these apart, because there is nothing to tell apart.
         CastInt: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::windowDrift"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError::34", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::124", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::windowDrift::240"],
         },
 
         // The gateway's equivalents, each worked out once from the code rather than
@@ -56,28 +71,28 @@
         // - the early return in isMissingSearchContext for a body that is not an array:
         //   what follows reads it through ?? , which yields null for a scalar anyway.
         DecrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError::34", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason::683", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::520", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode::86", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf::180", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor::104", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::114"],
         },
         IncrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason::683", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::520", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode::86", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf::180", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor::104", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::114"],
         },
         TrueValue: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::indexExists", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::createIndex"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::indexExists::420", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::createIndex::448"],
         },
         UnwrapArrayUnique: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::bulk"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::bulk::322"],
         },
         LessThan: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::call"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::call::629"],
         },
         LogicalOr: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::refusedTheParameter", "Borsche\\ElasticsearchAuditBundle\\Model\\Filter::crossed", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::refusedTheParameter::247", "Borsche\\ElasticsearchAuditBundle\\Model\\Filter::crossed::112", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::111"],
         },
         LogicalAnd: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::call"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::call::629"],
         },
         ReturnRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext", "Borsche\\ElasticsearchAuditBundle\\Model\\Filter::crossed", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::close"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::526", "Borsche\\ElasticsearchAuditBundle\\Model\\Filter::crossed::113"],
         },
         // The model's equivalents, worked out the same way as the gateway's:
         //
@@ -101,22 +116,22 @@
         //   matters is that booleans and scalars land in different namespaces; that is
         //   tested.
         GreaterThan: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion::217", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::131"],
         },
         UnwrapArrayValues: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds::103", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents::113", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds::126", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds::219", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors::235", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn::274", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars::545", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::363", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::405", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic::267", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113"],
         },
         Concat: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable::521", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::158", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::161"],
         },
         ConcatOperandRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable::521", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::158"],
         },
         Ternary: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable::521"],
         },
         CastString: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion::221"],
         },
 
         // The numeric comparator's equivalents. Two reasons cover all of them, and both
@@ -136,39 +151,40 @@
         //    may call it from somewhere else one day — and not worth a test that would
         //    have to reach past the guard to write one.
         PregMatchRemoveCaret: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::110"],
         },
         PregMatchRemoveDollar: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::110"],
         },
         ArrayItemRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::114", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::107"],
         },
         LessThanOrEqualTo: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::126"],
         },
         Minus: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::132"],
         },
 
         // The frame buffer's equivalents:
         //
-        // - refuse() empties the buffer as it poisons it, so close()'s "forget what was
-        //   held" has nothing left to forget and its early return has nothing left to
-        //   return. Both are there because the two facts are separate and a later change
-        //   could separate them again, not because they do work today.
+        // Two claims used to stand here and no longer do. close() was said to be safe
+        // from losing its forget() and its early return, on the grounds that refuse()
+        // had already emptied the buffer — but forget() also clears the refusal, so a
+        // buffer that keeps it answers the *next* operation with nothing as well, and
+        // the suite says so. The ignores were the only reason nobody found out: an
+        // ignored mutant is never generated, so a wrong equivalence claim cannot be
+        // contradicted. Naming lines rather than methods is what turned that up.
+        //
         // - array_values() around array_filter() of a one-element list: filter either
         //   keeps element 0 or leaves the list empty, and array_values() changes neither.
         //   Removing the filter is caught; removing the re-listing cannot be.
         // - `?? null` and `?? []` on an array read that PHP answers with null anyway.
         Coalesce: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk"],
-        },
-        MethodCallRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::close"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::356", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute::80", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk::72"],
         },
         UnwrapArrayFilter: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113"],
         },
 
         // The commands' equivalents:
