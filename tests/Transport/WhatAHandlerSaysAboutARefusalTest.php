@@ -47,9 +47,12 @@ final class WhatAHandlerSaysAboutARefusalTest extends TestCase
 
             self::fail('the batch should have been refused');
         } catch (TransportUnavailableException $retried) {
-            self::assertStringContainsString('1 of 2 audit records were refused', $retried->getMessage(), 'how much of the batch');
+            self::assertStringStartsWith('1 of 2 audit records were refused', $retried->getMessage(), 'how much of the batch');
             self::assertStringContainsString('#0 audit_log/a (HTTP 429): too many requests', $retried->getMessage(), 'and which, with what the cluster said');
-            self::assertStringContainsString('retrying the batch', $retried->getMessage(), 'and that it is not over');
+            // The note is an annotation on the summary and comes after it: read the
+            // other way round the sentence opens with a promise and buries what was
+            // refused, which is the part somebody is searching the log for.
+            self::assertStringEndsWith(' — retrying the batch', $retried->getMessage(), 'and that it is not over');
         }
     }
 
@@ -92,6 +95,20 @@ final class WhatAHandlerSaysAboutARefusalTest extends TestCase
         (new IndexAuditRecordHandler($gateway))(new IndexAuditRecord('audit_log', ['objectType' => 'order', 'id' => 'from-the-document'], null));
 
         self::assertSame(['from-the-document'], $gateway->ids['audit_log'] ?? null);
+    }
+
+    public function testTheMessageOwnIdIsTheOneUsedWhenBothAreThere(): void
+    {
+        // The document's copy is a fallback and only that. The two are the same string
+        // for every record this bundle builds, and the one place they could differ is a
+        // listener that replaced the document after the message was made — at which
+        // point the id the queue was told about is the one a redelivery will come back
+        // with, and writing under the other one stores the event twice.
+        $gateway = new InMemoryGateway();
+
+        (new IndexAuditRecordHandler($gateway))(new IndexAuditRecord('audit_log', ['objectType' => 'order', 'id' => 'from-the-document'], 'from-the-message'));
+
+        self::assertSame(['from-the-message'], $gateway->ids['audit_log'] ?? null);
     }
 
     public function testAnEmptyIdInTheDocumentIsNotAnId(): void

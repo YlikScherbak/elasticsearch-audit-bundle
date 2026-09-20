@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Transport;
 
+use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
@@ -81,6 +82,34 @@ final class MessengerTransportTest extends TestCase
         } catch (\Throwable $thrown) {
             self::assertInstanceOf(RequestRejectedException::class, $thrown, 'a refusal is what it was, wherever it was handled');
             self::assertStringContainsString('document_parsing_exception', $thrown->getMessage());
+        }
+    }
+
+    public function testTheBundlesOwnRefusalIsNotDressedUpAsAnUnreachableCluster(): void
+    {
+        // Not every failure on the way to the bus comes from a handler. The bundle's own
+        // middleware raises audit exceptions during the dispatch — a frame refusing an
+        // operation is the one that reaches an application — and those already say what
+        // is wrong and to whom. Wrapped as "the cluster is unreachable" a deliberate
+        // refusal becomes something the write path asks again about, and the caller who
+        // is meant to catch the refusal by its own class never sees it.
+        $refusal = FrameOverflowException::past(10, 3);
+        $bus = new class($refusal) implements MessageBusInterface {
+            public function __construct(private readonly FrameOverflowException $refusal)
+            {
+            }
+
+            public function dispatch(object $message, array $stamps = []): Envelope
+            {
+                throw $this->refusal;
+            }
+        };
+
+        try {
+            (new MessengerTransport($bus))->send('audit_log', ['objectType' => 'order'], 'a');
+            self::fail('the refusal should have surfaced');
+        } catch (\Throwable $thrown) {
+            self::assertSame($refusal, $thrown, 'the refusal was rewritten on its way out');
         }
     }
 

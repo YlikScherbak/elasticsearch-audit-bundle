@@ -6,8 +6,12 @@
     // What is listed here is where a silent defect costs most: redaction (a value that
     // escapes cannot be recalled), the frame buffer (records held and merged), the
     // outbox (the commit that must not happen without its history), the commands an
-    // operator trusts, and the Elasticsearch boundary. The rest of src/ is covered by
-    // the ordinary suite and is not held to a mutation score.
+    // operator trusts, the Elasticsearch boundary, the query and the reader, and — since
+    // every record in production goes through them — the writer and the Messenger
+    // transport. What is left out of src/ is wiring and vocabulary: the container
+    // extension, the Doctrine listener (its own configuration, for the reason written
+    // there), the events, the exceptions. The ordinary suite covers those, and they are
+    // not held to a mutation score.
     $schema: "tools/infection/vendor/infection/infection/resources/schema.json",
     source: {
         directories: [
@@ -18,6 +22,8 @@
             "src/Elasticsearch",
             "src/Model",
             "src/Reader",
+            "src/Writer",
+            "src/Transport",
         ],
     },
     logs: {
@@ -72,10 +78,10 @@
         // - the early return in isMissingSearchContext for a body that is not an array:
         //   what follows reads it through ?? , which yields null for a scalar anyway.
         DecrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError::34", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason::683", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::520", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode::86", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf::180", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor::104", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::114"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError::34", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason::683", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::520", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode::86", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf::180", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor::104", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::114", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\IndexAuditRecordHandler::__invoke::74", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\IndexAuditRecordsHandler::__invoke::67", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\IndexAuditRecordsHandler::__invoke::98", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\MessengerTransport::whatTheHandlerSaid::77"],
         },
         IncrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason::683", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::520", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode::86", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf::180", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor::104", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::114"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::reason::683", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext::520", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::decode::86", "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::queryOf::180", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor::104", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::114", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\IndexAuditRecordHandler::__invoke::74", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\IndexAuditRecordsHandler::__invoke::67", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\IndexAuditRecordsHandler::__invoke::98"],
         },
         TrueValue: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::indexExists::420", "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::createIndex::448"],
@@ -84,7 +90,7 @@
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::bulk::322"],
         },
         LessThan: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::call::629"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::call::629", "Borsche\\ElasticsearchAuditBundle\\Transport\\Messenger\\MessengerTransport::whatTheHandlerSaid::77"],
         },
         LogicalOr: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::refusedTheParameter::247", "Borsche\\ElasticsearchAuditBundle\\Model\\Filter::crossed::112", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::111"],
@@ -120,7 +126,7 @@
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion::217", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::131"],
         },
         UnwrapArrayValues: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds::103", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents::113", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds::126", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds::219", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors::235", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn::274", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars::545", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::363", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::405", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic::267", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::iterate::155"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds::103", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents::113", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds::126", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds::219", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors::235", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn::274", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars::545", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::363", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::405", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic::267", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::iterate::155", "Borsche\\ElasticsearchAuditBundle\\Writer\\IndexResolver::all::67"],
         },
         Concat: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable::521", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::158", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::161"],
@@ -198,8 +204,33 @@
         //   Removing the filter is caught; removing the re-listing cannot be.
         // - `?? null` and `?? []` on an array read that PHP answers with null anyway.
         Coalesce: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::356", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute::80", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk::72"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::356", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute::80", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk::72", "Borsche\\ElasticsearchAuditBundle\\Writer\\AuditWriter::prepare::523"],
         },
+        // The writer's and the transport's equivalents:
+        //
+        // - the second redaction in AuditWriter::prepare(), after the RecordCreated
+        //   event. It and RecordCreatedEvent::setRecord() cover the same outcome — a
+        //   record a listener replaced reaches the transport redacted — and setRecord()
+        //   redacts what it is handed, so no road to the transport reaches this line
+        //   with an unredacted record. Measured both ways round: remove either and the
+        //   test still passes, remove both and it fails (see
+        //   TheLastStepsBeforeARecordLeavesTest, which says so in full). This is an
+        //   equivalence about today's callers rather than about the expression: a road
+        //   that does not pass setRecord() would make the line live again, and the
+        //   number here going stale is how that would be noticed.
+        // - the inner array_values() in IndexResolver::all(): spreading an array
+        //   renumbers its integer keys and keeps its string ones, and array_unique()
+        //   preserves whatever it is given, so the result is identical without it. The
+        //   outer one is not equivalent and has its own test — which is why the two sit
+        //   on separate lines now, so that this claim cannot quietly cover both.
+        // - the 0 passed as the code of UnrecoverableMessageHandlingException in both
+        //   handlers. Nothing reads it: Messenger keys off the class and the interface,
+        //   and the status an operator needs is on the exception behind it, which
+        //   WhatAHandlerSaysAboutARefusalTest asks for by getCode().
+        // - the `$step < 8` bound in MessengerTransport::whatTheHandlerSaid(). It is a
+        //   guard against walking a chain forever, and every value above the deepest
+        //   chain this bundle builds — three links — behaves identically. Pinning 8 in
+        //   a test would make an arbitrary number expensive to change and prove nothing.
         UnwrapArrayFilter: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113"],
         },
@@ -217,7 +248,8 @@
         //   both are the last link of a chain whose earlier links are tested.
     },
     // The floor, not the goal, and deliberately below where the suite actually stands
-    // (99 after all five groups and the model-based frame test). The score is not
+    // (99, and still 99 with the writer and the transport added — 2,460 mutants, none
+    // of them escaping in either of those two). The score is not
     // quite deterministic: a mutant that loops forever is counted as killed, and one
     // sitting near the timeout is counted as killed or not depending on what else the
     // machine was doing — the same commit measured 89 and then 88 minutes apart. A floor

@@ -25,6 +25,18 @@ final class IndexResolverTest extends TestCase
         self::assertSame(['audit_log', 'audit_auth'], $resolver->all());
     }
 
+    public function testAllIsAListEvenWhenTheRepeatedIndexIsInTheMiddle(): void
+    {
+        // A duplicate anywhere but last leaves array_unique() with a gap in its keys,
+        // and an array with gaps is not a list: it json_encodes as an object, and every
+        // consumer of all() is declared against list<string>. The existing case above
+        // happens to repeat the last one, where the gap falls off the end and the
+        // renumbering is invisible.
+        $resolver = new IndexResolver('audit_log', ['auth' => 'audit_auth', 'order' => 'audit_log', 'stock' => 'audit_stock']);
+
+        self::assertSame(['audit_log', 'audit_auth', 'audit_stock'], $resolver->all(), 'the keys were left where array_unique() put them');
+    }
+
     public function testDefaultCannotBeEmpty(): void
     {
         $this->expectException(\InvalidArgumentException::class);

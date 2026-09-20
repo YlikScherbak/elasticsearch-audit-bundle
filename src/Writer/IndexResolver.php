@@ -57,6 +57,15 @@ final class IndexResolver
      */
     public function all(): array
     {
-        return array_values(array_unique([$this->default, ...array_values($this->routing)]));
+        // Two statements rather than one, so that the two re-listings can be spoken
+        // about separately. The inner one is belt: spreading an array renumbers its
+        // integer keys and keeps its string ones, and array_unique() then preserves
+        // whatever it was given, so the result is the same either way. The outer one is
+        // the braces, and it is load-bearing: a repeated index anywhere but last leaves
+        // a gap in the keys, and an array with a gap is not a list — it json_encodes as
+        // an object, and every caller of this is declared against list<string>.
+        $indices = array_unique([$this->default, ...array_values($this->routing)]);
+
+        return array_values($indices);
     }
 }
