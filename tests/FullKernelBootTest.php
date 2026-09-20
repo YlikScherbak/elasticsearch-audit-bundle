@@ -379,6 +379,10 @@ final class FullKernelBootTest extends TestCase
         // first fails inside an audit transaction, the resetter runs between them as
         // Messenger does, and the second has to behave as though the first never
         // happened.
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
         $kernel = new FullKernel($this->cacheDir, outbox: true);
         $kernel->boot();
 
