@@ -30,12 +30,23 @@ use PHPUnit\Framework\TestCase;
  * held after a frame closes are properties of the code, and they read the same on a
  * laptop and on a busy CI machine.
  *
- * What they are here to catch is a change of *class*, not a regression of a few percent.
- * One of those has happened before: a frame that copied everything it held on every
- * arriving element, which nothing noticed until an operation with four thousand of them
- * took four seconds instead of two hundred milliseconds. A quadratic cost is invisible
- * at the sizes a test suite uses and fatal at the sizes production uses, and the only
- * way to see it early is to assert the shape.
+ * What they are here to catch is a change of *class*, not a regression of a few percent:
+ * a quadratic cost is invisible at the sizes a test suite uses and fatal at the sizes
+ * production uses.
+ *
+ * **And half of that class is invisible here too, which is worth saying plainly.** Each
+ * of these watches one countable thing, and a cost that avoids that thing does not move
+ * the number. An array copied on every arriving element, a second pass over what the
+ * buffer already holds, a sort where a scan would do — none of them make another
+ * request, ask the comparator again or retain a byte. The quadratic cost this bundle
+ * actually shipped was one of those: a frame that copied everything it held on every
+ * arrival, four seconds instead of two hundred milliseconds at four thousand elements,
+ * and every count in this file would have stayed exactly where it was.
+ *
+ * Only a clock sees those, and a clock on a shared runner measures the runner. So the
+ * counts are what this file asserts, the names say "requests" and "comparisons" rather
+ * than "work", and a cost of the other kind is measured by hand against real sizes —
+ * which is how that one was found and how the next one will be.
  */
 final class WhatGrowsWithWhatTest extends TestCase
 {
@@ -129,11 +140,17 @@ final class WhatGrowsWithWhatTest extends TestCase
         self::assertSame($once, $threethousand);
     }
 
-    public function testTheWorkGrowsWithTheObjectsAndNotFasterThanThem(): void
+    public function testTheComparisonsGrowWithTheObjectsAndNotFasterThanThem(): void
     {
-        // Three times the objects, at most three times the work plus a constant. What
-        // this refuses is the shape, not the constant: anything quadratic clears this by
-        // a mile at these sizes, and nothing linear comes near it.
+        // Three times the objects, at most three times the comparisons plus a constant.
+        // What this refuses is the shape and not the constant: a comparison per pair of
+        // objects clears it by a mile at these sizes, and one per object comes nowhere
+        // near it.
+        //
+        // Comparisons, and that is the whole of what it says: a quadratic cost that does
+        // not go through the comparator leaves this number exactly where it is. See the
+        // class docblock, which names the one this bundle actually shipped — it was of
+        // that other kind.
         $thousand = self::comparisonsFor(objects: 1_000, savesEach: 2);
         $threethousand = self::comparisonsFor(objects: 3_000, savesEach: 2);
 
