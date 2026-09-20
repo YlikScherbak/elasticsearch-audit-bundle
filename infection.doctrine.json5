@@ -26,16 +26,16 @@
     // the bundle calls its price of complexity: one class answering for every shape a
     // Doctrine flush can take.
     //
-    // 90 against 92.4 measured, which is the same arrangement the other file argues
+    // 92 against 94.04 measured, which is the same arrangement the other file argues
     // for: a floor set at the best observed number turns ordinary drift into a job that
     // fails for no reason, and a check nobody trusts is worse than none.
     //
     // It moves up a group of escaped mutants at a time, the way that one did. 72 escaped
     // when this was first measured honestly; the flush bookkeeping, the always-recorded
-    // context, the walk over an element's owners and the wording of a refused
-    // declaration have been worked through since, and 51 are left. Each commit that
-    // takes a group names what remains.
-    minCoveredMsi: 90,
+    // context, the walk over an element's owners, what a change inside an element is
+    // built from and the wording of every refused declaration have been worked through
+    // since, and 40 are left. Each commit that takes a group names what remains.
+    minCoveredMsi: 92,
     // Six times the other run's. A test here is a schema and an EntityManager before it
     // is an assertion, so the work per mutant is a second or two rather than well under
     // one, and at 10 seconds the runner was calling eighty-eight of them timeouts — each

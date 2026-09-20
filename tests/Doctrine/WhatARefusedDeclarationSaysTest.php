@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Address;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Customer;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisspelledTracking;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PostBox;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Yard;
@@ -69,6 +72,53 @@ final class WhatARefusedDeclarationSaysTest extends DoctrineTestCase
                 '%s::$lines tracks the element field "quanitity", which is not a field of %s. Element tracking records what changed inside an element, and only its own scalar columns are reported that way.',
                 MisspelledTracking::class,
                 ShipmentLine::class,
+            ), self::chain($refused));
+        }
+    }
+
+    public function testAuditingSomethingDoctrineDoesNotMapAtAll(): void
+    {
+        // The plainest refusal of the three, and the one whose whole job is to say that
+        // nothing would have been recorded — rather than recording nothing and letting
+        // somebody find out from an empty history a year later.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist(new PostBox());
+
+        try {
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString(sprintf(
+                '%s::$nickname is audited, but Doctrine maps it as neither a field nor an association, so nothing about it would ever be recorded.',
+                PostBox::class,
+            ), self::chain($refused));
+        }
+    }
+
+    public function testAuditingAnEmbeddableNamesTheColumnsToAuditInstead(): void
+    {
+        // The subtler one, and the reason it gets a sentence of its own: the property is
+        // mapped, just never under the name it was audited by. Doctrine reports its
+        // columns as "address.city" and "address.street", and there is no property with
+        // either name to put an attribute on — so the refusal names the columns, then
+        // names the first of them to show what an attribute would have to sit on, and
+        // then names the only way left to declare them.
+        //
+        // The fixture carries an "addressNote" column as well, which is not part of the
+        // embeddable and must not be named: "starts with address" sweeps it in, and the
+        // developer is then told to audit a column they never asked about.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist(new Customer('Ada', new Address('Kyiv', 'Khreshchatyk')));
+
+        try {
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString(sprintf(
+                '%s::$address is audited, but it is an embeddable: Doctrine reports its columns as "address.city", "address.street" and never as "address", so nothing about it would ever be recorded. Name those columns instead — which #[AuditField] cannot do, since there is no property called "address.city" to put it on: declare them through AuditableInterface::getAuditedFields(), which takes the names as strings.',
+                Customer::class,
             ), self::chain($refused));
         }
     }

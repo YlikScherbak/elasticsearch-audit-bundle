@@ -26,6 +26,15 @@ class Customer
     #[AuditField]
     public Address $address;
 
+    /**
+     * A column whose name starts the way the embeddable's does and has nothing to do
+     * with it. The refusal above lists the embeddable's own columns, and "starts with
+     * address" would sweep this one in beside them — naming a column the developer is
+     * then told to audit instead of the one they meant.
+     */
+    #[ORM\Column]
+    public string $addressNote = '';
+
     public function __construct(string $name, Address $address)
     {
         $this->name = $name;
