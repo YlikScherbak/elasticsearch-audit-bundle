@@ -34,9 +34,21 @@ class Route
     #[AuditField(represent: 'getName')]
     public Collection $stops;
 
+    /**
+     * Mapped and never audited, which nothing else in this suite is: emptying it is an
+     * ordinary thing for an application to do, and the history has nothing to say about
+     * it — including no question asked of the database to find out what was in it.
+     *
+     * @var Collection<int, Stop>
+     */
+    #[ORM\ManyToMany(targetEntity: Stop::class)]
+    #[ORM\JoinTable(name: 'route_detours')]
+    public Collection $detours;
+
     public function __construct(string $code)
     {
         $this->code = $code;
         $this->stops = new ArrayCollection();
+        $this->detours = new ArrayCollection();
     }
 }

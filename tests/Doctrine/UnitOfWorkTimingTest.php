@@ -173,6 +173,36 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         self::assertCount(1, $lost, 'said once per flush, not once per entity');
         self::assertStringContainsString('postCommitCleanup', $lost[0], 'names the mechanism');
         self::assertStringContainsString('Move that work to postFlush', $lost[0], 'says what to do');
+        // Which entity, because the listener that called flush() is somewhere else
+        // entirely and the class is the only thread back to it.
+        self::assertStringContainsString(Shipment::class, $lost[0], 'names the entity it happened to');
+    }
+
+    public function testTheLostChangeSetIsReportedOncePerFlushAndNotOncePerEntity(): void
+    {
+        // Two audited entities in one flush, both of which lose their change set to the
+        // same nested flush. The warning is about the flush and not about either of them,
+        // and a worker that repeats it per entity turns one mistake into a log nobody
+        // reads — which is how the mistake stays unfixed.
+        $first = $this->shipmentWithTwoLines();
+        $second = new Shipment('SH-2');
+        $this->em->persist($second);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $this->flushFromPostUpdate();
+        $this->attachListener(FailurePolicy::Log);
+
+        $first->reference = 'SH-10';
+        $second->reference = 'SH-20';
+        $this->em->flush();
+
+        $lost = array_values(array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'had no change set left')
+        ));
+
+        self::assertCount(1, $lost, sprintf("two entities lost theirs and it was said %d times", \count($lost)));
     }
 
     public function testNothingIsReportedWhenNobodyFlushes(): void
