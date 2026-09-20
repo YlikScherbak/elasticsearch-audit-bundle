@@ -106,4 +106,37 @@ final class WhatARemovalAndAClearRecordTest extends DoctrineTestCase
         self::assertSame(['old' => 'R-1', 'new' => 'R-2'], $changes['code'] ?? null, 'the premise: the audited field is recorded');
         self::assertArrayNotHasKey('detours', $changes, 'a collection nobody audits says nothing when it is emptied');
     }
+
+    public function testTheCollectionNobodyAuditsDoesNotEndTheReadingOfTheOnesNextToIt(): void
+    {
+        // Two collections emptied in one flush, the unaudited one first. Skipping it is
+        // right; stopping at it is not, and the two look identical until there is
+        // something behind it to lose. What would be lost is the one operation Doctrine
+        // reports by saying nothing — a clear() leaves an empty snapshot and a
+        // collection that says it is not dirty — so the record would come out saying the
+        // stops never moved while the join rows were deleted.
+        $route = new Route('R-1');
+        $route->stops->add($stop = new Stop('a'));
+        $route->detours->add($detour = new Stop('b'));
+
+        $this->em->persist($stop);
+        $this->em->persist($detour);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $route->detours->clear();   // scheduled first, and nobody audits it
+        $route->stops->clear();
+        $route->code = 'R-2';       // so there is an update for the collections to ride on
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame(
+            ['old' => ['a'], 'new' => []],
+            $changes['stops'] ?? null,
+            'the audited collection was emptied and the record does not say so',
+        );
+    }
 }

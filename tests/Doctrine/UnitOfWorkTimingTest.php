@@ -431,10 +431,17 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         $this->em->getEventManager()->addEventListener([Events::postUpdate], $flushes);
         $this->attachListener(FailurePolicy::Log);
 
+        // Two fields, not one. What this path hands back is the whole snapshot with the
+        // new sides read off the entity, and a snapshot cut down to its first entry
+        // looks exactly like a correct one when there is only ever one entry in it.
         $shipment->reference = 'SH-12';
+        $shipment->meta = ['carrier' => 'dhl'];
         $this->em->flush();
 
-        self::assertSame('SH-CORRECTED', $this->lastDocument()['changes']['reference']['new'], 'the record says what the database took');
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame('SH-CORRECTED', $changes['reference']['new'] ?? null, 'the record says what the database took');
+        self::assertSame(['carrier' => 'dhl'], $changes['meta']['new'] ?? null, 'the field behind the corrected one was cut off the snapshot');
     }
 
     public function testWhatAPostUpdateListenerDoesToTheEntityIsNotWhatTheRecordSays(): void

@@ -5,11 +5,16 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Chute;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Hopper;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Doctrine\ORM\Event\PreUpdateEventArgs;
+use Doctrine\ORM\Events;
 
 /**
  * What a change inside an element is built from.
@@ -172,5 +177,136 @@ final class WhatAnElementChangeIsMadeOfTest extends DoctrineTestCase
 
         self::assertSame(['old' => 'R-1', 'new' => 'R-2'], $changes['code'] ?? null, 'the premise: something else moved');
         self::assertArrayNotHasKey('stops', $changes, 'the collection did not, so it says nothing');
+    }
+
+    public function testACorrectionToOneElementLeavesTheElementWhoseIdStartsTheSameAlone(): void
+    {
+        // Keys are "cases.<id>.<field>", and a correction to one element replaces that
+        // element's keys before writing the new ones — "this field went back where it
+        // started" has to make the planned change disappear rather than linger.
+        //
+        // Which keys belong to it is decided by a prefix, and a prefix without its
+        // separator is the prefix of every id that starts with the same digits. Element
+        // 1 correcting itself then wipes what element 11 had to say, and the history of
+        // the eleventh line of an order is simply missing — no error, nothing in a log,
+        // and only ever for the orders whose ids happen to line up that way.
+        $depot = new Depot('north');
+
+        for ($i = 1; $i <= 11; ++$i) {
+            $depot->add(new PackingCase('shelf-'.$i, $i));
+        }
+
+        $this->em->persist($depot);
+        $this->em->flush();
+
+        $first = $depot->cases->get(0);
+        $eleventh = $depot->cases->get(10);
+
+        self::assertNotNull($first);
+        self::assertNotNull($eleventh);
+        self::assertSame($first->id.'1', (string) $eleventh->id, 'the premise: one id starts with the other');
+
+        // The correction, which is what puts this element on the replacing path.
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], new class {
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof PackingCase && $entity->label === 'planned') {
+                    $entity->label = 'corrected';
+
+                    $em = $args->getObjectManager();
+                    $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(PackingCase::class), $entity);
+                }
+            }
+        });
+
+        $this->gateway->documents = [];
+
+        $first->label = 'planned';
+        $eleventh->weight = 999;
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame('corrected', $changes['cases.'.$first->id.'.label']['new'] ?? null, 'the premise: the correction reached the record');
+        self::assertSame(
+            ['old' => 11, 'new' => 999],
+            $changes['cases.'.$eleventh->id.'.weight'] ?? null,
+            'the correction to element '.$first->id.' took element '.$eleventh->id.' with it',
+        );
+    }
+
+    public function testAnElementWithNothingToSayCostsTheOthersNothing(): void
+    {
+        // An element whose only change the comparator waved through has nothing to add,
+        // and the entry it would have made is taken out again — otherwise "present but
+        // empty" reads as "something changed inside", and an update with no changes at
+        // all becomes a record.
+        //
+        // Taking it out has to mean taking out *its* entry. What the owner has collected
+        // from the elements before it is not this element's to drop, and what comes
+        // after it is not this element's to skip: either way the history of a line
+        // nobody touched decides what is recorded about the lines that were.
+        $this->attachListener(FailurePolicy::Log, new class implements ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                return $field === 'cases.label' ? true : null;
+            }
+        });
+
+        $depot = new Depot('north');
+        $depot->add($before = new PackingCase('a', 1));
+        $depot->add($silent = new PackingCase('b', 2));
+        $depot->add($after = new PackingCase('c', 3));
+
+        $this->em->persist($depot);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $before->weight = 100;
+        $silent->label = 'renamed';  // waved through, so this element says nothing
+        $after->weight = 300;
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertArrayNotHasKey('cases.'.$silent->id.'.label', $changes, 'the premise: the element in the middle had nothing to say');
+        self::assertSame(['old' => 1, 'new' => 100], $changes['cases.'.$before->id.'.weight'] ?? null, 'it took what the element before it had said');
+        self::assertSame(['old' => 3, 'new' => 300], $changes['cases.'.$after->id.'.weight'] ?? null, 'it ended the walk, so the element after it was never read');
+    }
+
+    public function testAnAssociationOfAnElementIsPassedOverAndNotStoppedAt(): void
+    {
+        // What element tracking records is what changed *inside* an element, which is
+        // what its own columns are reported as. An association is not that: representing
+        // one needs a callable, and an element has nowhere to declare it — so it is
+        // passed over.
+        //
+        // The chute declares its inspector before its size, which is the order Doctrine
+        // reports them in, so the association is what the reading reaches first. Passing
+        // over it has to mean carrying on: every column of every element that happens to
+        // have an association in front of it would otherwise go unrecorded, and only for
+        // the flushes where the association moved too.
+        $hopper = new Hopper('north');
+        $hopper->add($chute = new Chute(10));
+        $chute->inspector = $first = new Author('first');
+
+        $this->em->persist($first);
+        $this->em->persist($second = new Author('second'));
+        $this->em->persist($hopper);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $chute->inspector = $second;
+        $chute->size = 20;
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame(['old' => 10, 'new' => 20], $changes['chutes.'.$chute->id.'.size'] ?? null, 'the reading stopped at the association in front of it');
+        self::assertArrayNotHasKey('chutes.'.$chute->id.'.inspector', $changes, 'an association of an element was recorded as a change inside it');
     }
 }
