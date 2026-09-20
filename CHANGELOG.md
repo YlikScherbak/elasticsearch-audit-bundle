@@ -9,6 +9,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-09-20
+
 ### Fixed
 - **What the README says `max_held` does now matches what it does.** The prose said the valve
   opens when `max_held` is "reached", and both diagrams on the same page said "more than
