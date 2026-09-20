@@ -31,11 +31,25 @@
         // Everything else that escapes stays escaping. The list of those lives in the
         // commits that work through them, not here.
 
-        // ChangeSetBuilder::representAll takes a list<object> — the type is in the
-        // signature and every call site is checked against it — and array_map over a
-        // list answers with a list. array_values() cannot change one.
+        // Four re-listings on one road, and no single one of them is observable.
+        //
+        // What a collection is recorded as passes through two of them whichever way it
+        // was emptied: the snapshot the listener kept (rememberWhatIsBeingEmptied) or
+        // what the field holds now (contentsOf), and then representAll on the way into
+        // the Change. Doctrine hands a collection over keyed when the mapping says
+        // indexBy, so the keys are real — and either re-listing alone straightens them
+        // out, which is why Infection, changing one thing at a time, sees nothing.
+        //
+        // Measured rather than argued, with a fixture whose collection is keyed by its
+        // elements' codes: snapshot alone, representAll alone, contentsOf alone — all
+        // pass; snapshot together with representAll fails, and contentsOf together with
+        // representAll fails. Two pairs, two facts, in
+        // WhatARemovalAndAClearRecordTest, which asks for the keys of both sides of the
+        // record by name.
+        //
+        // collectionChange::250 is the fourth, over a list it built itself.
         UnwrapArrayValues: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::representAll::220", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::250"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::representAll::220", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::250", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::contentsOf::234", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::327"],
         },
 
         // collectionChange builds the list a collection is recorded as, and it is
@@ -122,7 +136,7 @@
     // the bundle calls its price of complexity: one class answering for every shape a
     // Doctrine flush can take.
     //
-    // 95 against 97.73 measured, which is the same arrangement the other file argues
+    // 96 against 98.79 measured, which is the same arrangement the other file argues
     // for: a floor set at the best observed number turns ordinary drift into a job that
     // fails for no reason, and a check nobody trusts is worse than none.
     //
@@ -130,11 +144,12 @@
     // when this was first measured honestly; the flush bookkeeping, the always-recorded
     // context, the walk over an element's owners, what a change inside an element is
     // built from, the wording of every refused declaration, what an abandoned flush
-    // counted, which keys a corrected element owns and what an identifier that is not a
-    // scalar becomes have been worked through since, and 15 are left — twelve of the
-    // escaped mutants turned out to be equivalent by construction and are listed above
-    // with the reason. Each commit that takes a group names what remains.
-    minCoveredMsi: 95,
+    // counted, which keys a corrected element owns, what an identifier that is not a
+    // scalar becomes and what a collection Doctrine keys is recorded as have been
+    // worked through since, and 8 are left — fourteen of the escaped mutants turned out
+    // to be equivalent by construction and are listed above with the reason. Each
+    // commit that takes a group names what remains.
+    minCoveredMsi: 96,
     // Six times the other run's. A test here is a schema and an EntityManager before it
     // is an assertion, so the work per mutant is a second or two rather than well under
     // one, and at 10 seconds the runner was calling eighty-eight of them timeouts — each

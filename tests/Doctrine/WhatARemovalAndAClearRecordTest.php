@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Doctrine\Common\Collections\ArrayCollection;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Rack;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\RackSlot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
 
@@ -138,5 +141,92 @@ final class WhatARemovalAndAClearRecordTest extends DoctrineTestCase
             $changes['stops'] ?? null,
             'the audited collection was emptied and the record does not say so',
         );
+    }
+
+    public function testAnEmptiedCollectionIsRecordedAsAListEvenWhenDoctrineKeysIt(): void
+    {
+        // A collection Doctrine keys by one of its elements' columns comes back as a map,
+        // and what the record carries has to be a list all the same: a field that is an
+        // array in one document and an object in another cannot be mapped, and
+        // Elasticsearch finds that out on the day the second one arrives.
+        //
+        // Emptying it is the path where the old side comes straight off the snapshot the
+        // listener kept, which is the keyed array as Doctrine handed it over. Two slots,
+        // because one entry is a list whichever way the keys fell.
+        $rack = new Rack('R-1');
+        $rack->add($a = new RackSlot('a'));
+        $rack->add($b = new RackSlot('b'));
+
+        $this->em->persist($a);
+        $this->em->persist($b);
+        $this->em->persist($rack);
+        $this->em->flush();
+
+        // Out and back, and read once, so the snapshot is the one Doctrine builds from
+        // the database — keyed by code — rather than the array this test just filled.
+        $id = $rack->id;
+        $this->em->clear();
+
+        $rack = $this->em->find(Rack::class, $id);
+
+        self::assertNotNull($rack);
+        self::assertSame(['a', 'b'], array_keys($rack->slots->toArray()), 'the premise: Doctrine keys this collection by code');
+
+        $this->gateway->documents = [];
+
+        $rack->slots->clear();
+        $rack->name = 'R-2';
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame([0, 1], array_keys($changes['slots']['old'] ?? []), 'the old side went into the record keyed, so it is an object and not an array');
+        self::assertSame(['a', 'b'], $changes['slots']['old'] ?? null);
+        self::assertSame([], $changes['slots']['new'] ?? null);
+    }
+
+    public function testACollectionReplacedByAKeyedOneIsRecordedAsAListOnBothSides(): void
+    {
+        // The other side of the same record. Replacing a collection is the second way
+        // Doctrine reports an emptying — the old one is scheduled for deletion and the
+        // field holds something new — so the "old" side comes off the snapshot and the
+        // "new" side off whatever the application put there, which here is keyed too.
+        //
+        // Both sides of one field, and both have to be arrays. Writing a list on one
+        // side and a map on the other is the same mapping problem as writing a map on
+        // both, discovered one document later.
+        $rack = new Rack('R-1');
+        $rack->add($a = new RackSlot('a'));
+        $rack->add($b = new RackSlot('b'));
+
+        $this->em->persist($a);
+        $this->em->persist($b);
+        $this->em->persist($rack);
+        $this->em->flush();
+
+        $id = $rack->id;
+        $this->em->clear();
+
+        $rack = $this->em->find(Rack::class, $id);
+        $b = $this->em->find(RackSlot::class, $b->id);
+
+        self::assertNotNull($rack);
+        self::assertNotNull($b);
+        self::assertSame(['a', 'b'], array_keys($rack->slots->toArray()), 'the premise: Doctrine keys this collection by code');
+
+        $this->gateway->documents = [];
+
+        // Keyed the same way the application would key it, because that is what it just
+        // read out of Doctrine.
+        $rack->slots = new ArrayCollection(['b' => $b]);
+        $rack->name = 'R-2';
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame([0, 1], array_keys($changes['slots']['old'] ?? []), 'the old side went into the record keyed');
+        self::assertSame([0], array_keys($changes['slots']['new'] ?? []), 'the new side went into the record keyed');
+        self::assertSame(['a', 'b'], $changes['slots']['old'] ?? null);
+        self::assertSame(['b'], $changes['slots']['new'] ?? null);
     }
 }

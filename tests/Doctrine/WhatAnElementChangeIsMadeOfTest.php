@@ -309,4 +309,28 @@ final class WhatAnElementChangeIsMadeOfTest extends DoctrineTestCase
         self::assertSame(['old' => 10, 'new' => 20], $changes['chutes.'.$chute->id.'.size'] ?? null, 'the reading stopped at the association in front of it');
         self::assertArrayNotHasKey('chutes.'.$chute->id.'.inspector', $changes, 'an association of an element was recorded as a change inside it');
     }
+
+    public function testEveryTrackedFieldOfAnElementIsRecordedAndNotJustTheFirst(): void
+    {
+        // Two fields of one element, both declared and both moved. Every other test here
+        // arranges for one of them to be waved through, which is what they are for and
+        // also what leaves the ordinary case — a line where two things changed at once —
+        // without anything watching it.
+        $depot = new Depot('north');
+        $depot->add($case = new PackingCase('shelf-a', 10));
+
+        $this->em->persist($depot);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $case->label = 'shelf-b';
+        $case->weight = 25;
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame(['old' => 'shelf-a', 'new' => 'shelf-b'], $changes['cases.'.$case->id.'.label'] ?? null);
+        self::assertSame(['old' => 10, 'new' => 25], $changes['cases.'.$case->id.'.weight'] ?? null, 'the second field of the element was cut off the record');
+    }
 }

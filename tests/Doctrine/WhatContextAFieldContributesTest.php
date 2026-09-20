@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Consignment;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Doctrine\ORM\Event\PreUpdateEventArgs;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
 
@@ -96,6 +97,65 @@ final class WhatContextAFieldContributesTest extends DoctrineTestCase
             ['old' => 'what the row got', 'new' => 'what the row got'],
             $changes['carrier'] ?? null,
             'the context describes the row, not what the object arrived with and not what it ended with',
+        );
+    }
+
+    public function testTheContextIsWhatAPreUpdateListenerCorrectedItTo(): void
+    {
+        // The other half of "the context describes the row". A postUpdate listener
+        // reaches the object after the UPDATE and so must be ignored; a preUpdate one
+        // reaches the row *instead of* the object — Doctrine recomputes the change set
+        // and writes the corrected value — and so must be believed.
+        //
+        // Read off the snapshot this field held when the flush began, the record would
+        // name the value that was planned a moment earlier and never stored. Read off
+        // the object it would be right here by accident, because a preUpdate correction
+        // happens to change both; the postUpdate test next door is the one that tells
+        // those two apart.
+        $this->attachListener(FailurePolicy::Log, new class implements ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                // Which is how carrier reaches the context pass at all: dropped from the
+                // changes, still in Doctrine's change set.
+                return $field === 'carrier' ? true : null;
+            }
+        });
+
+        $consignment = new Consignment('packed');
+        $consignment->carrier = 'first';
+        $this->em->persist($consignment);
+        $this->em->flush();
+
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], new class {
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if (!$entity instanceof Consignment || $entity->carrier !== 'planned') {
+                    return;
+                }
+
+                // Before the UPDATE, so this is the value the row takes.
+                $entity->carrier = 'corrected';
+
+                $em = $args->getObjectManager();
+                $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(Consignment::class), $entity);
+            }
+        });
+
+        $this->gateway->documents = [];
+
+        $consignment->carrier = 'planned';
+        $consignment->note = 'amended';
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame(['old' => 'packed', 'new' => 'amended'], $changes['note'] ?? null, 'the premise: something moved, so there is a record to give context to');
+        self::assertSame(
+            ['old' => 'corrected', 'new' => 'corrected'],
+            $changes['carrier'] ?? null,
+            'the context names the value that was only planned',
         );
     }
 }

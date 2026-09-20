@@ -60,6 +60,43 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         self::assertStringContainsString('route_stop', $read[0], 'and it is the one that reads the membership back');
     }
 
+    public function testACollectionThatDidNotMoveIsNotLoadedToFindThatOut(): void
+    {
+        // A lazy collection stays lazy. Asking what an audited collection holds means
+        // loading it, and loading it for every flush that touched the entity but not the
+        // collection is one SELECT per audited to-many per update — the cost that looks
+        // like nothing until the nightly job touches fifty thousand rows.
+        //
+        // What makes it askable at all is that a dirty collection has to be loaded: its
+        // snapshot would otherwise be empty and the record would claim every element is
+        // new. The guard says which of the two this is, and the question is what it costs
+        // to answer when the answer is "it did not move".
+        $route = new Route('R-1');
+        $route->stops->add($stop = new Stop('a'));
+
+        $this->em->persist($stop);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        // Out of the identity map and back in, so the collection is a lazy one rather
+        // than the array this test just filled.
+        $id = $route->id;
+        $this->em->clear();
+
+        $route = $this->em->find(Route::class, $id);
+
+        self::assertNotNull($route);
+        self::assertFalse($route->stops->isInitialized(), 'the premise: the collection has not been read');
+
+        $this->queries = [];
+
+        $route->code = 'R-2';
+        $this->em->flush();
+
+        self::assertSame([], self::selects($this->queries), 'the collection was read to discover that it had not changed');
+        self::assertFalse($route->stops->isInitialized(), 'and it is still unread afterwards');
+    }
+
     public function testAuditingWhatChangedInsideTheElementsCostsNoQueryPerElement(): void
     {
         // One update per changed row, which is the application's own work, and nothing
