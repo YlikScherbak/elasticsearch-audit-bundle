@@ -28,6 +28,20 @@ final class QueryBuilderTest extends TestCase
         self::assertArrayNotHasKey('search_after', $body);
     }
 
+    public function testACursorOfTheWrongWidthIsRefusedRatherThanSentOn(): void
+    {
+        // search_after is positional: Elasticsearch reads the tuple against the sort it
+        // was given, and a tuple of the wrong width is not a position in this result set
+        // at all. Sent on, the cluster either refuses it in its own words or — worse —
+        // takes a shorter one and answers from somewhere nobody asked about. A token
+        // this narrow comes from an older version of the bundle, or from a read that
+        // sorted differently, and the only honest answer is to say so and start again.
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('carries 1 sort value(s) and this query sorts by 3');
+
+        (new QueryBuilder())->build(AuditQuery::any()->after(['2026-08-26 10:00:00']));
+    }
+
     public function testEveryConditionIsAFilterClause(): void
     {
         $query = AuditQuery::for('order')
