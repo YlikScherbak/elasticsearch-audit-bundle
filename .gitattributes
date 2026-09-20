@@ -8,6 +8,7 @@
 /.gitignore         export-ignore
 /docker-compose.yml export-ignore
 /infection.json5    export-ignore
+/infection.doctrine.json5 export-ignore
 /phpstan.neon.dist  export-ignore
 /phpunit.xml.dist   export-ignore
 /CONTRIBUTING.md    export-ignore
