@@ -56,7 +56,7 @@
         // digits, so (int) $found[0] and (int) $found[1] cannot differ. No test can tell
         // these apart, because there is nothing to tell apart.
         CastInt: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError::34", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::124", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::windowDrift::240"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ClusterVersion::knowsIncludeSourceOnError::34", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::124", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::windowDrift::254"],
         },
 
         // The gateway's equivalents, each worked out once from the code rather than
@@ -126,7 +126,7 @@
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion::217", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal::131"],
         },
         UnwrapArrayValues: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds::103", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents::113", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds::126", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds::219", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors::235", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn::274", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars::545", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::363", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::405", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic::267", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::iterate::155", "Borsche\\ElasticsearchAuditBundle\\Writer\\IndexResolver::all::67"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withObjectIds::103", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withEvents::113", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::withIds::126", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowObjectIds::219", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowActors::235", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::narrowIn::274", "Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::scalars::545", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::363", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::405", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic::281", "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic::113", "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::iterate::155", "Borsche\\ElasticsearchAuditBundle\\Writer\\IndexResolver::all::67"],
         },
         Concat: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Model\\AuditQuery::comparable::521", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::158", "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::trim::161"],
@@ -204,7 +204,7 @@
         //   Removing the filter is caught; removing the re-listing cannot be.
         // - `?? null` and `?? []` on an array read that PHP answers with null anyway.
         Coalesce: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::356", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute::80", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk::72", "Borsche\\ElasticsearchAuditBundle\\Writer\\AuditWriter::prepare::525"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::356", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute::83", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk::72", "Borsche\\ElasticsearchAuditBundle\\Writer\\AuditWriter::prepare::525"],
         },
         // The writer's and the transport's equivalents:
         //
