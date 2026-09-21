@@ -119,22 +119,6 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   writing.
   <br>Found by a review of the release candidate and reproduced at once: an inner flush under
   another actor, and the outer flush's record came back signed by them.
-- **A flush running inside another no longer lends it its moment.** The fix below settles a
-  record's timestamp, actor and id where the change was seen — and it kept exactly one of those
-  answers at a time. When a lifecycle listener calls `flush()` while this listener's own flush is
-  still running, two flushes are alive at once: the inner one collected into the same lists and
-  replaced the number everything was filed under, and the outer flush then published *all* of it
-  with the inner request's actor, clock and route. The defect this release exists to remove,
-  arriving by a different road — and one no test could see, because none of them held two flushes
-  open at the same time.
-  <br>The flushes are a stack now. Each record remembers which of them collected it, so
-  publishing hands every stretch of records the moment its own flush settled — stretches rather
-  than groups, because reordering an audit trail to tidy up the writing would be its own kind of
-  wrong. An owner whose record is built after the commit remembers it too, and its
-  always-recorded context is read under the flush that saw it rather than the one doing the
-  writing.
-  <br>Found by a review of the release candidate and reproduced at once: an inner flush under
-  another actor, and the outer flush's record came back signed by them.
 - **A record published late is stamped with the moment it happened, not the moment it was
   written.** When a `postFlush` listener registered before this bundle's throws, the records
   that flush collected are written by the next flush to come along — and that flush belongs to
