@@ -229,4 +229,36 @@ final class WhatARemovalAndAClearRecordTest extends DoctrineTestCase
         self::assertSame(['a', 'b'], $changes['slots']['old'] ?? null);
         self::assertSame(['b'], $changes['slots']['new'] ?? null);
     }
+
+    public function testEmptyingAnAuditedCollectionIsRecordedWithNothingElseToRideOn(): void
+    {
+        // clear() schedules the join rows for deletion and dirties nothing on the owner,
+        // so Doctrine gives the owner no lifecycle event — and every record this listener
+        // builds for an entity is built from one. The rows go, the history says nothing,
+        // and no warning anywhere.
+        //
+        // Every other test on this path gives the owner a column to change as well, which
+        // is exactly what hid it: with an UPDATE of its own the owner gets its event and
+        // the emptied collection rides along on that.
+        $route = new Route('R-1');
+        $route->stops->add($a = new Stop('a'));
+        $route->stops->add($b = new Stop('b'));
+
+        $this->em->persist($a);
+        $this->em->persist($b);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $route->stops->clear();
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM route_stop'), 'the premise: the join rows are gone');
+
+        $document = $this->lastDocument();
+
+        self::assertSame('route', $document['objectType']);
+        self::assertSame(['old' => ['a', 'b'], 'new' => []], $document['changes']['stops'] ?? null);
+    }
 }

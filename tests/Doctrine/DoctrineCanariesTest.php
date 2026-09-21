@@ -13,6 +13,8 @@ use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Event\OnClearEventArgs;
+use Doctrine\ORM\Event\OnFlushEventArgs;
+use Doctrine\ORM\Event\PostUpdateEventArgs;
 use Doctrine\ORM\Event\PreUpdateEventArgs;
 use Doctrine\ORM\Events;
 use Doctrine\ORM\Mapping\Driver\AttributeDriver;
@@ -161,6 +163,129 @@ final class DoctrineCanariesTest extends TestCase
         self::assertCount(0, $collection, 'the collection still holds what it held');
         self::assertSame([], $collection->getSnapshot(), 'the snapshot still knows what was taken away — the listener could read it the ordinary way');
         self::assertFalse($collection->isDirty(), 'clear() now leaves the collection dirty, which would be a second way to notice it');
+    }
+
+    public function testWhichCollectionChangesGiveTheirOwnerALifecycleEventAndWhichDoNot(): void
+    {
+        // Every record this listener builds for an entity is built inside a lifecycle
+        // event, so which collection operations produce one decides which of them can be
+        // recorded at all — and they do not all produce one. Adding and removing an
+        // element dirty the owner and it gets its postUpdate; clear() schedules the
+        // collection for deletion instead and the owner is never touched, so an emptied
+        // collection has to reach its record by another road.
+        //
+        // The listener leans on this in publish(), which builds a record for an owner
+        // Doctrine raised no event for. If a future ORM starts dispatching postUpdate for
+        // a clear(), that record is built twice; if it stops dispatching one for an add,
+        // that membership goes unrecorded.
+        $article = new Article('first');
+        $article->tags->add($one = new Tag('one'));
+        $article->tags->add($two = new Tag('two'));
+        $spare = new Tag('spare');
+
+        foreach ([$one, $two, $spare] as $tag) {
+            $this->em->persist($tag);
+        }
+
+        $this->em->persist($article);
+        $this->em->flush();
+
+        $seen = [];
+        $spy = new class($seen) {
+            /** @param list<string> $seen */
+            public function __construct(private array &$seen)
+            {
+            }
+
+            public function postUpdate(PostUpdateEventArgs $args): void
+            {
+                // Empty, and that is the point: the owner is scheduled for an update
+                // because a collection of its went dirty, not because a column moved.
+                $changeSet = $args->getObjectManager()->getUnitOfWork()->getEntityChangeSet($args->getObject());
+
+                $this->seen[] = 'postUpdate('.\count($changeSet).')';
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $spy);
+
+        $article->tags->add($spare);
+        $this->em->flush();
+
+        self::assertSame(['postUpdate(0)'], $seen, 'adding to an owning collection no longer gives its owner an event with an empty change set');
+
+        $seen = [];
+        $article->tags->removeElement($spare);
+        $this->em->flush();
+
+        self::assertSame(['postUpdate(0)'], $seen, 'removing from an owning collection no longer gives its owner an event with an empty change set');
+
+        $seen = [];
+        $article->tags->clear();
+        $this->em->flush();
+
+        self::assertSame([], $seen, 'clear() now gives the owner an event, so the record for an emptied collection is built twice');
+        self::assertSame(0, (int) $this->connection->fetchOne('SELECT COUNT(*) FROM article_tag'), 'the premise: the join rows went all the same');
+    }
+
+    public function testACollectionDeletionAVetoStoppedIsStillScheduledOnTheNextFlush(): void
+    {
+        // What tells a flush that emptied a collection and committed from one a veto
+        // stopped, when neither leaves an entity event behind to ask about. The unit of
+        // work clears its scheduled collection deletions in postCommitCleanup(), so one
+        // that never got there is still on the list when the next flush computes its
+        // own — and that next flush will carry it out.
+        //
+        // The listener leans on this in beginFlush(), where an emptied collection still
+        // on the list means the flush that scheduled it did not commit, so its history
+        // is dropped rather than written late.
+        $article = new Article('first');
+        $article->tags->add($one = new Tag('one'));
+
+        $this->em->persist($one);
+        $this->em->persist($article);
+        $this->em->flush();
+
+        $veto = new class {
+            public bool $angry = true;
+
+            public function onFlush(): void
+            {
+                if ($this->angry) {
+                    throw new \DomainException('vetoed');
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+        $article->tags->clear();
+
+        try {
+            $this->em->flush();
+            self::fail('the veto should have stopped the flush');
+        } catch (\DomainException) {
+        }
+
+        $veto->angry = false;
+
+        $stillScheduled = null;
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class($stillScheduled) {
+            public function __construct(private mixed &$stillScheduled)
+            {
+            }
+
+            public function onFlush(OnFlushEventArgs $args): void
+            {
+                $this->stillScheduled = \count($args->getObjectManager()->getUnitOfWork()->getScheduledCollectionDeletions());
+            }
+        });
+
+        $this->em->persist(new Article('second'));
+        $this->em->flush();
+
+        self::assertSame(1, $stillScheduled, 'a collection deletion a veto stopped is no longer waiting on the next flush, so the listener cannot tell that flush from one that committed');
+        self::assertSame(0, (int) $this->connection->fetchOne('SELECT COUNT(*) FROM article_tag'), 'and the next flush is what carried it out');
     }
 
     public function testClearingAnInverseCollectionDoesNoneOfThat(): void

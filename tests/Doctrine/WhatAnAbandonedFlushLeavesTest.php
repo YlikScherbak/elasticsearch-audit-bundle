@@ -8,6 +8,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
 use Doctrine\ORM\Events;
 
 /**
@@ -291,6 +293,99 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
             static fn (array $d): mixed => $d['changes']['title']['new'] ?? null,
             $this->documents(),
         ), 'and nothing of its own reached the history');
+    }
+
+    public function testAFlushWhoseOnlyNewsWasAnEmptiedCollectionIsWrittenLateToo(): void
+    {
+        // The one kind of flush with no statements of its own to be asked about. clear()
+        // dirties nothing on the owner, so no entity event fires and the flag that tells
+        // a committed flush from a vetoed one never goes up — however well this flush
+        // went. The join rows are gone and the history has to say so.
+        $route = new Route('R-1');
+        $route->stops->add($a = new Stop('a'));
+
+        $this->em->persist($a);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $listener = $this->silenceOurPostFlush();
+
+        $route->stops->clear();
+        $this->em->flush();
+
+        self::assertSame([], $this->documents(), 'the premise: publishing never ran for that flush');
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM route_stop'), 'and the rows went all the same');
+
+        $this->restorePostFlush($listener);
+
+        $this->em->persist(new Article('Next'));
+        $this->em->flush();
+
+        $changes = array_column($this->documents(), 'changes');
+
+        self::assertNotSame([], array_filter(
+            $changes,
+            static fn (array $c): bool => isset($c['stops']),
+        ), sprintf("the emptying was dropped with the flush that did it; what was logged:
+%s", implode("
+", $this->logs)));
+    }
+
+    public function testAnEmptyingAVetoStoppedIsDroppedAndThenRecordedOnceByTheFlushThatDoesIt(): void
+    {
+        // The mirror, and the reason the question is asked of the collection rather than
+        // assumed. A veto in onFlush leaves this listener the same state a committed
+        // flush with a broken postFlush leaves — but the unit of work still has the
+        // deletion on its list, because it clears that list only after a commit.
+        //
+        // So the vetoed flush's news is dropped, and the flush that actually deletes the
+        // rows records the emptying itself. Once, not twice.
+        $route = new Route('R-1');
+        $route->stops->add($a = new Stop('a'));
+
+        $this->em->persist($a);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $veto = new class {
+            public bool $angry = true;
+
+            public function onFlush(): void
+            {
+                if ($this->angry) {
+                    throw new \DomainException('this may not be saved');
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+        $route->stops->clear();
+
+        try {
+            $this->em->flush();
+            self::fail('the veto should have taken the flush down');
+        } catch (\DomainException) {
+        }
+
+        $veto->angry = false;
+
+        $this->em->persist(new Article('Next'));
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM route_stop'), 'the premise: this flush is the one that deleted them');
+
+        $emptyings = array_values(array_filter(
+            array_column($this->documents(), 'changes'),
+            static fn (array $c): bool => isset($c['stops']),
+        ));
+
+        self::assertCount(1, $emptyings, 'the emptying was recorded by the flush the veto stopped as well as by the one that carried it out');
+        self::assertSame(['old' => ['a'], 'new' => []], $emptyings[0]['stops']);
     }
 
     public function testAFlushThatOnlyRemovedThingsIsWrittenLateToo(): void

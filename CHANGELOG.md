@@ -9,6 +9,25 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Fixed
+- **Emptying an audited collection is recorded even when nothing else about the owner
+  changed.** `clear()` is the one collection operation Doctrine reports by dirtying nothing:
+  it schedules the join rows for deletion and takes the collection's snapshot in the same
+  breath, so the owner is never scheduled for an update and gets no lifecycle event. Every
+  record this listener builds for an entity is built inside one — so the rows went and the
+  history said nothing, on an ordinary successful flush with nothing broken anywhere. The
+  machinery that reads the old membership back has been there since 1.0.1, waiting for an
+  event that by definition does not come. `postFlush` now builds that owner's record itself,
+  the way it already does for an owner whose news came from inside its collection. Adding to
+  or removing from a collection, and replacing one wholesale, were never affected: those do
+  dirty the owner, and a canary now pins which of the four do and which does not
+- **And such a flush is told apart from one a veto stopped.** A flush whose only news is a
+  `clear()` has no statements of its own to be asked about, so the check added in 1.2.3 would
+  have dropped it as interrupted. The unit of work answers instead, and about the collection
+  rather than the entity: scheduled deletions are cleared only after a commit, so one still on
+  the list belongs to a flush that never committed — dropped, and recorded once by the flush
+  that carries it out
+
 ## [1.2.3] - 2026-09-21
 
 ### Fixed

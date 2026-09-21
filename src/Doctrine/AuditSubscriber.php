@@ -153,7 +153,14 @@ final class AuditSubscriber
      * Both are visible in onFlush, and only there: the deletion list is cleared with the
      * rest of the unit of work when the flush ends.
      *
-     * @var array<int, array<string, list<object>>>
+     * The owner is kept beside what its collection held, and not only its object id,
+     * because this map is the only news some flushes have. `clear()` dirties nothing on
+     * the owner — it schedules the collection for deletion and takes its snapshot in the
+     * same breath — so Doctrine raises no lifecycle event for it, and a record built
+     * only inside those is a record that never exists. postFlush builds one from here
+     * instead, and needs the entity to build it from.
+     *
+     * @var array<int, array{0: object, 1: array<string, list<object>>}>
      */
     private array $emptiedCollections = [];
 
@@ -345,7 +352,8 @@ final class AuditSubscriber
                     $held = $uow->getCollectionPersister($mapping)->slice($collection, 0, null);
                 }
 
-                $this->emptiedCollections[spl_object_id($owner)][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
+                $this->emptiedCollections[spl_object_id($owner)][0] = $owner;
+                $this->emptiedCollections[spl_object_id($owner)][1][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
             } catch (\Throwable $e) {
                 // Reading the old membership back is the one part of this listener that
                 // asks the database a question of its own, and a question that fails must
@@ -546,6 +554,7 @@ final class AuditSubscriber
         $owners = array_unique(array_merge(
             array_keys($this->elementChanges),
             array_keys($this->elementMembership),
+            array_keys($this->emptiedCollections),
         ));
 
         foreach ($owners as $owner) {
@@ -555,6 +564,43 @@ final class AuditSubscriber
         }
 
         return $count;
+    }
+
+    /**
+     * Whether the collections the flush on the stack emptied were really emptied.
+     *
+     * A flush whose only news is a `clear()` has no statements of its own to be asked
+     * about: the owner is never dirtied, so no entity event fires and $statementsRan
+     * stays false however well the flush went. Asked only that way, the one kind of
+     * history this listener had to be taught to keep would be dropped again — and with
+     * the warning about a flush that was interrupted, which it was not.
+     *
+     * The unit of work answers instead, and about the collection rather than the entity.
+     * Scheduled deletions are cleared in postCommitCleanup(), so one that never got
+     * there is still on the list when the next flush computes its own — and that flush
+     * carries it out and collects it again. Still scheduled, then, means the flush that
+     * scheduled it did not commit: drop what it collected, and this flush will record
+     * the emptying once, properly. Gone from the list means it committed.
+     *
+     * Asked of this flush's unit of work, which is the one that rescheduled it — and
+     * which is the abandoned flush's own, or the check above has already said the
+     * manager is gone.
+     */
+    private function theEmptiedCollectionsWentThrough(EntityManagerInterface $em): bool
+    {
+        if ($this->emptiedCollections === []) {
+            return false;
+        }
+
+        foreach ($em->getUnitOfWork()->getScheduledCollectionDeletions() as $collection) {
+            $owner = $collection->getOwner();
+
+            if ($owner !== null && isset($this->emptiedCollections[spl_object_id($owner)])) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -624,7 +670,11 @@ final class AuditSubscriber
 
             $collected = $this->collectedSoFar();
 
-            if ($abandoned !== null && $abandoned->isOpen() && $this->statementsRan && $collected > 0) {
+            // Or the collections it emptied went through, which is the same question
+            // asked of the one kind of flush that has no statements of its own to show.
+            $committed = $this->statementsRan || $this->theEmptiedCollectionsWentThrough($em);
+
+            if ($abandoned !== null && $abandoned->isOpen() && $committed && $collected > 0) {
                 // Its manager is still open, so UnitOfWork::commit() did not fail — every
                 // failure inside its try closes the manager on the way out. The
                 // transaction committed and something else swallowed the rest of the
@@ -1249,6 +1299,16 @@ final class AuditSubscriber
             $byOwner[$key] = [$owner, $changes];
         }
 
+        // And the owners whose collection was taken away whole. Those are here for a
+        // different reason from the two above: not because their record needs something
+        // added to it, but because without this they have no record at all. `clear()`
+        // dirties nothing on the owner, so Doctrine raises no event for it, and every
+        // record built for an entity is built inside one. The rows went; recordForOwner()
+        // is what says so.
+        foreach ($this->emptiedCollections as $key => [$owner, $emptied]) {
+            $byOwner[$key] ??= [$owner, []];
+        }
+
         return array_values($byOwner);
     }
 
@@ -1304,6 +1364,25 @@ final class AuditSubscriber
 
             if ($id === null) {
                 return null;
+            }
+
+            $emptied = $this->emptiedCollections[spl_object_id($owner)][1] ?? [];
+
+            if ($emptied !== []) {
+                // Built here rather than merged in as a ready Change, because what an
+                // emptied collection is recorded as is the builder's decision — the old
+                // side represented from the snapshot the listener kept, the new side from
+                // what the field holds now, and the comparator asked whether that counts
+                // as a move at all. An owner with an event of its own gets the same thing
+                // through recordFor(); this is the road for one that had none.
+                //
+                // No change set: nothing else about this owner moved, or it would have
+                // had an event. What is already here from its elements wins, being about
+                // different fields.
+                $changes = array_replace(
+                    (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[spl_object_id($owner)] ?? []),
+                    $changes,
+                );
             }
 
             return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
@@ -1466,7 +1545,7 @@ final class AuditSubscriber
             $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
 
             if ($withChanges) {
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)] ?? [], $this->contextAsFlushed[spl_object_id($entity)] ?? []));
+                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)][1] ?? [], $this->contextAsFlushed[spl_object_id($entity)] ?? []));
             }
 
             return $record;
