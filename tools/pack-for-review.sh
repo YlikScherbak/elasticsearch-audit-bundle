@@ -65,10 +65,24 @@ printf 'Packing into %s/\n' "$out"
 pack doctrine          src/Doctrine src/Attribute src/Contract/AuditableInterface.php \
                        src/Contract/TracksCollectionElementsInterface.php \
                        tests/Doctrine tests/Fixtures
-pack writer-coalescing src/Writer src/Coalescing src/Transport src/Event \
+# Every enricher contract, not only the two that are handed a record: the writer asks
+# MomentEnricherInterface before the records of a flush exist and refuses to let an ordinary
+# enricher overwrite what it said, and a reviewer given only the call site can see the rule
+# but not what it is a rule about. ScopedEnricherInterface with them, because "a moment
+# enricher has no object type scoping" is a sentence about something.
+#
+# And src/Test: the collector is a transport, its questions are all about this boundary —
+# what an open frame is still holding, what a veto means, which transport an immediate write
+# takes — and it is the code an application's own tests are written against, so a defect in
+# it is a defect in everybody else's test suite.
+pack writer-coalescing src/Writer src/Coalescing src/Transport src/Event src/Test \
                        src/Contract/AuditEnricherInterface.php \
                        src/Contract/MergedRecordEnricherInterface.php \
-                       src/Contract/ValueComparatorInterface.php tests/Writer tests/Coalescing
+                       src/Contract/MomentEnricherInterface.php \
+                       src/Contract/DeclaresAuditFieldsInterface.php \
+                       src/Contract/ScopedEnricherInterface.php \
+                       src/Contract/ValueComparatorInterface.php \
+                       tests/Writer tests/Coalescing tests/Test
 pack read-path         src/Reader src/Model tests/Reader tests/Model
 # Both boot tests, and they prove different things: BundleBootTest that every service
 # can be built, FullKernelBootTest that the tags this bundle declares are collected by

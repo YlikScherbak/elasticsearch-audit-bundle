@@ -91,6 +91,18 @@ Current pack sizes (they grow with the bundle):
 > - A record released by a frame does not go through the enrichers a second time.
 > - `origin` says which part of the application produced the record, and a merged record does not
 >   claim an origin it does not have.
+> - A record's timestamp, actor and id are settled where the change was seen and travel with it,
+>   so a flush whose publishing was swallowed — and which is therefore written by a later flush,
+>   in another request — does not take the later moment's answers. `writtenAt` is the other
+>   timestamp: when the attempt that wrote the current version of the document started, updated
+>   on redelivery.
+> - `MomentEnricherInterface` is asked once per moment, before the records of it exist, and what
+>   it describes is not overwritten by an ordinary enricher running at write time — that attempt
+>   is logged. An attribute the caller set on the record wins over both.
+> - `transport: collector` replaces the last step and nothing else, so what a test asserts on is
+>   the document that would have been stored: including a record a listener vetoed, which
+>   reaches no transport, and excluding records an open frame is still holding, which is said
+>   rather than forced by closing the frame.
 
 ## Axis: `read-path`
 
