@@ -27,7 +27,6 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\ElasticsearchGateway;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
-use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
@@ -465,12 +464,12 @@ final class ElasticsearchAuditExtension extends Extension
             $container->setDefinition(self::SERVICE_COLLECTOR, (new Definition(AuditCollector::class, [
                 new Reference(self::SERVICE_FRAME_BUFFER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
                 new Reference(ChangeRedactor::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+                new Reference(self::SERVICE_CLOCK),
             ]))
-                // Last, because a veto set by a listener behind this one is still a veto
-                // and the collector would report the record as written.
-                ->addTag('kernel.event_listener', ['event' => RecordCreatedEvent::class, 'priority' => -1024])
-                // A kernel reused between tests starts each one empty.
-                ->addTag('kernel.reset', ['method' => 'reset'])
+                // No kernel.reset: a kernel kept between requests resets its services on
+                // the next boot, and what this one holds is what the test came to read.
+                // The frame is reset between requests because its leftovers are wrong
+                // records; these are the right ones. The test empties it when it wants to.
                 ->setPublic(true));
             $container->setAlias(AuditCollector::class, self::SERVICE_COLLECTOR)->setPublic(true);
 

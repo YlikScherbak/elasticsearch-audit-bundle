@@ -8,11 +8,14 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\MergedRecordEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\NoticesVetoedRecordsInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\ScopedEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\DeclaresAuditFieldsInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
@@ -169,6 +172,12 @@ final class AuditWriter
             $this->outbox?->spoil('the audit frame refused the operation because it grew past coalescing.max_held, and dropped what it had collected');
 
             throw $e;
+        } catch (NotConfiguredException $e) {
+            // Not a write failure, so on_failure does not get a say. That setting exists
+            // so a cluster having a bad day cannot take an operation down; it was never
+            // meant to swallow a bundle that was assembled wrong, and swallowing this one
+            // would leave an application with fields it believes are indexed and are not.
+            throw $e;
         } catch (\Throwable $e) {
             $this->reportFailure($e, $record);
 
@@ -197,6 +206,12 @@ final class AuditWriter
      */
     public function writeAll(array $records, ?Provenance $provenance = null): void
     {
+        // A batch is one moment. The listener passes the one its flush settled; anybody
+        // calling this directly gets one settled here, once — rather than each record
+        // asking the clock, the actor resolver and every moment enricher again, which is
+        // the per-record answer this method exists to avoid.
+        $provenance ??= $this->provenance();
+
         $outgoing = [];
         /** @var list<array{AuditRecord, \Throwable}> $failures */
         $failures = [];
@@ -235,6 +250,10 @@ final class AuditWriter
                 // this and carries on to a commit with no history behind it.
                 $this->outbox?->spoil('the audit frame refused the operation because it grew past coalescing.max_held, and dropped what it had collected');
 
+                throw $e;
+            } catch (NotConfiguredException $e) {
+                // As in write(): the configuration is wrong, and every record in this
+                // batch would meet the same wall.
                 throw $e;
             } catch (\Throwable $e) {
                 // Held, not reported here: under "throw" reporting raises, and raising
@@ -471,9 +490,26 @@ final class AuditWriter
      */
     private function enrichers(): array
     {
-        return $this->materialized ??= \is_array($this->enrichers)
-            ? array_values($this->enrichers)
-            : iterator_to_array($this->enrichers, false);
+        if ($this->materialized !== null) {
+            return $this->materialized;
+        }
+
+        $enrichers = \is_array($this->enrichers) ? array_values($this->enrichers) : iterator_to_array($this->enrichers, false);
+
+        foreach ($enrichers as $enricher) {
+            // Refused rather than quietly ignored. A moment enricher describes the
+            // moment, which is the same for every record of it, so there is nothing for
+            // object types to narrow — but the index commands would honour the
+            // declaration and map its fields into some indices only, while the writer
+            // put the values on every record. The application would then be told where
+            // its data goes by one half of the bundle and contradicted by the other,
+            // and under dynamic: false the value is stored and unsearchable.
+            if ($enricher instanceof MomentEnricherInterface && $enricher instanceof ScopedEnricherInterface) {
+                throw new NotConfiguredException(sprintf('%s is both a MomentEnricherInterface and a ScopedEnricherInterface, and those disagree: a moment is the same one for every record of it, so there is no record for objectTypes() to narrow. Drop ScopedEnricherInterface, or make it an ordinary AuditEnricherInterface if the field belongs to some object types only.', $enricher::class));
+            }
+        }
+
+        return $this->materialized = $enrichers;
     }
 
     /**
@@ -485,11 +521,14 @@ final class AuditWriter
         // Whatever a frame merged is what these see, and they run before redaction so
         // that what they add is redacted like the rest.
         foreach ($this->enrichers() as $enricher) {
-            if (!EnricherScope::covers($enricher, $record->objectType)) {
+            // Only the ones that wait for this moment, and the scope question is asked
+            // of them alone: a moment enricher is never handed a record, so it is never
+            // asked which records it is for.
+            if (!$enricher instanceof MergedRecordEnricherInterface || !EnricherScope::covers($enricher, $record->objectType)) {
                 continue;
             }
 
-            if ($enricher instanceof MergedRecordEnricherInterface && $enricher->supports($record)) {
+            if ($enricher->supports($record)) {
                 $record = $enricher->enrich($record);
             }
         }
@@ -514,6 +553,13 @@ final class AuditWriter
             // settings are, together, and the transaction says so rather than
             // committing a history it was told to leave short.
             $this->outbox?->spoil('a listener vetoed an audit record inside the transaction');
+
+            // After the dispatch, so the verdict is final: a listener behind the one
+            // that vetoed could have done it, and a transport asking to be a listener
+            // itself would be racing them for the answer.
+            if ($this->transport instanceof NoticesVetoedRecordsInterface) {
+                $this->transport->noticeVetoed($event->getRecord());
+            }
 
             return null;
         }

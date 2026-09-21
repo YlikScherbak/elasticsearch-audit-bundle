@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditEntry;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
+use Borsche\ElasticsearchAuditBundle\Test\AuditCollector;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
@@ -135,6 +136,11 @@ final class WhenARecordWasWrittenTest extends TestCase
         // comes through.
         $written = (new SyncTransport($sync = new InMemoryGateway(), self::clockAt(self::WRITTEN)));
         $written->send('audit_log', ['objectType' => 'order', WrittenAt::FIELD => self::HAPPENED], 'rec-1');
+
+        $collector = new AuditCollector(null, null, self::clockAt(self::WRITTEN));
+        $collector->send('audit_log', ['objectType' => 'order', WrittenAt::FIELD => self::HAPPENED], 'rec-1');
+
+        self::assertSame(self::WRITTEN, $collector->written()[0]->document[WrittenAt::FIELD] ?? null, 'the test transport kept a stamp somebody else put there');
         $written->sendMany([['index' => 'audit_batch', 'document' => ['objectType' => 'order', WrittenAt::FIELD => self::HAPPENED], 'id' => 'rec-2']]);
 
         self::assertSame(self::WRITTEN, $sync->only('audit_log')[WrittenAt::FIELD] ?? null);
@@ -229,11 +235,22 @@ final class WhenARecordWasWrittenTest extends TestCase
         $queuedBatch = new InMemoryGateway();
         (new IndexAuditRecordsHandler($queuedBatch, $clock))(new IndexAuditRecords([['index' => 'audit_log', 'document' => $document, 'id' => 'rec-1']]));
 
+        // The collector is a road too. It is the last step under transport: collector,
+        // and it promises a test the document that would have been stored — which it
+        // was not, while it was the one road that did not stamp the field.
+        $collected = new AuditCollector(null, null, $clock);
+        $collected->send('audit_log', $document, 'rec-1');
+
+        $collectedBatch = new AuditCollector(null, null, $clock);
+        $collectedBatch->sendMany([['index' => 'audit_log', 'document' => $document, 'id' => 'rec-1']]);
+
         return [
             'sync' => $sync->only('audit_log'),
             'sync batch' => $batch->only('audit_log'),
             'queued' => $queued->only('audit_log'),
             'queued batch' => $queuedBatch->only('audit_log'),
+            'collector' => $collected->written()[0]->document,
+            'collector batch' => $collectedBatch->written()[0]->document,
         ];
     }
 

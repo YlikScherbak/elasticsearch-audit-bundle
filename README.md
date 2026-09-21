@@ -1177,7 +1177,10 @@ final class RouteEnricher implements MomentEnricherInterface
 
 No `supports()`, no object type scoping and no `AuditRecord` parameter: there is no record to
 judge yet, and the moment is the same one for every record of it. A field only some records
-should carry is what an ordinary enricher is for. Three rules come with it:
+should carry is what an ordinary enricher is for — and one class implementing both this and
+`ScopedEnricherInterface` is refused rather than half honoured, because the index commands would
+map its fields into some indices while the writer put the values on every record. Three rules
+come with it:
 
 - **it is asked once per moment** — per flush for the Doctrine listener, per record for one
   written on its own — and not once per record of a batch;
@@ -1234,7 +1237,9 @@ message: it lists what was written, what was vetoed and what is still held.
 Two things it answers that "what was written" cannot:
 
 - **`vetoed()`** — a record a listener stopped. Those reach no transport and nothing is logged,
-  because a veto is a feature, so there is nowhere else to look;
+  because a veto is a feature, so there is nowhere else to look. The writer tells the collector
+  once the dispatch is over: listening for the event itself would be a race with whoever vetoes
+  last;
 - **`held()`** — how many records a frame that is still open is holding. A test that coalesces and
   asserts before closing the frame finds nothing written, and this is the reason. It is a question
   rather than a helpful assertion that closes the frame itself: closing it is the behaviour under
@@ -1264,6 +1269,10 @@ $this->assertNothingAudited();
 Each one fails with `explain()` behind it, so "expected 1, got 0" becomes which of the four it
 was. The trait needs phpunit/phpunit; the collector itself needs nothing, so an application on
 another framework uses its query methods directly.
+
+The collector is **not** reset by the kernel. A kernel kept between requests resets its services
+on the next boot, and what this one holds is the evidence the test came for — a two-request test
+would have found it empty. Call `reset()` yourself when you want it empty.
 
 > **It is the test transport.** Nothing reaches Elasticsearch, so `audit:check` refuses to call
 > such an installation healthy and says why. Keep it in `config/packages/test/`.
@@ -1822,6 +1831,7 @@ receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditOrigin`, `AuditQuery`, 
 **Implement these**
 `AuditableInterface` · `TracksCollectionElementsInterface` · `AuditEnricherInterface` ·
 `MergedRecordEnricherInterface` · `MomentEnricherInterface` · `ScopedEnricherInterface` ·
+`NoticesVetoedRecordsInterface` ·
 `ActorResolverInterface` ·
 `QueryExtensionInterface` · `RecordDecoratorInterface` · `ValueComparatorInterface` ·
 `TransportInterface` / `BatchTransportInterface` · `GatewayInterface`, if you have a reason to

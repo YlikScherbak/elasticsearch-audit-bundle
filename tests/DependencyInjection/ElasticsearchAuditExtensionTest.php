@@ -22,7 +22,7 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
-use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Contract\NoticesVetoedRecordsInterface;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Test\AuditCollector;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
@@ -426,20 +426,19 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertTrue($definitions->getAlias(AuditCollector::class)->isPublic(), 'a test has to be able to get it out of the container');
     }
 
-    public function testTheCollectorIsToldAboutVetoesLast(): void
+    public function testTheCollectorIsNeitherAListenerNorResetByTheKernel(): void
     {
-        // A veto set by a listener behind it is still a veto, and the collector would
-        // otherwise report the record as written. The priority is the whole guarantee,
-        // so it is asserted rather than assumed.
+        // Two things it deliberately is not. A listener would be racing whoever vetoes
+        // last — priorities order listeners, they do not make one final — so the writer
+        // tells it instead, after the dispatch. And a kernel kept between requests
+        // resets its services on the next boot, which would empty the collector between
+        // the request that recorded something and the one that looks.
         $collector = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'transport' => 'collector'])
             ->getDefinition(ElasticsearchAuditExtension::SERVICE_COLLECTOR);
 
-        $listener = $collector->getTag('kernel.event_listener');
-
-        self::assertCount(1, $listener);
-        self::assertSame(RecordCreatedEvent::class, $listener[0]['event'] ?? null);
-        self::assertLessThan(0, $listener[0]['priority'] ?? 0, 'a listener at the default priority can be overtaken by an application listener');
-        self::assertSame([['method' => 'reset']], $collector->getTag('kernel.reset'), 'a kernel reused between tests would carry records from the previous one');
+        self::assertSame([], $collector->getTag('kernel.event_listener'), 'listening for the event is a race with the listener that vetoes last');
+        self::assertSame([], $collector->getTag('kernel.reset'), 'a two-request test would find the evidence from the first request gone');
+        self::assertContains(NoticesVetoedRecordsInterface::class, class_implements(AuditCollector::class) ?: [], 'and then nothing would tell it about a veto at all');
     }
 
     public function testNoCollectorIsBuiltForAnyOtherTransport(): void

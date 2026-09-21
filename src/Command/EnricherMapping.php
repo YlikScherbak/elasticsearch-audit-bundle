@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Command;
 
+use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\DeclaresAuditFieldsInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Writer\EnricherScope;
@@ -33,7 +34,10 @@ final class EnricherMapping
         $mine = [];
 
         foreach ($enrichers as $enricher) {
-            if (EnricherScope::reaches($enricher, $resolver, $index)) {
+            // A moment enricher is about every record, so its fields belong in every
+            // index, and it is not asked the question at all. The writer refuses the one
+            // class that would claim otherwise, so the two halves cannot disagree.
+            if (!$enricher instanceof AuditEnricherInterface || EnricherScope::reaches($enricher, $resolver, $index)) {
                 $mine[] = $enricher;
             }
         }

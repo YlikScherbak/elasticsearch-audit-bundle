@@ -8,7 +8,9 @@ use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\ScopedEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
@@ -88,6 +90,79 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         self::assertCount(3, $this->gateway->documents['audit_log'] ?? []);
         self::assertSame(['/checkout', '/checkout', '/checkout'], array_column($this->gateway->documents['audit_log'], 'route'));
         self::assertSame(1, $counting->asked, 'the moment was described once per record of the batch');
+    }
+
+    public function testABatchNobodyHandedAProvenanceIsStillOneMoment(): void
+    {
+        // The test above passes a provenance, so it only pins the listener's road. An
+        // application writing its own batch does not have one and does not know the
+        // argument exists — and the promise is about batches, not about who assembled
+        // them. Every record asking the clock, the actor resolver and every moment
+        // enricher again is exactly what "never per record of a batch" rules out.
+        $counting = new class implements MomentEnricherInterface {
+            public int $asked = 0;
+
+            public function describe(): array
+            {
+                return ['sequence' => ++$this->asked];
+            }
+
+            public function mapping(): array
+            {
+                return ['sequence' => ['type' => 'integer']];
+            }
+        };
+
+        $this->writer([$counting])->writeAll([
+            new AuditRecord('order', 1, 'update'),
+            new AuditRecord('order', 2, 'update'),
+            new AuditRecord('order', 3, 'update'),
+        ]);
+
+        self::assertSame(1, $counting->asked, 'a batch written without a provenance asked for the moment once per record');
+        self::assertSame([1, 1, 1], array_column($this->gateway->documents['audit_log'], 'sequence'));
+    }
+
+    public function testOneThatClaimsAScopeIsRefusedRatherThanHalfHonoured(): void
+    {
+        // The two disagree: a moment is the same one for every record of it, so there is
+        // no record for objectTypes() to narrow — but the index commands honoured the
+        // declaration and mapped its fields into some indices, while the writer put the
+        // values on every record. Under dynamic: false that is a field stored and
+        // unsearchable, in an index the application was told it would never be in.
+        $both = new class implements MomentEnricherInterface, ScopedEnricherInterface {
+            public function objectTypes(): array
+            {
+                return ['order'];
+            }
+
+            public function describe(): array
+            {
+                return ['route' => '/checkout'];
+            }
+
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                return $record;
+            }
+
+            public function mapping(): array
+            {
+                return ['route' => ['type' => 'keyword']];
+            }
+        };
+
+        // Raised past the failure policy on purpose: on_failure is about a cluster
+        // having a bad day, not about a bundle assembled wrong.
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessage('there is no record for objectTypes() to narrow');
+
+        $this->writer([$both])->record('order', 1, 'update');
     }
 
     public function testAnOrdinaryEnricherDoesNotGetToOverwriteIt(): void

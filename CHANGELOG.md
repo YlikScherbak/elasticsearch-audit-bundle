@@ -91,6 +91,22 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
+- **Four promises this release made and did not keep, found by reviewing the candidate.**
+  `writeAll()` asked every moment enricher again for each record of a batch when nobody handed it
+  a provenance — which is every batch an application assembles itself, and the promise says never
+  per record of a batch. The collector did not stamp `writtenAt`, so the document it offered a
+  test as "what would have been stored" was the one field short of it that this release added.
+  A class implementing both `MomentEnricherInterface` and `ScopedEnricherInterface` had its
+  fields mapped into some indices and written into all of them — stored and unsearchable, in
+  indices the application was told they would never reach — and is now refused, past
+  `on_failure`, because a bundle assembled wrong is not a write having a bad day. And the
+  collector learned about a veto by listening at a low priority, which orders listeners without
+  making one final: the writer tells it after the dispatch instead, through
+  `NoticesVetoedRecordsInterface`.
+  <br>The collector also lost its `kernel.reset` tag. A kernel kept between requests resets its
+  services on the next boot, so a test making two requests found the evidence from the first one
+  gone — the frame is reset between requests because its leftovers are wrong records, and the
+  collector's are the right ones. `reset()` is public and the test calls it.
 - **The report about two enrichers disagreeing no longer repeats a redacted value, and a moment
   enricher's own exception no longer travels into the log.** Both are new in this release and both
   go around a rule the bundle already had. When an ordinary enricher sets an attribute a moment

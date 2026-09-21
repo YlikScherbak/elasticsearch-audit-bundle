@@ -96,7 +96,7 @@ final class AuditAssertionsTest extends TestCase
     {
         // The third: the record was built and stopped on purpose. It reaches no
         // transport and nothing is logged, so this is the only place to look.
-        $this->writer(self::vetoing($this->collector))->record('order', 42, 'update');
+        $this->writer(self::vetoing())->record('order', 42, 'update');
 
         $vetoed = $this->assertAuditVetoed('order', 42, 'update');
 
@@ -152,18 +152,13 @@ final class AuditAssertionsTest extends TestCase
         self::fail('the assertion passed where it should have failed');
     }
 
-    private static function vetoing(AuditCollector $collector): EventDispatcherInterface
+    private static function vetoing(): EventDispatcherInterface
     {
-        return new class($collector) implements EventDispatcherInterface {
-            public function __construct(private readonly AuditCollector $collector)
-            {
-            }
-
+        return new class implements EventDispatcherInterface {
             public function dispatch(object $event): object
             {
                 if ($event instanceof RecordCreatedEvent) {
                     $event->veto();
-                    ($this->collector)($event);
                 }
 
                 return $event;

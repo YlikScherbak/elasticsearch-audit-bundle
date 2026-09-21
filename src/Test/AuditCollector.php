@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Test;
 
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
+use Borsche\ElasticsearchAuditBundle\Contract\NoticesVetoedRecordsInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\BulkResult;
-use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
+use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Transport\BatchTransportInterface;
+use Borsche\ElasticsearchAuditBundle\Transport\WrittenAt;
+use Psr\Clock\ClockInterface;
 
 /**
  * The transport a test uses: it keeps the records instead of sending them.
@@ -35,8 +38,10 @@ use Borsche\ElasticsearchAuditBundle\Transport\BatchTransportInterface;
  * Two things a test will want that are not "what was written":
  *
  * - `vetoed()`, for a record a listener dropped on purpose. Those never reach a
- *   transport, so this service is also a listener on RecordCreatedEvent, registered
- *   last, which is where the final verdict is known;
+ *   transport, so the writer tells this one about them through
+ *   {@see NoticesVetoedRecordsInterface}, after the dispatch is over and the verdict is
+ *   final. Listening for the event instead would be a race: a veto set by a listener
+ *   behind you is still a veto;
  * - `held()`, for records an open frame is still holding. A test that coalesces and
  *   then asserts on `written()` before closing the frame finds nothing, and the honest
  *   answer is "they are held", not a helpful assertion that closes the frame itself —
@@ -44,7 +49,7 @@ use Borsche\ElasticsearchAuditBundle\Transport\BatchTransportInterface;
  *
  * @see CollectedRecord for what comes back
  */
-final class AuditCollector implements BatchTransportInterface
+final class AuditCollector implements BatchTransportInterface, NoticesVetoedRecordsInterface
 {
     /** @var list<CollectedRecord> */
     private array $written = [];
@@ -55,17 +60,20 @@ final class AuditCollector implements BatchTransportInterface
     public function __construct(
         private readonly ?FrameBuffer $frame = null,
         private readonly ?ChangeRedactor $redactor = null,
+        // The same clock the other transports stamp with, so what is collected is what
+        // would have been stored rather than one field short of it.
+        private readonly ?ClockInterface $clock = null,
     ) {
     }
 
     public function send(string $index, array $document, ?string $id = null): void
     {
-        $this->written[] = new CollectedRecord($index, $document, $id);
+        $this->written[] = new CollectedRecord($index, WrittenAt::on($document, $this->clock), $id);
     }
 
     public function sendMany(array $items): BulkResult
     {
-        foreach ($items as $item) {
+        foreach (WrittenAt::onEach($items, $this->clock) as $item) {
             $this->written[] = new CollectedRecord($item['index'], $item['document'], $item['id']);
         }
 
@@ -73,22 +81,16 @@ final class AuditCollector implements BatchTransportInterface
     }
 
     /**
-     * Records a veto. Registered as the last listener on the event, because a veto set
-     * by a listener behind this one would otherwise go unseen.
+     * Records a veto, told by the writer once the verdict is final.
      *
-     * @internal the bundle registers this; a test reads vetoed()
+     * @internal the writer calls this; a test reads vetoed()
      */
-    public function __invoke(RecordCreatedEvent $event): void
+    public function noticeVetoed(AuditRecord $record): void
     {
-        if (!$event->isVetoed()) {
-            return;
-        }
-
-        $record = $event->getRecord();
-
-        // No index: routing happens after the event, and a record that was vetoed was
-        // never routed anywhere. Saying "audit_log" here would be inventing the answer
-        // to a question that was not asked.
+        // No index and no writtenAt: routing happens after the event and no write was
+        // attempted, so a record that was vetoed was never routed anywhere and never
+        // written. Filling either in would be inventing the answer to a question nobody
+        // asked.
         $this->vetoed[] = new CollectedRecord('', $record->toDocument(), $record->id);
     }
 
@@ -177,8 +179,11 @@ final class AuditCollector implements BatchTransportInterface
     }
 
     /**
-     * Forgets everything. Tagged kernel.reset, so a kernel reused between tests starts
-     * each one empty.
+     * Forgets everything. Called by the test, and deliberately not by the kernel: a
+     * kernel kept between requests resets its services on the next boot, and what this
+     * one holds is the evidence the test came for rather than state that must not leak
+     * between requests. A two-request test would have found it empty and been told
+     * nothing was written.
      */
     public function reset(): void
     {

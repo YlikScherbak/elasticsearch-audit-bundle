@@ -4,11 +4,17 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Writer;
 
-use Borsche\ElasticsearchAuditBundle\Contract\DeclaresAuditFieldsInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ScopedEnricherInterface;
 
 /**
  * Reads what an enricher said about the object types it is for.
+ *
+ * An AuditEnricherInterface, and deliberately not the wider interface both kinds of
+ * enricher share: a moment enricher is never asked this, because the moment is the same
+ * one for every record of it. Widening the parameter to the parent was how a moment
+ * enricher came to have its fields mapped into some indices and written into all of
+ * them — a type that let a class through for a question it has no answer to.
  *
  * One place because two ask, and their answers have to be the same one: the writer,
  * about a record in front of it, and the index commands, about an index that has no
@@ -23,7 +29,7 @@ final class EnricherScope
     /**
      * Whether this enricher takes part in records of this object type.
      */
-    public static function covers(DeclaresAuditFieldsInterface $enricher, string $objectType): bool
+    public static function covers(AuditEnricherInterface $enricher, string $objectType): bool
     {
         $types = self::typesOf($enricher);
 
@@ -37,7 +43,7 @@ final class EnricherScope
      * an object type into an index, and it is the resolver that knows it — including
      * the part nobody writes down, that everything unrouted goes to the default.
      */
-    public static function reaches(DeclaresAuditFieldsInterface $enricher, IndexResolver $resolver, string $index): bool
+    public static function reaches(AuditEnricherInterface $enricher, IndexResolver $resolver, string $index): bool
     {
         $types = self::typesOf($enricher);
 
@@ -59,7 +65,7 @@ final class EnricherScope
     /**
      * @return list<string>
      */
-    private static function typesOf(DeclaresAuditFieldsInterface $enricher): array
+    private static function typesOf(AuditEnricherInterface $enricher): array
     {
         return $enricher instanceof ScopedEnricherInterface ? $enricher->objectTypes() : [];
     }

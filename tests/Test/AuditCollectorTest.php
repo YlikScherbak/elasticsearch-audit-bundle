@@ -91,10 +91,12 @@ final class AuditCollectorTest extends TestCase
     public function testARecordAListenerVetoedIsSomewhereToLook(): void
     {
         // It reaches no transport and nothing is logged — a veto is a feature, not a
-        // failure — so without this a test for one has nothing to assert on.
+        // failure — so without this a test for one has nothing to assert on. The writer
+        // says so after the dispatch, which is why this dispatcher only vetoes: a
+        // collector listening for the event itself would be racing whoever vetoes last.
         $collector = new AuditCollector();
 
-        $this->writer($collector, self::vetoing($collector))->record('order', 42, 'update');
+        $this->writer($collector, self::vetoing())->record('order', 42, 'update');
 
         self::assertSame([], $collector->written(), 'a vetoed record was written anyway');
         self::assertCount(1, $collector->vetoed());
@@ -106,7 +108,7 @@ final class AuditCollectorTest extends TestCase
     {
         $collector = new AuditCollector();
 
-        $this->writer($collector, self::watching($collector))->record('order', 42, 'update');
+        $this->writer($collector, self::watching())->record('order', 42, 'update');
 
         self::assertCount(1, $collector->written());
         self::assertSame([], $collector->vetoed());
@@ -164,7 +166,7 @@ final class AuditCollectorTest extends TestCase
     {
         $collector = new AuditCollector();
 
-        $this->writer($collector, self::vetoing($collector))->record('order', 42, 'update');
+        $this->writer($collector, self::vetoing())->record('order', 42, 'update');
         $this->writer($collector)->record('order', 43, 'update');
 
         self::assertNotSame([], $collector->vetoed());
@@ -178,21 +180,17 @@ final class AuditCollectorTest extends TestCase
     }
 
     /**
-     * A dispatcher that vetoes everything and then hands the event to the collector,
-     * which is where the bundle puts it: last, after every application listener.
+     * A dispatcher that vetoes everything. Nothing hands the event to the collector: the
+     * writer tells it once the dispatch is over, which is the only moment the verdict is
+     * settled.
      */
-    private static function vetoing(AuditCollector $collector): EventDispatcherInterface
+    private static function vetoing(): EventDispatcherInterface
     {
-        return new class($collector) implements EventDispatcherInterface {
-            public function __construct(private readonly AuditCollector $collector)
-            {
-            }
-
+        return new class implements EventDispatcherInterface {
             public function dispatch(object $event): object
             {
                 if ($event instanceof RecordCreatedEvent) {
                     $event->veto();
-                    ($this->collector)($event);
                 }
 
                 return $event;
@@ -203,19 +201,11 @@ final class AuditCollectorTest extends TestCase
     /**
      * The same, without the veto.
      */
-    private static function watching(AuditCollector $collector): EventDispatcherInterface
+    private static function watching(): EventDispatcherInterface
     {
-        return new class($collector) implements EventDispatcherInterface {
-            public function __construct(private readonly AuditCollector $collector)
-            {
-            }
-
+        return new class implements EventDispatcherInterface {
             public function dispatch(object $event): object
             {
-                if ($event instanceof RecordCreatedEvent) {
-                    ($this->collector)($event);
-                }
-
                 return $event;
             }
         };
