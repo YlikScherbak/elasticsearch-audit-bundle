@@ -10,10 +10,12 @@ use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
+use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
+use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
 use PHPUnit\Framework\TestCase;
@@ -136,6 +138,76 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         self::assertSame([], $this->logs, 'the moment defended an attribute it never set');
     }
 
+    public function testTheValuesAreNotRepeatedWhenARuleCoversTheField(): void
+    {
+        // The report above exists to tell an application which of its two enrichers is
+        // doing nothing, and it did that by putting both values in the log. Redaction
+        // happens on the way out, after this runs, so for a field under a rule this was
+        // the one place that held both values in the clear while the document that
+        // reached Elasticsearch held neither.
+        $this->writer([
+            self::describing(['token' => 'ALICE_SECRET_7c1f']),
+            self::enriching(['token' => 'BOB_SECRET_9a2e']),
+        ], new ChangeRedactor(['token']))->record('user', 7, 'update');
+
+        $said = json_encode($this->logs, \JSON_THROW_ON_ERROR);
+
+        self::assertStringNotContainsString('ALICE_SECRET_7c1f', $said, 'the value the moment described reached the log');
+        self::assertStringNotContainsString('BOB_SECRET_9a2e', $said, 'and so did the one that was discarded');
+
+        // Still reported, and still actionable: which attribute and which enricher.
+        self::assertStringContainsString('token', $this->logs[0]['message'] ?? '');
+        self::assertStringContainsString('redaction rule', $this->logs[0]['message'] ?? '');
+        self::assertSame('token', $this->logs[0]['context']['attribute'] ?? null);
+    }
+
+    public function testAFailingMomentEnricherDoesNotRepeatItsOwnException(): void
+    {
+        // An enricher asked to read the request is as likely to quote a token in its
+        // exception as a cluster is to quote a document in its error, and this bundle
+        // has one policy for repeating what other people's code said. The new log line
+        // was going around it.
+        $broken = new class implements MomentEnricherInterface {
+            public function describe(): array
+            {
+                throw new \RuntimeException('Authorization: Bearer ALICE_SECRET_7c1f');
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $this->writer([$broken])->record('user', 7, 'update');
+
+        $said = json_encode($this->logs, \JSON_THROW_ON_ERROR);
+
+        self::assertStringNotContainsString('ALICE_SECRET_7c1f', $said, 'the enricher own message travelled into the log under the default policy');
+        self::assertNotSame([], $this->logs, 'and the failure went unreported entirely');
+    }
+
+    public function testUnderFullDetailsTheEnrichersOwnMessageIsWhatWasAskedFor(): void
+    {
+        // The other half of the setting: "full" means repeat what other code said, and
+        // an installation that asked for it gets it here like everywhere else.
+        $broken = new class implements MomentEnricherInterface {
+            public function describe(): array
+            {
+                throw new \RuntimeException('the request stack was empty');
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $this->writer([$broken], null, FailureDetails::Full)->record('user', 7, 'update');
+
+        self::assertSame('the request stack was empty', $this->logs[0]['context']['reason'] ?? null);
+    }
+
     public function testAnEnricherThatLeavesTheMomentAloneIsNotAccusedOfAnything(): void
     {
         // The other side of the rule. "Kept" is only interesting when somebody tried to
@@ -176,9 +248,12 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
 
         self::assertSame('north', $document['tenant'] ?? null, 'one failing moment enricher took the others with it');
         self::assertArrayNotHasKey('route', $document);
-        // The message is a PSR-3 template; what it says is in the context beside it.
-        self::assertSame('no request here', $this->logs[0]['context']['reason'] ?? null);
+        // The message is a PSR-3 template; what it says is in the context beside it. The
+        // enricher's own sentence is not in there under the default policy — that is
+        // what the two tests above are about — but which enricher failed is, because
+        // that is the part the application acts on.
         self::assertSame($broken::class, $this->logs[0]['context']['enricher'] ?? null, 'the log does not say which enricher failed');
+        self::assertStringContainsString('RuntimeException', (string) ($this->logs[0]['context']['reason'] ?? ''));
         self::assertStringContainsString('{reason}', $this->logs[0]['message'] ?? '');
     }
 
@@ -291,11 +366,11 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
     /**
      * @param list<AuditEnricherInterface|MomentEnricherInterface> $enrichers
      */
-    private function writer(array $enrichers): AuditWriter
+    private function writer(array $enrichers, ?ChangeRedactor $redactor = null, ?FailureDetails $details = null): AuditWriter
     {
         $transport = new SyncTransport($this->gateway, new FrozenClock());
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, logger: $this->logger());
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, logger: $this->logger(), redactor: $redactor, failureDetails: $details);
     }
 
     private function logger(): AbstractLogger

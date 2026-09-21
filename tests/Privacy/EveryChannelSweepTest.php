@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Privacy;
 
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
@@ -192,6 +193,73 @@ final class EveryChannelSweepTest extends TestCase
         $this->assertNothingLeaked();
     }
 
+    public function testTwoEnrichersDisagreeingAboutARedactedFieldLeakNothing(): void
+    {
+        // A moment enricher and an ordinary one setting the same attribute: the writer
+        // keeps the moment's value and says so, because an application with two
+        // enrichers and no message has no way to find out which of them does nothing.
+        // Saying so put both values in a log line, and this one runs before redaction —
+        // so the field a rule covers was in the clear in the one place nobody looks,
+        // while the document had only the placeholder.
+        $writer = $this->writer(FailurePolicy::Log, enrichers: [
+            new class implements MomentEnricherInterface {
+                public function describe(): array
+                {
+                    return ['password' => EveryChannelSweepTest::secret()];
+                }
+
+                public function mapping(): array
+                {
+                    return ['password' => ['type' => 'keyword']];
+                }
+            },
+            new class implements AuditEnricherInterface {
+                public function supports(AuditRecord $record): bool
+                {
+                    return true;
+                }
+
+                public function enrich(AuditRecord $record): AuditRecord
+                {
+                    return $record->withAttributes(['password' => 'the other '.EveryChannelSweepTest::secret()]);
+                }
+
+                public function mapping(): array
+                {
+                    return ['password' => ['type' => 'keyword']];
+                }
+            },
+        ]);
+
+        $writer->record('user', 7, 'update', ['name' => new Change('a', 'b')]);
+
+        $this->assertNothingLeaked();
+    }
+
+    public function testAMomentEnricherThatThrowsQuotingTheSecretLeaksNothing(): void
+    {
+        // The other new channel: an enricher asked to read the request throws, and its
+        // own message is as likely to quote a token as a cluster's error is to quote a
+        // document. Under the default policy the bundle does not repeat it.
+        $writer = $this->writer(FailurePolicy::Log, enrichers: [
+            new class implements MomentEnricherInterface {
+                public function describe(): array
+                {
+                    throw new \RuntimeException('Authorization: Bearer '.EveryChannelSweepTest::secret());
+                }
+
+                public function mapping(): array
+                {
+                    return [];
+                }
+            },
+        ]);
+
+        $writer->record('user', 7, 'update', ['name' => new Change('a', 'b')]);
+
+        $this->assertNothingLeaked();
+    }
+
     public function testTheRowTheOutboxCommitsCarriesOnlyThePlaceholder(): void
     {
         // The last channel, and the one that keeps what it is given for as long as the
@@ -358,6 +426,14 @@ final class EveryChannelSweepTest extends TestCase
      * being asked is "does this text appear anywhere", and a channel that cannot be
      * encoded cleanly still has to be looked at.
      */
+    /**
+     * The marker, readable from the anonymous enrichers the scenarios build.
+     */
+    public static function secret(): string
+    {
+        return self::MARKER;
+    }
+
     private function assertNothingLeaked(): void
     {
         foreach ($this->channels as $name => $channel) {

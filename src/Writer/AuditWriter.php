@@ -620,7 +620,7 @@ final class AuditWriter
             }
 
             if ($enricher->supports($record)) {
-                $record = self::keeping($moment, $enricher->enrich($record), $enricher, $this->say(...));
+                $record = $this->keeping($moment, $enricher->enrich($record), $enricher);
             }
         }
 
@@ -649,6 +649,14 @@ final class AuditWriter
             try {
                 $moment = array_replace($moment, $enricher->describe());
             } catch (\Throwable $e) {
+                // Through the failure policy, like every other foreign cause this class
+                // repeats. An enricher is application code that was asked to read the
+                // request: its exception is as likely to quote a token as a cluster's is
+                // to quote a document, and a log line is a channel like any other. Under
+                // the default, redact.failure_details: cause, what travels is the
+                // bundle's own sentence and not somebody else's.
+                $e = $this->failureDetails->of($e);
+
                 $this->say('A moment enricher failed to describe the moment, so its fields are missing from every record of it: {reason}.', ['enricher' => $enricher::class, 'reason' => $e->getMessage(), 'exception' => $e]);
             }
         }
@@ -666,10 +674,15 @@ final class AuditWriter
      * both values are in the message, because which of the two is wanted is a decision
      * only the application can make, and it cannot make it without seeing them.
      *
-     * @param array<string, mixed>                     $moment
-     * @param callable(string, array<string, mixed>): void $say
+     * A value under a redaction rule is named and not repeated. Redaction happens on
+     * the way out, in prepare(), and this runs before it — so the one place that knew
+     * both values was putting both of them in the log while the document that reached
+     * Elasticsearch had neither. The rule is asked of the redactor rather than guessed
+     * from the value, which is what redacts() is public for.
+     *
+     * @param array<string, mixed> $moment
      */
-    private static function keeping(array $moment, AuditRecord $record, AuditEnricherInterface $enricher, callable $say): AuditRecord
+    private function keeping(array $moment, AuditRecord $record, AuditEnricherInterface $enricher): AuditRecord
     {
         $taken = [];
 
@@ -684,7 +697,13 @@ final class AuditWriter
         }
 
         foreach ($taken as $name => $value) {
-            $say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept.', $enricher::class, $name), [
+            if ($this->redactor?->redacts($record->objectType, $name) === true) {
+                $this->say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept. Neither value is repeated here: "%s" is covered by a redaction rule.', $enricher::class, $name, $name), ['attribute' => $name]);
+
+                continue;
+            }
+
+            $this->say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept.', $enricher::class, $name), [
                 'attribute' => $name,
                 'kept' => $value,
                 'discarded' => $record->attributes[$name] ?? null,

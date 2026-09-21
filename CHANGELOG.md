@@ -91,6 +91,34 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
+- **The report about two enrichers disagreeing no longer repeats a redacted value, and a moment
+  enricher's own exception no longer travels into the log.** Both are new in this release and both
+  go around a rule the bundle already had. When an ordinary enricher sets an attribute a moment
+  enricher had described, the writer keeps the moment's value and logs the attempt with both
+  values — and that runs before redaction, so for a field under a rule the one place holding both
+  in the clear was a log line, while the document had only the placeholder. It now names the
+  attribute and says the values are withheld, asking the redactor rather than guessing from the
+  value. And a `describe()` that throws is repeated through `redact.failure_details` like every
+  other foreign cause: an enricher asked to read the request is as likely to quote a token as a
+  cluster is to quote a document.
+  <br>Both have a scenario in the sweep that checks every channel at once, which is where they
+  should have been caught.
+- **A flush running inside another no longer lends it its moment.** The fix below settles a
+  record's timestamp, actor and id where the change was seen — and it kept exactly one of those
+  answers at a time. When a lifecycle listener calls `flush()` while this listener's own flush is
+  still running, two flushes are alive at once: the inner one collected into the same lists and
+  replaced the number everything was filed under, and the outer flush then published *all* of it
+  with the inner request's actor, clock and route. The defect this release exists to remove,
+  arriving by a different road — and one no test could see, because none of them held two flushes
+  open at the same time.
+  <br>The flushes are a stack now. Each record remembers which of them collected it, so
+  publishing hands every stretch of records the moment its own flush settled — stretches rather
+  than groups, because reordering an audit trail to tidy up the writing would be its own kind of
+  wrong. An owner whose record is built after the commit remembers it too, and its
+  always-recorded context is read under the flush that saw it rather than the one doing the
+  writing.
+  <br>Found by a review of the release candidate and reproduced at once: an inner flush under
+  another actor, and the outer flush's record came back signed by them.
 - **A flush running inside another no longer lends it its moment.** The fix below settles a
   record's timestamp, actor and id where the change was seen — and it kept exactly one of those
   answers at a time. When a lifecycle listener calls `flush()` while this listener's own flush is
