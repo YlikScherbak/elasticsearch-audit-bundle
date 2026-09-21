@@ -79,8 +79,34 @@ final class AuditSubscriber
     /** @var list<AuditRecord> records built during the current flush, written after its commit */
     private array $pending = [];
 
+    /**
+     * Which flush collected each pending record, by the same index.
+     *
+     * Parallel to $pending rather than folded into it: publish() replaces entries by
+     * index when it merges what happened inside a collection into its owner's record,
+     * and an index that means two things is an index that drifts.
+     *
+     * @var list<int>
+     */
+    private array $pendingFlush = [];
+
     /** @var array<int, AuditRecord> records for entities being removed, keyed by object id */
     private array $pendingRemovals = [];
+
+    /** @var array<int, int> which flush took each of those, kept for the move into pending */
+    private array $pendingRemovalsFlush = [];
+
+    /**
+     * Which flush saw each owner whose record is built after the commit, by object id.
+     *
+     * An owner with no lifecycle event of its own has no record until publish() makes
+     * one, so there is nothing else carrying its number — and it needs one for the same
+     * reason every other record does: a nested flush must not lend it its moment or its
+     * context.
+     *
+     * @var array<int, int>
+     */
+    private array $ownerFlush = [];
 
     /** @var array<int, array{0: object, 1: array<string, Change>}> changes inside tracked collection elements, keyed by the owner's object id */
     private array $elementChanges = [];
@@ -173,13 +199,23 @@ final class AuditSubscriber
     private array $provenance = [];
 
     /**
-     * The flush whose records this listener is holding, if it is holding any.
+     * The flushes this listener is inside, innermost last.
      *
-     * Everything collected belongs to exactly one flush — that is the whole shape of
-     * this listener — and this is its number, so that publishing reaches for the right
-     * moment and the right context even when it happens two flushes later.
+     * A stack rather than a number, because a lifecycle listener may call flush() while
+     * this listener's own flush is still running, and then two flushes are alive at
+     * once: the inner one collects into the same lists, the outer one publishes both.
+     * A single number meant the inner flush replaced the outer's, and the outer's
+     * records were written with the inner request's actor, clock and route — the very
+     * defect the per-flush moment exists to prevent, back again wherever a nested flush
+     * happens to run.
+     *
+     * Pushed in onFlush, popped by the postFlush of the flush that pushed it. What is
+     * collected is filed under whichever number is on top at the time, and every record
+     * remembers its own, so publishing can hand each one the moment it belongs to.
+     *
+     * @var list<int>
      */
-    private ?int $collecting = null;
+    private array $collecting = [];
 
     /**
      * The entity manager the flush on the stack belongs to, held weakly.
@@ -314,7 +350,7 @@ final class AuditSubscriber
         $this->beginFlush($em);
 
         $this->provenance[$this->flush] = $this->writer->provenance();
-        $this->collecting = $this->flush;
+        $this->collecting[] = $this->flush;
 
         $uow = $em->getUnitOfWork();
 
@@ -425,6 +461,7 @@ final class AuditSubscriber
                 }
 
                 $this->emptiedCollections[spl_object_id($owner)][0] = $owner;
+                $this->ownerFlush[spl_object_id($owner)] ??= $this->collectingNow() ?? $this->flush;
                 $this->emptiedCollections[spl_object_id($owner)][1][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
             } catch (\Throwable $e) {
                 // Reading the old membership back is the one part of this listener that
@@ -447,6 +484,7 @@ final class AuditSubscriber
 
         if ($record !== null) {
             $this->pending[] = $record;
+            $this->pendingFlush[] = $this->collectingNow() ?? $this->flush;
             // Registered like an update's: an owner created with its lines has one
             // record, and what the lines did belongs in it. Without this the membership
             // found no record to join and invented a second, phantom update.
@@ -485,6 +523,7 @@ final class AuditSubscriber
         }
 
         $this->pending[] = $record;
+        $this->pendingFlush[] = $this->collectingNow() ?? $this->flush;
         $this->pendingIndexByEntity[spl_object_id($entity)] = array_key_last($this->pending);
     }
 
@@ -494,6 +533,10 @@ final class AuditSubscriber
 
         if ($record !== null) {
             $this->pendingRemovals[spl_object_id($args->getObject())] = $record;
+            // Taken here and used when postRemove moves the record across, rather than
+            // read again there: the two are the same flush today, and a record that
+            // carries the moment it was taken in does not depend on that staying true.
+            $this->pendingRemovalsFlush[spl_object_id($args->getObject())] = $this->collectingNow() ?? $this->flush;
         }
     }
 
@@ -505,10 +548,12 @@ final class AuditSubscriber
 
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
-        unset($this->pendingRemovals[$key]);
+        $collected = $this->pendingRemovalsFlush[$key] ?? null;
+        unset($this->pendingRemovals[$key], $this->pendingRemovalsFlush[$key]);
 
         if ($record !== null) {
             $this->pending[] = $record;
+            $this->pendingFlush[] = $collected ?? $this->collectingNow() ?? $this->flush;
         }
     }
 
@@ -540,6 +585,13 @@ final class AuditSubscriber
         }
 
         if ($this->flushDepths !== []) {
+            // An inner flush is over. Its number comes off the stack so that everything
+            // the outer flush collects from here on is filed under the outer's again —
+            // otherwise the rest of the outer flush, and the publishing of all of it,
+            // would be dated and signed by the request that happened to be running when
+            // somebody called flush() from a lifecycle listener.
+            array_pop($this->collecting);
+
             return;
         }
 
@@ -562,6 +614,7 @@ final class AuditSubscriber
     private function publish(ObjectManager $manager, ?EntityManagerInterface $em): void
     {
         $records = $this->pending;
+        $collected = $this->pendingFlush;
 
         // Now that the flush is over, every element has its identifier — including the
         // ones inserted a moment ago — so what happened inside a tracked collection can
@@ -579,28 +632,59 @@ final class AuditSubscriber
             $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
 
             try {
+                // The flush that saw this owner, which is not always the one publishing:
+                // an inner flush may have run in between, and its number must not become
+                // the outer record's moment or the key its context is read under.
+                $flush = $this->ownerFlush[spl_object_id($owner)] ?? $this->collectingNow();
+
                 if ($index !== null && isset($records[$index])) {
                     $merged = array_replace($records[$index]->changes, $changes);
-                    $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged));
+                    $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged, $collected[$index] ?? $flush));
 
                     continue;
                 }
 
-                $record = $this->recordForOwner($manager, $owner, $changes);
+                $record = $this->recordForOwner($manager, $owner, $changes, $flush);
 
                 if ($record !== null) {
                     $records[] = $record;
+                    $collected[] = $flush;
                 }
             } catch (\Throwable $e) {
                 $this->reportWhileBuilding($e, $index !== null ? ($records[$index] ?? null) : null);
             }
         }
 
-        // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
-        // The moment the change happened, not the moment it is being written: this
-        // method runs in postFlush, and in the branch that publishes a swallowed flush it
-        // runs during a later one entirely.
-        $this->writer->writeAll(array_values($records), $this->provenance[$this->collecting] ?? null);
+        // One batch: a flush that touched fifty entities is one _bulk call, not fifty
+        // round-trips. The moment the change happened, not the moment it is being
+        // written: this method runs in postFlush, and in the branch that publishes a
+        // swallowed flush it runs during a later one entirely.
+        //
+        // One batch per run of records that share a moment, and runs rather than groups
+        // so that the order records were collected in is the order they are written in.
+        // Nearly always there is exactly one run; there are two or three when a
+        // lifecycle listener called flush() in the middle of this one, and then each
+        // stretch goes out with the moment its own flush settled.
+        $records = array_values($records);
+        $collected = array_values($collected);
+        $run = [];
+        $moment = null;
+
+        foreach ($records as $position => $record) {
+            $its = $collected[$position] ?? null;
+
+            if ($run !== [] && $its !== $moment) {
+                $this->writer->writeAll($run, $this->provenance[$moment] ?? null);
+                $run = [];
+            }
+
+            $run[] = $record;
+            $moment = $its;
+        }
+
+        if ($run !== []) {
+            $this->writer->writeAll($run, $this->provenance[$moment] ?? null);
+        }
 
         // And only now, with everything that could be written on its way out. If
         // writeAll() raised instead, that is the exception the caller gets: it is about
@@ -703,21 +787,35 @@ final class AuditSubscriber
     /**
      * Everything the flush that is ending collected, dropped with it.
      */
+    /**
+     * The flush things are being collected under right now, if any.
+     */
+    private function collectingNow(): ?int
+    {
+        return $this->collecting === [] ? null : $this->collecting[array_key_last($this->collecting)];
+    }
+
     private function forgetThisFlush(): void
     {
         $this->pending = [];
+        $this->pendingFlush = [];
         $this->pendingRemovals = [];
+        $this->pendingRemovalsFlush = [];
         $this->pendingIndexByEntity = [];
         $this->elementChanges = [];
         $this->elementMembership = [];
+        $this->ownerFlush = [];
         $this->flushDepths = [];
         $this->statementsRan = false;
         $this->failureWhileBuilding = null;
 
-        if ($this->collecting !== null) {
-            unset($this->contextAsFlushed[$this->collecting], $this->provenance[$this->collecting]);
-            $this->collecting = null;
-        }
+        // Everything, not this flush's entry: forgetting happens when nothing is live —
+        // the outermost postFlush, or a new flush finding the last one abandoned — and
+        // an entry left behind under another number would be a moment nothing can ever
+        // publish. Removing only the current one and then emptying the map anyway was
+        // two rules for one thing, and the second made the first unobservable.
+        $this->collecting = [];
+        $this->provenance = [];
         $this->changeSets = [];
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
@@ -1272,6 +1370,7 @@ final class AuditSubscriber
                     'id' => $identifier,
                 ];
                 $this->elementMembership[$key] = [$owner, $held];
+                $this->ownerFlush[$key] ??= $this->collectingNow() ?? $this->flush;
 
                 continue;
             }
@@ -1328,6 +1427,7 @@ final class AuditSubscriber
             // the same quadratic cost, in memcpy instead of callbacks.
             if (!isset($this->elementChanges[$key])) {
                 $this->elementChanges[$key] = [$owner, []];
+                $this->ownerFlush[$key] ??= $this->collectingNow() ?? $this->flush;
             }
 
             foreach ($changes as $name => $change) {
@@ -1445,7 +1545,7 @@ final class AuditSubscriber
      *
      * @return array<string, Change|mixed>
      */
-    private function withContext(?EntityManagerInterface $em, object $owner, array $changes): array
+    private function withContext(?EntityManagerInterface $em, object $owner, array $changes, ?int $flush = null): array
     {
         $metadata = $em === null ? null : $this->metadataFactory->for($owner);
 
@@ -1453,7 +1553,9 @@ final class AuditSubscriber
             return $changes;
         }
 
-        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes, $this->contextAsFlushed[$this->collecting][spl_object_id($owner)] ?? [], $this->changeSets[spl_object_id($owner)] ?? []);
+        $flush ??= $this->collectingNow();
+
+        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? [], $this->changeSets[spl_object_id($owner)] ?? []);
     }
 
     /**
@@ -1463,8 +1565,10 @@ final class AuditSubscriber
      *
      * @param array<string, Change> $changes
      */
-    private function recordForOwner(ObjectManager $manager, object $owner, array $changes): ?AuditRecord
+    private function recordForOwner(ObjectManager $manager, object $owner, array $changes, ?int $flush = null): ?AuditRecord
     {
+        $flush ??= $this->collectingNow();
+
         $record = null;
 
         try {
@@ -1495,13 +1599,13 @@ final class AuditSubscriber
                 // had an event. What is already here from its elements wins, being about
                 // different fields.
                 $changes = array_replace(
-                    (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$this->collecting][spl_object_id($owner)] ?? []),
+                    (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? []),
                     $changes,
                 );
             }
 
             return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
-                ->withChanges($this->withContext($em, $owner, $changes));
+                ->withChanges($this->withContext($em, $owner, $changes, $flush));
         } catch (\Throwable $e) {
             $this->reportWhileBuilding($e, $record);
 
@@ -1660,7 +1764,7 @@ final class AuditSubscriber
             $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
 
             if ($withChanges) {
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)][1] ?? [], $this->contextAsFlushed[$this->collecting][spl_object_id($entity)] ?? []));
+                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)][1] ?? [], $this->contextAsFlushed[$this->collectingNow()][spl_object_id($entity)] ?? []));
             }
 
             return $record;

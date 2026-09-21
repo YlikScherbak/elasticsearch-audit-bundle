@@ -15,6 +15,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
+use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Events;
 use Psr\Clock\ClockInterface;
 
@@ -262,6 +263,272 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
     private static function millisecondsIn(string $id): string
     {
         return substr(str_replace('-', '', $id), 0, 12);
+    }
+
+    public function testAFlushRunningInsideAnotherDoesNotLendItItsMoment(): void
+    {
+        // Two flushes alive at once, which is the only shape in which the flush number
+        // is observable at all — and the shape the first version of this fix got wrong.
+        // A lifecycle listener calls flush() while Alice's is still running; that inner
+        // flush belongs to whoever is acting by then. What must not happen is the outer
+        // flush's records taking the inner one's answers, which is the defect this whole
+        // file is about, arriving by a different road.
+        $this->em->persist($alice = new Article('Alice wrote this'));
+        $this->em->persist($aside = new Article('Something else'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                // Another request's worth of difference, from inside Alice's flush.
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+
+                $this->aside->title = 'Bob changed this from inside';
+                $this->em->flush();
+            }
+        });
+
+        $alice->title = 'Alice edited this';
+        $this->em->flush();
+
+        $records = [];
+
+        foreach ($this->documents() as $document) {
+            $records[$document['changes']['title']['new'] ?? '?'] = $document;
+        }
+
+        self::assertArrayHasKey('Alice edited this', $records, 'the premise: the outer flush was recorded');
+        self::assertArrayHasKey('Bob changed this from inside', $records, 'the premise: so was the inner one');
+
+        self::assertSame('alice', $records['Alice edited this']['source'], 'the outer flush was signed by whoever the inner one was running as');
+        self::assertSame(self::ALICE, $records['Alice edited this']['loggedAt'], 'and dated by the inner flush too');
+
+        self::assertSame('bob', $records['Bob changed this from inside']['source'], 'the inner flush is its own moment, not a copy of the outer one');
+        self::assertSame(self::BOB, $records['Bob changed this from inside']['loggedAt']);
+    }
+
+    public function testBothMomentsSurviveWhenTheWholeThingIsPublishedLate(): void
+    {
+        // The other direction: nothing published at the time — the outer flush's
+        // postFlush is swallowed, and the inner one never publishes anyway — so the next
+        // flush writes both of them, late. Each stretch has to keep its own moment
+        // through that, and a single provenance for the whole batch would flatten them
+        // into one.
+        $this->em->persist($alice = new Article('Alice wrote this'));
+        $this->em->persist($aside = new Article('Something else'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+
+                $this->aside->title = 'Bob changed this from inside';
+                $this->em->flush();
+            }
+        });
+
+        $this->aliceChanges(static fn () => $alice->title = 'Alice edited this');
+
+        // A third request writes what the two of them left behind.
+        $this->who->actor = 'carol';
+        $this->when->now = '2026-09-23 09:00:00';
+
+        $this->em->persist(new Article('Carol writes something'));
+        $this->em->flush();
+
+        $records = [];
+
+        foreach ($this->documents() as $document) {
+            $records[$document['changes']['title']['new'] ?? '?'] = $document;
+        }
+
+        self::assertSame(['alice', self::ALICE], [$records['Alice edited this']['source'] ?? null, $records['Alice edited this']['loggedAt'] ?? null], 'the outer flush, published two requests later, is still Alice at her moment');
+        self::assertSame(['bob', self::BOB], [$records['Bob changed this from inside']['source'] ?? null, $records['Bob changed this from inside']['loggedAt'] ?? null], 'and the flush that ran inside it is still Bob at his');
+        self::assertSame('carol', $records['Carol writes something']['source'] ?? null, 'and the flush that did the writing is only itself');
+    }
+
+    public function testWhatTheOuterFlushCollectsAfterTheInnerOneIsStillTheOuterFlushes(): void
+    {
+        // The half of the previous test that it cannot see. Doctrine works through the
+        // entities of one flush in turn, so a nested flush started from the first
+        // entity's postUpdate is over by the time the second entity's runs — and
+        // everything after it has to be filed under the outer flush again. Without the
+        // inner number coming off the stack, the second record is collected under the
+        // inner flush's number and published with its actor and its clock.
+        $this->em->persist($first = new Article('First'));
+        $this->em->persist($second = new Article('Second'));
+        $this->em->persist($aside = new Article('Something else'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+
+                $this->aside->title = 'Bob changed this from inside';
+                $this->em->flush();
+            }
+        });
+
+        $first->title = 'First, edited by Alice';
+        $second->title = 'Second, edited by Alice';
+        $this->em->flush();
+
+        $records = [];
+
+        foreach ($this->documents() as $document) {
+            $records[$document['changes']['title']['new'] ?? '?'] = $document;
+        }
+
+        self::assertArrayHasKey('Second, edited by Alice', $records, 'the premise: both of the outer flush\'s entities were recorded');
+
+        self::assertSame('alice', $records['Second, edited by Alice']['source'], 'what the outer flush collected after the inner one finished was filed under the inner flush');
+        self::assertSame(self::ALICE, $records['Second, edited by Alice']['loggedAt']);
+    }
+
+    public function testAnOwnerSeenOnlyByTheInnerFlushKeepsThatFlushesContext(): void
+    {
+        // The owner path, where the record does not exist until publish() builds it and
+        // the always-recorded context beside it is read from a snapshot. Which snapshot
+        // is the question: the crate is touched by the inner flush, and the record is
+        // written by the outer one, so reading it under "the flush that is publishing"
+        // finds nothing at all.
+        $crate = new Crate('C-1');
+        $crate->add($item = new CrateItem('SKU-1'));
+        $crate->status = 'packed by bob';
+
+        $this->em->persist($crate);
+        $this->em->persist($alice = new Article('Alice wrote this'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $item) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly CrateItem $item,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+
+                // Only the line moves, so the crate itself gets no event of its own and
+                // its record is built after the commit, by the outer flush.
+                $this->item->quantity = 7;
+                $this->em->flush();
+            }
+        });
+
+        $alice->title = 'Alice edited this';
+        $this->em->flush();
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates, 'the premise: the crate got a record for what happened inside it');
+        self::assertSame('bob', $crates[0]['source'], 'the crate was touched by the inner flush and signed by the outer one');
+        self::assertSame(
+            ['old' => 'packed by bob', 'new' => 'packed by bob'],
+            $crates[0]['changes']['status'] ?? null,
+            'the context beside it was read under the flush that published rather than the one that saw it',
+        );
+    }
+
+    public function testTheListenerKeepsNoMomentsAfterTheFlushThatMadeThem(): void
+    {
+        // A worker runs for weeks and flushes millions of times. One Provenance per
+        // flush, kept forever, is a leak nothing else in this file can see: every
+        // assertion here is about a record, and a record is written whether or not the
+        // map behind it was emptied. So it is asked of the listener directly.
+        $this->em->persist($article = new Article('Alice wrote this'));
+        $this->em->flush();
+
+        $article->title = 'Alice edited this';
+        $this->em->flush();
+
+        $held = new \ReflectionProperty(AuditSubscriber::class, 'provenance');
+        $collecting = new \ReflectionProperty(AuditSubscriber::class, 'collecting');
+
+        self::assertSame([], $held->getValue($this->ourListener()), 'a moment stayed behind after the flush that settled it was published');
+        self::assertSame([], $collecting->getValue($this->ourListener()), 'and the flush it belonged to is still on the stack');
+    }
+
+    /**
+     * The moment the nested flush belongs to, readable from inside an anonymous class.
+     */
+    public static function bobsMoment(): string
+    {
+        return self::BOB;
     }
 
     private function alicePersisted(): Article
