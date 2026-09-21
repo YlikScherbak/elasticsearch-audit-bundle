@@ -49,7 +49,7 @@
         //
         // collectionChange::250 is the fourth, over a list it built itself.
         UnwrapArrayValues: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::representAll::220", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::250", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::contentsOf::234", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::348"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::representAll::220", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::250", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::contentsOf::234", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::374"],
         },
 
         // collectionChange builds the list a collection is recorded as, and it is
@@ -68,7 +68,7 @@
         // reachable here — it is reachable in the job that runs the ORM this one does
         // not, which is why the arm stays.
         Ternary: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::336"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::361"],
         },
 
         // The manager of the flush on the stack, read through a weak reference that is
@@ -76,7 +76,7 @@
         // reached only when the stack is not empty, and the stack is only ever appended
         // to beside that reference — so it is never null where the question is asked.
         NullSafeMethodCall: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::622"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::710"],
         },
 
         // Publishing a flush that committed late runs application code, so it is wrapped
@@ -85,7 +85,7 @@
         // thing. The finally stays because the day something is added that can escape,
         // the flush still has to be forgotten.
         UnwrapFinally: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::639"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::731"],
         },
 
         // asTheEntityNowStands walks a Doctrine change set, whose entries are always a
@@ -95,10 +95,10 @@
         // answer. They are there because the method is handed a snapshot the listener
         // kept, and a snapshot is only as well-formed as whoever filled it.
         DecrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::1402"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::1523"],
         },
         LogicalOr: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::1402", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::1299"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::1523", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::1401"],
         },
 
         // Two guards that never fire, kept for the day they can.
@@ -115,7 +115,7 @@
         //   and the keys for a cache of its result, so removing the return costs a
         //   metadata lookup and changes nothing anybody can observe.
         ReturnRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable::942"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable::1034"],
         },
 
         // Two `continue`s with nothing behind them to skip, each for its own reason.
@@ -134,7 +134,7 @@
         //   collections through one property. Whatever follows a match either fails
         //   those guards and skips itself, or is the same mapping written twice.
         Continue_: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::elementChanges::188", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::holdElementChanges::1158"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::elementChanges::188", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::holdElementChanges::1250"],
         },
 
         // stringify's arm for a BackedEnum, which nothing reaches: Doctrine hands an
@@ -146,14 +146,14 @@
         // Doctrine makes in writing. The Stringable arm beside it is reached, and has a
         // test.
         CastString: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::stringify::1516"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::stringify::1637"],
         },
     },
     // Its own floor, and well below the other run's, because this listener is the code
     // the bundle calls its price of complexity: one class answering for every shape a
     // Doctrine flush can take.
     //
-    // 97 against 99.25 measured, which is the same arrangement the other file argues
+    // 97 against 98.30 measured, which is the same arrangement the other file argues
     // for: a floor set at the best observed number turns ordinary drift into a job that
     // fails for no reason, and a check nobody trusts is worse than none.
     //
@@ -163,7 +163,9 @@
     // built from, the wording of every refused declaration, what an abandoned flush
     // counted, which keys a corrected element owns, what an identifier that is not a
     // scalar becomes and what a collection Doctrine keys is recorded as have been
-    // worked through since, and 5 are left — sixteen of the escaped mutants turned out
+    // worked through since, and 11 are left — six of those arrived with the three fixes
+    // of 1.2.4, which is the usual shape: new code, new escapees, worked through next.
+    // Sixteen of the escaped mutants turned out
     // to be equivalent by construction and are listed above with the reason. Each
     // commit that takes a group names what remains.
     //
