@@ -114,6 +114,9 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         $said = $this->logs[0]['message'] ?? '';
 
         self::assertStringContainsString('route', $said, 'nothing was logged about the discarded value');
+        // Which attribute, what was kept, what was thrown away: all three, because a
+        // message naming two of them sends somebody looking through their enrichers.
+        self::assertSame('route', $this->logs[0]['context']['attribute'] ?? null);
         self::assertSame('/checkout', $this->logs[0]['context']['kept'] ?? null);
         self::assertSame('/whatever-is-running-now', $this->logs[0]['context']['discarded'] ?? null);
     }
@@ -131,6 +134,24 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
 
         self::assertSame('/ordinary-enricher-won', $this->gateway->only('audit_log')['route'] ?? null);
         self::assertSame([], $this->logs, 'the moment defended an attribute it never set');
+    }
+
+    public function testAnEnricherThatLeavesTheMomentAloneIsNotAccusedOfAnything(): void
+    {
+        // The other side of the rule. "Kept" is only interesting when somebody tried to
+        // take it: an enricher adding a field of its own beside the moment's is the
+        // ordinary case, and telling an application about it every record would make the
+        // message worth ignoring by the time it matters.
+        $this->writer([
+            self::describing(['route' => '/checkout']),
+            self::enriching(['tenant' => 'north']),
+        ])->record('order', 1, 'updated');
+
+        $document = $this->gateway->only('audit_log');
+
+        self::assertSame('/checkout', $document['route'] ?? null);
+        self::assertSame('north', $document['tenant'] ?? null);
+        self::assertSame([], $this->logs, 'an enricher that touched nothing of the moment was reported anyway');
     }
 
     public function testOneThatFailsCostsItsOwnFieldsAndNothingElse(): void
@@ -157,6 +178,7 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         self::assertArrayNotHasKey('route', $document);
         // The message is a PSR-3 template; what it says is in the context beside it.
         self::assertSame('no request here', $this->logs[0]['context']['reason'] ?? null);
+        self::assertSame($broken::class, $this->logs[0]['context']['enricher'] ?? null, 'the log does not say which enricher failed');
         self::assertStringContainsString('{reason}', $this->logs[0]['message'] ?? '');
     }
 
