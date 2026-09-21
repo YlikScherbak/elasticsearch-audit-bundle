@@ -9,6 +9,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-09-21
+
 ### Fixed
 - **A flush whose only history came from inside a tracked collection no longer loses it.** An
   owner whose own columns did not change gets no lifecycle event from Doctrine at all, so what
