@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Doctrine\Common\Collections\ArrayCollection;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Rack;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\RackNote;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\RackSlot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
@@ -260,5 +261,32 @@ final class WhatARemovalAndAClearRecordTest extends DoctrineTestCase
 
         self::assertSame('route', $document['objectType']);
         self::assertSame(['old' => ['a', 'b'], 'new' => []], $document['changes']['stops'] ?? null);
+    }
+
+    public function testAnOwnerKeepsBothKindsOfNewsWhenItHasNoEventOfItsOwn(): void
+    {
+        // Two roads meet in one record. The rack emptied a collection, so what it held
+        // comes off the snapshot the listener kept; a line inside it changed, so that
+        // comes off the element map. The rack itself was never updated, so Doctrine gave
+        // it no event and the record is built after the flush from both — and keeping
+        // only one of them is a history that is half true.
+        $rack = new Rack('R-1');
+        $rack->add($a = new RackSlot('a'));
+        $rack->note($note = new RackNote('as written'));
+
+        $this->em->persist($a);
+        $this->em->persist($rack);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $rack->slots->clear();
+        $note->text = 'corrected';
+        $this->em->flush();
+
+        $changes = $this->lastDocument()['changes'];
+
+        self::assertSame(['old' => ['a'], 'new' => []], $changes['slots'] ?? null, 'the emptied collection is missing from a record that has the element news');
+        self::assertSame(['old' => 'as written', 'new' => 'corrected'], $changes['notes.'.$note->id.'.text'] ?? null, 'the element news is missing from a record that has the emptied collection');
     }
 }

@@ -153,7 +153,7 @@
     // the bundle calls its price of complexity: one class answering for every shape a
     // Doctrine flush can take.
     //
-    // 97 against 98.30 measured, which is the same arrangement the other file argues
+    // 97 against 99.15 measured, which is the same arrangement the other file argues
     // for: a floor set at the best observed number turns ordinary drift into a job that
     // fails for no reason, and a check nobody trusts is worse than none.
     //
@@ -163,9 +163,12 @@
     // built from, the wording of every refused declaration, what an abandoned flush
     // counted, which keys a corrected element owns, what an identifier that is not a
     // scalar becomes and what a collection Doctrine keys is recorded as have been
-    // worked through since, and 11 are left — six of those arrived with the three fixes
-    // of 1.2.4, which is the usual shape: new code, new escapees, worked through next.
-    // Sixteen of the escaped mutants turned out
+    // worked through since, and 6 are left. Four arrived with the three fixes of 1.2.4
+    // and three of them were worked through in the same breath; the fourth is the `??`
+    // on the context an owner kept when Doctrine gave it no event, which no arrangement
+    // of fixtures reaches — an owner that emptied a collection *and* was updated has a
+    // record already, so it never takes that road — and which therefore stays escaping
+    // rather than being claimed equivalent. Sixteen of the escaped mutants turned out
     // to be equivalent by construction and are listed above with the reason. Each
     // commit that takes a group names what remains.
     //

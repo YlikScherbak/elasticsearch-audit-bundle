@@ -388,6 +388,51 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         self::assertSame(['old' => ['a'], 'new' => []], $emptyings[0]['stops']);
     }
 
+    public function testSomebodyElsesCollectionBeingEmptiedDoesNotLookLikeARefusalOfOurs(): void
+    {
+        // The question asked of the unit of work is whether *this owner's* collection is
+        // still waiting to be deleted — not whether anything at all is. Flushes that
+        // empty collections are not rare in an application that has them, and reading
+        // any scheduled deletion as "the previous flush never committed" would drop a
+        // history for the sole reason that an unrelated route was being emptied at the
+        // same moment.
+        $first = new Route('R-1');
+        $first->stops->add($a = new Stop('a'));
+        $second = new Route('R-2');
+        $second->stops->add($b = new Stop('b'));
+
+        foreach ([$a, $b] as $stop) {
+            $this->em->persist($stop);
+        }
+
+        $this->em->persist($first);
+        $this->em->persist($second);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $listener = $this->silenceOurPostFlush();
+
+        $first->stops->clear();
+        $this->em->flush();
+
+        $this->restorePostFlush($listener);
+
+        // The next flush empties a different route's collection, so a deletion is on the
+        // unit of work's list while the question is being asked — and it is not ours.
+        $second->stops->clear();
+        $this->em->flush();
+
+        $emptyings = array_values(array_filter(
+            array_column($this->documents(), 'changes'),
+            static fn (array $c): bool => isset($c['stops']),
+        ));
+
+        self::assertCount(2, $emptyings, sprintf("a stranger's emptying was read as this one's refusal; what was logged:
+%s", implode("
+", $this->logs)));
+    }
+
     public function testAFlushThatOnlyRemovedThingsIsWrittenLateToo(): void
     {
         // A flush whose whole contribution to the history is deletions. Its records are

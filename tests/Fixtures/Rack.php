@@ -37,10 +37,28 @@ class Rack
     #[AuditField(represent: 'getCode')]
     public Collection $slots;
 
+    /**
+     * The other kind of news an owner can have, on the same owner: what changed inside a
+     * line of it. A record built after the flush can carry both at once, and the two
+     * arrive by different roads.
+     *
+     * @var Collection<int, RackNote>
+     */
+    #[ORM\OneToMany(mappedBy: 'rack', targetEntity: RackNote::class, cascade: ['persist'])]
+    #[AuditField(represent: 'getText', trackElements: ['text'])]
+    public Collection $notes;
+
     public function __construct(string $name)
     {
         $this->name = $name;
         $this->slots = new ArrayCollection();
+        $this->notes = new ArrayCollection();
+    }
+
+    public function note(RackNote $note): void
+    {
+        $note->rack = $this;
+        $this->notes->add($note);
     }
 
     public function add(RackSlot $slot): void

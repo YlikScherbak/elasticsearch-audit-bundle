@@ -643,6 +643,50 @@ final class TransactionSafetyTest extends DoctrineTestCase
         ))), 'the history of everything else in the flush went with the record that could not be built');
     }
 
+    public function testTheFailureTheCallerGetsIsTheFirstOneTheFlushHit(): void
+    {
+        // Two records that cannot be built in the same flush, on the two different roads
+        // to that: a vault whose element representer runs after the commit, and a siding
+        // whose record is built from nothing but its emptied collection. Both are held
+        // and only one can be raised.
+        //
+        // The first, because the ones behind it happened later and an operator reading a
+        // failure transport is looking for what went wrong rather than for what went
+        // wrong last. Told apart by what the two sentences name: a deferred representer
+        // has no record to name yet, and the other one does.
+        $siding = new Siding('S-1');
+        $siding->planks->add($plank = new FolderDocument('p'));
+
+        $vault = new Vault('v');
+
+        $this->em->persist($plank);
+        $this->em->persist($siding);
+        $this->em->persist($vault);
+        $this->em->flush();
+
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->gateway->documents = [];
+
+        $vault->documents->add($document = new FolderDocument('d'));
+        $document->vault = $vault;
+        $this->em->persist($document);
+
+        $siding->planks->clear();
+
+        $raised = null;
+
+        try {
+            $this->em->flush();
+        } catch (WriteFailedException $e) {
+            $raised = $e;
+        }
+
+        self::assertNotNull($raised);
+        self::assertStringContainsString('could not be built', $raised->getMessage(), 'the caller was handed the last failure of the flush rather than its first');
+        self::assertStringNotContainsString('siding', $raised->getMessage());
+    }
+
     public function testAMistakeInTheAuditDeclarationIsLoggedNotFatal(): void
     {
         $entity = new Misdeclared();
