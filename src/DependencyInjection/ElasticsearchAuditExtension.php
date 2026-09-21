@@ -373,7 +373,7 @@ final class ElasticsearchAuditExtension extends Extension
      */
     private function registerTransport(string $transport, string $busId, array $outbox, string $connection, ContainerBuilder $container, FailureDetails $failureDetails): void
     {
-        $container->setDefinition(self::SERVICE_SYNC_TRANSPORT, new Definition(SyncTransport::class, [new Reference(self::SERVICE_GATEWAY)]));
+        $container->setDefinition(self::SERVICE_SYNC_TRANSPORT, new Definition(SyncTransport::class, [new Reference(self::SERVICE_GATEWAY), new Reference(self::SERVICE_CLOCK)]));
 
         if ($transport === 'messenger') {
             // Both halves, like doctrine.enabled: the component to build a message and
@@ -387,9 +387,9 @@ final class ElasticsearchAuditExtension extends Extension
             }
 
             $container->setDefinition(self::SERVICE_TRANSPORT, new Definition(MessengerTransport::class, [new Reference($busId)]));
-            $container->setDefinition(IndexAuditRecordHandler::class, (new Definition(IndexAuditRecordHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
+            $container->setDefinition(IndexAuditRecordHandler::class, (new Definition(IndexAuditRecordHandler::class, [new Reference(self::SERVICE_GATEWAY), new Reference(self::SERVICE_CLOCK)]))
                 ->addTag('messenger.message_handler'));
-            $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
+            $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY), new Reference(self::SERVICE_CLOCK)]))
                 ->addTag('messenger.message_handler'));
         } elseif ($transport === 'outbox') {
             // The same two halves as messenger, for the same reason: the record travels
@@ -420,9 +420,9 @@ final class ElasticsearchAuditExtension extends Extension
                 $outbox['require_transaction'],
             ]));
 
-            $container->setDefinition(IndexAuditRecordHandler::class, (new Definition(IndexAuditRecordHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
+            $container->setDefinition(IndexAuditRecordHandler::class, (new Definition(IndexAuditRecordHandler::class, [new Reference(self::SERVICE_GATEWAY), new Reference(self::SERVICE_CLOCK)]))
                 ->addTag('messenger.message_handler'));
-            $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY)]))
+            $container->setDefinition(IndexAuditRecordsHandler::class, (new Definition(IndexAuditRecordsHandler::class, [new Reference(self::SERVICE_GATEWAY), new Reference(self::SERVICE_CLOCK)]))
                 ->addTag('messenger.message_handler'));
 
             // The one call that would reach Elasticsearch before the commit, refused

@@ -16,6 +16,15 @@ final class AuditRecord
     public const DATE_FORMAT = 'Y-m-d H:i:s';
 
     /**
+     * The field the write path adds to every document: when the write that produced
+     * the version now in the index started. Named here because it is part of the
+     * document's shape, and set there because a record cannot know it.
+     *
+     * @see \Borsche\ElasticsearchAuditBundle\Transport\WrittenAt
+     */
+    public const WRITTEN_AT = 'writtenAt';
+
+    /**
      * @param array<string, Change|mixed> $changes    field => Change, or any JSON-able value
      * @param array<string, mixed>        $attributes extra top-level, filterable fields
      * @param string|null                 $id         the document id; the writer assigns a UUID v7 when left out
@@ -46,6 +55,16 @@ final class AuditRecord
         foreach (array_keys($attributes) as $name) {
             if (\in_array($name, self::reservedFields(), true)) {
                 throw new \InvalidArgumentException(sprintf('"%s" is a reserved document field and cannot be used as an attribute.', $name));
+            }
+
+            // Refused rather than reserved, which is a different thing: the name is not
+            // a base field — it is filterable like any attribute, which is the whole
+            // point of it — but it is the write path's to set, and a record that set it
+            // would be describing a write that has not happened yet. Silently replacing
+            // it on the way out is the other option, and it is how somebody reads a
+            // number they put there as one the bundle measured.
+            if ($name === self::WRITTEN_AT) {
+                throw new \InvalidArgumentException(sprintf('"%s" is set when the document is written and cannot be set on a record. Read it back and filter on it; the bundle fills it in.', $name));
             }
         }
     }

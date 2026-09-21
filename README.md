@@ -1400,6 +1400,7 @@ was asked for inside a nested one), `WriteFailedException`.
   "objectId": 42,
   "event": "update",
   "loggedAt": "2026-08-26 12:00:00",
+  "writtenAt": "2026-08-26 12:00:00",
   "source": "7",
   "changes": { "status": { "old": "new", "new": "paid" } },
   "salesType": 3
@@ -1410,6 +1411,28 @@ was asked for inside a nested one), `WriteFailedException`.
 (pass your own with `withId()` when you have a natural one). `source` holds the actor. `loggedAt`
 is always UTC in `yyyy-MM-dd HH:mm:ss`. Everything after `changes` is an attribute added by an
 enricher.
+
+`writtenAt` (since 1.3) is the other timestamp: when the write that produced this version of the
+document started, in the same format. Usually the same second as `loggedAt` and worth having for
+when it is not — a record is stamped with the moment its change happened, and the flush that sees
+a change is not always the flush that writes it, nor is a queued message written the moment it is
+queued. The gap between the two is the only thing that can say history is being published late —
+with one timestamp, a queue nobody has consumed since Friday looks exactly like one keeping up:
+
+```php
+// What reached the index in the last hour, whenever it happened. An entry whose loggedAt is
+// far behind its writtenAt is one that waited.
+$page = $reader->find(AuditQuery::any()->whereBetween('writtenAt', $anHourAgo, null));
+
+foreach ($page->entries as $entry) {
+    $waited = strtotime((string) $entry->attribute('writtenAt')) - $entry->loggedAt->getTimestamp();
+}
+```
+
+You cannot set it — a record that carried one would be describing a write that has not happened —
+and documents written before 1.3 do not have it, so `$entry->attribute('writtenAt')` reads null
+for them. Existing indices need `audit:index:sync` before it can be filtered on; until then it is
+stored with the document and not indexed, like any field the mapping does not declare.
 
 ## After 1.0
 

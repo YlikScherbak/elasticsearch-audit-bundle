@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Transport;
 
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
+use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
@@ -133,9 +134,9 @@ final class MessengerTransportTest extends TestCase
     {
         $gateway = new InMemoryGateway();
 
-        (new IndexAuditRecordHandler($gateway))(new IndexAuditRecord('audit_log', ['objectType' => 'order', 'objectId' => 1], 'rec-1'));
+        (new IndexAuditRecordHandler($gateway, new FrozenClock()))(new IndexAuditRecord('audit_log', ['objectType' => 'order', 'objectId' => 1], 'rec-1'));
 
-        self::assertSame(['objectType' => 'order', 'objectId' => 1], $gateway->only('audit_log'));
+        self::assertSame(['objectType' => 'order', 'objectId' => 1, 'writtenAt' => '2026-08-26 12:00:00'], $gateway->only('audit_log'));
         self::assertSame(['rec-1'], $gateway->ids['audit_log']);
     }
 

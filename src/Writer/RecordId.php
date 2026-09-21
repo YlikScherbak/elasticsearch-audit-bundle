@@ -21,6 +21,12 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
  * `iterate(consistent: true)` gives, and near-exact over a live index, where the
  * uncertainty is one millisecond wide at the boundary of a page.
  *
+ * Built from when the change happened, not from when the record is written — so the
+ * records of one flush share a millisecond, and among themselves sort in no order
+ * at all, which is the paragraph above applied to a case that used to be spread out
+ * by the writing. Nothing reads them as a sequence; what the writing moment is good
+ * for is answering "how late is this", and that is the writtenAt field.
+ *
  * Known before the write, so a retried write (Messenger redelivering after a
  * timeout) overwrites its own document instead of adding a second one.
  *

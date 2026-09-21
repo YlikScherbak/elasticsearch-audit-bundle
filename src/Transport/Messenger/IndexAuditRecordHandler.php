@@ -10,6 +10,8 @@ use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\SafeMessage;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
+use Borsche\ElasticsearchAuditBundle\Transport\WrittenAt;
+use Psr\Clock\ClockInterface;
 use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
 
 /**
@@ -34,8 +36,10 @@ use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
  */
 final class IndexAuditRecordHandler
 {
-    public function __construct(private readonly GatewayInterface $gateway)
-    {
+    public function __construct(
+        private readonly GatewayInterface $gateway,
+        private readonly ?ClockInterface $clock = null,
+    ) {
     }
 
     public function __invoke(IndexAuditRecord $message): void
@@ -50,7 +54,10 @@ final class IndexAuditRecordHandler
         $id = $message->id ?? (\is_string($message->document['id'] ?? null) && $message->document['id'] !== '' ? $message->document['id'] : null);
 
         try {
-            $this->gateway->index($message->index, $message->document, $id);
+            // Stamped here rather than where the message was built: the point of the
+            // field is when the document reached the cluster, and between the two there
+            // is a queue that may have been standing still all weekend.
+            $this->gateway->index($message->index, WrittenAt::on($message->document, $this->clock), $id);
         } catch (TransportUnavailableException|IndexNotFoundException $e) {
             // Retried, so it stays this class — Messenger's strategy keys off it, and a
             // busy cluster or an index mid-rollover must not cost a record. What does

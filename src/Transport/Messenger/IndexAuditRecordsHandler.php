@@ -11,6 +11,8 @@ use Borsche\ElasticsearchAuditBundle\Exception\IndexNotFoundException;
 use Borsche\ElasticsearchAuditBundle\Exception\RequestRejectedException;
 use Borsche\ElasticsearchAuditBundle\Exception\SafeMessage;
 use Borsche\ElasticsearchAuditBundle\Exception\TransportUnavailableException;
+use Borsche\ElasticsearchAuditBundle\Transport\WrittenAt;
+use Psr\Clock\ClockInterface;
 use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
 
 /**
@@ -42,14 +44,16 @@ use Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException;
  */
 final class IndexAuditRecordsHandler
 {
-    public function __construct(private readonly GatewayInterface $gateway)
-    {
+    public function __construct(
+        private readonly GatewayInterface $gateway,
+        private readonly ?ClockInterface $clock = null,
+    ) {
     }
 
     public function __invoke(IndexAuditRecords $message): void
     {
         try {
-            $result = $this->gateway->bulk($message->items);
+            $result = $this->gateway->bulk(WrittenAt::onEach($message->items, $this->clock));
         } catch (TransportUnavailableException|IndexNotFoundException $e) {
             // Retried, so it keeps its class; but not the cause it was built from. See
             // the single-record handler: what the client puts in a message is the status

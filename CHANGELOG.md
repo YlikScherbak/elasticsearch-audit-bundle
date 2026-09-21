@@ -9,6 +9,31 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Added
+- **`writtenAt`: when the document was written, beside `loggedAt` for when the change
+  happened.** The two used to be the same number in all but name, and the fix below made them
+  different on purpose — which left no way to see that they had diverged. With one timestamp a
+  queue nobody has consumed since Friday reads exactly like a queue that is keeping up: every
+  record says it arrived the instant it happened, because that is the only moment it records.
+  <br>The field is set by the bundle's write path, on every attempt, so a message redelivered
+  after a timeout reports the attempt that actually wrote the document rather than the one that
+  gave up; a batch carries one timestamp for the whole `_bulk` call, because the call is one
+  attempt. It is mapped as a date and filterable like any attribute —
+  `AuditQuery::any()->whereBetween('writtenAt', $anHourAgo, null)` is "what reached the index in
+  the last hour, whenever it happened" — and read back with `$entry->attribute('writtenAt')`.
+  <br>Two things to know when upgrading. **Existing indices do not have the field in their
+  mapping**: `audit:index:create --dump` and `audit:check` will say so, and `audit:index:sync`
+  adds it. Until then the value is stored with each document and not indexed, which reads back
+  fine and cannot be filtered on — the same thing that happens to any undeclared field under
+  `dynamic: false`. And **documents written before this release do not have it at all**, so
+  `attribute('writtenAt')` reads `null` for them; that is "we do not know", not damage, and such
+  an entry is still `isComplete()`.
+  <br>The name is now refused as a record attribute and as an enricher's mapping field. A record
+  that carried a `writtenAt` would be describing a write that has not happened yet, and the one
+  thing worse than refusing it is replacing it silently on the way out — which is what happens
+  to a document that arrives already holding one, since by then it is a re-index of something
+  read back rather than somebody's value.
+
 ### Fixed
 - **A record published late is stamped with the moment it happened, not the moment it was
   written.** When a `postFlush` listener registered before this bundle's throws, the records

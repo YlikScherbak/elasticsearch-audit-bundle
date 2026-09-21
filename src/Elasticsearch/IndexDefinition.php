@@ -93,6 +93,14 @@ final class IndexDefinition
             'objectId' => ['type' => $this->objectIdType],
             'event' => ['type' => 'keyword'],
             'loggedAt' => ['type' => 'date', 'format' => 'yyyy-MM-dd HH:mm:ss'],
+            // When the write that produced this version of the document started, which
+            // is no longer the same question as loggedAt: a record is stamped with the
+            // moment its change happened, and the flush that sees a change may not be
+            // the one that writes it. The gap between the two is the only way to see
+            // that history is being published late, so it is mapped rather than merely
+            // stored — an index created before this field existed keeps it in _source
+            // and cannot filter on it until audit:index:sync adds it.
+            'writtenAt' => ['type' => 'date', 'format' => 'yyyy-MM-dd HH:mm:ss'],
             'source' => ['type' => 'keyword'],
             'changes' => ['type' => 'object', 'enabled' => false],
         ];

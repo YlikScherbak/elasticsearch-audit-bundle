@@ -47,6 +47,11 @@ final class AuditWriterTest extends TestCase
             'loggedAt' => '2026-08-26 12:00:00',
             'source' => 'system',
             'changes' => ['ip' => '10.0.0.1'],
+            // Added on the way out rather than by the writer, and the same moment here
+            // only because the clock is frozen. Whether the two can differ is the
+            // subject of WhenARecordWasWrittenTest; that they are both present is this
+            // test's business, since it is the one that says what a document holds.
+            'writtenAt' => '2026-08-26 12:00:00',
         ], $document);
     }
 
@@ -245,7 +250,7 @@ final class AuditWriterTest extends TestCase
             }
         };
 
-        $transport = new SyncTransport($this->gateway);
+        $transport = new SyncTransport($this->gateway, new FrozenClock());
 
         return new AuditWriter($transport, $transport, new IndexResolver('audit_log', $routing), new ChainActorResolver([], 'system'), new FrozenClock(), $enrichers, $policy, $logger, failureDetails: $details);
     }
