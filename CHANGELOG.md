@@ -9,6 +9,27 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Fixed
+- **A record published late is stamped with the moment it happened, not the moment it was
+  written.** When a `postFlush` listener registered before this bundle's throws, the records
+  that flush collected are written by the next flush to come along — and that flush belongs to
+  another request, another user and, for a process that ran overnight, another day. Everything
+  the writer takes from "now" was taken from there: the **actor** from whoever was logged in at
+  the time of writing, the **timestamp** from the clock at that point, and the **record id**,
+  which is built from that timestamp and therefore sorted the history by when it was written.
+  The result was not a missing record — it was a record naming the wrong person at the wrong
+  time, which is the one shape of history worse than none.
+  <br>The moment is now settled in `onFlush`, where the change is seen, and carried with the
+  records to wherever they are eventually written. A flush that had no actor keeps none: "nobody
+  was logged in" is an answer that flush gave, not a question left open for whoever is around
+  later. The always-recorded context beside such a record is likewise the one its own flush saw,
+  including for an owner that had no lifecycle event of its own and so was never asked before.
+  <br>**Enrichers are not covered by this.** They run when the record is written, which is where
+  the bundle's public contract puts them, and moving somebody else's enricher to a different
+  moment is not something a patch release may do: an enricher that reads the request's route will
+  still describe the later request. A dedicated contract for enrichers that describe the moment
+  rather than the record is the next change, and opt-in
+
 ## [1.2.4] - 2026-09-21
 
 ### Fixed

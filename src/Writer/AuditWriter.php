@@ -193,7 +193,7 @@ final class AuditWriter
      *
      * @param list<AuditRecord> $records
      */
-    public function writeAll(array $records): void
+    public function writeAll(array $records, ?Provenance $provenance = null): void
     {
         $outgoing = [];
         /** @var list<array{AuditRecord, \Throwable}> $failures */
@@ -201,7 +201,7 @@ final class AuditWriter
 
         foreach ($records as $record) {
             try {
-                $record = $this->complete($record);
+                $record = $this->complete($record, $provenance);
 
                 if ($this->frame !== null && $this->frame->accepts($record->objectType)) {
                     foreach ($this->frame->hold($record) as $released) {
@@ -545,18 +545,41 @@ final class AuditWriter
     }
 
     /**
+     * The moment as it stands: what time it is and who is acting.
+     *
+     * For whoever collects records now and has them written later — the Doctrine
+     * listener, whose postFlush can be swallowed by a listener registered before it.
+     * Asked here rather than assembled by the caller because the clock and the actor
+     * resolver are this writer's, and a second opinion about either would be a second
+     * answer to "when did this happen".
+     */
+    public function provenance(): Provenance
+    {
+        return new Provenance(
+            \DateTimeImmutable::createFromInterface($this->clock->now()),
+            $this->actorResolver->resolve(),
+        );
+    }
+
+    /**
      * Fills in what the caller left out and runs the enrichers.
      *
      * @internal write() and writeAll() complete a record on the way through
      */
-    public function complete(AuditRecord $record): AuditRecord
+    public function complete(AuditRecord $record, ?Provenance $provenance = null): AuditRecord
     {
         if ($record->loggedAt === null) {
-            $record = $record->withLoggedAt(\DateTimeImmutable::createFromInterface($this->clock->now()));
+            $record = $record->withLoggedAt($provenance !== null ? $provenance->at : \DateTimeImmutable::createFromInterface($this->clock->now()));
         }
 
+        // Asked of the moment the change belongs to when there is one, and of the
+        // present only when there is not. The difference shows in a flush whose
+        // publishing was swallowed: its records are written by a later flush, and
+        // resolving then names whoever is logged in now. A provenance answers once and
+        // for all — including with "nobody", which is why it is asked about rather than
+        // read: a null actor in it is settled, and a null actor without it is a question.
         if ($record->actor === null) {
-            $record = $record->withActor($this->actorResolver->resolve());
+            $record = $record->withActor($provenance !== null ? $provenance->actor : $this->actorResolver->resolve());
         }
 
         if ($record->id === null) {

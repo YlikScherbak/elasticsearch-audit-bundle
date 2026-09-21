@@ -16,6 +16,7 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
+use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\Event\OnClearEventArgs;
@@ -139,9 +140,46 @@ final class AuditSubscriber
      * the change set instead, which is recomputed when a preUpdate listener corrects it;
      * this is for the ones it did not write, where the row keeps what it had.
      *
-     * @var array<int, array<string, mixed>>
+     * Keyed by the flush that saw them, and then by the entity. By the flush because a
+     * flush whose publishing was swallowed is written by the next one, and that next one
+     * is collecting its own context while the old records are still waiting: keyed by
+     * the entity alone, the second visit to the same object overwrote what the first had
+     * kept. Today's order of calls happens to prevent it; a number no other flush holds
+     * prevents it whatever the order becomes.
+     *
+     * @var array<int, array<int, array<string, mixed>>>
      */
     private array $contextAsFlushed = [];
+
+    /**
+     * Which flush this is, counting from the first one this listener sees.
+     *
+     * Only ever used as a key. It does not survive the process and does not mean
+     * anything outside it — two workers number their flushes the same way and never
+     * compare notes.
+     */
+    private int $flush = 0;
+
+    /**
+     * When each flush happened and who was acting, kept until its records are written.
+     *
+     * The records of a flush can be written by a later one, and everything the writer
+     * takes from "now" — the timestamp, the actor, the identifier built from the
+     * timestamp — would then be the later flush's. What is kept here is the answer as it
+     * stood where the change happened, handed to the writer when the records finally go.
+     *
+     * @var array<int, Provenance>
+     */
+    private array $provenance = [];
+
+    /**
+     * The flush whose records this listener is holding, if it is holding any.
+     *
+     * Everything collected belongs to exactly one flush — that is the whole shape of
+     * this listener — and this is its number, so that publishing reaches for the right
+     * moment and the right context even when it happens two flushes later.
+     */
+    private ?int $collecting = null;
 
     /**
      * The entity manager the flush on the stack belongs to, held weakly.
@@ -264,7 +302,19 @@ final class AuditSubscriber
             return;
         }
 
+        // This flush's number first, before anything else reads or writes per-flush
+        // state. beginFlush() below may publish what the *previous* flush left — it
+        // knows its own number and reads that — and everything collected from here on
+        // is filed under this one. Two different numbers is what makes the isolation
+        // structural: three of this week's defects lived in per-flush state whose
+        // correctness rested on the order of two calls, and no rearrangement of these
+        // lines can make one flush's moment overwrite another's.
+        ++$this->flush;
+
         $this->beginFlush($em);
+
+        $this->provenance[$this->flush] = $this->writer->provenance();
+        $this->collecting = $this->flush;
 
         $uow = $em->getUnitOfWork();
 
@@ -318,6 +368,10 @@ final class AuditSubscriber
         }
 
         if ($metadata === null || $metadata->alwaysRecorded === []) {
+            // Written all the same, and empty: "asked, and there was nothing" is an
+            // answer, and the callers that ask once per flush need to see it.
+            $this->contextAsFlushed[$this->flush][spl_object_id($entity)] = [];
+
             return;
         }
 
@@ -330,7 +384,7 @@ final class AuditSubscriber
             }
         }
 
-        $this->contextAsFlushed[spl_object_id($entity)] = $context;
+        $this->contextAsFlushed[$this->flush][spl_object_id($entity)] = $context;
     }
 
     /**
@@ -543,7 +597,10 @@ final class AuditSubscriber
         }
 
         // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
-        $this->writer->writeAll(array_values($records));
+        // The moment the change happened, not the moment it is being written: this
+        // method runs in postFlush, and in the branch that publishes a swallowed flush it
+        // runs during a later one entirely.
+        $this->writer->writeAll(array_values($records), $this->provenance[$this->collecting] ?? null);
 
         // And only now, with everything that could be written on its way out. If
         // writeAll() raised instead, that is the exception the caller gets: it is about
@@ -656,6 +713,11 @@ final class AuditSubscriber
         $this->flushDepths = [];
         $this->statementsRan = false;
         $this->failureWhileBuilding = null;
+
+        if ($this->collecting !== null) {
+            unset($this->contextAsFlushed[$this->collecting], $this->provenance[$this->collecting]);
+            $this->collecting = null;
+        }
         $this->changeSets = [];
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
@@ -1132,6 +1194,17 @@ final class AuditSubscriber
 
     private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, ?bool $added = null, bool $replacing = false): void
     {
+        // An owner reached through its elements may have no event of its own — nothing on
+        // it changed — so the loops in onFlush never offered it to rememberContext(). Its
+        // always-recorded fields would then be read off the object when the record is
+        // assembled in postFlush, which is a later moment, and a later moment still when
+        // that postFlush belongs to the flush after it. Asked once per flush: the entry
+        // is written even when it is empty, so a second element of the same owner finds
+        // it rather than asking again.
+        if (!isset($this->contextAsFlushed[$this->flush][spl_object_id($owner)])) {
+            $this->rememberContext($em, $owner);
+        }
+
         $ownerMetadata = $em->getClassMetadata($owner::class);
 
         // Every audited to-many field, not only the tracked ones: membership is part of
@@ -1380,7 +1453,7 @@ final class AuditSubscriber
             return $changes;
         }
 
-        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes, $this->contextAsFlushed[spl_object_id($owner)] ?? [], $this->changeSets[spl_object_id($owner)] ?? []);
+        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes, $this->contextAsFlushed[$this->collecting][spl_object_id($owner)] ?? [], $this->changeSets[spl_object_id($owner)] ?? []);
     }
 
     /**
@@ -1422,7 +1495,7 @@ final class AuditSubscriber
                 // had an event. What is already here from its elements wins, being about
                 // different fields.
                 $changes = array_replace(
-                    (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[spl_object_id($owner)] ?? []),
+                    (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$this->collecting][spl_object_id($owner)] ?? []),
                     $changes,
                 );
             }
@@ -1587,7 +1660,7 @@ final class AuditSubscriber
             $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
 
             if ($withChanges) {
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)][1] ?? [], $this->contextAsFlushed[spl_object_id($entity)] ?? []));
+                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)][1] ?? [], $this->contextAsFlushed[$this->collecting][spl_object_id($entity)] ?? []));
             }
 
             return $record;

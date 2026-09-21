@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
+use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
@@ -26,6 +27,7 @@ use Doctrine\ORM\Events;
 use Doctrine\ORM\Mapping\Driver\AttributeDriver;
 use Doctrine\ORM\Tools\SchemaTool;
 use PHPUnit\Framework\TestCase;
+use Psr\Clock\ClockInterface;
 use Psr\Log\AbstractLogger;
 use Psr\Log\LoggerInterface;
 
@@ -173,8 +175,16 @@ abstract class DoctrineTestCase extends TestCase
     {
         $transport = new SyncTransport($this->gateway);
 
-        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), $enrichers, $policy, $this->logger(), null, $buffer);
+        return new AuditWriter($transport, $transport, new IndexResolver('audit_log'), $this->actors ?? new ChainActorResolver([], 'tests'), $this->clock ?? new FrozenClock(), $enrichers, $policy, $this->logger(), null, $buffer);
     }
+
+    /**
+     * Who the writer asks, and what time it is, when a test needs either to change
+     * between one flush and the next. Set before attachListener().
+     */
+    protected ?ActorResolverInterface $actors = null;
+
+    protected ?ClockInterface $clock = null;
 
     /**
      * The listener the tests attach, replacing whatever setUp() put there, wired to a
