@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
@@ -152,6 +155,67 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         $this->bobFlushes();
 
         self::assertNull($this->lateRecord()['source'], 'a record with no actor was given the next request\'s one');
+    }
+
+    public function testWhatAMomentEnricherSaidTravelsWithTheRecordAndAnOrdinaryOneDoesNot(): void
+    {
+        // The two kinds side by side in the case that tells them apart. Both read the
+        // same moving value; the moment enricher is asked in onFlush, the ordinary one
+        // when the record is written, and in this flush those are a day and a user
+        // apart. The ordinary one describing the later request is not a defect — it is
+        // the documented contract, and it is what the other interface exists to avoid.
+        $request = new \stdClass();
+        $request->route = '/alices-request';
+
+        $this->attachListener(FailurePolicy::Log, null, [
+            new class($request) implements MomentEnricherInterface {
+                public function __construct(private readonly \stdClass $request)
+                {
+                }
+
+                public function describe(): array
+                {
+                    return ['momentRoute' => $this->request->route];
+                }
+
+                public function mapping(): array
+                {
+                    return ['momentRoute' => ['type' => 'keyword']];
+                }
+            },
+            new class($request) implements AuditEnricherInterface {
+                public function __construct(private readonly \stdClass $request)
+                {
+                }
+
+                public function supports(AuditRecord $record): bool
+                {
+                    return true;
+                }
+
+                public function enrich(AuditRecord $record): AuditRecord
+                {
+                    return $record->withAttributes(['writeRoute' => $this->request->route]);
+                }
+
+                public function mapping(): array
+                {
+                    return ['writeRoute' => ['type' => 'keyword']];
+                }
+            },
+        ]);
+
+        $article = $this->alicePersisted();
+
+        $this->aliceChanges(static fn () => $article->title = 'Alice edited this');
+
+        $request->route = '/bobs-request';
+        $this->bobFlushes();
+
+        $late = $this->lateRecord();
+
+        self::assertSame('/alices-request', $late['momentRoute'] ?? null, 'the moment enricher described the request that published the record rather than the one that caused it');
+        self::assertSame('/bobs-request', $late['writeRoute'] ?? null, 'the premise: an ordinary enricher runs at write time, which is the contract');
     }
 
     public function testTheContextBesideALateRecordIsTheOneItsOwnFlushSaw(): void

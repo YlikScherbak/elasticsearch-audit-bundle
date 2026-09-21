@@ -15,9 +15,15 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
  * enricher adds at write time, together with its mapping so `audit:index:create`
  * knows the field type.
  *
+ * An enricher runs when the record is written. For a fact about the moment the change
+ * happened — the route, the request id — that is the same instant almost always and the
+ * wrong one exactly when it matters: a flush whose publishing was swallowed is written
+ * by a later one, and a later one belongs to another request. {@see MomentEnricherInterface}
+ * is asked before the records exist and travels with them.
+ *
  * Implementations are picked up automatically (the interface is autoconfigured).
  */
-interface AuditEnricherInterface
+interface AuditEnricherInterface extends DeclaresAuditFieldsInterface
 {
     public function supports(AuditRecord $record): bool;
 
@@ -26,12 +32,4 @@ interface AuditEnricherInterface
      * records it does not support; the writer only calls it after supports().
      */
     public function enrich(AuditRecord $record): AuditRecord;
-
-    /**
-     * Mapping properties for the attributes this enricher adds, e.g.
-     * ['salesType' => ['type' => 'integer']]. Return [] if it adds none.
-     *
-     * @return array<string, array<string, mixed>>
-     */
-    public function mapping(): array;
 }

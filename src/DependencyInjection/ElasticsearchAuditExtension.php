@@ -16,6 +16,7 @@ use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Command\SyncIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
@@ -131,6 +132,10 @@ final class ElasticsearchAuditExtension extends Extension
         $config = $this->processConfiguration(new Configuration(), $configs);
 
         $container->registerForAutoconfiguration(AuditEnricherInterface::class)->addTag(self::TAG_ENRICHER);
+        // The same tag, deliberately: the two kinds differ in when they are asked and
+        // not in where they are collected, and everything that folds their fields into
+        // an index asks them the one question they both answer.
+        $container->registerForAutoconfiguration(MomentEnricherInterface::class)->addTag(self::TAG_ENRICHER);
         $container->registerForAutoconfiguration(ActorResolverInterface::class)->addTag(self::TAG_ACTOR_RESOLVER);
         $container->registerForAutoconfiguration(QueryExtensionInterface::class)->addTag(self::TAG_QUERY_EXTENSION);
         $container->registerForAutoconfiguration(RecordDecoratorInterface::class)->addTag(self::TAG_DECORATOR);

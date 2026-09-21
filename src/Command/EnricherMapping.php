@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Command;
 
-use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\DeclaresAuditFieldsInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Writer\EnricherScope;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
@@ -26,7 +26,7 @@ final class EnricherMapping
      * can never appear in, and audit:index:sync adds them. Enrichers that named no
      * object types still go everywhere; that is what they are saying.
      *
-     * @param iterable<AuditEnricherInterface> $enrichers
+     * @param iterable<DeclaresAuditFieldsInterface> $enrichers
      */
     public static function forIndex(IndexDefinition $definition, iterable $enrichers, IndexResolver $resolver, string $index): IndexDefinition
     {
@@ -42,7 +42,7 @@ final class EnricherMapping
     }
 
     /**
-     * @param iterable<AuditEnricherInterface> $enrichers
+     * @param iterable<DeclaresAuditFieldsInterface> $enrichers
      */
     public static function apply(IndexDefinition $definition, iterable $enrichers): IndexDefinition
     {

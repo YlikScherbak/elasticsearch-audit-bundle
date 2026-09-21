@@ -10,6 +10,31 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [Unreleased]
 
 ### Added
+- **`MomentEnricherInterface`: an enricher asked about the moment instead of about the
+  record.** Every other enricher runs when the record is written, which is the same instant the
+  change happened for every record but the one the fix below is about: a flush whose publishing
+  was swallowed is written by the next flush to come along, and by then the request an enricher
+  would read belongs to somebody else. The record's own timestamp and actor now travel with it;
+  an enricher reading the current request could not, so there is an interface for the ones that
+  want to.
+  <br>It has one method, `describe(): array`, and no `AuditRecord` parameter, because it is asked
+  before the records of that moment exist — once per flush for the Doctrine listener, once per
+  record for a record written on its own, and never once per record of a batch. It is picked up
+  by the same autoconfiguration as every other enricher and its `mapping()` is folded into the
+  index by `audit:index:create` in the same pass; the two interfaces now share a parent,
+  `DeclaresAuditFieldsInterface`, which is where `mapping()` moved to. Nothing that implements
+  `AuditEnricherInterface` has to change: it already had that method.
+  <br>Two rules come with it. What it describes is **not overwritten**: an ordinary enricher
+  setting the same attribute has its value discarded and the attempt logged with both values,
+  because the alternative is the write-time enricher quietly putting the later request back under
+  a name that promises the earlier one. An attribute the **caller** set on the record is a
+  different matter and wins — the moment fills in what is missing. And it **must not throw**:
+  there is no record to report a failure against, so a failure is logged and that enricher
+  contributes nothing, rather than a flush losing its history because a request lookup did not
+  work.
+  <br>No object type scoping and no `supports()`, deliberately: there is no record to judge and
+  the moment is the same one for all of them. A field only some records should carry is what an
+  ordinary enricher is for.
 - **`writtenAt`: when the document was written, beside `loggedAt` for when the change
   happened.** The two used to be the same number in all but name, and the fix below made them
   different on purpose — which left no way to see that they had diverged. With one timestamp a
@@ -52,8 +77,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   <br>**Enrichers are not covered by this.** They run when the record is written, which is where
   the bundle's public contract puts them, and moving somebody else's enricher to a different
   moment is not something a patch release may do: an enricher that reads the request's route will
-  still describe the later request. A dedicated contract for enrichers that describe the moment
-  rather than the record is the next change, and opt-in
+  still describe the later request. `MomentEnricherInterface`, above, is the opt-in way to move
+  one — a new interface rather than a changed meaning for the old one.
 
 ## [1.2.4] - 2026-09-21
 

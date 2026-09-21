@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Writer;
 
-use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\DeclaresAuditFieldsInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ScopedEnricherInterface;
 
 /**
@@ -23,7 +23,7 @@ final class EnricherScope
     /**
      * Whether this enricher takes part in records of this object type.
      */
-    public static function covers(AuditEnricherInterface $enricher, string $objectType): bool
+    public static function covers(DeclaresAuditFieldsInterface $enricher, string $objectType): bool
     {
         $types = self::typesOf($enricher);
 
@@ -37,7 +37,7 @@ final class EnricherScope
      * an object type into an index, and it is the resolver that knows it — including
      * the part nobody writes down, that everything unrouted goes to the default.
      */
-    public static function reaches(AuditEnricherInterface $enricher, IndexResolver $resolver, string $index): bool
+    public static function reaches(DeclaresAuditFieldsInterface $enricher, IndexResolver $resolver, string $index): bool
     {
         $types = self::typesOf($enricher);
 
@@ -59,7 +59,7 @@ final class EnricherScope
     /**
      * @return list<string>
      */
-    private static function typesOf(AuditEnricherInterface $enricher): array
+    private static function typesOf(DeclaresAuditFieldsInterface $enricher): array
     {
         return $enricher instanceof ScopedEnricherInterface ? $enricher->objectTypes() : [];
     }

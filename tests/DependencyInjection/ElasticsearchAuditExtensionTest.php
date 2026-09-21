@@ -9,6 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\QueryExtensionInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\DoctrineSupport;
@@ -391,6 +392,25 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertSame('acme', $gateway->only('audit_log')['tenant']);
     }
 
+    public function testMomentEnrichersAreCollectedByTheSameAutoconfiguration(): void
+    {
+        // The other kind, through the same tag: a moment enricher is registered and
+        // asked without anything being wired for it by hand, which is the claim behind
+        // giving the two interfaces one tag instead of two.
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']]], static function (ContainerBuilder $c): void {
+            $c->setDefinition(RouteMomentEnricher::class, (new Definition(RouteMomentEnricher::class))->setAutoconfigured(true));
+        });
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        $writer->record('order', 1, 'create');
+
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        self::assertSame('/checkout', $gateway->only('audit_log')['route']);
+    }
+
     public function testSecurityResolverIsRegisteredWhenSecurityCoreIsInstalled(): void
     {
         $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']]]);
@@ -450,6 +470,19 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
         self::assertFalse($chain->isAutoconfigured());
         self::assertSame([], $chain->getTag(ElasticsearchAuditExtension::TAG_VALUE_COMPARATOR));
+    }
+}
+
+final class RouteMomentEnricher implements MomentEnricherInterface
+{
+    public function describe(): array
+    {
+        return ['route' => '/checkout'];
+    }
+
+    public function mapping(): array
+    {
+        return ['route' => ['type' => 'keyword']];
     }
 }
 

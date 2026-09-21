@@ -7,7 +7,9 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\MergedRecordEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Contract\DeclaresAuditFieldsInterface;
 use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Event\RecordFailedEvent;
 use Borsche\ElasticsearchAuditBundle\Exception\FrameOverflowException;
@@ -41,8 +43,8 @@ use Psr\Log\NullLogger;
 final class AuditWriter
 {
     /**
-     * @param iterable<AuditEnricherInterface> $enrichers
-     * @param positive-int                     $batchSize how many records go out in one batch
+     * @param iterable<DeclaresAuditFieldsInterface> $enrichers
+     * @param positive-int                           $batchSize how many records go out in one batch
      */
     public function __construct(
         private readonly TransportInterface $transport,
@@ -87,9 +89,9 @@ final class AuditWriter
         $this->failureDetails = $failureDetails ?? FailureDetails::Cause;
     }
 
-    /** @var iterable<AuditEnricherInterface> */
+    /** @var iterable<DeclaresAuditFieldsInterface> */
     private readonly iterable $enrichers;
-    /** @var list<AuditEnricherInterface>|null */
+    /** @var list<DeclaresAuditFieldsInterface>|null */
     private ?array $materialized = null;
     private readonly LoggerInterface $logger;
     private readonly FailureDetails $failureDetails;
@@ -465,7 +467,7 @@ final class AuditWriter
      * exhausted and quietly enrich nothing. So: read once, and not a moment before it
      * is needed.
      *
-     * @return list<AuditEnricherInterface>
+     * @return list<DeclaresAuditFieldsInterface>
      */
     private function enrichers(): array
     {
@@ -558,6 +560,7 @@ final class AuditWriter
         return new Provenance(
             \DateTimeImmutable::createFromInterface($this->clock->now()),
             $this->actorResolver->resolve(),
+            $this->describeTheMoment(),
         );
     }
 
@@ -586,10 +589,25 @@ final class AuditWriter
             $record = $record->withId(RecordId::v7($record->loggedAt ?? throw new \LogicException('unreachable: the timestamp was just set')));
         }
 
+        // What the moment looked like: from the provenance when there is one, because
+        // that is the moment this record belongs to and it may be long past; asked now
+        // when there is not, which is a record being written on its own and therefore a
+        // moment of its own.
+        $moment = $provenance !== null ? $provenance->attributes : $this->describeTheMoment();
+
+        // Only the keys it actually set. An attribute the caller put on the record wins
+        // — the moment fills in what is missing — and a key it did not win is not one
+        // it gets to defend below.
+        $moment = array_diff_key($moment, $record->attributes);
+        $record = $record->withAttributes($moment);
+
         foreach ($this->enrichers() as $enricher) {
-            // The merged ones wait for prepare(): what they say is about the record that
-            // will be stored, not about the step that is being recorded right now.
-            if ($enricher instanceof MergedRecordEnricherInterface) {
+            // The ones that are handed a record, minus those that wait. A moment
+            // enricher is never handed one — it was asked before this record existed and
+            // its answer is already on it — and the merged ones wait for prepare(),
+            // because what they say is about the record that will be stored rather than
+            // about the step being recorded right now.
+            if (!$enricher instanceof AuditEnricherInterface || $enricher instanceof MergedRecordEnricherInterface) {
                 continue;
             }
 
@@ -602,11 +620,78 @@ final class AuditWriter
             }
 
             if ($enricher->supports($record)) {
-                $record = $enricher->enrich($record);
+                $record = self::keeping($moment, $enricher->enrich($record), $enricher, $this->say(...));
             }
         }
 
         return $record;
+    }
+
+    /**
+     * What every moment enricher says about the moment happening now, in one array.
+     *
+     * A failure here costs that enricher's fields and nothing else. There is no record
+     * to report against — this runs before the records of the moment exist — and the
+     * alternative is a flush losing its history because a request lookup did not work,
+     * which is a trade this bundle does not make anywhere else either.
+     *
+     * @return array<string, mixed>
+     */
+    private function describeTheMoment(): array
+    {
+        $moment = [];
+
+        foreach ($this->enrichers() as $enricher) {
+            if (!$enricher instanceof MomentEnricherInterface) {
+                continue;
+            }
+
+            try {
+                $moment = array_replace($moment, $enricher->describe());
+            } catch (\Throwable $e) {
+                $this->say('A moment enricher failed to describe the moment, so its fields are missing from every record of it: {reason}.', ['enricher' => $enricher::class, 'reason' => $e->getMessage(), 'exception' => $e]);
+            }
+        }
+
+        return $moment;
+    }
+
+    /**
+     * The record with the moment's own attributes back where an enricher moved them.
+     *
+     * The point of a moment enricher is that an ordinary one running at write time
+     * describes the wrong request, so letting the ordinary one win here would undo the
+     * whole thing quietly — the attribute would be there, it would look right, and it
+     * would name the request that did the writing. The application is told instead:
+     * both values are in the message, because which of the two is wanted is a decision
+     * only the application can make, and it cannot make it without seeing them.
+     *
+     * @param array<string, mixed>                     $moment
+     * @param callable(string, array<string, mixed>): void $say
+     */
+    private static function keeping(array $moment, AuditRecord $record, AuditEnricherInterface $enricher, callable $say): AuditRecord
+    {
+        $taken = [];
+
+        foreach ($moment as $name => $value) {
+            if (($record->attributes[$name] ?? null) !== $value) {
+                $taken[$name] = $value;
+            }
+        }
+
+        if ($taken === []) {
+            return $record;
+        }
+
+        foreach ($taken as $name => $value) {
+            $say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept.', $enricher::class, $name), [
+                'attribute' => $name,
+                'kept' => $value,
+                'discarded' => $record->attributes[$name] ?? null,
+            ]);
+        }
+
+        return $record->withAttributes($taken);
     }
 
     /**

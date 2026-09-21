@@ -1148,6 +1148,48 @@ final class QuantityChanged implements MergedRecordEnricherInterface
 `withAttributes()` replaces what is already there; `withAddedAttributes()` (**since 0.9**) fills
 gaps only, for an enricher that defers to whatever set the value first.
 
+**A fact about the moment, not about the record.** Both interfaces above run when the record is
+written, and for almost every record that is also when the change happened. Not for one: a flush
+whose publishing was swallowed — a `postFlush` listener registered before this bundle's and
+throwing — has its records written by the next flush to come along, which is another request,
+another user and possibly another day. The record's own timestamp and actor are settled where the
+change was seen and travel with it; an enricher reading the current request cannot, because by
+then the current request is somebody else's.
+
+`MomentEnricherInterface` (**since 1.3**) is asked once, before the records of that moment exist,
+and its answer travels with them:
+
+```php
+final class RouteEnricher implements MomentEnricherInterface
+{
+    public function __construct(private readonly RequestStack $requests) {}
+
+    public function describe(): array
+    {
+        $request = $this->requests->getCurrentRequest();
+
+        return $request === null ? [] : ['route' => (string) $request->attributes->get('_route')];
+    }
+
+    public function mapping(): array { return ['route' => ['type' => 'keyword']]; }
+}
+```
+
+No `supports()`, no object type scoping and no `AuditRecord` parameter: there is no record to
+judge yet, and the moment is the same one for every record of it. A field only some records
+should carry is what an ordinary enricher is for. Three rules come with it:
+
+- **it is asked once per moment** — per flush for the Doctrine listener, per record for one
+  written on its own — and not once per record of a batch;
+- **what it says is not overwritten.** An ordinary enricher setting the same attribute has its
+  value discarded and the attempt logged with both values, because otherwise the enricher running
+  at write time would quietly put the later request back under a name that promises the earlier
+  one. An attribute *you* set on the record yourself is different and wins: the moment fills in
+  what is missing;
+- **it must not throw.** There is no record to report a failure against, so a failure is logged
+  and that enricher contributes nothing — a flush does not lose its history because a request
+  lookup did not work.
+
 **Where the record came from.** `$record->origin` (**since 0.9**) is `AuditOrigin::Doctrine` for
 what the listener built, `Manual` for what the application handed to the writer, and `Mixed` for a
 record a frame merged out of both — so an enricher that should only touch one of them can ask
@@ -1711,7 +1753,8 @@ receive — `AuditRecord`, `Change`, `AuditEvent`, `AuditOrigin`, `AuditQuery`, 
 
 **Implement these**
 `AuditableInterface` · `TracksCollectionElementsInterface` · `AuditEnricherInterface` ·
-`MergedRecordEnricherInterface` · `ScopedEnricherInterface` · `ActorResolverInterface` ·
+`MergedRecordEnricherInterface` · `MomentEnricherInterface` · `ScopedEnricherInterface` ·
+`ActorResolverInterface` ·
 `QueryExtensionInterface` · `RecordDecoratorInterface` · `ValueComparatorInterface` ·
 `TransportInterface` / `BatchTransportInterface` · `GatewayInterface`, if you have a reason to
 speak to Elasticsearch differently.
