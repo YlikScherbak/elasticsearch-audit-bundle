@@ -51,6 +51,7 @@ picks it up. The reasoning behind each behaviour is in the
 |---|---|
 | Every setting, with its default and the reason it exists | [`Operating/configuration.yaml`](Operating/configuration.yaml) |
 | Commit the change and its history together | [`Operating/ApprovingAnOrderAtomically.php`](Operating/ApprovingAnOrderAtomically.php) |
+| Assert on what your application recorded | [`Operating/AssertingOnTheTrail.php`](Operating/AssertingOnTheTrail.php) |
 
 That file is not a listing anybody typed out: the test suite parses it and puts it
 through the bundle's own configuration tree, so a setting that is renamed or removed

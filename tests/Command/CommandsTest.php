@@ -253,6 +253,59 @@ final class CommandsTest extends TestCase
         self::assertSame(['type' => 'integer'], $this->gateway->indices['audit_auth']['mappings']['properties']['salesType']);
     }
 
+    public function testCheckRefusesToCallTheTestTransportHealthy(): void
+    {
+        // Every other line this command prints is about indices, and under the collector
+        // nothing is being written to them: a green check would say the installation is
+        // ready for a history that is not arriving. The one setting that makes every
+        // other answer misleading is said first and costs the exit code.
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [], transport: 'collector'));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('transport: collector', $tester->getDisplay());
+        self::assertStringContainsString('never reach Elasticsearch', $tester->getDisplay());
+        self::assertStringContainsString('audit_log ok', $tester->getDisplay(), 'the premise: the indices themselves are fine, which is exactly why the line above matters');
+
+        // And says nothing of the sort for the transports that do write.
+        $healthy = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), []));
+
+        self::assertSame(Command::SUCCESS, $healthy->execute([]));
+        self::assertStringNotContainsString('collector', $healthy->getDisplay());
+    }
+
+    public function testAnIndexFromBeforeAFieldWasABaseFieldIsToldWhereToGo(): void
+    {
+        // The upgrade path for writtenAt, which arrived as a base field of every
+        // document rather than as somebody's enricher: every index out there was created
+        // without it, so audit:check goes from green to red on all of them at once. That
+        // is the intended answer — the field is stored and unsearchable until the
+        // mapping has it — and what makes it an upgrade rather than a puzzle is that the
+        // line names the command that fixes it.
+        $before = (new IndexDefinition())->toArray();
+        unset($before['mappings']['properties'][AuditRecord::WRITTEN_AT]);
+
+        $this->gateway->indices['audit_log'] = $before;
+        $this->gateway->indices['audit_auth'] = $before;
+
+        $check = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), []));
+
+        self::assertSame(Command::FAILURE, $check->execute([]));
+        self::assertStringContainsString('audit_log exists but lacks mapping for: '.AuditRecord::WRITTEN_AT, $check->getDisplay());
+        self::assertStringContainsString('run audit:index:sync', $check->getDisplay(), 'the operator is told what is wrong and not what to do about it');
+
+        // And the command it names does it, on every index the resolver knows.
+        $sync = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), []));
+
+        self::assertSame(Command::SUCCESS, $sync->execute([]));
+        self::assertSame(['type' => 'date', 'format' => 'yyyy-MM-dd HH:mm:ss'], $this->gateway->indices['audit_log']['mappings']['properties'][AuditRecord::WRITTEN_AT]);
+        self::assertSame(['type' => 'date', 'format' => 'yyyy-MM-dd HH:mm:ss'], $this->gateway->indices['audit_auth']['mappings']['properties'][AuditRecord::WRITTEN_AT]);
+
+        self::assertSame(Command::SUCCESS, (new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [])))->execute([]), 'green again once the operator did what the line said');
+    }
+
     public function testSyncReachesAFieldInsideAnObject(): void
     {
         // context exists, context.city does not: the addition travels as a partial

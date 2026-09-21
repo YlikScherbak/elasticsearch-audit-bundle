@@ -413,8 +413,12 @@ final class ChangeRedactor
      * less a secret for sitting one level down). Mind that element changes are recorded
      * on the owner, so a scoped rule names the owner's type — "shipment.price" covers
      * "lines.42.price" on a shipment's record.
+     *
+     * Public so that a test can ask instead of guessing: a redacted value is stored as
+     * the placeholder, and comparing against "***" cannot tell a rule that worked from
+     * an application that really wrote three asterisks. {@see \Borsche\ElasticsearchAuditBundle\Test\AuditCollector::redacts()}
      */
-    private function redacts(string $objectType, string $field): bool
+    public function redacts(string $objectType, string $field): bool
     {
         foreach ($this->fields as $rule) {
             $scope = strpos($rule, '.');

@@ -48,8 +48,8 @@ final class Configuration implements ConfigurationInterface
         self::indices($children->arrayNode('indices'));
 
         $children->enumNode('transport')
-            ->info('How a finished record reaches Elasticsearch. "sync": inside the request. "messenger": as a message a worker writes, which takes the cluster out of response times. "outbox": into a SQL queue on the application\'s own connection, so the record is committed by the same transaction as the change it describes - see AuditTransaction, and outbox.transport for the queue it uses.')
-            ->values(['sync', 'messenger', 'outbox'])
+            ->info('How a finished record reaches Elasticsearch. "sync": inside the request. "messenger": as a message a worker writes, which takes the cluster out of response times. "outbox": into a SQL queue on the application\'s own connection, so the record is committed by the same transaction as the change it describes - see AuditTransaction, and outbox.transport for the queue it uses. "collector": keeps finished records in memory instead of sending them, for tests - everything up to the send happens, and nothing reaches the cluster, so it belongs in config/packages/test only. audit:check says so when it meets it.')
+            ->values(['sync', 'messenger', 'outbox', 'collector'])
             ->defaultValue('sync');
 
         $children->scalarNode('message_bus')

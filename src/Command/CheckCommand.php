@@ -59,6 +59,9 @@ final class CheckCommand extends Command
         // silently a different argument to all of them.
         private readonly ?bool $sourceOnError = null,
         private readonly FailureDetails $failureDetails = FailureDetails::Cause,
+        // Which road records take. Only one of them is worth a line here, and it is the
+        // one that makes every other line of this command misleading.
+        private readonly string $transport = 'sync',
     ) {
         parent::__construct();
     }
@@ -104,6 +107,17 @@ final class CheckCommand extends Command
             } else {
                 $io->text(sprintf('<comment>Elasticsearch %s predates include_source_on_error</comment> (%d.%d and later know it), so writes do not carry it and a document this cluster refuses is quoted back in its own error. The bundle does not repeat that error — it names the type and the field and nothing else, and redact.failure_details: "cause", the default, keeps that exception out of what is logged, raised and dispatched. Setting it to "full" on this cluster means a refused audit record can appear in your logs.', $version, GatewayInterface::MINIMUM_VERSION[0], GatewayInterface::MINIMUM_VERSION[1]));
             }
+        }
+
+        if ($this->transport === 'collector') {
+            // Everything below this line is about indices that nothing is being written
+            // to. The collector is the test transport: it keeps finished records in
+            // memory and sends none, so a green check here says the indices are ready
+            // for a history that is not arriving. Said first, because it changes how to
+            // read the rest.
+            $io->text('<error>transport: collector</error> — finished records are kept in memory and never reach Elasticsearch. That is the test transport; in any environment that is meant to keep history, set transport to sync, messenger or outbox.');
+
+            $healthy = false;
         }
 
         foreach ($this->indexResolver->all() as $index) {

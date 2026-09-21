@@ -22,7 +22,9 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
+use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
+use Borsche\ElasticsearchAuditBundle\Test\AuditCollector;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
@@ -409,6 +411,62 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         $gateway = $container->get(GatewayInterface::class);
 
         self::assertSame('/checkout', $gateway->only('audit_log')['route']);
+    }
+
+    public function testTheCollectorReplacesBothRoadsToTheCluster(): void
+    {
+        // Including the immediate one. `immediately: true` means "before the request
+        // ends", not "past the collector": leaving it on the sync transport would send
+        // those records to a real cluster from a suite that asked for none — and they
+        // are exactly the records somebody wanted to be sure about.
+        $definitions = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'transport' => 'collector']);
+
+        self::assertSame(ElasticsearchAuditExtension::SERVICE_COLLECTOR, (string) $definitions->getAlias(ElasticsearchAuditExtension::SERVICE_TRANSPORT));
+        self::assertSame(ElasticsearchAuditExtension::SERVICE_COLLECTOR, (string) $definitions->getAlias(ElasticsearchAuditExtension::SERVICE_IMMEDIATE_TRANSPORT));
+        self::assertTrue($definitions->getAlias(AuditCollector::class)->isPublic(), 'a test has to be able to get it out of the container');
+    }
+
+    public function testTheCollectorIsToldAboutVetoesLast(): void
+    {
+        // A veto set by a listener behind it is still a veto, and the collector would
+        // otherwise report the record as written. The priority is the whole guarantee,
+        // so it is asserted rather than assumed.
+        $collector = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'transport' => 'collector'])
+            ->getDefinition(ElasticsearchAuditExtension::SERVICE_COLLECTOR);
+
+        $listener = $collector->getTag('kernel.event_listener');
+
+        self::assertCount(1, $listener);
+        self::assertSame(RecordCreatedEvent::class, $listener[0]['event'] ?? null);
+        self::assertLessThan(0, $listener[0]['priority'] ?? 0, 'a listener at the default priority can be overtaken by an application listener');
+        self::assertSame([['method' => 'reset']], $collector->getTag('kernel.reset'), 'a kernel reused between tests would carry records from the previous one');
+    }
+
+    public function testNoCollectorIsBuiltForAnyOtherTransport(): void
+    {
+        $definitions = $this->load(['client' => ['hosts' => ['http://localhost:9200']]]);
+
+        self::assertFalse($definitions->hasDefinition(ElasticsearchAuditExtension::SERVICE_COLLECTOR));
+        self::assertSame(ElasticsearchAuditExtension::SERVICE_SYNC_TRANSPORT, (string) $definitions->getAlias(ElasticsearchAuditExtension::SERVICE_TRANSPORT));
+    }
+
+    public function testWhatTheWriterWritesUnderTheCollectorIsCollected(): void
+    {
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']], 'transport' => 'collector']);
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        $writer->record('order', 42, 'update');
+
+        /** @var AuditCollector $collector */
+        $collector = $container->get(AuditCollector::class);
+
+        self::assertCount(1, $collector->writtenFor('order', 42), $collector->explain());
+
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        self::assertSame([], $gateway->documents, 'the collector is the end of the road, not a copy of it');
     }
 
     public function testSecurityResolverIsRegisteredWhenSecurityCoreIsInstalled(): void

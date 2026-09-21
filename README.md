@@ -1200,6 +1200,74 @@ Attributes land beside `objectType`, `event`, ... at the top level of the docume
 what makes them filterable. `changes` is deliberately **not indexed** (`enabled: false`): its
 shape differs per object type and per field, and indexing it would blow the mapping up over time.
 
+## Testing what your application records
+
+```yaml
+# config/packages/test/borsche_elasticsearch_audit.yaml
+borsche_elasticsearch_audit:
+  transport: collector
+```
+
+`transport: collector` (**since 1.3**) replaces the road to Elasticsearch and nothing else. The
+records are completed, enriched, coalesced, redacted and routed exactly as they would be, and the
+last step keeps them instead of sending them — so a test asserts on the document that *would have
+been stored*, not on what the application asked for:
+
+```php
+$collector = static::getContainer()->get(AuditCollector::class);
+
+$this->orders->pay($order);
+
+self::assertCount(1, $collector->writtenFor('order', $order->getId(), 'update'), $collector->explain());
+
+$entry = $collector->writtenFor('order', $order->getId())[0]->entry();
+
+self::assertSame('paid', $entry->changes['status']['new']);
+self::assertSame('/checkout', $entry->attribute('route'));
+```
+
+A `CollectedRecord` carries the `index` it was routed to, its `id`, the raw `document`, and
+`entry()` — the same `AuditEntry` the reader returns, so an assertion here and a query in
+production agree about what a field is called. `explain()` is what to pass as the assertion
+message: it lists what was written, what was vetoed and what is still held.
+
+Two things it answers that "what was written" cannot:
+
+- **`vetoed()`** — a record a listener stopped. Those reach no transport and nothing is logged,
+  because a veto is a feature, so there is nowhere else to look;
+- **`held()`** — how many records a frame that is still open is holding. A test that coalesces and
+  asserts before closing the frame finds nothing written, and this is the reason. It is a question
+  rather than a helpful assertion that closes the frame itself: closing it is the behaviour under
+  test.
+
+And `redacts('user', 'password')` answers from the configuration rather than from the value —
+`***` cannot tell a rule that worked from an application that really wrote three asterisks.
+
+The `AuditAssertions` trait wraps the same collector, and it is there for the failure messages:
+
+```php
+use AuditAssertions;
+
+protected function auditCollector(): AuditCollector
+{
+    return static::getContainer()->get(AuditCollector::class);
+}
+
+// Exactly one — a duplicated record is indistinguishable from history, so "at least one" is
+// not what a test of an audit trail means.
+$record = $this->assertAudited('order', $order->getId(), 'update');
+
+$this->assertAuditVetoed('reminder', $order->getId());
+$this->assertNothingAudited();
+```
+
+Each one fails with `explain()` behind it, so "expected 1, got 0" becomes which of the four it
+was. The trait needs phpunit/phpunit; the collector itself needs nothing, so an application on
+another framework uses its query methods directly.
+
+> **It is the test transport.** Nothing reaches Elasticsearch, so `audit:check` refuses to call
+> such an installation healthy and says why. Keep it in `config/packages/test/`.
+
 ## Writing asynchronously
 
 ```yaml
@@ -1764,6 +1832,9 @@ speak to Elasticsearch differently.
 
 **Route these**
 `IndexAuditRecord` and `IndexAuditRecords`, the Messenger messages.
+
+**Test with these**
+`AuditCollector` and `CollectedRecord` under `transport: collector`.
 
 Everything else — `FrameBuffer`, `ChangeSetBuilder`, `AuditMetadataFactory`, `QueryBuilder`,
 `IndexResolver`, `RecordId`, `ClientFactory`, the actor chain, the commands, the message

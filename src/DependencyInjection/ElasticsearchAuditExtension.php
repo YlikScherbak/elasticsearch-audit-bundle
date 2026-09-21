@@ -27,6 +27,7 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\ElasticsearchGateway;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
+use Borsche\ElasticsearchAuditBundle\Event\RecordCreatedEvent;
 use Borsche\ElasticsearchAuditBundle\Privacy\ChangeRedactor;
 use Borsche\ElasticsearchAuditBundle\Reader\AuditReader;
 use Borsche\ElasticsearchAuditBundle\Reader\QueryBuilder;
@@ -37,6 +38,7 @@ use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
 use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\ImmediateTransportGuard;
 use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
+use Borsche\ElasticsearchAuditBundle\Test\AuditCollector;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
@@ -75,6 +77,7 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_TRANSPORT = 'borsche_elasticsearch_audit.transport';
     public const SERVICE_SYNC_TRANSPORT = 'borsche_elasticsearch_audit.transport.sync';
     public const SERVICE_IMMEDIATE_TRANSPORT = 'borsche_elasticsearch_audit.transport.immediate';
+    public const SERVICE_COLLECTOR = 'borsche_elasticsearch_audit.transport.collector';
     public const SERVICE_OUTBOX_CONTEXT = 'borsche_elasticsearch_audit.outbox.context';
     public const SERVICE_AUDIT_TRANSACTION = 'borsche_elasticsearch_audit.outbox.transaction';
     public const SERVICE_INDEX_RESOLVER = 'borsche_elasticsearch_audit.index_resolver';
@@ -149,7 +152,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerWriter($config['on_failure'], $config['batch_size'], $config['redact'], $container);
         $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
-        $this->registerCommands($container, $config['reader']['max_result_window'], $config['transport'] === 'outbox' ? ($config['outbox']['transport'] ?? null) : null, $config['doctrine']['connection'], self::failureDetails($config['redact']));
+        $this->registerCommands($container, $config['reader']['max_result_window'], $config['transport'] === 'outbox' ? ($config['outbox']['transport'] ?? null) : null, $config['doctrine']['connection'], self::failureDetails($config['redact']), $config['transport']);
     }
 
     /**
@@ -456,6 +459,28 @@ final class ElasticsearchAuditExtension extends Extension
                 $failureDetails,
             ]));
             $container->setAlias(AuditTransaction::class, self::SERVICE_AUDIT_TRANSACTION);
+        } elseif ($transport === 'collector') {
+            // The road to Elasticsearch, replaced and nothing else: everything before
+            // the send happens exactly as it would.
+            $container->setDefinition(self::SERVICE_COLLECTOR, (new Definition(AuditCollector::class, [
+                new Reference(self::SERVICE_FRAME_BUFFER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+                new Reference(ChangeRedactor::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            ]))
+                // Last, because a veto set by a listener behind this one is still a veto
+                // and the collector would report the record as written.
+                ->addTag('kernel.event_listener', ['event' => RecordCreatedEvent::class, 'priority' => -1024])
+                // A kernel reused between tests starts each one empty.
+                ->addTag('kernel.reset', ['method' => 'reset'])
+                ->setPublic(true));
+            $container->setAlias(AuditCollector::class, self::SERVICE_COLLECTOR)->setPublic(true);
+
+            $container->setAlias(self::SERVICE_TRANSPORT, self::SERVICE_COLLECTOR);
+
+            // Including the immediate one. `immediately: true` means "before the request
+            // ends", not "past the collector": leaving it on the sync transport would
+            // send those records to a real cluster from a test suite that asked for
+            // none, and they are exactly the records somebody wanted to be sure about.
+            $container->setAlias(self::SERVICE_IMMEDIATE_TRANSPORT, self::SERVICE_COLLECTOR);
         } else {
             $container->setAlias(self::SERVICE_TRANSPORT, self::SERVICE_SYNC_TRANSPORT);
         }
@@ -529,7 +554,7 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
 
-    private function registerCommands(ContainerBuilder $container, int $maxResultWindow, ?string $queue, string $connection, FailureDetails $failureDetails): void
+    private function registerCommands(ContainerBuilder $container, int $maxResultWindow, ?string $queue, string $connection, FailureDetails $failureDetails, string $transport = 'sync'): void
     {
         if (!class_exists(Command::class)) {
             return;
@@ -571,6 +596,9 @@ final class ElasticsearchAuditExtension extends Extension
             // cluster that quotes a refused document back, that setting is the whole
             // difference between a fact worth knowing and a record in the log.
             $failureDetails,
+            // And which transport, so the check can refuse to call an installation
+            // healthy when nothing is being written to the indices it just approved.
+            $transport,
         ]))->addTag('console.command'));
     }
 }

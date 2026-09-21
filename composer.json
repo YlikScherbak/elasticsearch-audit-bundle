@@ -59,6 +59,7 @@
         "symfony/messenger": "To write audit records asynchronously",
         "symfony/security-core": "To record the authenticated user as the actor of each change",
         "symfony/console": "To create and check the Elasticsearch indices from the command line",
+        "phpunit/phpunit": "For the AuditAssertions trait under transport: collector - the collector itself needs nothing",
         "guzzlehttp/guzzle": "A PSR-18 HTTP client, required by elasticsearch/elasticsearch 9 which no longer ships one"
     },
     "autoload": {

@@ -10,6 +10,37 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [Unreleased]
 
 ### Added
+- **`transport: collector`: the test transport, and a public collector to read it with.**
+  Asserting on an audit trail meant writing a fake transport, and a hand-written one sits a layer
+  higher than the real thing and stops testing the layers it replaced — which is where every
+  defect in this bundle has been found. This one replaces the last step and nothing else:
+  completion, enrichment, coalescing, redaction and routing all happen, and what a test asserts on
+  is the document that would have been stored.
+  <br>`AuditCollector` is public: `written()`, `writtenFor($objectType, $objectId, $event)`, and a
+  `CollectedRecord` that carries the index, the id, the raw document and `entry()` — the same
+  `AuditEntry` the reader returns, so an assertion and a production query agree about what a field
+  is called. `explain()` is the assertion message: what was written, what was vetoed, what is
+  still held.
+  <br>Two answers that "what was written" cannot give. **`vetoed()`**: a record a listener stopped
+  reaches no transport and is not logged, because a veto is a feature, so a test for one had
+  nowhere to look; the collector is registered as the last listener on `RecordCreatedEvent`, which
+  is where the final verdict is known. **`held()`**: how many records a frame that is still open
+  is holding — the reason a correct test can look empty, asked rather than answered by an
+  assertion that closes the frame, since closing it is the behaviour under test.
+  <br>`ChangeRedactor::redacts()` is now public, and the collector exposes it: a redacted value is
+  stored as the placeholder, and comparing against `***` cannot tell a rule that worked from an
+  application that really wrote three asterisks.
+  <br>`AuditAssertions` is a trait over the same collector, and it exists for its failure
+  messages: `assertCount(1, ...)` says "expected 1, got 0" and leaves a person choosing between
+  four bugs — nothing was recorded, something else was, a listener vetoed it, or a frame is still
+  open — three of which are not in the code under test. `assertAudited()` (exactly one, because a
+  duplicate is indistinguishable from history), `assertAuditedTimes()`, `assertNotAudited()`,
+  `assertAuditVetoed()` and `assertNothingAudited()` all fail with `explain()` behind them, which
+  says which of the four it is. It needs phpunit/phpunit; the collector itself needs nothing.
+  <br>The immediate transport is replaced too — `immediately: true` means "before the request
+  ends", not "past the collector". And since nothing reaches the cluster, **`audit:check` refuses
+  to call such an installation healthy** and says so before anything else it prints: every other
+  line it produces is about indices that nothing is being written to.
 - **`MomentEnricherInterface`: an enricher asked about the moment instead of about the
   record.** Every other enricher runs when the record is written, which is the same instant the
   change happened for every record but the one the fix below is about: a flush whose publishing
