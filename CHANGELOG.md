@@ -10,6 +10,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [Unreleased]
 
 ### Fixed
+- **A logger that throws no longer takes the operation down.** Everything the writer and the
+  frame log is about something that already went wrong, and a logger is the application's code
+  like the rest of it. `AuditTransaction` guarded its own logging in 1.2.3; these two were not,
+  and under `on_failure: log` — whose whole promise is that the audit log cannot take an
+  operation down — a broken logger turned that promise inside out: the save being recorded
+  failed because the record of it could not be complained about. Under `throw`, and on the
+  frame's cleanup path, the caller was handed "your logger is down" in place of the exception
+  it threw. Both now log the way the transaction does, and the test asks for the caller's own
+  exception by identity rather than by class
 - **One record that cannot be built no longer costs the flush the rest of its history.**
   The records of a flush are assembled after the commit, one owner at a time, and a
   representer is the application's code: one that throws is reported through the failure

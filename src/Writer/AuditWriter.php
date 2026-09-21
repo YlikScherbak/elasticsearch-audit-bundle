@@ -405,7 +405,7 @@ final class AuditWriter
             try {
                 $this->reportFrameFinalizeFailures();
             } catch (\Throwable $reporting) {
-                $this->logger->error('A comparator failure could not be reported while a failed write was on its way out: {reason}.', ['reason' => $reporting->getMessage()]);
+                $this->say('A comparator failure could not be reported while a failed write was on its way out: {reason}.', ['reason' => $reporting->getMessage()]);
             }
 
             throw $write;
@@ -587,6 +587,31 @@ final class AuditWriter
     }
 
     /**
+     * Says it, and does not let saying it become the failure.
+     *
+     * Every line this writer logs is about something that already went wrong, and the
+     * logger is somebody else's code like the rest of it. Under `on_failure: log` the
+     * whole promise is that the audit log cannot take an operation down — a broken
+     * logger turned that inside out, and the save being recorded failed because the
+     * record of it could not be complained about. Under `throw` it is the cause that
+     * matters, and "your logger is down" is not it.
+     *
+     * The same guard AuditTransaction::report() puts around its own logging, written
+     * out again rather than shared: what each of them has to say differs, and two short
+     * try blocks are cheaper to read than one abstraction over them.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function say(string $message, array $context = []): void
+    {
+        try {
+            $this->logger->error($message, $context);
+        } catch (\Throwable) {
+            // Nowhere left to say it.
+        }
+    }
+
+    /**
      * Applies the failure policy to something that kept a record from being written —
      * a transport error, or (for the Doctrine listener) a record that could not even be
      * built, in which case there is no record to report. Log: logged and done. Throw:
@@ -619,7 +644,7 @@ final class AuditWriter
             // definition now, so it does not leave here at all: the failure is reported
             // without it, naming what went wrong instead.
             $redaction = $this->failureDetails->of($redaction);
-            $this->logger->error('An audit record could not be redacted while reporting a failure, so it is reported without its record: {reason}', ['reason' => $redaction->getMessage(), 'exception' => $redaction]);
+            $this->say('An audit record could not be redacted while reporting a failure, so it is reported without its record: {reason}', ['reason' => $redaction->getMessage(), 'exception' => $redaction]);
             $record = null;
         }
 
@@ -637,7 +662,7 @@ final class AuditWriter
                 // into the log with its message and the object itself.
                 $listener = $this->failureDetails->of($listener);
 
-                $this->logger->error('A listener of RecordFailedEvent threw while an audit failure was being reported: {reason}', ['reason' => $listener->getMessage(), 'exception' => $listener]);
+                $this->say('A listener of RecordFailedEvent threw while an audit failure was being reported: {reason}', ['reason' => $listener->getMessage(), 'exception' => $listener]);
             }
         }
 
@@ -651,7 +676,7 @@ final class AuditWriter
             throw WriteFailedException::for($record, $reason);
         }
 
-        $this->logger->error('Audit record could not be written: {reason}', [
+        $this->say('Audit record could not be written: {reason}', [
             'reason' => $reason->getMessage(),
             'objectType' => $record?->objectType,
             'objectId' => $record?->objectId,

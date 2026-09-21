@@ -116,7 +116,7 @@ final class AuditFrame
             // because their saves committed, so the caller's own transaction is what
             // rolls them back — which is why this setting is only meaningful where
             // there is one.
-            $this->logger->warning('An operation was refused because the audit frame could not hold it (coalescing.on_overflow: throw); the {held} record(s) it had collected were dropped, and nothing it records from here until the outermost frame closes will be written either. The database changes behind them are not undone by this — the transaction around the operation is what rolls those back.', ['held' => $refused->held()]);
+            $this->say('warning', 'An operation was refused because the audit frame could not hold it (coalescing.on_overflow: throw); the {held} record(s) it had collected were dropped, and nothing it records from here until the outermost frame closes will be written either. The database changes behind them are not undone by this — the transaction around the operation is what rolls those back.', ['held' => $refused->held()]);
 
             $this->end();
 
@@ -130,7 +130,7 @@ final class AuditFrame
             try {
                 $this->end();
             } catch (\Throwable $close) {
-                $this->logger->error('The audit frame could not close cleanly after the operation had already failed: {reason}. The operation\'s own exception follows.', ['reason' => $close->getMessage(), 'exception' => $close]);
+                $this->say('error', 'The audit frame could not close cleanly after the operation had already failed: {reason}. The operation\'s own exception follows.', ['reason' => $close->getMessage(), 'exception' => $close]);
             }
 
             throw $failed;
@@ -159,7 +159,7 @@ final class AuditFrame
             return false;
         }
 
-        $this->logger->warning('An audit frame was left open; its {held} held record(s) are being written and the frame closed. Pair begin() with end() in a try/finally, or use coalesce().', ['held' => $held]);
+        $this->say('warning', 'An audit frame was left open; its {held} held record(s) are being written and the frame closed. Pair begin() with end() in a try/finally, or use coalesce().', ['held' => $held]);
 
         try {
             $this->writer->writeManyCompleted($records);
@@ -227,6 +227,29 @@ final class AuditFrame
      * because it overflowed" are different events, and a log line naming the wrong one
      * sends whoever reads it looking for a missing try/finally that is not there.
      */
+    /**
+     * Says it, and does not let saying it become the failure.
+     *
+     * Everything this frame logs is about something that already went wrong or is
+     * already being undone, and the logger is the application's code like the rest of
+     * it. One that throws used to reach the caller in place of the reason their
+     * operation failed — and, worse, from release(), before the records it was
+     * announcing had been written at all.
+     *
+     * The same guard AuditTransaction::report() and AuditWriter::say() put around their
+     * own logging.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function say(string $level, string $message, array $context = []): void
+    {
+        try {
+            $this->logger->log($level, $message, $context);
+        } catch (\Throwable) {
+            // Nowhere left to say it.
+        }
+    }
+
     private function drop(string $why): bool
     {
         $held = $this->buffer->count();
@@ -235,7 +258,7 @@ final class AuditFrame
             return false;
         }
 
-        $this->logger->warning($why, ['held' => $held]);
+        $this->say('warning', $why, ['held' => $held]);
 
         return true;
     }
@@ -256,7 +279,7 @@ final class AuditFrame
         try {
             $this->reportFinalizeFailures();
         } catch (\Throwable $e) {
-            $this->logger->error('A comparator failure could not be reported while the frame was closing: {reason}.', ['reason' => $e->getMessage(), 'exception' => $e]);
+            $this->say('error', 'A comparator failure could not be reported while the frame was closing: {reason}.', ['reason' => $e->getMessage(), 'exception' => $e]);
         }
     }
 

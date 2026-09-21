@@ -169,4 +169,43 @@ final class WhenReportingAFailureFailsTest extends TestCase
             }
         };
     }
+
+    public function testALoggerThatThrowsDoesNotTakeTheOperationDownUnderTheLogPolicy(): void
+    {
+        // The whole of what `on_failure: log` promises is that the audit log cannot take
+        // an operation down: a cluster that is gone, a record that cannot be built, a
+        // listener that throws — all of it ends in a line in the log and the application
+        // carries on. A logger is somebody else's code too, and one that throws turned
+        // that promise inside out: the failure of the audit became the failure of the
+        // save it was recording.
+        $this->gateway->failWith = new \RuntimeException('the cluster went away');
+
+        $writer = new AuditWriter(
+            new SyncTransport($this->gateway),
+            new SyncTransport($this->gateway),
+            new IndexResolver('audit_log'),
+            new ChainActorResolver([], 'tests'),
+            new FrozenClock(),
+            [],
+            FailurePolicy::Log,
+            new class extends AbstractLogger {
+                /**
+                 * @param mixed               $level
+                 * @param mixed               $message
+                 * @param array<mixed, mixed> $context
+                 */
+                public function log($level, $message, array $context = []): void
+                {
+                    throw new \RuntimeException('the logger is down');
+                }
+            },
+        );
+
+        $writer->write(new AuditRecord('order', 1, AuditEvent::UPDATE, changes: ['status' => new Change('a', 'b')]));
+
+        // Reaching this line is the assertion. There is nothing to look at afterwards:
+        // the cluster is gone and the log is broken, and "log" means the caller is not
+        // told either way.
+        $this->expectNotToPerformAssertions();
+    }
 }

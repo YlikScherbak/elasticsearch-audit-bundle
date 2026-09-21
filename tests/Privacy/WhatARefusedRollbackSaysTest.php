@@ -306,4 +306,53 @@ final class WhatARefusedRollbackSaysTest extends TestCase
     {
         return self::MARKER;
     }
+
+    public function testTheFramesOwnLoggerCannotReplaceTheCallersExceptionEither(): void
+    {
+        // The transaction's logger is guarded, and 1.2.3 said so. Its cleanup is not the
+        // only thing that speaks, though: dropEverything() goes through the frame, and
+        // the frame announces what it dropped through a logger of its own — one the
+        // application supplies separately, and one the tests until now always gave a
+        // working one.
+        //
+        // The same instance, not a matching class or message: what the caller is holding
+        // has to be the object they threw, or an error handler keyed on identity —
+        // retries, compensations, a `catch` that rethrows one particular object — is
+        // looking at something else.
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed for a connection to fail rolling back.');
+        }
+
+        $broken = new class extends AbstractLogger {
+            /**
+             * @param mixed               $level
+             * @param mixed               $message
+             * @param array<mixed, mixed> $context
+             */
+            public function log($level, $message, array $context = []): void
+            {
+                throw new \RuntimeException('the frame logger is down');
+            }
+        };
+
+        $buffer = new FrameBuffer();
+        $writer = self::writer($buffer);
+        $frame = new AuditFrame($buffer, $writer, $broken);
+
+        $ours = new \DomainException('the operation itself failed');
+
+        try {
+            $this->transactionThatCannotRollBack($frame)->run(static function () use ($writer, $ours): void {
+                $writer->record('order', 1, 'update', ['status' => new Change('draft', 'paid')]);
+
+                throw $ours;
+            });
+
+            self::fail('the operation should have failed');
+        } catch (\Throwable $thrown) {
+            self::assertSame($ours, $thrown, 'the caller was handed something other than the exception it threw: '.$thrown->getMessage());
+        }
+
+        self::assertSame(0, $buffer->count(), 'and the frame was emptied all the same');
+    }
 }
