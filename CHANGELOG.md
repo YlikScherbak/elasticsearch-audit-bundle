@@ -10,6 +10,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [Unreleased]
 
 ### Fixed
+- **One record that cannot be built no longer costs the flush the rest of its history.**
+  The records of a flush are assembled after the commit, one owner at a time, and a
+  representer is the application's code: one that throws is reported through the failure
+  policy, which under `on_failure: throw` raises. Raising there left the loop, so the records
+  already built never reached the transport and `postFlush` dropped them — an entity with
+  nothing wrong with it had its row in the database and no history, because something else in
+  the same flush was misdeclared. The failure is held now and raised once the good records are
+  out, which is the order `AuditWriter::writeAll()` has always kept for the same reason;
+  reporting itself still happens where it happens, so the event and the log line are unchanged.
+  Inside an `AuditTransaction` nothing about this changes: a failure there refuses the whole
+  operation, rows and queued records together
 - **Emptying an audited collection is recorded even when nothing else about the owner
   changed.** `clear()` is the one collection operation Doctrine reports by dirtying nothing:
   it schedules the join rows for deletion and takes the collection's snapshot in the same

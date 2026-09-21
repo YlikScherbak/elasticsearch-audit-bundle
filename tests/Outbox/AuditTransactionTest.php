@@ -28,7 +28,9 @@ use Symfony\Component\EventDispatcher\EventDispatcher;
 use Symfony\Component\Messenger\Transport\Sender\SenderInterface;
 use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
 use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\FolderDocument;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vault;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
 use Borsche\ElasticsearchAuditBundle\Tests\Transport\QueueSender;
@@ -826,6 +828,41 @@ final class AuditTransactionTest extends TestCase
     private function queue(): QueueConnection
     {
         return new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $this->connection);
+    }
+
+    public function testARepresenterThatThrowsInsideTheTransactionRefusesTheWholeOperation(): void
+    {
+        // The same broken representer as in TransactionSafetyTest, on the other side of
+        // the boundary. There, a plain flush has already committed by the time the
+        // representer runs, so the good records go out and the failure follows them.
+        // Here the transaction owns the commit, and a failure that reaches it is the
+        // operation being refused: the rows and the queued records go back together, and
+        // the history is not half-written.
+        $this->rebuildWith(policy: FailurePolicy::Throw);
+
+        try {
+            $this->transaction->run(function (): void {
+                $this->em->persist($shipment = new Shipment('SH-1'));
+                $this->em->flush();
+
+                $vault = new Vault('v');
+                $this->em->persist($vault);
+                $this->em->flush();
+
+                $vault->documents->add($document = new FolderDocument('d'));
+                $document->vault = $vault;
+                $this->em->persist($document);
+                $this->em->flush();
+            });
+
+            self::fail('the broken representer should have refused the operation');
+        } catch (\Throwable $e) {
+            self::assertInstanceOf(WriteFailedException::class, $e);
+        }
+
+        self::assertSame(0, $this->shipments(), 'the business rows went back with the refusal');
+        self::assertSame(0, $this->queued(), 'and so did every record the operation had queued');
+        self::assertSame([], $this->gateway->documents['audit_log'] ?? [], 'nothing reached the cluster');
     }
 
     private function queued(): int

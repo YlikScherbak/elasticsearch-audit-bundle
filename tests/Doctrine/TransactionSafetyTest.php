@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Siding;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\FolderDocument;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Ledger;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\LedgerLine;
@@ -554,6 +555,92 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame($article->id.'|a\|b', $this->lastDocument()['objectId']);
+    }
+
+    public function testOneBrokenRepresenterDoesNotCostTheFlushItsOtherHistory(): void
+    {
+        // A mixed flush: an ordinary article with nothing wrong with it, and a vault
+        // whose element representer throws. The representer is the application's code
+        // and it runs in postFlush, after the commit — so by the time it fails, both
+        // rows are in the database and the article's record is already built.
+        //
+        // Under on_failure: throw, reporting that failure raises, and raising while the
+        // records are still being assembled abandons every one of them. The article is
+        // saved and its history is gone, which is the outcome the whole listener is
+        // written to avoid. The failure still has to reach the caller — it is the point
+        // of that setting — but after the records that were fine have gone out.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $vault = new Vault('v');
+        $this->em->persist($vault);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $article = new Article('Perfectly fine');
+        $this->em->persist($article);
+
+        $vault->documents->add($document = new FolderDocument('d'));
+        $document->vault = $vault;
+        $this->em->persist($document);
+
+        $raised = null;
+
+        try {
+            $this->em->flush();
+        } catch (WriteFailedException $e) {
+            $raised = $e;
+        }
+
+        self::assertNotNull($raised, 'the broken representer must still reach the caller');
+        self::assertSame(1, (int) $this->em->getConnection()->fetchOne("SELECT COUNT(*) FROM article WHERE title = 'Perfectly fine'"), 'the premise: the row committed');
+
+        self::assertSame(['Perfectly fine'], array_values(array_filter(array_map(
+            static fn (array $d): mixed => $d['changes']['title']['new'] ?? null,
+            $this->documents(),
+        ))), 'the history of everything else in the flush went with the one record that could not be built');
+    }
+
+    public function testARecordThatCannotBeBuiltAtAllCostsTheFlushNoOtherHistoryEither(): void
+    {
+        // The other road to the same loss. Vault's elements are inserted, so its broken
+        // representer runs against a record already in the list; a siding emptied on its
+        // own gets no lifecycle event at all, so its record is built from the map of
+        // emptied collections — and the representer fails while it is being built.
+        //
+        // Reporting that raises under on_failure: throw just the same, and the article
+        // beside it is just as innocent.
+        // Built while the policy still only logs: creating it represents the plank too,
+        // and this test is about the emptying rather than about the insert.
+        $siding = new Siding('S-1');
+        $siding->planks->add($plank = new FolderDocument('p'));
+
+        $this->em->persist($plank);
+        $this->em->persist($siding);
+        $this->em->flush();
+
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->gateway->documents = [];
+
+        $article = new Article('Perfectly fine');
+        $this->em->persist($article);
+        $siding->planks->clear();
+
+        $raised = null;
+
+        try {
+            $this->em->flush();
+        } catch (WriteFailedException $e) {
+            $raised = $e;
+        }
+
+        self::assertNotNull($raised, 'the representer that could not build a record must still reach the caller');
+
+        self::assertSame(['Perfectly fine'], array_values(array_filter(array_map(
+            static fn (array $d): mixed => $d['changes']['title']['new'] ?? null,
+            $this->documents(),
+        ))), 'the history of everything else in the flush went with the record that could not be built');
     }
 
     public function testAMistakeInTheAuditDeclarationIsLoggedNotFatal(): void

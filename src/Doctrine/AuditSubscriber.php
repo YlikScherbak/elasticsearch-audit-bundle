@@ -112,6 +112,24 @@ final class AuditSubscriber
     private bool $statementsRan = false;
 
     /**
+     * The first failure raised while this flush's records were being assembled.
+     *
+     * Reporting a failure raises under `on_failure: throw` — that is what the setting is
+     * for — and the records of a flush are assembled one by one, after the commit. So a
+     * representer of the application's that throws for one collection used to take the
+     * whole flush's history with it: the exception left the loop, the records already
+     * built never reached the transport, and postFlush's `finally` dropped them. The row
+     * of an entity with nothing wrong with it was in the database and its history was
+     * gone.
+     *
+     * Held here instead, and raised once the good records are out — the same order
+     * AuditWriter::writeAll() keeps for the same reason. The reporting itself still
+     * happens where it happened: the event is dispatched and the line is logged as the
+     * failure occurs, and only the raising waits.
+     */
+    private ?\Throwable $failureWhileBuilding = null;
+
+    /**
      * What the always-recorded fields of an audited entity held when the flush began,
      * keyed by object id.
      *
@@ -520,12 +538,19 @@ final class AuditSubscriber
                     $records[] = $record;
                 }
             } catch (\Throwable $e) {
-                $this->writer->reportFailure($e, $index !== null ? ($records[$index] ?? null) : null);
+                $this->reportWhileBuilding($e, $index !== null ? ($records[$index] ?? null) : null);
             }
         }
 
         // One batch: a flush that touched fifty entities is one _bulk call, not fifty round-trips.
         $this->writer->writeAll(array_values($records));
+
+        // And only now, with everything that could be written on its way out. If
+        // writeAll() raised instead, that is the exception the caller gets: it is about
+        // records that reached the transport, and this one has been reported either way.
+        if ($this->failureWhileBuilding !== null) {
+            throw $this->failureWhileBuilding;
+        }
     }
 
     /**
@@ -564,6 +589,21 @@ final class AuditSubscriber
         }
 
         return $count;
+    }
+
+    /**
+     * Reports a failure that happened while the records were being assembled, without
+     * letting it end the assembling.
+     *
+     * @see self::$failureWhileBuilding
+     */
+    private function reportWhileBuilding(\Throwable $e, ?AuditRecord $record = null): void
+    {
+        try {
+            $this->writer->reportFailure($e, $record);
+        } catch (\Throwable $raised) {
+            $this->failureWhileBuilding ??= $raised;
+        }
     }
 
     /**
@@ -615,6 +655,7 @@ final class AuditSubscriber
         $this->elementMembership = [];
         $this->flushDepths = [];
         $this->statementsRan = false;
+        $this->failureWhileBuilding = null;
         $this->changeSets = [];
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
@@ -646,6 +687,7 @@ final class AuditSubscriber
         $this->elementChanges = [];
         $this->elementMembership = [];
         $this->statementsRan = false;
+        $this->failureWhileBuilding = null;
 
         // Unconditionally here, and the depth with it: onClear is not paired with
         // anything, so popping one level would leave the stack describing a flush that
@@ -1285,7 +1327,7 @@ final class AuditSubscriber
                         // does, and only this element is lost.
                         $entry['value'] = self::represent($entry['element'], $entry['represent']);
                     } catch (\Throwable $e) {
-                        $this->writer->reportFailure($e);
+                        $this->reportWhileBuilding($e);
 
                         continue;
                     }
@@ -1388,7 +1430,7 @@ final class AuditSubscriber
             return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
                 ->withChanges($this->withContext($em, $owner, $changes));
         } catch (\Throwable $e) {
-            $this->writer->reportFailure($e, $record);
+            $this->reportWhileBuilding($e, $record);
 
             return null;
         }
