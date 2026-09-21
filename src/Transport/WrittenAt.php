@@ -56,12 +56,17 @@ final class WrittenAt
     public static function onEach(array $items, ?ClockInterface $clock): array
     {
         $at = self::now($clock);
+        $stamped = [];
 
-        foreach ($items as $position => $item) {
-            $items[$position]['document'] = array_replace($item['document'], [self::FIELD => $at]);
+        // Rebuilt rather than written into in place: the older PHPStan the lowest
+        // supported dependencies pin loses the list-ness of an array assigned through
+        // its keys, and a list is what bulk() is promised.
+        foreach ($items as $item) {
+            $item['document'] = array_replace($item['document'], [self::FIELD => $at]);
+            $stamped[] = $item;
         }
 
-        return $items;
+        return $stamped;
     }
 
     /**

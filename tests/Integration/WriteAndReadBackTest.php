@@ -81,6 +81,13 @@ final class WriteAndReadBackTest extends ElasticsearchTestCase
         self::assertSame(2, $orders['hits']['total']['value']);
         self::assertSame($orders['hits']['hits'][0]['_id'], $orders['hits']['hits'][0]['_source']['id'], 'the record id is the document id');
         unset($orders['hits']['hits'][0]['_source']['id']);
+
+        // The write moment, which a frozen clock cannot predict: the record's clock is
+        // stopped at 2026-08-26 and this one is the transport's, running. Taken out of
+        // the comparison below and asked about on its own.
+        $writtenAt = $orders['hits']['hits'][0]['_source']['writtenAt'] ?? null;
+        unset($orders['hits']['hits'][0]['_source']['writtenAt']);
+
         self::assertSame([
             'objectType' => 'order',
             'objectId' => 42,
@@ -90,6 +97,13 @@ final class WriteAndReadBackTest extends ElasticsearchTestCase
             'changes' => ['status' => ['old' => 'new', 'new' => 'paid']],
             'salesType' => 3,
         ], $orders['hits']['hits'][0]['_source']);
+
+        self::assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', (string) $writtenAt);
+
+        // And the cluster took it as a date: a range over it is what an operator runs to
+        // find what was published late, and it only works because the field is mapped.
+        $recent = $this->gateway->search($this->index, ['query' => ['range' => ['writtenAt' => ['gte' => '2026-08-26 12:00:00']]]]);
+        self::assertSame(3, $recent['hits']['total']['value'], 'writtenAt reached the index as a date the mapping knows');
 
         $byDate = $this->gateway->search($this->index, ['query' => ['range' => ['loggedAt' => ['gte' => '2026-08-26 00:00:00', 'lt' => '2026-08-27 00:00:00']]]]);
         self::assertSame(3, $byDate['hits']['total']['value']);
