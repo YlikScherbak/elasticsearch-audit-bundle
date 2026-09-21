@@ -10,6 +10,24 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 ## [Unreleased]
 
 ### Fixed
+- **A flush whose only history came from inside a tracked collection no longer loses it.** An
+  owner whose own columns did not change gets no lifecycle event from Doctrine at all, so what
+  happened inside its collection — a line of an order, the weight of a case — waits in a map of
+  its own until `postFlush` builds the record from it. When a `postFlush` listener registered
+  before this one threw, the next flush looked only at the list of finished records, read the
+  flush as one that had collected nothing, and dropped it: the rows were committed and the
+  history did not mention them, under a warning saying **zero** records were lost. The count and
+  the question behind it now know about all three places a flush keeps what it collected, and
+  both warnings say the real number
+- **And it is not written for a flush a veto stopped.** The obvious form of the fix above is
+  wrong, which is worth writing down because the two situations leave this listener exactly the
+  same state. A listener that throws in `onFlush` aborts the flush before Doctrine writes
+  anything *and* before `UnitOfWork::commit()` enters the try whose catch closes the manager — so
+  it leaves an open manager and collected state, just like a flush that committed and lost its
+  `postFlush`. The list of finished records used to tell them apart by accident: it is filled
+  after the statements run. That is now asked of Doctrine directly, so a flush that never reached
+  a statement is dropped as before — otherwise its history would be written once for the change
+  that never happened and again by the flush that really made it
 - **A refused rollback no longer quotes either failure into the log.** When an audit
   transaction fails and the rollback fails too, the second failure is reported rather than
   raised — the caller needs the reason the operation failed, and a database that cannot roll

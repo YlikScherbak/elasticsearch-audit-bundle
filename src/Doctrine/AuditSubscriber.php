@@ -91,6 +91,27 @@ final class AuditSubscriber
     private array $pendingIndexByEntity = [];
 
     /**
+     * Whether Doctrine got as far as running statements for the flush on the stack.
+     *
+     * A later flush finding this listener's state still there has to decide whether the
+     * flush that left it committed. An open manager is most of that answer and not all
+     * of it: a listener that throws in *onFlush* — a validation veto, the usual reason —
+     * aborts the flush before `UnitOfWork::commit()` enters the try whose catch closes
+     * the manager, so it leaves an open manager and nothing written.
+     *
+     * The list of finished records used to answer the rest by accident. It is filled in
+     * postPersist and postUpdate, which run after the statements, so a record in it was
+     * itself proof the flush got that far — and what a tracked collection said is not,
+     * because that is collected in onFlush, before anything is written. Reading the two
+     * as the same kind of evidence is how a flush aborted by a veto came to have its
+     * history published, and then published again by the flush that really wrote it.
+     *
+     * So this is asked of Doctrine instead, and for every entity rather than the audited
+     * ones: any post-statement event at all means the flush reached its statements.
+     */
+    private bool $statementsRan = false;
+
+    /**
      * What the always-recorded fields of an audited entity held when the flush began,
      * keyed by object id.
      *
@@ -338,6 +359,10 @@ final class AuditSubscriber
 
     public function postPersist(PostPersistEventArgs $args): void
     {
+        // Whether the flush reached its statements at all, which is what tells a
+        // committed flush from one a veto aborted. Every entity, audited or not.
+        $this->statementsRan = true;
+
         $record = $this->recordFor($args, AuditEvent::CREATE);
 
         if ($record !== null) {
@@ -351,6 +376,10 @@ final class AuditSubscriber
 
     public function postUpdate(PostUpdateEventArgs $args): void
     {
+        // Whether the flush reached its statements at all, which is what tells a
+        // committed flush from one a veto aborted. Every entity, audited or not.
+        $this->statementsRan = true;
+
         // Before the record, and for every updated entity rather than the audited
         // ones: an element of a tracked collection is usually not audited itself, and
         // this is the only moment its final change set can be read.
@@ -390,6 +419,10 @@ final class AuditSubscriber
 
     public function postRemove(PostRemoveEventArgs $args): void
     {
+        // Whether the flush reached its statements at all, which is what tells a
+        // committed flush from one a veto aborted. Every entity, audited or not.
+        $this->statementsRan = true;
+
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
         unset($this->pendingRemovals[$key]);
@@ -488,6 +521,43 @@ final class AuditSubscriber
     }
 
     /**
+     * How many records the flush on the stack has collected, wherever it put them.
+     *
+     * Three places, and asking only the first one was a way to lose history without
+     * saying so. Finished records sit in the pending list. A removal's record is taken
+     * in preRemove and waits apart until postRemove moves it across. And what happened
+     * inside a tracked collection is held against its owner until postFlush builds the
+     * record from it — which is the whole point of that map: **an owner whose own
+     * columns did not change gets no event from Doctrine at all**, so nothing about it
+     * ever reaches the pending list.
+     *
+     * That last one is why this exists. A flush whose only news came from inside a
+     * collection was read as a flush that collected nothing: its rows were committed,
+     * its records were dropped, and the warning said zero records were lost.
+     *
+     * Counted once per owner, and not at all for an owner already in the pending list —
+     * publish() folds what its elements did into the record that is there rather than
+     * writing a second one.
+     */
+    private function collectedSoFar(): int
+    {
+        $count = \count($this->pending) + \count($this->pendingRemovals);
+
+        $owners = array_unique(array_merge(
+            array_keys($this->elementChanges),
+            array_keys($this->elementMembership),
+        ));
+
+        foreach ($owners as $owner) {
+            if (!isset($this->pendingIndexByEntity[$owner])) {
+                ++$count;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
      * Everything the flush that is ending collected, dropped with it.
      */
     private function forgetThisFlush(): void
@@ -498,6 +568,7 @@ final class AuditSubscriber
         $this->elementChanges = [];
         $this->elementMembership = [];
         $this->flushDepths = [];
+        $this->statementsRan = false;
         $this->changeSets = [];
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
@@ -528,6 +599,7 @@ final class AuditSubscriber
         $this->pendingIndexByEntity = [];
         $this->elementChanges = [];
         $this->elementMembership = [];
+        $this->statementsRan = false;
 
         // Unconditionally here, and the depth with it: onClear is not paired with
         // anything, so popping one level would leave the stack describing a flush that
@@ -550,7 +622,9 @@ final class AuditSubscriber
             $abandoned = $this->flushingManager?->get();
             $abandoned = $abandoned instanceof EntityManagerInterface ? $abandoned : null;
 
-            if ($abandoned !== null && $abandoned->isOpen() && ($this->pending !== [] || $this->pendingRemovals !== [])) {
+            $collected = $this->collectedSoFar();
+
+            if ($abandoned !== null && $abandoned->isOpen() && $this->statementsRan && $collected > 0) {
                 // Its manager is still open, so UnitOfWork::commit() did not fail — every
                 // failure inside its try closes the manager on the way out. The
                 // transaction committed and something else swallowed the rest of the
@@ -558,7 +632,7 @@ final class AuditSubscriber
                 // listener never ran. The rows are in the database; dropping the records
                 // would be the audit trail losing what actually happened, which is the
                 // one outcome it must not choose.
-                $this->logger->warning('A flush committed without reaching this listener — a postFlush listener registered before it threw — so its {count} audit record(s) are being written now, late. Give the audit listener a higher priority than listeners that may fail, or handle the failure in that listener.', ['count' => \count($this->pending) + \count($this->pendingRemovals)]);
+                $this->logger->warning('A flush committed without reaching this listener — a postFlush listener registered before it threw — so its {count} audit record(s) are being written now, late. Give the audit listener a higher priority than listeners that may fail, or handle the failure in that listener.', ['count' => $collected]);
 
                 $this->flushDepths = [];
 
@@ -570,12 +644,13 @@ final class AuditSubscriber
                     $this->forgetThisFlush();
                 }
             } else {
-                // Nothing was collected, or the manager is gone: closed by
-                // UnitOfWork::commit() after a failure, or replaced by the application
-                // afterwards. Either way nothing here can be shown to have reached the
-                // database, and history that describes rows nobody has is worse than
-                // history that is missing.
-                $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => \count($this->pending) + \count($this->pendingRemovals)]);
+                // Nothing was collected; or the flush never reached a statement,
+                // because a listener in onFlush threw before Doctrine wrote anything; or
+                // the manager is gone — closed by UnitOfWork::commit() after a failure,
+                // or replaced by the application afterwards. Any of the three means
+                // nothing here can be shown to have reached the database, and history
+                // that describes rows nobody has is worse than history that is missing.
+                $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => $collected]);
 
                 $this->forgetThisFlush();
             }
@@ -1096,6 +1171,26 @@ final class AuditSubscriber
         }
     }
 
+    /**
+     * Whether this owner has news from inside a tracked collection, which is reason to
+     * keep a record its own columns left empty.
+     *
+     * **It has not been possible to observe this changing anything, and that is written
+     * down rather than acted on.** Wired to answer no, the whole suite still passes:
+     * publish() builds a record for every owner that collected something, whether or not
+     * one is already pending, so the same document arrives either way — amended in place
+     * when this kept it, appended when it did not. Removing publish()'s half *is*
+     * observable, and WhatAnElementChangeIsMadeOfTest fails on it.
+     *
+     * What is left is an ordering argument that could not be turned into a test.
+     * Doctrine groups its updates by class, so an audited entity of another class that
+     * is updated after the owner's would sit between the two in the pending list — and
+     * then keeping the record here, rather than appending it in postFlush, is what puts
+     * the owner's line before it in the history. No arrangement of the fixtures produced
+     * that order, so the guard stays and is not claimed to be equivalent: "no test tells
+     * these apart" is not the same statement as "there is nothing to tell apart", and
+     * the mutant on this line is left escaping to say so.
+     */
     private function hasElementChanges(object $owner): bool
     {
         $key = spl_object_id($owner);

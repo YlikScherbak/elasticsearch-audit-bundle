@@ -333,4 +333,37 @@ final class WhatAnElementChangeIsMadeOfTest extends DoctrineTestCase
         self::assertSame(['old' => 'shelf-a', 'new' => 'shelf-b'], $changes['cases.'.$case->id.'.label'] ?? null);
         self::assertSame(['old' => 10, 'new' => 25], $changes['cases.'.$case->id.'.weight'] ?? null, 'the second field of the element was cut off the record');
     }
+
+    public function testAnOwnerWithNothingOfItsOwnToSayIsStillRecordedForItsElement(): void
+    {
+        // A flush that gave the depot an UPDATE of its own and moved nothing audited on
+        // it, while a line inside it changed. Left to its own change set the record is
+        // empty and skipped — which is what skip_empty_updates is for — and the news
+        // from inside the element would go with it.
+        //
+        // **Two things keep it, and only their pair is observable.** postUpdate asks
+        // hasElementChanges() before skipping an empty record, and postFlush builds a
+        // record for every owner that collected something, whether or not one is already
+        // pending. Remove either and the record still arrives — measured, both ways
+        // round, including the order it arrives in. Remove both and it is gone. So the
+        // assertion here is about the outcome and not about either line, and the guard
+        // in postUpdate is documented as an equivalent mutant for that reason.
+        $depot = new Depot('north');
+        $depot->add($case = new PackingCase('shelf-a', 10));
+
+        $this->em->persist($depot);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $depot->note = 'touched, and not audited';
+        $case->weight = 25;
+        $this->em->flush();
+
+        $documents = $this->documents();
+
+        self::assertCount(1, $documents, 'the record about the element went with the empty one for its owner');
+        self::assertSame('depot', $documents[0]['objectType']);
+        self::assertSame(['old' => 10, 'new' => 25], $documents[0]['changes']['cases.'.$case->id.'.weight'] ?? null);
+    }
 }

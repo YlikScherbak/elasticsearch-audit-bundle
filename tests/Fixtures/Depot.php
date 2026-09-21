@@ -29,6 +29,15 @@ class Depot
     #[ORM\Column, AuditField]
     public string $name;
 
+    /**
+     * Mapped and not audited. A flush can then give this depot an UPDATE of its own
+     * while leaving its record with nothing to say, which is the only arrangement in
+     * which the listener has to decide whether news from inside an element is reason
+     * enough to keep that record where it stands.
+     */
+    #[ORM\Column]
+    public string $note = '';
+
     /** @var Collection<int, PackingCase> */
     #[ORM\OneToMany(mappedBy: 'depot', targetEntity: PackingCase::class, cascade: ['persist'])]
     #[AuditField(represent: 'getLabel', trackElements: ['weight', 'label'])]
