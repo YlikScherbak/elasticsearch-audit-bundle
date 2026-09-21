@@ -1185,10 +1185,14 @@ come with it:
 - **it is asked once per moment** — per flush for the Doctrine listener, per record for one
   written on its own — and not once per record of a batch;
 - **what it says is not overwritten.** An ordinary enricher setting the same attribute has its
-  value discarded and the attempt logged with both values, because otherwise the enricher running
-  at write time would quietly put the later request back under a name that promises the earlier
-  one. An attribute *you* set on the record yourself is different and wins: the moment fills in
-  what is missing;
+  value discarded and the attempt logged, because otherwise the enricher running at write time
+  would quietly put the later request back under a name that promises the earlier one. An
+  attribute *you* set on the record yourself is different and wins over the moment: the moment
+  fills in what is missing, and an ordinary enricher may still replace what you set, as it always
+  could. A value under a redaction rule is named in that log line and not repeated;
+- **return values, not objects that can change.** What `describe()` hands back is kept until the
+  records of that moment are written, which may be a different request — and an array holds an
+  object by reference;
 - **it must not throw.** There is no record to report a failure against, so a failure is logged
   and that enricher contributes nothing — a flush does not lose its history because a request
   lookup did not work.

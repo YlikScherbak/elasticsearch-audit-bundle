@@ -70,6 +70,14 @@ interface MomentEnricherInterface extends DeclaresAuditFieldsInterface
      * Return [] when there is nothing to say; that is what a console command's request
      * context amounts to, and it is not a failure.
      *
+     * **Return values, not something that can change afterwards.** What comes back is
+     * kept until the records of this moment are written, which for a flush whose
+     * publishing was swallowed is a different request entirely — and an array holds an
+     * object by reference, so an object whose fields move between here and there
+     * describes neither moment. Read what you need and hand back the reading. Nothing
+     * enforces this: the type says `mixed`, because a value may legitimately be a nested
+     * array, and there is no way to say "an array of things that cannot change".
+     *
      * @return array<string, mixed>
      */
     public function describe(): array;

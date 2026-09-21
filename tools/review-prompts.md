@@ -98,7 +98,8 @@ Current pack sizes (they grow with the bundle):
 >   on redelivery.
 > - `MomentEnricherInterface` is asked once per moment, before the records of it exist, and what
 >   it describes is not overwritten by an ordinary enricher running at write time — that attempt
->   is logged. An attribute the caller set on the record wins over both.
+>   is logged. An attribute the caller set on the record wins over the moment — the moment fills
+>   in what is missing — and an ordinary enricher may still replace it, as it always could.
 > - `transport: collector` replaces the last step and nothing else, so what a test asserts on is
 >   the document that would have been stored: including a record a listener vetoed, which
 >   reaches no transport, and excluding records an open frame is still holding, which is said

@@ -65,7 +65,10 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   work.
   <br>No object type scoping and no `supports()`, deliberately: there is no record to judge and
   the moment is the same one for all of them. A field only some records should carry is what an
-  ordinary enricher is for.
+  ordinary enricher is for, and a class claiming both is refused. `describe()` should return
+  values rather than objects that can change afterwards: what it hands back is kept until the
+  records of that moment are written, which may be another request, and an array holds an object
+  by reference.
 - **`writtenAt`: when the document was written, beside `loggedAt` for when the change
   happened.** The two used to be the same number in all but name, and the fix below made them
   different on purpose — which left no way to see that they had diverged. With one timestamp a
