@@ -593,7 +593,12 @@ final class TransactionSafetyTest extends DoctrineTestCase
         }
 
         self::assertNotNull($raised, 'the broken representer must still reach the caller');
-        self::assertSame(1, (int) $this->em->getConnection()->fetchOne("SELECT COUNT(*) FROM article WHERE title = 'Perfectly fine'"), 'the premise: the row committed');
+        // The table name comes from the mapping rather than from memory: SQLite does not
+        // care what case it is written in and MySQL on Linux does, which is the kind of
+        // difference the database matrix exists to find — and did.
+        $table = $this->em->getClassMetadata(Article::class)->getTableName();
+
+        self::assertSame(1, (int) $this->em->getConnection()->fetchOne(sprintf("SELECT COUNT(*) FROM %s WHERE title = 'Perfectly fine'", $table)), 'the premise: the row committed');
 
         self::assertSame(['Perfectly fine'], array_values(array_filter(array_map(
             static fn (array $d): mixed => $d['changes']['title']['new'] ?? null,
