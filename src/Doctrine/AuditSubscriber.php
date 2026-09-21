@@ -86,14 +86,14 @@ final class AuditSubscriber
      * index when it merges what happened inside a collection into its owner's record,
      * and an index that means two things is an index that drifts.
      *
-     * @var list<int>
+     * @var list<int|null>
      */
     private array $pendingFlush = [];
 
     /** @var array<int, AuditRecord> records for entities being removed, keyed by object id */
     private array $pendingRemovals = [];
 
-    /** @var array<int, int> which flush took each of those, kept for the move into pending */
+    /** @var array<int, int|null> which flush took each of those, kept for the move into pending */
     private array $pendingRemovalsFlush = [];
 
     /**
@@ -104,7 +104,7 @@ final class AuditSubscriber
      * reason every other record does: a nested flush must not lend it its moment or its
      * context.
      *
-     * @var array<int, int>
+     * @var array<int, int|null>
      */
     private array $ownerFlush = [];
 
@@ -461,7 +461,7 @@ final class AuditSubscriber
                 }
 
                 $this->emptiedCollections[spl_object_id($owner)][0] = $owner;
-                $this->ownerFlush[spl_object_id($owner)] ??= $this->collectingNow() ?? $this->flush;
+                $this->rememberWhoSawTheOwner(spl_object_id($owner));
                 $this->emptiedCollections[spl_object_id($owner)][1][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
             } catch (\Throwable $e) {
                 // Reading the old membership back is the one part of this listener that
@@ -484,7 +484,7 @@ final class AuditSubscriber
 
         if ($record !== null) {
             $this->pending[] = $record;
-            $this->pendingFlush[] = $this->collectingNow() ?? $this->flush;
+            $this->pendingFlush[] = $this->collectingNow();
             // Registered like an update's: an owner created with its lines has one
             // record, and what the lines did belongs in it. Without this the membership
             // found no record to join and invented a second, phantom update.
@@ -523,7 +523,7 @@ final class AuditSubscriber
         }
 
         $this->pending[] = $record;
-        $this->pendingFlush[] = $this->collectingNow() ?? $this->flush;
+        $this->pendingFlush[] = $this->collectingNow();
         $this->pendingIndexByEntity[spl_object_id($entity)] = array_key_last($this->pending);
     }
 
@@ -536,7 +536,7 @@ final class AuditSubscriber
             // Taken here and used when postRemove moves the record across, rather than
             // read again there: the two are the same flush today, and a record that
             // carries the moment it was taken in does not depend on that staying true.
-            $this->pendingRemovalsFlush[spl_object_id($args->getObject())] = $this->collectingNow() ?? $this->flush;
+            $this->pendingRemovalsFlush[spl_object_id($args->getObject())] = $this->collectingNow();
         }
     }
 
@@ -553,7 +553,7 @@ final class AuditSubscriber
 
         if ($record !== null) {
             $this->pending[] = $record;
-            $this->pendingFlush[] = $collected ?? $this->collectingNow() ?? $this->flush;
+            $this->pendingFlush[] = $collected;
         }
     }
 
@@ -787,6 +787,20 @@ final class AuditSubscriber
     /**
      * Everything the flush that is ending collected, dropped with it.
      */
+    /**
+     * Notes which flush saw an owner whose record is built after the commit, the first
+     * sighting winning.
+     *
+     * The first rather than the last, and in one place rather than at each of the three
+     * roads into that map: an owner two flushes touched belongs to the one that started
+     * touching it — the outer one, whose commit the whole history hangs off — and three
+     * copies of a rule are three chances for it to stop being the same rule.
+     */
+    private function rememberWhoSawTheOwner(int $owner): void
+    {
+        $this->ownerFlush[$owner] ??= $this->collectingNow();
+    }
+
     /**
      * The flush things are being collected under right now, if any.
      */
@@ -1370,7 +1384,7 @@ final class AuditSubscriber
                     'id' => $identifier,
                 ];
                 $this->elementMembership[$key] = [$owner, $held];
-                $this->ownerFlush[$key] ??= $this->collectingNow() ?? $this->flush;
+                $this->rememberWhoSawTheOwner($key);
 
                 continue;
             }
@@ -1427,8 +1441,9 @@ final class AuditSubscriber
             // the same quadratic cost, in memcpy instead of callbacks.
             if (!isset($this->elementChanges[$key])) {
                 $this->elementChanges[$key] = [$owner, []];
-                $this->ownerFlush[$key] ??= $this->collectingNow() ?? $this->flush;
             }
+
+            $this->rememberWhoSawTheOwner($key);
 
             foreach ($changes as $name => $change) {
                 $this->elementChanges[$key][1][$name] = $change;

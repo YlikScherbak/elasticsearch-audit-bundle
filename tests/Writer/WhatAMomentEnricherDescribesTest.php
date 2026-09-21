@@ -236,6 +236,22 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         self::assertSame('token', $this->logs[0]['context']['attribute'] ?? null);
     }
 
+    public function testARedactedCollisionDoesNotSilenceTheOnesAfterIt(): void
+    {
+        // Two attributes taken at once, the first of them under a rule. Withholding its
+        // values must not end the report: the second is an ordinary field, and an
+        // application with two enrichers still needs to be told about it.
+        $this->writer([
+            self::describing(['token' => 'ALICE_SECRET_7c1f', 'route' => '/checkout']),
+            self::enriching(['token' => 'BOB_SECRET_9a2e', 'route' => '/whatever-is-running-now']),
+        ], new ChangeRedactor(['token']))->record('user', 7, 'update');
+
+        self::assertCount(2, $this->logs, 'the redacted one ended the report instead of skipping its values');
+        self::assertSame('token', $this->logs[0]['context']['attribute'] ?? null);
+        self::assertSame('route', $this->logs[1]['context']['attribute'] ?? null);
+        self::assertSame('/checkout', $this->logs[1]['context']['kept'] ?? null);
+    }
+
     public function testAFailingMomentEnricherDoesNotRepeatItsOwnException(): void
     {
         // An enricher asked to read the request is as likely to quote a token in its

@@ -504,6 +504,161 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         );
     }
 
+    public function testAnOwnerBothFlushesTouchedBelongsToTheOneThatStarted(): void
+    {
+        // One owner, one record, two flushes that moved something inside it. The record
+        // goes with the flush that first saw the owner rather than the last: it is the
+        // operation that started touching it, and it is the one whose commit the whole
+        // history hangs off. The test beside this one is the other case — an owner only
+        // the inner flush saw keeps the inner moment — and together they say which of
+        // the two sightings counts.
+        $crate = new Crate('C-1');
+        $crate->add($first = new CrateItem('SKU-1'));
+        $crate->add($second = new CrateItem('SKU-2'));
+
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $second) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly CrateItem $second,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+
+                $this->second->quantity = 9;
+                $this->em->flush();
+            }
+        });
+
+        $first->quantity = 7;
+        $this->em->flush();
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates, 'the premise: one owner, one record, whatever moved inside it');
+        self::assertSame('alice', $crates[0]['source'], 'the owner went with the flush that touched it last rather than the one that started');
+    }
+
+    public function testAnOwnerTheInnerFlushOnlyEmptiedIsThatFlushesToo(): void
+    {
+        // The third road into the map of who saw an owner: a collection emptied. An
+        // owner nothing else touched is remembered there and nowhere else, so forgetting
+        // to note the flush costs it its moment — and the outer flush, which publishes,
+        // would sign it.
+        $crate = new Crate('C-1');
+        $crate->add(new CrateItem('SKU-1'));
+
+        $this->em->persist($crate);
+        $this->em->persist($alice = new Article('Alice wrote this'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $crate) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Crate $crate,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+
+                $this->crate->items->clear();
+                $this->em->flush();
+            }
+        });
+
+        $alice->title = 'Alice edited this';
+        $this->em->flush();
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertNotSame([], $crates, 'the premise: emptying the collection was recorded against its owner');
+        self::assertSame('bob', $crates[0]['source'], 'the owner was signed by the flush that published rather than the one that emptied it');
+        self::assertSame(self::BOB, $crates[0]['loggedAt']);
+    }
+
+    public function testAnOwnerIsStillTheFirstFlushesWhenTheSecondEmptiesItsCollection(): void
+    {
+        // The same rule on the other road into that map: an owner is remembered when a
+        // collection of its is emptied, and the inner flush emptying one must not take
+        // an owner the outer flush had already touched.
+        $crate = new Crate('C-1');
+        $crate->add($first = new CrateItem('SKU-1'));
+        $crate->add(new CrateItem('SKU-2'));
+
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $crate) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Crate $crate,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+
+                $this->crate->items->clear();
+                $this->em->flush();
+            }
+        });
+
+        $first->quantity = 7;
+        $this->em->flush();
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertNotSame([], $crates, 'the premise: the crate got a record');
+        self::assertSame('alice', $crates[0]['source'], 'emptying a collection in the inner flush took an owner the outer one had already touched');
+    }
+
     public function testTheListenerKeepsNoMomentsAfterTheFlushThatMadeThem(): void
     {
         // A worker runs for weeks and flushes millions of times. One Provenance per
