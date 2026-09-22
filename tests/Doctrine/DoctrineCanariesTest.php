@@ -439,11 +439,14 @@ final class DoctrineCanariesTest extends TestCase
                 });
             }
 
-            $em->getEventManager()->addEventListener([Events::postUpdate], new class($em, $aside) {
+            $em->getEventManager()->addEventListener([Events::postUpdate], new class($em, $aside, $killTheInner) {
                 private bool $ran = false;
 
-                public function __construct(private readonly EntityManagerInterface $em, private readonly Article $aside)
-                {
+                public function __construct(
+                    private readonly EntityManagerInterface $em,
+                    private readonly Article $aside,
+                    private readonly bool $retryAfterTheRefusal,
+                ) {
                 }
 
                 public function postUpdate(): void
@@ -460,6 +463,15 @@ final class DoctrineCanariesTest extends TestCase
                     } catch (\DomainException) {
                         // what the application does when a listener refuses its inner flush
                     }
+
+                    if (!$this->retryAfterTheRefusal) {
+                        return;
+                    }
+
+                    // And then the other half of what an application does: flush again to
+                    // record that the first one was refused.
+                    $this->aside->title = 'and then logged';
+                    $this->em->flush();
                 }
             });
 
@@ -477,8 +489,22 @@ final class DoctrineCanariesTest extends TestCase
                 // The inner one never opened a transaction, so the outer flush's next
                 // event arrives at the level the dead inner pushed at — which is what
                 // makes "at or below the current level" enough to throw it away.
-                self::assertSame('postUpdate 1', $trace[3] ?? null, 'a dead inner flush left the level somewhere else than where it pushed');
-                self::assertCount(4, $trace, 'with a dead inner flush there is nothing else to see');
+                // The whole of what the unwinding rests on, in order. The dead inner
+                // flush pushes at 1 and never opens a transaction, so the flush the
+                // application starts next to log the refusal begins at 1 as well —
+                // exactly where the dead one is. There is nothing in a level to tell the
+                // two apart, so a rule that reads levels has to treat "no deeper than
+                // that entry" as "that entry is over", and then say what is LEFT
+                // underneath: the live outer flush, at 0, whose own event comes last.
+                self::assertSame([
+                    'onFlush 0',    // the outer flush, before its transaction
+                    'postUpdate 1', // inside it, one level deeper
+                    'onFlush 1',    // the inner flush the veto refuses
+                    'onFlush 1',    // and the one started to log the refusal, at the same level
+                    'postUpdate 2', // which runs its own events deeper still
+                    'postUpdate 2',
+                    'postUpdate 1', // the outer flush, still alive, finishing its list
+                ], $trace, 'the levels a dead inner flush and the one after it arrive at have moved');
 
                 continue;
             }

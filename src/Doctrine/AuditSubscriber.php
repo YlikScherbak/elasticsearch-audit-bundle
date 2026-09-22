@@ -907,14 +907,34 @@ final class AuditSubscriber
 
     /**
      * Remember how deep this flush started, and notice a flush above it that died.
+     *
+     * The unwinding is the one {@see collectingNow()} does, spelled out because here it
+     * decides more than which number is current. Whatever is at or above this level
+     * belongs to a flush that is over; what is left underneath is what says whether
+     * anything is still live — and only an empty stack means nothing is.
+     *
+     * The distinction is the whole of it. A dead flush on top of a live one is the
+     * ordinary aftermath of a listener refusing an inner flush, and the application
+     * catching that and carrying on is the pattern the bundle exists to survive: the
+     * outer flush is still walking its entities, still has its transaction open, and its
+     * records must not be published — they describe rows the outer flush may still roll
+     * back. Read as an abandoned outer, that is exactly what happened: every record the
+     * live flush had collected went out before its commit, signed by whoever was acting
+     * in the listener that started the dead one.
      */
     private function beginFlush(EntityManagerInterface $em, int $flush): void
     {
         $level = $em->getConnection()->getTransactionNestingLevel();
+        $unwound = false;
 
-        if ($this->flushes !== [] && $level <= $this->flushes[array_key_last($this->flushes)]['level']) {
-            // Not nested inside the flush on the stack: that one is over, and it did not
-            // come back through postFlush. Two very different things end that way.
+        while ($this->flushes !== [] && $this->flushes[array_key_last($this->flushes)]['level'] >= $level) {
+            array_pop($this->flushes);
+            $unwound = true;
+        }
+
+        if ($unwound && $this->flushes === []) {
+            // Nothing is left underneath: the flush this state belongs to is over, and it
+            // did not come back through postFlush. Two very different things end that way.
             $abandoned = $this->flushingManager?->get();
             $abandoned = $abandoned instanceof EntityManagerInterface ? $abandoned : null;
 
@@ -933,8 +953,6 @@ final class AuditSubscriber
                 // would be the audit trail losing what actually happened, which is the
                 // one outcome it must not choose.
                 $this->logger->warning('A flush committed without reaching this listener — a postFlush listener registered before it threw — so its {count} audit record(s) are being written now, late. Give the audit listener a higher priority than listeners that may fail, or handle the failure in that listener.', ['count' => $collected]);
-
-                $this->flushes = [];
 
                 try {
                     $this->publish($abandoned, $abandoned);

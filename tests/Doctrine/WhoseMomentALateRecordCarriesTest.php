@@ -753,6 +753,93 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         self::assertSame(self::ALICE, $records['Second, edited by Alice']['loggedAt']);
     }
 
+    public function testAFlushStartedAfterADeadInnerOneDoesNotPublishTheOuterOnesWork(): void
+    {
+        // The same dead inner flush as above, and then the thing an application actually
+        // does about it: catch, and flush again to record that it failed. That second
+        // flush is a perfectly ordinary inner flush — the outer one is still walking its
+        // entities, its transaction is still open — but it begins at the level the dead
+        // one pushed at, and reading that as "the flush below me is gone" made it publish
+        // everything the LIVE outer flush had collected. Before the commit, which is the
+        // one thing postFlush exists to wait for, and signed by whoever was acting in the
+        // listener that started the dead one.
+        $this->em->persist($first = new Article('First'));
+        $this->em->persist($second = new Article('Second'));
+        $this->em->persist($aside = new Article('Aside'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class {
+            private int $seen = 0;
+
+            public function onFlush(): void
+            {
+                // The outer flush passes, the inner one is refused, and the flush that
+                // logs the refusal passes again.
+                if (++$this->seen === 2) {
+                    throw new \DomainException('this entity may not be saved');
+                }
+            }
+        });
+
+        $published = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside, $this->gateway, $published) {
+            private bool $ran = false;
+
+            /** @param list<int> $published */
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+                private readonly object $gateway,
+                private array &$published,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+                $this->aside->title = 'Bob changed this from inside';
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does when a listener refuses its inner flush
+                }
+
+                $this->aside->title = 'Bob logged the refusal';
+                $this->em->flush();
+
+                // Counted here, inside the outer flush, because by the end everything is
+                // published either way and the end is not where this goes wrong.
+                $this->published[] = \count($this->gateway->documents['audit_log'] ?? []);
+            }
+        });
+
+        $first->title = 'First, edited by Alice';
+        $second->title = 'Second, edited by Alice';
+        $this->em->flush();
+
+        self::assertSame([0], $published, "the outer flush's records were published from inside it, before its own commit");
+
+        $signed = array_map(
+            static fn (array $d): array => [$d['changes']['title']['new'] ?? '?', $d['source']],
+            $this->documents(),
+        );
+
+        self::assertContains(['Second, edited by Alice', 'alice'], $signed, "the outer flush's work was signed by the actor of the flush that logged the refusal");
+        self::assertContains(['Bob logged the refusal', 'bob'], $signed, 'and the flush that logged the refusal keeps its own actor');
+    }
+
     public function testADeadInnerFlushDoesNotReachARemovalTheOuterOneMade(): void
     {
         // The two together, which is where a fix for either alone would still be wrong:
