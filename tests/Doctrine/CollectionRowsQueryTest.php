@@ -32,7 +32,7 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
         $route = new Route('R-1');
 
         self::assertSame(
-            ['SELECT COUNT(*) FROM "route_stop" WHERE "route_id" = ?', [null], ['integer']],
+            ['SELECT COUNT(*) FROM route_stop WHERE route_id = ?', [null], ['integer']],
             $this->counting(Route::class, $route, $this->mappingOf(Route::class, 'stops')),
         );
     }
@@ -49,7 +49,24 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
 
         [$sql] = $this->counting(Route::class, new Route('R-1'), $mapping) ?? [null];
 
-        self::assertSame('SELECT COUNT(*) FROM "shipping"."route_stop" WHERE "route_id" = ?', $sql);
+        self::assertSame('SELECT COUNT(*) FROM shipping.route_stop WHERE route_id = ?', $sql);
+    }
+
+    public function testANameTheMappingCallsQuotedIsQuotedAndOneItDoesNotIsNot(): void
+    {
+        // Doctrine creates a table nobody asked it to quote with its name unquoted, so a
+        // database that folds case stores it folded -- and a query that quotes it anyway
+        // is asking for a table that is not there. Its own quote strategy goes by the flag
+        // and so does this; quoting everything cost a whole road on Postgres, silently,
+        // because the exception went through the failure policy.
+        $mapping = $this->mappingOf(Route::class, 'stops');
+        $joinTable = $mapping['joinTable'];
+        $joinTable['quoted'] = true;
+        $mapping['joinTable'] = $joinTable;
+
+        [$sql] = $this->counting(Route::class, new Route('R-1'), $mapping) ?? [null];
+
+        self::assertSame('SELECT COUNT(*) FROM "route_stop" WHERE route_id = ?', $sql);
     }
 
     public function testAnInverseOneToManyIsCountedInTheElementsTable(): void
@@ -57,7 +74,7 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
         // Where a replaced collection with orphanRemoval deletes its rows, in one
         // statement and with no lifecycle event: the only witness there is for it.
         self::assertSame(
-            ['SELECT COUNT(*) FROM "CrateItem" WHERE "crate_id" = ?', ['C-1'], ['string']],
+            ['SELECT COUNT(*) FROM CrateItem WHERE crate_id = ?', ['C-1'], ['string']],
             $this->counting(
                 Crate::class,
                 new Crate('C-1'),
@@ -128,7 +145,7 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
 
         self::assertSame(
             [
-                'SELECT COUNT(*) FROM "route_stop" WHERE "route_id" = ? AND "route_id_again" = ?',
+                'SELECT COUNT(*) FROM route_stop WHERE route_id = ? AND route_id_again = ?',
                 [null, null],
                 ['integer', 'integer'],
             ],

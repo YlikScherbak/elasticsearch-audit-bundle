@@ -67,6 +67,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private bool $anEmptyingIsWaiting = false;
 
+    /** Where the next number comes from. */
+    private int $from = 0;
+
     /**
      * What every line has been called, by its id.
      *
@@ -96,10 +99,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * @var array<int, string>
      */
     private const KNOWN = [
-        20 => 'a replacement with a new line, then the line moved away and removed',
-        24 => 'a replacement with a new line whose publishing is swallowed twice',
-        35 => 'two replacements with a new line each, the second swallowed',
-        47 => 'a replacement, then another with a new line whose publishing is swallowed',
+        16 => 'an emptying published late, then a replacement with a new line, also late',
+        28 => 'a move refused, then the collection replaced twice',
+        29 => 'a move published late, then the collection replaced',
+        37 => 'a replacement with a new line arriving as the old ones go',
+        42 => 'a replacement with a new line whose publishing is swallowed',
     ];
 
     /** The tables this reads, and the column that names each row in a statement. */
@@ -150,11 +154,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         $this->setUp();
         $this->attachListener(FailurePolicy::Log);
 
-        $random = new \Random\Randomizer(new \Random\Engine\Mt19937($seed));
-        $steps = $this->aSequence($random);
-        $world = $this->aWorld($random->getInt(0, 1) === 1);
+        $this->from = $seed;
+        $steps = $this->aSequence();
+        $world = $this->aWorld($this->next(2) === 1);
 
-        if ($random->getInt(0, 3) === 0) {
+        if ($this->next(4) === 0) {
             $this->em->getConfiguration()->addFilter('hide_stops', HideEveryStop::class);
             $this->em->getFilters()->enable('hide_stops');
         }
@@ -196,9 +200,26 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     }
 
     /**
+     * The next number below a bound, from the seed and nothing else.
+     *
+     * Written out rather than taken from \Random\Randomizer, which arrived in PHP 8.2 and
+     * this bundle supports 8.1 -- a mistake made here and caught by CI rather than by the
+     * machine it was written on. It also makes a seed mean the same sequence on every
+     * version, which a seeded engine does not promise across majors and which is the whole
+     * point of printing the seed when one fails.
+     */
+    private function next(int $below): int
+    {
+        // An ordinary linear congruential step, the constants Numerical Recipes'.
+        $this->from = ($this->from * 1664525 + 1013904223) % 2147483648;
+
+        return intdiv($this->from, 65536) % $below;
+    }
+
+    /**
      * @return list<string>
      */
-    private function aSequence(\Random\Randomizer $random): array
+    private function aSequence(): array
     {
         $vocabulary = [
             'edit the article',
@@ -213,11 +234,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         $steps = [];
 
-        for ($i = 0, $n = $random->getInt(1, 4); $i < $n; ++$i) {
-            $steps[] = $vocabulary[$random->getInt(0, \count($vocabulary) - 1)];
+        for ($i = 0, $n = 1 + $this->next(4); $i < $n; ++$i) {
+            $steps[] = $vocabulary[$this->next(\count($vocabulary))];
 
             // How the flush that carries it out ends.
-            $steps[] = match ($random->getInt(0, 5)) {
+            $steps[] = match ($this->next(6)) {
                 0 => 'flush, refused',
                 1 => 'flush, publishing swallowed',
                 default => 'flush',

@@ -60,10 +60,12 @@ final class CollectionRowsQuery
             $table = self::entry($joinTable, 'name');
             $schema = self::entry($joinTable, 'schema');
             $columns = self::entry($joinTable, 'joinColumns');
+            $quoted = $joinTable;
         } elseif ($target !== null && \is_string($mappedBy = self::entry($mapping, 'mappedBy'))) {
             $table = $target->getTableName();
             $schema = self::entry($target->table, 'schema');
             $columns = self::entry($target->getAssociationMapping($mappedBy), 'joinColumns');
+            $quoted = $target->table;
         } else {
             return null;
         }
@@ -85,7 +87,7 @@ final class CollectionRowsQuery
             }
 
             $of = $owner->getFieldForColumn($referenced);
-            $where[] = $platform->quoteIdentifier($name).' = ?';
+            $where[] = self::named($platform, $name, $column).' = ?';
             $values[] = $owner->getFieldValue($entity, $of);
             // The column's own type, so that an identifier which is an object — a UUID
             // stored as binary, say — is converted the way the column stores it rather
@@ -99,12 +101,31 @@ final class CollectionRowsQuery
         // strategy qualifies it, and a query that does not would count another table's
         // rows and call a refusal an emptying.
         $qualified = \is_string($schema) && $schema !== ''
-            ? $platform->quoteIdentifier($schema).'.'.$platform->quoteIdentifier($table)
-            : $platform->quoteIdentifier($table);
+            ? self::named($platform, $schema, $quoted).'.'.self::named($platform, $table, $quoted)
+            : self::named($platform, $table, $quoted);
 
         // COUNT rather than a LIMIT, which every platform spells differently: one owner's
         // rows are few, and this runs where an emptying is being recorded or judged.
         return ['SELECT COUNT(*) FROM '.$qualified.' WHERE '.implode(' AND ', $where), $values, $types];
+    }
+
+    /**
+     * A name as Doctrine would write it: quoted only where the mapping says quoted.
+     *
+     * Quoting everything is what this did first, and it is wrong in a way that only shows
+     * on a database that folds case. Doctrine creates a table nobody asked it to quote
+     * with its name unquoted, so Postgres stores `CrateItem` as `crateitem` — and a query
+     * asking for `"CrateItem"` is asking for a table that is not there. The exception went
+     * through the failure policy and the emptying was never recorded: rows deleted, and
+     * no history, on Postgres only. Its own quote strategy is the rule being followed
+     * here, flag for flag.
+     *
+     * @param mixed $mapping the part of the mapping the name came from, which carries the
+     *                       flag
+     */
+    private static function named(AbstractPlatform $platform, string $name, mixed $mapping): string
+    {
+        return self::entry($mapping, 'quoted') !== null ? $platform->quoteIdentifier($name) : $name;
     }
 
     /**
