@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
+use Doctrine\Common\Collections\ArrayCollection;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
@@ -1042,21 +1043,26 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
      * statement writes. And of one particular entity because Doctrine groups its updates
      * by class and the order of the groups is not portable.
      */
-    private function inThePreUpdateOf(object $entity, \Closure $what): void
+    private function inThePreUpdateOf(object $entity, \Closure $what, ?string $onlyWhenChanging = null): void
     {
-        $this->em->getEventManager()->addEventListener([Events::preUpdate], new class($this->em, $entity, $what) {
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], new class($this->em, $entity, $what, $onlyWhenChanging) {
             private bool $ran = false;
 
             public function __construct(
                 private readonly EntityManagerInterface $em,
                 private readonly object $entity,
                 private readonly \Closure $what,
+                private readonly ?string $onlyWhenChanging = null,
             ) {
             }
 
             public function preUpdate(\Doctrine\ORM\Event\PreUpdateEventArgs $args): void
             {
                 if ($this->ran || $args->getObject() !== $this->entity) {
+                    return;
+                }
+
+                if ($this->onlyWhenChanging !== null && !$args->hasChangedField($this->onlyWhenChanging)) {
                     return;
                 }
 
@@ -1739,6 +1745,177 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
             $this->logs,
             static fn (string $line): bool => str_contains($line, 'are being written now, late'),
         ), 'a refused flush was reported as one that committed');
+    }
+
+    public function testAReplacedCollectionIsRecordedAsTheEmptyingItIs(): void
+    {
+        // Nothing else going wrong: no nesting, no refusal, no swallowed postFlush. The
+        // application assigns a fresh collection over the property, which Doctrine carries
+        // out for an inverse OneToMany with orphanRemoval as one statement and no
+        // lifecycle event at all -- so the membership road, which is what records a
+        // clear(), has nothing to say. The rows went and the owner's record came back with
+        // nothing in it.
+        $crate = new Crate('C-1');
+        $crate->add(new CrateItem('SKU-1'));
+        $crate->add(new CrateItem('SKU-2'));
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $crate->items = new ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'the premise: the rows went');
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates, 'the replacement was recorded more than once, or not at all');
+        self::assertSame(
+            ['old' => ['SKU-1', 'SKU-2'], 'new' => []],
+            $crates[0]['changes']['items'] ?? null,
+            'the owner\'s record says nothing about the lines that were deleted',
+        );
+    }
+
+    public function testAnOwnerThatChangedItsOwnFieldTooKeepsBothHalvesOfTheRecord(): void
+    {
+        // The owner has a change of its own as well, so Doctrine raises an event for it and
+        // publishing has a record to amend rather than one to build. What an emptied
+        // collection is recorded as used to be worked out only on the other road -- the one
+        // for an owner with no event at all -- so an owner that did both kept the half it
+        // said itself and lost the half its collection said.
+        $crate = new Crate('C-1');
+        $crate->add(new CrateItem('SKU-1'));
+        $crate->add(new CrateItem('SKU-2'));
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $crate->status = 'sealed';
+        $crate->items = new ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'the premise: the rows went');
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates, 'the owner was recorded more than once');
+        self::assertSame(
+            [
+                'status' => ['old' => 'packed', 'new' => 'sealed'],
+                'items' => ['old' => ['SKU-1', 'SKU-2'], 'new' => []],
+            ],
+            $crates[0]['changes'],
+            'one of the two halves of what the owner did is missing',
+        );
+    }
+
+    public function testAReplacedOrphanCollectionWhosePostFlushWasSwallowedIsStillWrittenLate(): void
+    {
+        // The same replacement, and the recovery road on top of it. What this adds is the
+        // other half: the flush's collection deletion stays on the schedule, because
+        // postCommitCleanup() never ran, and the next flush is handed it again with the
+        // old collection's snapshot still full. Recorded again, that was a second document
+        // about rows the second operation never touched.
+        $crate = new Crate('C-1');
+        $crate->add(new CrateItem('SKU-1'));
+        $crate->add(new CrateItem('SKU-2'));
+        $crate->add(new CrateItem('SKU-3'));
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $breaker = new class {
+            public bool $armed = false;
+
+            public function postFlush(): void
+            {
+                if ($this->armed) {
+                    $this->armed = false;
+
+                    throw new \DomainException('somebody else exploded in postFlush');
+                }
+            }
+        };
+
+        $ours = $this->silenceOurPostFlush();
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $breaker);
+        $this->restorePostFlush($ours);
+
+        $crate->items = new ArrayCollection();
+        $breaker->armed = true;
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+            // the application copes
+        }
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'the premise: the rows went');
+
+        // Somebody else's operation, which is what carries the old record out.
+        $this->em->persist(new Article('Bob writes something'));
+        $this->em->flush();
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates, 'the emptying was dropped, or recorded once for each operation');
+        self::assertSame(['old' => ['SKU-1', 'SKU-2', 'SKU-3'], 'new' => []], $crates[0]['changes']['items'] ?? null);
+    }
+
+    public function testCorrectingAnotherFieldDoesNotEraseAnEarlierSuccessfulInnerUpdate(): void
+    {
+        // Two nested flushes, each about a different field of the same line. The first
+        // writes the quantity and commits it; the second changes the sku and has it
+        // corrected in preUpdate. Reading the line again is the last word about the fields
+        // that update is ABOUT, and about no others -- read as the last word about the
+        // line, it took the quantity the first flush had really written with it.
+        $crate = new Crate('C-1');
+        $crate->add($item = new CrateItem('SKU-A'));
+        $this->em->persist($crate);
+        $this->em->persist($trigger = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->inThePreUpdateOf($item, static function (CrateItem $item, EntityManagerInterface $em): void {
+            $item->sku = 'SKU-C';
+            $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(CrateItem::class), $item);
+        }, onlyWhenChanging: 'sku');
+
+        $seen = [];
+
+        $this->inThePreUpdateOf($trigger, static function (object $entity, EntityManagerInterface $em) use ($item, &$seen): void {
+            $item->quantity = 9;
+            $em->flush();
+
+            $seen[] = (int) $em->getConnection()->fetchOne('SELECT quantity FROM CrateItem WHERE id = ?', [$item->id]);
+
+            $item->sku = 'SKU-B';
+            $em->flush();
+        });
+
+        $trigger->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame([9], $seen, 'the premise: the first nested flush wrote the quantity');
+        self::assertSame(
+            ['9', 'SKU-C'],
+            array_map('strval', (array) $this->em->getConnection()->fetchNumeric('SELECT quantity, sku FROM CrateItem WHERE id = ?', [$item->id])),
+            'the premise: the column holds both the first write and the correction',
+        );
+
+        self::assertSame(
+            [[
+                'items.'.$item->id.'.quantity' => ['old' => 1, 'new' => 9],
+                'items.'.$item->id.'.sku' => ['old' => 'SKU-A', 'new' => 'SKU-C'],
+            ]],
+            $this->linesRecordedFor('crate'),
+            'correcting one field of a line took another field\'s committed change with it',
+        );
     }
 
     private function silenceOurPostFlush(): AuditSubscriber

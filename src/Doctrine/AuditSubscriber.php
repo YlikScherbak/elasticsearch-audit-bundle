@@ -19,6 +19,7 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
+use Doctrine\DBAL\ParameterType;
 use Doctrine\ORM\PersistentCollection;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\OnFlushEventArgs;
@@ -350,6 +351,22 @@ final class AuditSubscriber
      */
     private \WeakMap $neverWritten;
 
+    /**
+     * Whether this flush began by publishing what an earlier one had left.
+     *
+     * Which is the one situation where a collection deletion on the schedule may already
+     * have been carried out: a flush whose postFlush somebody swallowed never reaches
+     * postCommitCleanup(), so its deletions stay listed and this flush is handed them
+     * again, with the old collection's snapshot still full. Recorded again, that became a
+     * second document about rows this operation never touched.
+     *
+     * A flag rather than asking every emptying, because asking costs a query and an
+     * ordinary emptying has nothing to doubt. {@see
+     * HowOftenTheListenerAsksTheDatabaseTest}, which is where the cost of this listener is
+     * written down.
+     */
+    private bool $theLastFlushWasPublishedLate = false;
+
     /** Reported once per flush: a hundred entities would otherwise say the same thing a hundred times. */
     private bool $reportedLostChangeSets = false;
 
@@ -569,6 +586,16 @@ final class AuditSubscriber
 
                 if ($held === []) {
                     $held = $uow->getCollectionPersister($mapping)->slice($collection, 0, null);
+                }
+
+                if ($this->theLastFlushWasPublishedLate && $held !== [] && $this->theJoinRowsAreGone($em, $owner, $field) === true) {
+                    // Already carried out. A flush whose postFlush somebody swallowed
+                    // never reaches postCommitCleanup(), so its collection deletion stays
+                    // on the schedule and the next flush is handed it again -- with the
+                    // old collection's snapshot still full, so it looks exactly like an
+                    // emptying about to happen. Recorded again, it became a second
+                    // document, against a row this operation never touched.
+                    continue;
                 }
 
                 if ($held === []) {
@@ -806,6 +833,10 @@ final class AuditSubscriber
                 $flush = $this->ownerFlush[spl_object_id($owner)] ?? self::NO_FLUSH;
 
                 if ($index !== null && isset($records[$index])) {
+                    // Not the emptying: an owner with a pending record got that in
+                    // recordFor(), which is handed the same map. Folding it in again here
+                    // was written before that was measured, and a second road to one
+                    // answer is how two of this week's defects started.
                     $merged = array_replace($records[$index]->changes, $changes);
                     $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged, $collected[$index] ?? $flush));
 
@@ -1011,21 +1042,25 @@ final class AuditSubscriber
     }
 
     /**
-     * Whether the join table holds anything for this owner, asked of the connection.
+     * Whether the rows this collection stands for are gone, asked of the connection.
+     *
+     * Two shapes, because an audited to-many has two. An owning ManyToMany is rows of a
+     * join table, keyed by the owner's own columns. An inverse OneToMany is rows of the
+     * elements' table carrying the owner's key -- which is where a replaced collection
+     * with orphanRemoval deletes them, in one statement and with no lifecycle event, so
+     * this is the only witness there is for it.
      *
      * Null when the question cannot be put: a collection that is not persistent any more,
-     * an association with no join table, or an identifier this cannot turn into a
-     * parameter. The caller reads null as "not established", which is what it also reads
-     * "there are rows" as — the two differ to a person and not to the decision.
+     * an association whose shape this cannot read, or a mapping with no join columns. The
+     * callers read null as "not established".
      *
-     * **None of those answers has a fixture, and they are left escaping rather than
-     * claimed equivalent.** An association with no join table cannot arrive here: emptying
-     * one raises entity events for its elements, which proves the flush ran and means this
-     * question is never asked. A mapping Doctrine built is well-formed, and the arm of
-     * each shape test that the installed ORM major cannot take is not reachable while it
-     * is installed. What is left is reading a mapping at analysis level 8, which costs one
-     * branch per step whether or not anything can take the other one; the alternative is a
-     * suppression, and a suppression says nothing to the next reader.
+     * Asked of the connection rather than of a persister, and this is the point of it: a
+     * persister's count() is a query the ORM writes and it adds the target entity's SQL
+     * filter. A soft-delete filter then answers "no rows" for a collection whose rows are
+     * every one of them still there, and a refused flush is published as an emptying. The
+     * parameters carry their Doctrine types, so an identifier that is an object -- a UUID
+     * stored as binary, say -- is converted the way the column stores it rather than
+     * refused for not being a scalar.
      */
     private function theJoinRowsAreGone(EntityManagerInterface $em, object $owner, string $field): ?bool
     {
@@ -1036,12 +1071,24 @@ final class AuditSubscriber
             return null;
         }
 
-        // Read as an array throughout: that is what a mapping is on ORM 2, and what ORM
-        // 3's mapping objects answer as, which is the same reading the field mappings get
-        // further down.
-        $joinTable = self::mappingEntry($collection->getMapping(), 'joinTable');
-        $table = self::mappingEntry($joinTable, 'name');
-        $columns = self::mappingEntry($joinTable, 'joinColumns');
+        $mapping = $collection->getMapping();
+        $joinTable = self::mappingEntry($mapping, 'joinTable');
+        $mappedBy = self::mappingEntry($mapping, 'mappedBy');
+        $target = self::mappingEntry($mapping, 'targetEntity');
+
+        if ($joinTable !== null) {
+            $table = self::mappingEntry($joinTable, 'name');
+            $schema = self::mappingEntry($joinTable, 'schema');
+            $columns = self::mappingEntry($joinTable, 'joinColumns');
+        } elseif (\is_string($mappedBy) && \is_string($target) && $target !== '') {
+            // The elements' own table, and the column their reference back is stored in.
+            $targetMetadata = $em->getClassMetadata($target);
+            $table = $targetMetadata->getTableName();
+            $schema = self::mappingEntry($targetMetadata->table, 'schema');
+            $columns = self::mappingEntry($targetMetadata->getAssociationMapping($mappedBy), 'joinColumns');
+        } else {
+            return null;
+        }
 
         if (!\is_string($table) || !\is_array($columns) || $columns === []) {
             return null;
@@ -1050,6 +1097,7 @@ final class AuditSubscriber
         $platform = $em->getConnection()->getDatabasePlatform();
         $where = [];
         $values = [];
+        $types = [];
 
         foreach ($columns as $column) {
             $name = self::mappingEntry($column, 'name');
@@ -1059,21 +1107,28 @@ final class AuditSubscriber
                 return null;
             }
 
-            $value = $classMetadata->getFieldValue($owner, $classMetadata->getFieldForColumn($referenced));
-
-            if (!\is_scalar($value)) {
-                return null;
-            }
-
+            $of = $classMetadata->getFieldForColumn($referenced);
             $where[] = $platform->quoteIdentifier($name).' = ?';
-            $values[] = $value;
+            $values[] = $classMetadata->getFieldValue($owner, $of);
+            // A field with no declared type is one DBAL infers from the value, which is
+            // the behaviour a query with no types at all gets.
+            $types[] = $classMetadata->getTypeOfField($of) ?? ParameterType::STRING;
         }
 
+        // The schema with it, because a name alone is a different table on a connection
+        // whose search path holds one of the same name: Doctrine's own quote strategy
+        // qualifies it, and a query that does not would count the wrong table's rows and
+        // call a refusal an emptying.
+        $qualified = \is_string($schema) && $schema !== ''
+            ? $platform->quoteIdentifier($schema).'.'.$platform->quoteIdentifier($table)
+            : $platform->quoteIdentifier($table);
+
         // COUNT rather than a LIMIT, which every platform spells differently: one owner's
-        // join rows are few, and this runs on the rarest branch there is.
+        // rows are few, and this runs where an emptying is being recorded or judged.
         $rows = $em->getConnection()->fetchOne(
-            'SELECT COUNT(*) FROM '.$platform->quoteIdentifier($table).' WHERE '.implode(' AND ', $where),
+            'SELECT COUNT(*) FROM '.$qualified.' WHERE '.implode(' AND ', $where),
             $values,
+            $types,
         );
 
         return \is_numeric($rows) && (int) $rows === 0;
@@ -1383,6 +1438,7 @@ final class AuditSubscriber
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
+        $this->theLastFlushWasPublishedLate = false;
     }
 
     /**
@@ -1476,6 +1532,7 @@ final class AuditSubscriber
                     $this->writer->reportFailure($e, null);
                 } finally {
                     $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
+                    $this->theLastFlushWasPublishedLate = true;
                 }
             } else {
                 // Nothing was collected; or the flush never reached a statement,
@@ -1568,7 +1625,14 @@ final class AuditSubscriber
         // Merged rather than replaced, and for the same reason the owner's own fields
         // are: what the row went FROM is only in the snapshot.
         $this->rememberChangeSet($element, self::sidesFrom($current, $snapshot), $flush);
-        $this->collectElementChanges($em, $element, $flush, replacing: true);
+
+        // Named, rather than "this element". What the statement is about is what the unit
+        // of work has just recomputed, and a field it does not mention is a field this
+        // update is not touching -- which is not the same statement as "that field went
+        // back to where it started", although both arrive here with no change to record.
+        // Read as the same, a second nested flush correcting one field of a line erased
+        // the successful change another flush had made to a different field of it.
+        $this->collectElementChanges($em, $element, $flush, replacing: array_keys($current));
     }
 
     /**
@@ -1579,7 +1643,10 @@ final class AuditSubscriber
      * already loaded, so this asks nothing of the database. A failure here is reported
      * like any other: an element that cannot be read must not fail the flush.
      */
-    private function collectElementChanges(EntityManagerInterface $em, object $element, int $flush, ?bool $added = null, bool $replacing = false): void
+    /**
+     * @param list<string>|null $replacing the element's fields this update is about, when it is being read again
+     */
+    private function collectElementChanges(EntityManagerInterface $em, object $element, int $flush, ?bool $added = null, ?array $replacing = null): void
     {
         try {
             $elementMetadata = $em->getClassMetadata($element::class);
@@ -1875,7 +1942,10 @@ final class AuditSubscriber
      * Holds what this element did against one owner, if that owner is audited and tracks
      * the collection this element belongs to.
      */
-    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, int $flush, ?bool $added, bool $replacing = false): void
+    /**
+     * @param list<string>|null $replacing
+     */
+    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, int $flush, ?bool $added, ?array $replacing = null): void
     {
         if (!\is_object($owner)) {
             return; // no owner on that side: nothing to write a history against
@@ -1904,7 +1974,10 @@ final class AuditSubscriber
         $this->holdElementChanges($em, $element, $owner, $metadata, $association, $flush, $added, $replacing);
     }
 
-    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, int $flush, ?bool $added = null, bool $replacing = false): void
+    /**
+     * @param list<string>|null $replacing
+     */
+    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, int $flush, ?bool $added = null, ?array $replacing = null): void
     {
         // An owner reached through its elements may have no event of its own — nothing on
         // it changed — so the loops in onFlush never offered it to rememberContext(). Its
@@ -2020,7 +2093,7 @@ final class AuditSubscriber
             // element of every ordinary flush. It walks everything the owner has
             // collected so far, so ten thousand lines of one order cost fifty million
             // prefix comparisons to discover that none of them matched.
-            if ($replacing) {
+            if ($replacing !== null) {
                 $prefix = ElementKey::of($field, $id).'.';
 
                 // Every bucket, not only this flush's. This is the element read again
@@ -2037,7 +2110,7 @@ final class AuditSubscriber
                 // column never moved and the history said it had.
                 foreach ($this->elementChanges[$key][1] ?? [] as $its => $bucket) {
                     foreach (array_keys($bucket) as $name) {
-                        if (str_starts_with($name, $prefix)) {
+                        if (str_starts_with($name, $prefix) && \in_array(substr($name, \strlen($prefix)), $replacing, true)) {
                             unset($this->elementChanges[$key][1][$its][$name]);
                         }
                     }
@@ -2297,6 +2370,54 @@ final class AuditSubscriber
     }
 
     /**
+     * What an emptied collection is recorded as, folded into whatever else the owner has
+     * to say.
+     *
+     * Built here rather than merged in as a ready Change, because what an emptied
+     * collection is recorded as is the builder's decision — the old side represented from
+     * the snapshot the listener kept, the new side from what the field holds now, and the
+     * comparator asked whether that counts as a move at all.
+     *
+     * **On both roads out of publish(), which is the whole point of it being one method.**
+     * It used to live inside recordForOwner(), which is only reached by an owner Doctrine
+     * raised no event for — and `clear()` raises none, so the case it was written for
+     * worked. Replacing the collection instead (`$order->lines = new ArrayCollection()`)
+     * dirties the owner, so it has a postUpdate and a pending record, and publish() took
+     * the other road: the rows were deleted and the owner's record came back with nothing
+     * in it at all. Measured with nothing else going wrong — no nesting, no refusal, no
+     * swallowed postFlush — `clear()` recording both lines and the replacement recording
+     * an empty update.
+     *
+     * What the owner already has wins: those are about different fields.
+     *
+     * @param array<string, Change|mixed> $changes
+     *
+     * @return array<string, Change|mixed>
+     */
+    private function withWhatWasEmptied(?EntityManagerInterface $em, object $owner, array $changes, int $flush): array
+    {
+        $emptied = self::inFlushOrder($this->emptiedCollections[spl_object_id($owner)][1] ?? []);
+        $metadata = $em === null ? null : $this->metadataFactory->for($owner);
+
+        if ($emptied === [] || $em === null || $metadata === null) {
+            return $changes;
+        }
+
+        // Nothing here drops the whole-collection form when the elements said it
+        // themselves, and that is measured rather than trusted: the two never arrive
+        // together. A ManyToMany emptied leaves a snapshot and no element events, since an
+        // element of one reaches back through a collection and is not tracked. An inverse
+        // OneToMany with orphanRemoval leaves element events when it is cleared and a
+        // snapshot when it is replaced, one or the other. And clearing an inverse
+        // collection WITHOUT orphanRemoval does nothing to the database at all -- probed,
+        // the rows still pointing at their owner -- so it leaves neither.
+        return array_replace(
+            (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? []),
+            $changes,
+        );
+    }
+
+    /**
      * The record for an owner that Doctrine never raised an event for, built after the
      * commit from what onFlush collected. The entity is still managed and its
      * identifier is settled, which is all this needs.
@@ -2321,24 +2442,7 @@ final class AuditSubscriber
                 return null;
             }
 
-            $emptied = self::inFlushOrder($this->emptiedCollections[spl_object_id($owner)][1] ?? []);
-
-            if ($emptied !== []) {
-                // Built here rather than merged in as a ready Change, because what an
-                // emptied collection is recorded as is the builder's decision — the old
-                // side represented from the snapshot the listener kept, the new side from
-                // what the field holds now, and the comparator asked whether that counts
-                // as a move at all. An owner with an event of its own gets the same thing
-                // through recordFor(); this is the road for one that had none.
-                //
-                // No change set: nothing else about this owner moved, or it would have
-                // had an event. What is already here from its elements wins, being about
-                // different fields.
-                $changes = array_replace(
-                    (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? []),
-                    $changes,
-                );
-            }
+            $changes = $this->withWhatWasEmptied($em, $owner, $changes, $flush);
 
             return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
                 ->withChanges($this->withContext($em, $owner, $changes, $flush));

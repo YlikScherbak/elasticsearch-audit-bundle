@@ -73,11 +73,22 @@ final class ChangeSetBuilder
                 // members. Both produced a record that said nothing while the join rows
                 // were deleted, or one whose "old" side was empty.
                 $change = match (true) {
-                    $classMetadata->isAssociationInverseSide($field) => null,
+                // The emptying comes first, including for an inverse side. The skip
+                // below is right about an inverse collection in general -- what the
+                // database took is the element's own reference back, and the
+                // membership path records that -- but an emptying is the case where
+                // the membership path may have nothing to record: replacing an inverse
+                // collection that has orphanRemoval deletes its rows with one statement
+                // and no lifecycle event at all. Ordered the other way round, the arm
+                // this branch exists for was never reached, and a replaced collection
+                // came back as an update with nothing in it while its rows were gone.
+                // The caller drops this whole-collection form when the elements did
+                // speak, so the two cannot both describe one emptying.
                     \array_key_exists($field, $emptied) => new Change(
                         self::representAll($emptied[$field], $represent),
                         self::representAll(self::contentsOf($classMetadata->getFieldValue($entity, $field)), $represent),
                     ),
+                    $classMetadata->isAssociationInverseSide($field) => null,
                     default => $this->collectionChange($classMetadata->getFieldValue($entity, $field), $represent),
                 };
             } elseif ($classMetadata->isSingleValuedAssociation($field)) {
