@@ -56,8 +56,19 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
 
         $read = self::selects($this->queries);
 
-        self::assertCount(1, $read, 'one question, asked once');
-        self::assertStringContainsString('route_stop', $read[0], 'and it is the one that reads the membership back');
+        // Two questions, and they are different ones. The first asks whether the rows are
+        // still there, because a collection can arrive on the schedule holding a snapshot
+        // of rows that are already gone -- a flush whose publishing was swallowed leaves
+        // its deletion listed, and a collection cleared and committed keeps its snapshot
+        // when it is then replaced. Recorded either way, that is a document about rows the
+        // operation never touched. The second reads back what the collection held, which
+        // clear() has already taken away.
+        //
+        // Asked every time rather than only where a flush looked suspicious: that was the
+        // cheaper rule, and two of the roads above have nothing suspicious about them.
+        self::assertCount(2, $read, 'two questions, each asked once');
+        self::assertStringContainsString('route_stop', $read[0], 'the first reads the membership back');
+        self::assertStringContainsString('COUNT(*)', $read[1], 'the second asks whether the rows are still there');
     }
 
     public function testACollectionThatDidNotMoveIsNotLoadedToFindThatOut(): void

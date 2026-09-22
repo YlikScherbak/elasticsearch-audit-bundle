@@ -350,22 +350,6 @@ final class AuditSubscriber
      */
     private \WeakMap $neverWritten;
 
-    /**
-     * Whether this flush began by publishing what an earlier one had left.
-     *
-     * Which is the one situation where a collection deletion on the schedule may already
-     * have been carried out: a flush whose postFlush somebody swallowed never reaches
-     * postCommitCleanup(), so its deletions stay listed and this flush is handed them
-     * again, with the old collection's snapshot still full. Recorded again, that became a
-     * second document about rows this operation never touched.
-     *
-     * A flag rather than asking every emptying, because asking costs a query and an
-     * ordinary emptying has nothing to doubt. {@see
-     * HowOftenTheListenerAsksTheDatabaseTest}, which is where the cost of this listener is
-     * written down.
-     */
-    private bool $theLastFlushWasPublishedLate = false;
-
     /** Reported once per flush: a hundred entities would otherwise say the same thing a hundred times. */
     private bool $reportedLostChangeSets = false;
 
@@ -609,13 +593,23 @@ final class AuditSubscriber
                     );
                 }
 
-                if ($this->theLastFlushWasPublishedLate && $held !== [] && $this->theJoinRowsAreGone($em, $owner, $field) === true) {
-                    // Already carried out. A flush whose postFlush somebody swallowed
-                    // never reaches postCommitCleanup(), so its collection deletion stays
-                    // on the schedule and the next flush is handed it again -- with the
-                    // old collection's snapshot still full, so it looks exactly like an
-                    // emptying about to happen. Recorded again, it became a second
-                    // document, against a row this operation never touched.
+                if ($held !== [] && $this->theJoinRowsAreGone($em, $owner, $field) === true) {
+                    // Nothing left to empty. A collection can arrive here holding a
+                    // snapshot of rows that are already gone, by more roads than one: a
+                    // flush whose postFlush somebody swallowed never reaches
+                    // postCommitCleanup(), so its deletion stays on the schedule and the
+                    // next flush is handed it again; and a collection cleared and
+                    // committed keeps the snapshot it had when it is then replaced.
+                    // Recorded, either became a second document about rows this operation
+                    // never touched.
+                    //
+                    // Asked every time rather than only where a flush looked suspicious.
+                    // That was the cheaper rule and it was wrong twice: the second road
+                    // above has nothing suspicious about it at all, and a generated
+                    // sequence found a third where the fact that a flush HAD been
+                    // published late was forgotten by a refusal in between. One question
+                    // per emptied collection, where an emptying is already the most
+                    // expensive thing this listener records.
                     continue;
                 }
 
@@ -854,11 +848,7 @@ final class AuditSubscriber
                 $flush = $this->ownerFlush[spl_object_id($owner)] ?? self::NO_FLUSH;
 
                 if ($index !== null && isset($records[$index])) {
-                    // Not the emptying: an owner with a pending record got that in
-                    // recordFor(), which is handed the same map. Folding it in again here
-                    // was written before that was measured, and a second road to one
-                    // answer is how two of this week's defects started.
-                    $merged = array_replace($records[$index]->changes, $changes);
+                    $merged = array_replace($records[$index]->changes, $this->withWhatWasEmptied($em, $owner, $changes, $flush));
                     $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged, $collected[$index] ?? $flush));
 
                     continue;
@@ -1429,7 +1419,6 @@ final class AuditSubscriber
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
-        $this->theLastFlushWasPublishedLate = false;
     }
 
     /**
@@ -1523,7 +1512,6 @@ final class AuditSubscriber
                     $this->writer->reportFailure($e, null);
                 } finally {
                     $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
-                    $this->theLastFlushWasPublishedLate = true;
                 }
             } else {
                 // Nothing was collected; or the flush never reached a statement,
@@ -2394,18 +2382,58 @@ final class AuditSubscriber
             return $changes;
         }
 
-        // Nothing here drops the whole-collection form when the elements said it
-        // themselves, and that is measured rather than trusted: the two never arrive
-        // together. A ManyToMany emptied leaves a snapshot and no element events, since an
-        // element of one reaches back through a collection and is not tracked. An inverse
-        // OneToMany with orphanRemoval leaves element events when it is cleared and a
-        // snapshot when it is replaced, one or the other. And clearing an inverse
-        // collection WITHOUT orphanRemoval does nothing to the database at all -- probed,
-        // the rows still pointing at their owner -- so it leaves neither.
-        return array_replace(
-            (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? []),
-            $changes,
-        );
+        // What the elements said themselves, the whole-collection form does not repeat.
+        //
+        // This rule was here, taken out in the round that added it because no probe could
+        // reach the case, and put back by a generated sequence that reached it at once:
+        // clear() a collection and then replace it before one flush, and both roads have
+        // something to say about the same rows -- the orphan removals raise an event per
+        // element, and the replaced collection leaves a snapshot. The reviewer who asked
+        // for that probe had named it in the same breath. "No probe of mine reached it" is
+        // not "it cannot happen", and this is the third premise of this kind to be stated
+        // wider than it was measured.
+        //
+        // Subtracted element by element rather than dropped whole: membership may name
+        // some of what went and not the rest.
+        foreach ($emptied as $field => $held) {
+            // By what each element is shown as, not by its identifier: an element the
+            // flush deleted has had its generated id cleared by then, so matching on one
+            // kept every element that had gone -- which is the half of them this is for.
+            $named = [];
+
+            foreach ($changes as $name => $change) {
+                if ($change instanceof Change && str_starts_with((string) $name, $field.'.') && substr_count((string) $name, '.') === 1) {
+                    $named[] = $change->old ?? $change->new;
+                }
+            }
+
+            $represent = $metadata->fields[$field] ?? null;
+            $left = array_values(array_filter(
+                $held,
+                static fn (object $element): bool => !\in_array(self::represent($element, $represent), $named, true),
+            ));
+
+            if ($left === []) {
+                unset($emptied[$field]);
+            } else {
+                $emptied[$field] = $left;
+            }
+        }
+
+        if ($emptied === []) {
+            return $changes;
+        }
+
+        // Only the fields that were emptied. The builder is asked for a whole change set
+        // because that is where the decision about what an emptying looks like lives, and
+        // everything else it produces is about other fields -- the always-recorded ones,
+        // filled from context rather than from anything that moved. Handed on whole, that
+        // context overwrites the owner's own real change on the road where it has one:
+        // "sealed -> sealed" where the row went from packed. This was taken out once, as
+        // redundant, during a round when the road that needed it had been taken out too.
+        $built = (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? []);
+
+        return array_replace(array_intersect_key($built, $emptied), $changes);
     }
 
     /**
@@ -2595,7 +2623,13 @@ final class AuditSubscriber
             $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
 
             if ($withChanges) {
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), self::inFlushOrder($this->emptiedCollections[spl_object_id($entity)][1] ?? []), $this->contextAsFlushed[$this->collectingNow($em)][spl_object_id($entity)] ?? []));
+                // Not the emptying. It is folded in after the commit, in publish(), where
+                // what the owner's ELEMENTS said is also known -- and the whole-collection
+                // form has to leave out whatever they already said, or one loss is
+                // described twice. Built here as well, that subtraction had nothing to
+                // subtract from: two roads to one answer, which is the shape this listener
+                // keeps producing and the shape a generated sequence found again.
+                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), [], $this->contextAsFlushed[$this->collectingNow($em)][spl_object_id($entity)] ?? []));
             }
 
             return $record;

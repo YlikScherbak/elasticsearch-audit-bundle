@@ -491,6 +491,19 @@ Three things worth knowing:
   unless you mean all of them. Redaction understands these keys: a rule for `password` covers
   `lines.42.password`. Associations of an element are left out — representing one needs a
   callable, and an element has nowhere to declare it.
+- **Where an ORM filter has a say, and where it does not** (since 1.3). A collection is recorded
+  in two forms, and they answer to different things. The **whole-collection** form —
+  `stops: ["Alpha", "Beta"] → []` — lists the collection **as your application loaded it**, which
+  means with your SQL filters applied: if a soft-delete filter hides an element, the list does
+  not name it. The **emptying** and **membership** forms are read from the rows instead, with
+  filters suspended, because those answer "what did this statement take" and a `DELETE` by the
+  owner's key takes a hidden row exactly like a visible one.
+  <br>This is a decision rather than a fact about Doctrine, and it is made this way round for a
+  reason: a collection your application had already loaded was loaded under its filters, and
+  nothing here can load it again as it would have been without them. Reading it underneath the
+  filters only when the bundle happens to be the one initialising it would make the same field
+  read differently depending on who touched it first, which is worse than either answer on its
+  own.
 
 ## One operation, one record
 
