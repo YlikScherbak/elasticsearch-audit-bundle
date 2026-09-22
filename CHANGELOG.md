@@ -175,6 +175,24 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   change sets travel that way: handing the live flush's forward as well corrects a step that
   needs no correcting, and the history then reads as two changes from the same value rather than
   one after the other.
+- **A flush whose only news was an emptied collection, and whose publishing another
+  listener swallowed, no longer loses that history — and no longer leaves a phantom
+  behind.** Such a flush has no statement of its own to be asked about: `clear()` dirties
+  nothing on the owner, so Doctrine raises no entity event for it. What stood in for the
+  question was the unit of work's schedule, on the premise that a deletion still listed
+  there belongs to a flush that did not commit. `UnitOfWork::commit()` dispatches
+  `postFlush` and calls `postCommitCleanup()` after it with nothing between them, so a
+  `postFlush` listener that throws leaves every schedule exactly as an aborted flush
+  would: the two are indistinguishable from the listener, and one of them has the rows
+  deleted. Measured with an audited join table — the rows gone, the history dropped, and
+  the warning saying nothing could vouch for the flush.
+  <br>The rows are asked instead, and only on that branch: a collection the owner still
+  has rows for was not emptied. One query per owner, on the road where a flush left state
+  behind without a single statement to show for it.
+  <br>The same stale schedule was then collected again by the next flush and published as
+  an update with no changes at all, against a row nobody in that operation had touched. An
+  emptying with nothing to show for it is no longer recorded, which also covers a
+  collection that was already empty.
 - **A statement Doctrine announces twice is recorded once.** A flush started from a lifecycle
   listener runs on the outer flush's unit of work and carries out whatever it finds scheduled
   there, including the outer flush's own remaining updates. When the outer flush resumed its

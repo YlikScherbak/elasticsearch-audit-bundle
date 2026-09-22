@@ -1413,6 +1413,99 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         self::assertSame(['old' => ['Alpha', 'Beta'], 'new' => []], $routes[0]['changes']['stops'] ?? null);
     }
 
+    public function testTwoRefusalsInARowLeaveBothTheirCorrectionsBehind(): void
+    {
+        // The first flush plans a title and is refused; the second plans a status and is
+        // refused; the third changes the title again. Each discarding hands forward what
+        // it found the row holding, and the second must add to the first rather than
+        // replace it -- the two are about different columns, and the column the first one
+        // knew about is still holding what it said.
+        $this->em->persist($article = new Article('One'));
+        $article->status = 'draft';
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $refusals = new class {
+            public int $seen = 0;
+
+            public function onFlush(): void
+            {
+                if (++$this->seen <= 2) {
+                    throw new \DomainException('refused');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $refusals);
+
+        $article->title = 'Two';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        $article->status = 'sent';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        self::assertSame('One', $this->titleInTheDatabase($article), 'the premise: neither refusal wrote anything');
+
+        $article->title = 'Three';
+        $this->em->flush();
+
+        self::assertSame(
+            [['old' => 'One', 'new' => 'Three']],
+            array_map(static fn (array $d): mixed => $d['changes']['title'], $this->documents()),
+            'the second refusal replaced what the first one knew instead of adding to it',
+        );
+    }
+
+    public function testTwoFlushesEachWithNewsAboutADifferentLineBothReachTheRecord(): void
+    {
+        // Two buckets, and a key in each that the other does not have. Reading them as one
+        // answer has to keep both: the merge exists to say which flush's answer about the
+        // SAME key is current, and a key only one of them has is not that question.
+        $crate = new Crate('C-1');
+        $crate->add($first = new CrateItem('SKU-1'));
+        $crate->add($second = new CrateItem('SKU-2'));
+        $this->em->persist($crate);
+        $this->em->persist($trigger = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->inThePreUpdateOf($trigger, static function (object $entity, EntityManagerInterface $em) use ($second): void {
+            $second->quantity = 7;
+            $em->flush();
+        });
+
+        $first->quantity = 2;
+        $trigger->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame(2, $this->quantityInTheDatabase($first), 'the premise: the outer flush wrote its line');
+        self::assertSame(7, $this->quantityInTheDatabase($second), 'the premise: the inner flush wrote the other one');
+
+        $lines = $this->linesRecordedFor('crate');
+
+        self::assertCount(1, $lines, 'the crate got more than one record for one operation');
+
+        ksort($lines[0]);
+
+        self::assertSame(
+            [
+                'items.'.$first->id.'.quantity' => ['old' => 1, 'new' => 2],
+                'items.'.$second->id.'.quantity' => ['old' => 1, 'new' => 7],
+            ],
+            $lines[0],
+            'one of the two flushes\' news about the collection did not reach the record',
+        );
+    }
+
     private function silenceOurPostFlush(): AuditSubscriber
     {
         foreach ($this->em->getEventManager()->getListeners(Events::postFlush) as $listener) {
