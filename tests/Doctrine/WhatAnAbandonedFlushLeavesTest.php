@@ -6,6 +6,9 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
+use Doctrine\ORM\EntityManagerInterface;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
@@ -605,6 +608,196 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
      * publishing and a process that carries on, not a process that never publishes
      * again.
      */
+    public function testWhatADeadInnerFlushPlannedInsideACollectionIsNotPublished(): void
+    {
+        // The inner flush is refused in its own onFlush, so it never opened a
+        // transaction and never wrote a row -- but by then it had already computed its
+        // change sets, and what it planned to do inside a tracked collection was sitting
+        // in the outer flush's state. The outer one committed, published everything it
+        // found, and the history said a line went from 1 to 9 while the column still
+        // held 1.
+        [, $item] = $this->aCrateWithOneLine();
+        $this->em->persist($article = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+        $this->changeAndFlushFromInside(static function () use ($item): void {
+            $item->quantity = 9;
+        });
+
+        $article->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame(1, $this->quantityInTheDatabase($item), 'the premise: the refused flush wrote nothing');
+        self::assertSame([], $this->linesRecordedFor('crate'), 'a line the refused flush only planned was recorded as history');
+    }
+
+    public function testWhatTheLiveFlushCollectedAboutTheSameLineSurvivesTheDeadOne(): void
+    {
+        // The same field, twice: the outer flush plans 1 -> 2 and carries it out, and the
+        // inner one plans 2 -> 9 and dies. "items.1.quantity" names a column rather than
+        // an occasion, so the second answer had simply written over the first -- and
+        // taking the dead flush's work away has to put the live flush's answer back, not
+        // leave the owner with nothing.
+        [, $item] = $this->aCrateWithOneLine();
+        $this->em->persist($article = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+        $this->changeAndFlushFromInside(static function () use ($item): void {
+            $item->quantity = 9;
+        });
+
+        $item->quantity = 2;
+        $article->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame(2, $this->quantityInTheDatabase($item), 'the premise: the live flush wrote its own value');
+        self::assertSame(
+            ['items.1.quantity' => ['old' => 1, 'new' => 2]],
+            $this->linesRecordedFor('crate'),
+            'the history disagrees with the column',
+        );
+    }
+
+    public function testAnInnerFlushThatRanItsStatementsKeepsItsHistoryWhenItsPostFlushIsSwallowed(): void
+    {
+        // The case that decides what "dead" means. This inner flush is not refused: it
+        // runs, it commits, and somebody else's postFlush listener throws before ours is
+        // reached. The column really moved, so the record has to stay -- which is why a
+        // flush is judged by whether it ran statements and not by whether we saw it
+        // finish.
+        [, $item] = $this->aCrateWithOneLine();
+        $this->em->persist($article = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $breaker = new class {
+            public bool $armed = false;
+
+            public function postFlush(): void
+            {
+                if ($this->armed) {
+                    $this->armed = false;
+
+                    throw new \DomainException('somebody else exploded in postFlush');
+                }
+            }
+        };
+
+        $ours = $this->silenceOurPostFlush();
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $breaker);
+        $this->restorePostFlush($ours);
+
+        $this->changeAndFlushFromInside(static function () use ($item, $breaker): void {
+            $item->quantity = 9;
+            $breaker->armed = true;
+        });
+
+        $article->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame(9, $this->quantityInTheDatabase($item), 'the premise: the inner flush wrote its row');
+        self::assertSame(
+            ['items.1.quantity' => ['old' => 1, 'new' => 9]],
+            $this->linesRecordedFor('crate'),
+            'a flush that committed had its history thrown away because its postFlush was swallowed',
+        );
+    }
+
+    /** @return array{0: Crate, 1: CrateItem} */
+    private function aCrateWithOneLine(): array
+    {
+        $crate = new Crate('C-1');
+        $crate->add($item = new CrateItem('SKU-1'));
+        $this->em->persist($crate);
+
+        return [$crate, $item];
+    }
+
+    private function quantityInTheDatabase(CrateItem $item): int
+    {
+        return (int) $this->em->getConnection()->fetchOne('SELECT quantity FROM CrateItem WHERE id = ?', [$item->id]);
+    }
+
+    /**
+     * What the history says happened inside a collection of that kind of owner: the keys
+     * naming an element, which are the ones these tests are about.
+     *
+     * @return array<string, mixed>
+     */
+    private function linesRecordedFor(string $objectType): array
+    {
+        $lines = [];
+
+        foreach ($this->documents() as $document) {
+            if ($document['objectType'] !== $objectType) {
+                continue;
+            }
+
+            foreach ($document['changes'] as $field => $change) {
+                if (str_contains($field, '.')) {
+                    $lines[$field] = $change;
+                }
+            }
+        }
+
+        return $lines;
+    }
+
+    private function refuseTheSecondFlush(): void
+    {
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class {
+            private int $seen = 0;
+
+            public function onFlush(): void
+            {
+                if (++$this->seen === 2) {
+                    throw new \DomainException('the inner flush is refused');
+                }
+            }
+        });
+    }
+
+    private function changeAndFlushFromInside(\Closure $change, ?\Closure $andThen = null): void
+    {
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $change, $andThen) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly \Closure $change,
+                private readonly ?\Closure $andThen,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                ($this->change)();
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does when a listener refuses its inner flush
+                }
+
+                if ($this->andThen !== null) {
+                    ($this->andThen)();
+                }
+            }
+        });
+    }
+
     private function silenceOurPostFlush(): AuditSubscriber
     {
         foreach ($this->em->getEventManager()->getListeners(Events::postFlush) as $listener) {

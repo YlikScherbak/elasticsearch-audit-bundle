@@ -135,27 +135,6 @@ final class AuditSubscriber
     private array $pendingIndexByEntity = [];
 
     /**
-     * Whether Doctrine got as far as running statements for the flush on the stack.
-     *
-     * A later flush finding this listener's state still there has to decide whether the
-     * flush that left it committed. An open manager is most of that answer and not all
-     * of it: a listener that throws in *onFlush* — a validation veto, the usual reason —
-     * aborts the flush before `UnitOfWork::commit()` enters the try whose catch closes
-     * the manager, so it leaves an open manager and nothing written.
-     *
-     * The list of finished records used to answer the rest by accident. It is filled in
-     * postPersist and postUpdate, which run after the statements, so a record in it was
-     * itself proof the flush got that far — and what a tracked collection said is not,
-     * because that is collected in onFlush, before anything is written. Reading the two
-     * as the same kind of evidence is how a flush aborted by a veto came to have its
-     * history published, and then published again by the flush that really wrote it.
-     *
-     * So this is asked of Doctrine instead, and for every entity rather than the audited
-     * ones: any post-statement event at all means the flush reached its statements.
-     */
-    private bool $statementsRan = false;
-
-    /**
      * The first failure raised while this flush's records were being assembled.
      *
      * Reporting a failure raises under `on_failure: throw` — that is what the setting is
@@ -326,7 +305,27 @@ final class AuditSubscriber
      * transaction level says is no longer live, every time it is asked, so a flush that
      * died without a word is gone by the next question rather than by the next postFlush.
      *
-     * @var list<array{level: int, flush: int}>
+     * And whether Doctrine got as far as running statements for it, which is the other
+     * half of what a flush leaving state behind has to be asked. An open manager is most
+     * of the answer and not all of it: a listener that throws in *onFlush* — a validation
+     * veto, the usual reason — aborts the flush before `UnitOfWork::commit()` enters the
+     * try whose catch closes the manager, so it leaves an open manager and nothing
+     * written.
+     *
+     * In the entry rather than in a flag of its own, because the question is about one
+     * flush and a flag answered for all of them at once. A dead inner flush left the
+     * outer one's statements standing as its own proof, which is how what it planned and
+     * never carried out came to be published as history. What the flag could not say is
+     * which flush ran, and that is exactly what has to be known to take one flush's work
+     * away and leave the rest.
+     *
+     * Filled by any post-statement event at all, for every entity rather than the audited
+     * ones. What a tracked collection said is deliberately not evidence of it: that is
+     * collected in onFlush, before anything is written, and reading the two as the same
+     * kind of proof is how a flush a veto aborted came to have its history published, and
+     * then published again by the flush that really wrote it.
+     *
+     * @var list<array{level: int, flush: int, ran: bool}>
      */
     private array $flushes = [];
 
@@ -495,16 +494,13 @@ final class AuditSubscriber
 
     public function postPersist(PostPersistEventArgs $args): void
     {
-        // Whether the flush reached its statements at all, which is what tells a
-        // committed flush from one a veto aborted. Every entity, audited or not.
-        $this->statementsRan = true;
-
         $record = $this->recordFor($args, AuditEvent::CREATE);
         $manager = self::entityManagerOf($args->getObjectManager());
+        $collecting = $manager === null ? null : $this->collectingNowAfterAStatement($manager);
 
         if ($record !== null) {
             $this->pending[] = $record;
-            $this->pendingFlush[] = $manager === null ? null : $this->collectingNow($manager);
+            $this->pendingFlush[] = $collecting;
             // Registered like an update's: an owner created with its lines has one
             // record, and what the lines did belongs in it. Without this the membership
             // found no record to join and invented a second, phantom update.
@@ -514,15 +510,11 @@ final class AuditSubscriber
 
     public function postUpdate(PostUpdateEventArgs $args): void
     {
-        // Whether the flush reached its statements at all, which is what tells a
-        // committed flush from one a veto aborted. Every entity, audited or not.
-        $this->statementsRan = true;
-
         // Before the record, and for every updated entity rather than the audited
         // ones: an element of a tracked collection is usually not audited itself, and
         // this is the only moment its final change set can be read.
         $manager = self::entityManagerOf($args->getObjectManager());
-        $collecting = $manager === null ? null : $this->collectingNow($manager);
+        $collecting = $manager === null ? null : $this->collectingNowAfterAStatement($manager);
 
         if ($manager !== null) {
             $this->refreshElementChanges($manager, $args->getObject(), $collecting);
@@ -609,9 +601,8 @@ final class AuditSubscriber
 
     public function postRemove(PostRemoveEventArgs $args): void
     {
-        // Whether the flush reached its statements at all, which is what tells a
-        // committed flush from one a veto aborted. Every entity, audited or not.
-        $this->statementsRan = true;
+        $manager = self::entityManagerOf($args->getObjectManager());
+        $collecting = $manager === null ? null : $this->collectingNowAfterAStatement($manager);
 
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
@@ -625,7 +616,7 @@ final class AuditSubscriber
             // a removal published late then took whatever moment the publishing request
             // had. postRemove is inside the flush that did the deleting, which is the
             // flush the record belongs to.
-            $this->pendingFlush[] = self::entityManagerOf($args->getObjectManager()) === null ? null : $this->collectingNow(self::entityManagerOf($args->getObjectManager()));
+            $this->pendingFlush[] = $collecting;
         }
     }
 
@@ -655,7 +646,7 @@ final class AuditSubscriber
         // at or below this level belongs to a flush that is over. Asked here it also
         // answers the question this method starts with, because the outermost flush is
         // the one that leaves nothing behind.
-        $collecting = $em === null ? null : $this->collectingNow($em);
+        $collecting = $em === null ? null : $this->collectingNow($em, theOneAtThisLevelCommitted: true);
 
         if ($collecting !== null || ($em !== null && $this->flushes !== [])) {
             // An inner flush is over. What the outer flush collects from here on is filed
@@ -844,7 +835,7 @@ final class AuditSubscriber
      * Whether the collections the flush on the stack emptied were really emptied.
      *
      * A flush whose only news is a `clear()` has no statements of its own to be asked
-     * about: the owner is never dirtied, so no entity event fires and $statementsRan
+     * about: the owner is never dirtied, so no entity event fires and its entry's `ran`
      * stays false however well the flush went. Asked only that way, the one kind of
      * history this listener had to be taught to keep would be dropped again — and with
      * the warning about a flush that was interrupted, which it was not.
@@ -860,16 +851,24 @@ final class AuditSubscriber
      * which is the abandoned flush's own, or the check above has already said the
      * manager is gone.
      */
-    private function theEmptiedCollectionsWentThrough(EntityManagerInterface $em): bool
+    private function theEmptiedCollectionsWentThrough(EntityManagerInterface $em, int $flush): bool
     {
-        if ($this->emptiedCollections === []) {
+        $owners = [];
+
+        foreach ($this->emptiedCollections as $key => [, $byFlush]) {
+            if (isset($byFlush[$flush])) {
+                $owners[$key] = true;
+            }
+        }
+
+        if ($owners === []) {
             return false;
         }
 
         foreach ($em->getUnitOfWork()->getScheduledCollectionDeletions() as $collection) {
             $owner = $collection->getOwner();
 
-            if ($owner !== null && isset($this->emptiedCollections[spl_object_id($owner)])) {
+            if ($owner !== null && isset($owners[spl_object_id($owner)])) {
                 return false;
             }
         }
@@ -911,15 +910,120 @@ final class AuditSubscriber
      * the collecting-time callers take a number instead: there is no version of this
      * question that can be asked in the wrong place.
      */
-    private function collectingNow(EntityManagerInterface $em): ?int
+    private function collectingNow(EntityManagerInterface $em, bool $theOneAtThisLevelCommitted = false): ?int
     {
-        $level = $em->getConnection()->getTransactionNestingLevel();
-
-        while ($this->flushes !== [] && $this->flushes[array_key_last($this->flushes)]['level'] >= $level) {
-            array_pop($this->flushes);
-        }
+        $this->unwindTo($em, $em->getConnection()->getTransactionNestingLevel(), $theOneAtThisLevelCommitted);
 
         return $this->flushes === [] ? null : $this->flushes[array_key_last($this->flushes)]['flush'];
+    }
+
+    /**
+     * The same, and a statement of Doctrine's that the flush collecting now reached its
+     * statements. The two in one call because they are one fact from one event: a post*
+     * event arrives inside a flush, and the flush it arrives inside is the one it proves.
+     *
+     * Written as two calls it would be right only in one order — mark, then unwind, and
+     * the mark lands on an entry that is about to be thrown away; unwind, then mark, and
+     * it is right until somebody moves a line. This listener has lost history three times
+     * to per-flush state whose correctness rested on the order of two calls.
+     */
+    private function collectingNowAfterAStatement(EntityManagerInterface $em): ?int
+    {
+        $flush = $this->collectingNow($em);
+
+        if ($this->flushes !== []) {
+            $this->flushes[array_key_last($this->flushes)]['ran'] = true;
+        }
+
+        return $flush;
+    }
+
+    /**
+     * Takes off the stack every flush the current transaction level says is over, and
+     * says whether any of them got as far as running statements.
+     *
+     * A flush that did not is a flush whose work never happened: refused in its own
+     * onFlush by a listener behind this one, before `UnitOfWork::commit()` opened a
+     * transaction or wrote a row. What it collected describes rows nobody has — and the
+     * rest of the flush it was nested in is still live and still collecting, so dropping
+     * everything is not open either. It takes its own share and leaves the rest, which is
+     * what the per-flush buckets are for: an outer flush's "1 -> 2" for the same field
+     * comes back when the inner flush's "2 -> 9" goes, and the history agrees with the
+     * database again.
+     *
+     * A flush that only emptied a collection has no statement of its own to show, and is
+     * asked about its collections instead — except in its own postFlush, which says it
+     * outright. postFlush is dispatched by a commit that went through, and it is
+     * dispatched BEFORE postCommitCleanup() empties the schedules, so the collections
+     * that flush deleted are still on the list there and asking would answer "not yet".
+     * Which entry that is, is not "the top": a dead inner flush can be sitting above it,
+     * at a deeper level, and is exactly what this is here to take away.
+     */
+    private function unwindTo(EntityManagerInterface $em, int $level, bool $theOneAtThisLevelCommitted = false): bool
+    {
+        $ran = false;
+
+        while ($this->flushes !== [] && $this->flushes[array_key_last($this->flushes)]['level'] >= $level) {
+            $entry = array_pop($this->flushes);
+
+            if ($entry['ran']
+                || ($theOneAtThisLevelCommitted && $entry['level'] === $level)
+                || $this->theEmptiedCollectionsWentThrough($em, $entry['flush'])
+            ) {
+                $ran = true;
+
+                continue;
+            }
+
+            $this->forgetWhatThisFlushCollected($entry['flush']);
+        }
+
+        return $ran;
+    }
+
+    /**
+     * Everything one flush collected, taken away without touching what the others did.
+     *
+     * The finished records are not among it, and that is the invariant rather than an
+     * oversight: every one of them is taken in a post-statement event, which is the very
+     * event that marks the flush as having run, so a flush being discarded here has none.
+     * What it does have is what it collected in its onFlush, before Doctrine wrote
+     * anything — the three element maps — and the moment and context filed under its
+     * number.
+     *
+     * Which flush first saw an owner is rebuilt rather than patched: it is the lowest
+     * bucket that owner has left, and deriving it again cannot fall out of step with the
+     * buckets the way a second rule about it would.
+     */
+    private function forgetWhatThisFlushCollected(int $flush): void
+    {
+        foreach ([&$this->elementChanges, &$this->elementMembership, &$this->emptiedCollections] as &$map) {
+            foreach ($map as $owner => [, $byFlush]) {
+                unset($byFlush[$flush]);
+
+                if ($byFlush === []) {
+                    unset($map[$owner]);
+
+                    continue;
+                }
+
+                $map[$owner][1] = $byFlush;
+            }
+        }
+
+        unset($map);
+
+        $this->ownerFlush = [];
+
+        foreach ([$this->elementChanges, $this->elementMembership, $this->emptiedCollections] as $map) {
+            foreach ($map as $owner => [, $byFlush]) {
+                foreach (array_keys($byFlush) as $bucket) {
+                    $this->ownerFlush[$owner] = min($this->ownerFlush[$owner] ?? $bucket, $bucket);
+                }
+            }
+        }
+
+        unset($this->provenance[$flush], $this->contextAsFlushed[$flush]);
     }
 
     private function forgetThisFlush(): void
@@ -932,7 +1036,6 @@ final class AuditSubscriber
         $this->elementMembership = [];
         $this->ownerFlush = [];
         $this->flushes = [];
-        $this->statementsRan = false;
         $this->failureWhileBuilding = null;
 
         // Everything, not this flush's entry: forgetting happens when nothing is live —
@@ -1002,24 +1105,18 @@ final class AuditSubscriber
     private function beginFlush(EntityManagerInterface $em, int $flush): void
     {
         $level = $em->getConnection()->getTransactionNestingLevel();
-        $unwound = false;
+        $before = \count($this->flushes);
+        $committed = $this->unwindTo($em, $level);
 
-        while ($this->flushes !== [] && $this->flushes[array_key_last($this->flushes)]['level'] >= $level) {
-            array_pop($this->flushes);
-            $unwound = true;
-        }
-
-        if ($unwound && $this->flushes === []) {
+        if (\count($this->flushes) < $before && $this->flushes === []) {
             // Nothing is left underneath: the flush this state belongs to is over, and it
             // did not come back through postFlush. Two very different things end that way.
             $abandoned = $this->flushingManager?->get();
             $abandoned = $abandoned instanceof EntityManagerInterface ? $abandoned : null;
 
+            // Whatever the flushes that unwound left: the ones that ran nothing have
+            // already taken their share away, so this counts what is really there.
             $collected = $this->collectedSoFar();
-
-            // Or the collections it emptied went through, which is the same question
-            // asked of the one kind of flush that has no statements of its own to show.
-            $committed = $this->statementsRan || $this->theEmptiedCollectionsWentThrough($em);
 
             if ($abandoned !== null && $abandoned->isOpen() && $committed && $collected > 0) {
                 // Its manager is still open, so UnitOfWork::commit() did not fail — every
@@ -1052,7 +1149,7 @@ final class AuditSubscriber
         }
 
         $this->flushingManager = \WeakReference::create($em);
-        $this->flushes[] = ['level' => $level, 'flush' => $flush];
+        $this->flushes[] = ['level' => $level, 'flush' => $flush, 'ran' => false];
     }
 
     /**

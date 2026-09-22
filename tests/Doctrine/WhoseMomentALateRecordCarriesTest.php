@@ -897,6 +897,80 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         ), 'a real second update of the same entity was folded into the first one');
     }
 
+    public function testAnOwnerFirstSeenByAFlushThatDiedBelongsToTheOneThatSurvives(): void
+    {
+        // The owner is reached only from inside a collection, and the flush that sees it
+        // first is the one that is refused: the outer flush never touches the crate, the
+        // inner one plans a line and dies, and the flush after it plans the line again
+        // and carries it out. "Whoever saw it first" then names a flush that never
+        // happened, whose moment went away with it -- and the record, having no moment of
+        // its own to carry, took the moment of whenever it was finally written.
+        $crate = new Crate('C-1');
+        $crate->add($item = new CrateItem('SKU-1'));
+        $this->em->persist($crate);
+        $this->em->persist($article = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class {
+            private int $seen = 0;
+
+            public function onFlush(): void
+            {
+                if (++$this->seen === 2) {
+                    throw new \DomainException('the inner flush is refused');
+                }
+            }
+        });
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $item) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly CrateItem $item,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                $this->who->actor = 'bob';
+                $this->item->quantity = 9;
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does when a listener refuses its inner flush
+                }
+
+                $this->who->actor = 'carol';
+                $this->item->quantity = 3;
+                $this->em->flush();
+
+                // And somebody else is acting by the time the outer flush publishes, so
+                // "ask again now" and "the flush that really did it" are different
+                // answers.
+                $this->who->actor = 'dave';
+            }
+        });
+
+        $article->title = 'Trigger, edited';
+        $this->em->flush();
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates, 'the premise: the crate got one record for what happened inside it');
+        self::assertSame('carol', $crates[0]['source'], 'the crate was signed by whoever was acting when it was written rather than when it changed');
+    }
+
     public function testADeadInnerFlushDoesNotReachARemovalTheOuterOneMade(): void
     {
         // The two together, which is where a fix for either alone would still be wrong:
