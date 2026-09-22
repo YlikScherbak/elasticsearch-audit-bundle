@@ -94,6 +94,14 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
+- **A `clear()` between two operations no longer hands the second one the first's moment.**
+  `onClear` was a second copy of the listener's forgetting, written out by hand, and it fell
+  behind: the fields added for the per-flush moment were never added to it. So a clear after a
+  swallowed publication emptied the records and left the numbers that went with them, and the
+  next flush's first record — at position zero, where the leftover number was — went out with
+  the moment of the records that had just been thrown away. A new change written as somebody
+  else, at a time before it happened, which is worse than the loss the clear was already
+  causing. It forgets through the one method now.
 - **A flush that died without saying so no longer owns what the next one does, and a removal
   belongs to the flush that made it.** Two stacks were keeping one answer between them — the
   transaction levels of the flushes in progress, and their numbers — and they came off by

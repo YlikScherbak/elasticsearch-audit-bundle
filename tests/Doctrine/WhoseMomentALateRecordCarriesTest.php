@@ -828,6 +828,34 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         self::assertSame(self::ALICE, $removals[0]['loggedAt']);
     }
 
+    public function testAClearBetweenTwoOperationsDoesNotHandTheSecondTheFirstsMoment(): void
+    {
+        // An import loop: a flush whose publishing was swallowed, then $em->clear(), then
+        // the next operation. The clear drops the records that flush collected — it
+        // always has, because they describe rows that may have been rolled back — and it
+        // has to drop what went with them. Leaving the numbers behind meant the next
+        // flush's first record, at position zero, was matched with the moment of the
+        // records that had just been thrown away: a new change written as somebody else
+        // at a time before it happened.
+        $article = $this->alicePersisted();
+
+        $this->aliceChanges(static fn () => $article->title = 'Alice edited this');
+
+        $this->em->clear();
+
+        $this->who->actor = 'bob';
+        $this->when->now = self::BOB;
+
+        $this->em->persist(new Article('Bob writes something'));
+        $this->em->flush();
+
+        $documents = $this->documents();
+
+        self::assertCount(1, $documents, 'the premise: the cleared flush is gone and only Bob is left');
+        self::assertSame('bob', $documents[0]['source'], 'Bob is change was written as Alice, from before the clear');
+        self::assertSame(self::BOB, $documents[0]['loggedAt']);
+    }
+
     public function testTheListenerKeepsNoMomentsAfterTheFlushThatMadeThem(): void
     {
         // A worker runs for weeks and flushes millions of times. One Provenance per

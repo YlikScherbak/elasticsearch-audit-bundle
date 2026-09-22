@@ -863,22 +863,22 @@ final class AuditSubscriber
         }
 
         // Everything a flush collected, not only the records: what onFlush saw about the
-        // elements of tracked collections describes INSERTs and UPDATEs that were rolled back
-        // with the rest, and would otherwise surface in the next flush as history.
-        $this->pending = [];
-        $this->pendingRemovals = [];
-        $this->pendingIndexByEntity = [];
-        $this->elementChanges = [];
-        $this->elementMembership = [];
-        $this->statementsRan = false;
-        $this->failureWhileBuilding = null;
-
-        // Unconditionally here, and the depth with it: onClear is not paired with
-        // anything, so popping one level would leave the stack describing a flush that
-        // no longer exists.
-        $this->changeSets = [];
-        $this->reportedLostChangeSets = false;
-        $this->flushes = [];
+        // elements of tracked collections describes INSERTs and UPDATEs that were rolled
+        // back with the rest, and would otherwise surface in the next flush as history.
+        //
+        // Through forgetThisFlush() rather than by listing the same fields again. This
+        // used to be a second copy of that method, written out by hand, and it fell
+        // behind: the fields added for the per-flush moment were not in it, so a clear
+        // after a swallowed publication emptied the records and left the numbers that
+        // went with them — and the next flush's first record, at position zero, was
+        // written with the moment of the flush whose records had just been thrown away.
+        // A new record dated and signed as somebody else's, which is worse than the loss
+        // the clear was already causing.
+        //
+        // Unconditionally, and the flush stack with it: onClear is not paired with
+        // anything, so popping one level would leave the stack describing a flush that no
+        // longer exists.
+        $this->forgetThisFlush();
     }
 
     /**
