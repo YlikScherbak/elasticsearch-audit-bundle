@@ -19,7 +19,6 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
-use Doctrine\DBAL\ParameterType;
 use Doctrine\ORM\PersistentCollection;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\OnFlushEventArgs;
@@ -590,7 +589,7 @@ final class AuditSubscriber
                 // side is not what is persisted. Collected anyway, a replacement of such a
                 // collection was recorded as an emptying while both rows stayed exactly
                 // where they were.
-                if (self::mappingEntry($mapping, 'mappedBy') !== null && self::mappingEntry($mapping, 'orphanRemoval') !== true) {
+                if (CollectionRowsQuery::entry($mapping, 'mappedBy') !== null && CollectionRowsQuery::entry($mapping, 'orphanRemoval') !== true) {
                     continue;
                 }
 
@@ -1100,23 +1099,17 @@ final class AuditSubscriber
     /**
      * Whether the rows this collection stands for are gone, asked of the connection.
      *
-     * Two shapes, because an audited to-many has two. An owning ManyToMany is rows of a
-     * join table, keyed by the owner's own columns. An inverse OneToMany is rows of the
-     * elements' table carrying the owner's key -- which is where a replaced collection
-     * with orphanRemoval deletes them, in one statement and with no lifecycle event, so
-     * this is the only witness there is for it.
-     *
-     * Null when the question cannot be put: a collection that is not persistent any more,
-     * an association whose shape this cannot read, or a mapping with no join columns. The
-     * callers read null as "not established".
-     *
      * Asked of the connection rather than of a persister, and this is the point of it: a
      * persister's count() is a query the ORM writes and it adds the target entity's SQL
      * filter. A soft-delete filter then answers "no rows" for a collection whose rows are
-     * every one of them still there, and a refused flush is published as an emptying. The
-     * parameters carry their Doctrine types, so an identifier that is an object -- a UUID
-     * stored as binary, say -- is converted the way the column stores it rather than
-     * refused for not being a scalar.
+     * every one of them still there, and a refused flush is published as an emptying.
+     *
+     * The statement is built by {@see CollectionRowsQuery}, which is a class of its own so
+     * that the shapes this cannot reach from a fixture — a schema, an identifier that is an
+     * object, the arm of each test belonging to the other ORM major — have somewhere to be
+     * tested. Null from it means the mapping could not say, which the callers read as "not
+     * established", the same as "there are rows": the two differ to a person and not to the
+     * decision.
      */
     private function theJoinRowsAreGone(EntityManagerInterface $em, object $owner, string $field): ?bool
     {
@@ -1128,83 +1121,25 @@ final class AuditSubscriber
         }
 
         $mapping = $collection->getMapping();
-        $joinTable = self::mappingEntry($mapping, 'joinTable');
-        $mappedBy = self::mappingEntry($mapping, 'mappedBy');
-        $target = self::mappingEntry($mapping, 'targetEntity');
-
-        if ($joinTable !== null) {
-            $table = self::mappingEntry($joinTable, 'name');
-            $schema = self::mappingEntry($joinTable, 'schema');
-            $columns = self::mappingEntry($joinTable, 'joinColumns');
-        } elseif (\is_string($mappedBy) && \is_string($target) && $target !== '') {
-            // The elements' own table, and the column their reference back is stored in.
-            $targetMetadata = $em->getClassMetadata($target);
-            $table = $targetMetadata->getTableName();
-            $schema = self::mappingEntry($targetMetadata->table, 'schema');
-            $columns = self::mappingEntry($targetMetadata->getAssociationMapping($mappedBy), 'joinColumns');
-        } else {
-            return null;
-        }
-
-        if (!\is_string($table) || !\is_array($columns) || $columns === []) {
-            return null;
-        }
-
-        $platform = $em->getConnection()->getDatabasePlatform();
-        $where = [];
-        $values = [];
-        $types = [];
-
-        foreach ($columns as $column) {
-            $name = self::mappingEntry($column, 'name');
-            $referenced = self::mappingEntry($column, 'referencedColumnName');
-
-            if (!\is_string($name) || !\is_string($referenced)) {
-                return null;
-            }
-
-            $of = $classMetadata->getFieldForColumn($referenced);
-            $where[] = $platform->quoteIdentifier($name).' = ?';
-            $values[] = $classMetadata->getFieldValue($owner, $of);
-            // A field with no declared type is one DBAL infers from the value, which is
-            // the behaviour a query with no types at all gets.
-            $types[] = $classMetadata->getTypeOfField($of) ?? ParameterType::STRING;
-        }
-
-        // The schema with it, because a name alone is a different table on a connection
-        // whose search path holds one of the same name: Doctrine's own quote strategy
-        // qualifies it, and a query that does not would count the wrong table's rows and
-        // call a refusal an emptying.
-        $qualified = \is_string($schema) && $schema !== ''
-            ? $platform->quoteIdentifier($schema).'.'.$platform->quoteIdentifier($table)
-            : $platform->quoteIdentifier($table);
-
-        // COUNT rather than a LIMIT, which every platform spells differently: one owner's
-        // rows are few, and this runs where an emptying is being recorded or judged.
-        $rows = $em->getConnection()->fetchOne(
-            'SELECT COUNT(*) FROM '.$qualified.' WHERE '.implode(' AND ', $where),
-            $values,
-            $types,
+        $target = CollectionRowsQuery::entry($mapping, 'targetEntity');
+        $counting = CollectionRowsQuery::counting(
+            $em->getConnection()->getDatabasePlatform(),
+            $classMetadata,
+            $owner,
+            $mapping,
+            \is_string($target) && $target !== '' ? $em->getClassMetadata($target) : null,
         );
+
+        if ($counting === null) {
+            return null;
+        }
+
+        [$sql, $values, $types] = $counting;
+        $rows = $em->getConnection()->fetchOne($sql, $values, $types);
 
         return \is_numeric($rows) && (int) $rows === 0;
     }
 
-    /**
-     * One entry of a Doctrine mapping, whichever of its two shapes it has.
-     *
-     * An array on ORM 2, an object over the same keys on ORM 3. Null for anything that is
-     * neither, and for a key that is not there — which is how an association with no join
-     * table answers, and is the only answer this needs to tell apart.
-     */
-    private static function mappingEntry(mixed $mapping, string $key): mixed
-    {
-        if (\is_array($mapping)) {
-            return $mapping[$key] ?? null;
-        }
-
-        return $mapping instanceof \ArrayAccess && $mapping->offsetExists($key) ? $mapping[$key] : null;
-    }
 
     /**
      * Everything the flush that is ending collected, dropped with it.
