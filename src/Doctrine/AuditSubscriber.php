@@ -1060,7 +1060,12 @@ final class AuditSubscriber
         $flush = $this->collectingNow($em);
 
         if ($this->flushes !== []) {
-            $this->flushes[array_key_last($this->flushes)]['ran'] = true;
+            // Taken off and put back rather than written through its key: the stack is a
+            // list, and writing through a key is how an analyser — rightly — stops being
+            // able to say that it still is one.
+            $entry = array_pop($this->flushes);
+            $entry['ran'] = true;
+            $this->flushes[] = $entry;
         }
 
         return $flush;
@@ -1990,16 +1995,13 @@ final class AuditSubscriber
         $byOwner = [];
 
         foreach ($this->elementChanges as $key => [$owner, $byFlush]) {
-            $byOwner[$key] = [$owner, array_map(
-                static fn (array $entry): Change => $entry['change'],
-                self::latestPerKey($byFlush),
-            )];
+            $byOwner[$key] = [$owner, self::theChangesInForce($byFlush)];
         }
 
         foreach ($this->elementMembership as $key => [$owner, $byFlush]) {
             $changes = $byOwner[$key][1] ?? [];
 
-            foreach (self::latestPerKey($byFlush) as $entry) {
+            foreach (self::theMembershipInForce($byFlush) as $entry) {
                 // An inserted element had no identifier when it was collected; it has one now.
                 $id = $entry['id'] ?? ($em === null ? null : $this->identifierOf($em, $entry['element']));
 
@@ -2045,7 +2047,7 @@ final class AuditSubscriber
     }
 
     /**
-     * What several flushes collected about one owner, read as one answer.
+     * Which flush's answer about each key is the current one.
      *
      * By the stamp on each entry, the latest winning — which is what a single bucket did
      * by being written over, and what the flush numbers could not do. A flush's number
@@ -2058,36 +2060,68 @@ final class AuditSubscriber
      * The buckets stay because a flush's share has to be removable, which is a different
      * question from whose answer is the current one.
      *
-     * @template T of array{at: int}
+     * The rule lives here and the two maps that follow it are readers: an entry of one is
+     * a Change and an entry of the other is an element's membership, and carrying one
+     * template through an accumulator is something the oldest supported static analyser
+     * cannot do. So the shapes are read apart and the comparison is written once.
      *
-     * @param array<int, array<string, T>> $byFlush
+     * @param array<int, array<string, array{at: int}>> $byFlush
      *
-     * @return array<string, T>
+     * @return array<string, int> the key, and the flush whose entry about it is current
      */
-    private static function latestPerKey(array $byFlush): array
+    private static function whoseAnswerIsCurrent(array $byFlush): array
     {
-        // The one bucket handed back as it is, which is every ordinary flush. Merging it
-        // would copy everything one owner collected — the memcpy the write side is
-        // written key by key to avoid, put back at the other end.
-        if (\count($byFlush) === 1) {
-            return reset($byFlush);
-        }
-
-        $latest = [];
+        $current = [];
         $stamps = [];
 
-        foreach ($byFlush as $bucket) {
+        foreach ($byFlush as $flush => $bucket) {
             foreach ($bucket as $name => $entry) {
                 $at = $entry['at'];
 
                 if (($stamps[$name] ?? -1) < $at) {
                     $stamps[$name] = $at;
-                    $latest[$name] = $entry;
+                    $current[$name] = $flush;
                 }
             }
         }
 
-        return $latest;
+        return $current;
+    }
+
+    /**
+     * What several flushes said changed inside one owner's elements, read as one answer.
+     *
+     * @param array<int, array<string, array{at: int, change: Change}>> $byFlush
+     *
+     * @return array<string, Change>
+     */
+    private static function theChangesInForce(array $byFlush): array
+    {
+        $changes = [];
+
+        foreach (self::whoseAnswerIsCurrent($byFlush) as $name => $flush) {
+            $changes[$name] = $byFlush[$flush][$name]['change'];
+        }
+
+        return $changes;
+    }
+
+    /**
+     * The same for what its collection gained and lost.
+     *
+     * @param array<int, array<string, array{at: int, element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>> $byFlush
+     *
+     * @return array<string, array{at: int, element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>
+     */
+    private static function theMembershipInForce(array $byFlush): array
+    {
+        $entries = [];
+
+        foreach (self::whoseAnswerIsCurrent($byFlush) as $name => $flush) {
+            $entries[$name] = $byFlush[$flush][$name];
+        }
+
+        return $entries;
     }
 
     /**
