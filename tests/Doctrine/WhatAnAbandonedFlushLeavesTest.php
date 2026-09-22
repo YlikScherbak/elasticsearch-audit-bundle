@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Doctrine\ORM\EntityManagerInterface;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\HideEveryStop;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
@@ -1083,6 +1084,13 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         });
     }
 
+    private function ownerInTheDatabase(CrateItem $item): ?string
+    {
+        $owner = $this->em->getConnection()->fetchOne('SELECT crate_id FROM CrateItem WHERE id = ?', [$item->id]);
+
+        return $owner === false || $owner === null ? null : (string) $owner;
+    }
+
     private function titleInTheDatabase(Article $article): string
     {
         return (string) $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]);
@@ -1274,15 +1282,15 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
 
         self::assertSame('Three', $this->titleInTheDatabase($subject), 'the premise: the column took the second value');
 
-        $titles = [];
-
-        foreach ($this->documents() as $document) {
-            $titles[(string) $document['objectId']] = $document['changes']['title'];
-        }
-
+        // Every document of that entity, in order, rather than a map by its id: a map
+        // lets a right answer cover a wrong one that came before it, which is two of the
+        // things this file is for.
         self::assertSame(
-            ['old' => 'One', 'new' => 'Three'],
-            $titles[(string) $subject->id] ?? null,
+            [['old' => 'One', 'new' => 'Three']],
+            array_values(array_map(
+                static fn (array $d): mixed => $d['changes']['title'],
+                array_filter($this->documents(), static fn (array $d): bool => (string) $d['objectId'] === (string) $subject->id),
+            )),
             'the inner flush took the outer one\'s correction away with its own discarding',
         );
     }
@@ -1586,6 +1594,151 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
             array_map(static fn (array $d): mixed => $d['changes']['title'], $this->documents()),
             'the change after the one that wrote the column started from a value two writes old',
         );
+    }
+
+    public function testARetriedOwnerChangeStartsFromTheOwnerTheDatabaseHeld(): void
+    {
+        // Which owner an element is arriving FROM is read out of the change set of its own
+        // reference back, and after a refused flush the unit of work answers that from a
+        // value the column never took. A line the database had under A, re-pointed at B by
+        // a flush that was refused and then at C by the retry, was recorded as leaving B --
+        // a crate that never held it -- while A kept it in its history for ever.
+        $this->em->persist($a = new Crate('A'));
+        $this->em->persist($b = new Crate('B'));
+        $this->em->persist($c = new Crate('C'));
+        $a->add($item = new CrateItem('SKU-1'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseOneFlush();
+
+        $item->crate = $b;
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+            // what an application does when a listener refuses its flush
+        }
+
+        self::assertSame('A', $this->ownerInTheDatabase($item), 'the premise: the refused flush moved nothing');
+
+        $item->crate = $c;
+        $this->em->flush();
+
+        self::assertSame('C', $this->ownerInTheDatabase($item), 'the premise: the retry moved it');
+
+        $membership = [];
+
+        foreach ($this->documents() as $document) {
+            foreach ($document['changes'] as $field => $change) {
+                if (str_contains($field, '.')) {
+                    $membership[] = [$document['objectId'], $field, $change['old'], $change['new']];
+                }
+            }
+        }
+
+        self::assertSame(
+            [
+                ['A', 'items.'.$item->id, 'SKU-1', null],
+                ['C', 'items.'.$item->id, null, 'SKU-1'],
+            ],
+            $membership,
+            'the history has the line leaving a crate that never held it',
+        );
+    }
+
+    public function testReturningToTheOriginalValueSuppressesAnEarlierInnerChange(): void
+    {
+        // The inner flush really writes 9, and then the outer one puts the line back where
+        // it started and writes 1. The column never moved, so there is nothing to record --
+        // and "nothing" has no key to carry a stamp on, so the inner flush's earlier answer
+        // won the merge by default and the owner's history claimed a change that did not
+        // happen.
+        [, $item] = $this->aCrateWithOneLine();
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $seen = [];
+
+        $this->inThePreUpdateOf($item, static function (CrateItem $item, EntityManagerInterface $em) use (&$seen): void {
+            $item->quantity = 9;
+            $em->flush();
+
+            $seen[] = (int) $em->getConnection()->fetchOne('SELECT quantity FROM CrateItem WHERE id = ?', [$item->id]);
+
+            $item->quantity = 1;
+        });
+
+        $item->quantity = 2;
+        $this->em->flush();
+
+        self::assertSame([9], $seen, 'the premise: the inner flush wrote its own value first');
+        self::assertSame(1, $this->quantityInTheDatabase($item), 'the premise: the outer flush put it back');
+
+        self::assertSame([], $this->linesRecordedFor('crate'), 'the history records a change the column never kept');
+    }
+
+    public function testAnOrmFilterCannotProveThatAnAbortedCollectionDeletionRan(): void
+    {
+        // Whether the rows are gone is a question about what the database physically holds,
+        // and the collection persister answers it with a query the ORM writes -- adding the
+        // target entity's SQL filter to it. A soft-delete filter, which most applications
+        // have, then says "no rows" for a collection whose rows are every one of them still
+        // there, and a refused flush was published as an emptying.
+        $route = new Route('R-1');
+        $route->stops->add($first = new Stop('Alpha'));
+        $route->stops->add($second = new Stop('Beta'));
+        $this->em->persist($first);
+        $this->em->persist($second);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $refusals = new class {
+            public int $seen = 0;
+
+            public function onFlush(): void
+            {
+                if (++$this->seen <= 2) {
+                    throw new \DomainException('refused');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $refusals);
+
+        $route->stops->clear();
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        $this->em->getConfiguration()->addFilter('hide_stops', HideEveryStop::class);
+        $this->em->getFilters()->enable('hide_stops');
+
+        // A second operation, refused as well, so that nothing here can have deleted
+        // anything -- and the first one's state is judged while the filter is on.
+        $this->em->persist(new Article('Something else'));
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        self::assertSame(2, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM route_stop'), 'the premise: nothing was deleted');
+
+        self::assertSame([], array_values(array_filter(
+            $this->documents(),
+            static fn (array $d): bool => $d['objectType'] === 'route',
+        )), 'an emptying that never happened was published');
+
+        self::assertSame([], array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'are being written now, late'),
+        ), 'a refused flush was reported as one that committed');
     }
 
     private function silenceOurPostFlush(): AuditSubscriber

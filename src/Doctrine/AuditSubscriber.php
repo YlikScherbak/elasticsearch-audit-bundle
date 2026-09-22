@@ -963,9 +963,19 @@ final class AuditSubscriber
      * listener that throws leaves every schedule exactly as a refusal would. The two
      * states are identical from here, and one of them has the rows deleted.
      *
-     * So the rows are asked. A collection the owner still has rows for was not emptied;
-     * no rows, and the DELETE went through. One query per owner, and only on the branch
-     * where a flush left state behind without a single statement to show for it.
+     * So the rows are asked, and asked underneath the ORM rather than through it. The
+     * collection persister's count() would be the obvious way and is the wrong one: it is
+     * a query the ORM writes, and it adds the target entity's SQL filter to it. A
+     * soft-delete filter — ordinary in a Symfony application — then answers "no rows" for
+     * a collection whose rows are every one of them still there, and a refused flush is
+     * published as an emptying. A decision that needs the physical state cannot be taken
+     * from a filtered answer; that is one of the shapes this bundle refuses on principle,
+     * and it arrived here by asking the right question of the wrong reader.
+     *
+     * So it is one COUNT over the join table, by the owner's own columns, through the
+     * connection. The mapping is read as an array, which is what it is on ORM 2 and what
+     * ORM 3's mapping objects answer as — the same reading the field mappings get further
+     * down. Anything this cannot build a query from is answered as not established.
      *
      * A collection that was empty before the flush cannot be told apart this way, and is
      * not worth telling apart: emptying an empty collection records nothing either way.
@@ -977,31 +987,103 @@ final class AuditSubscriber
         foreach ($this->emptiedCollections as [$owner, $byFlush]) {
             foreach (array_keys($byFlush[$flush] ?? []) as $field) {
                 try {
-                    $collection = $em->getClassMetadata($owner::class)->getFieldValue($owner, $field);
-
-                    if (!$collection instanceof PersistentCollection) {
-                        continue;
-                    }
-
-                    $asked = true;
-
-                    if ($em->getUnitOfWork()->getCollectionPersister($collection->getMapping())->count($collection) > 0) {
-                        return false;
-                    }
+                    $gone = $this->theJoinRowsAreGone($em, $owner, $field);
                 } catch (\Throwable $e) {
                     // The one question this listener asks of the database on this road,
-                    // and a question that fails must not take the flush with it. What it
-                    // could not establish is treated as not established: the records go,
-                    // which is the answer this branch gives when nothing can vouch for
-                    // them.
+                    // and a question that fails must not take the flush with it.
                     $this->writer->reportFailure($e, null);
 
                     return false;
                 }
+
+                if ($gone !== true) {
+                    // Either the rows are there, or nothing here could ask: both are "not
+                    // established", and this branch drops the records when nothing can
+                    // vouch for them.
+                    return false;
+                }
+
+                $asked = true;
             }
         }
 
         return $asked;
+    }
+
+    /**
+     * Whether the join table holds anything for this owner, asked of the connection.
+     *
+     * Null when the question cannot be put: a collection that is not persistent any more,
+     * an association with no join table, or an identifier this cannot turn into a
+     * parameter. The caller reads null as "not established", which is what it also reads
+     * "there are rows" as — the two differ to a person and not to the decision.
+     */
+    private function theJoinRowsAreGone(EntityManagerInterface $em, object $owner, string $field): ?bool
+    {
+        $classMetadata = $em->getClassMetadata($owner::class);
+        $collection = $classMetadata->getFieldValue($owner, $field);
+
+        if (!$collection instanceof PersistentCollection) {
+            return null;
+        }
+
+        // Read as an array throughout: that is what a mapping is on ORM 2, and what ORM
+        // 3's mapping objects answer as, which is the same reading the field mappings get
+        // further down.
+        $joinTable = self::mappingEntry($collection->getMapping(), 'joinTable');
+        $table = self::mappingEntry($joinTable, 'name');
+        $columns = self::mappingEntry($joinTable, 'joinColumns');
+
+        if (!\is_string($table) || !\is_array($columns) || $columns === []) {
+            return null;
+        }
+
+        $platform = $em->getConnection()->getDatabasePlatform();
+        $where = [];
+        $values = [];
+
+        foreach ($columns as $column) {
+            $name = self::mappingEntry($column, 'name');
+            $referenced = self::mappingEntry($column, 'referencedColumnName');
+
+            if (!\is_string($name) || !\is_string($referenced)) {
+                return null;
+            }
+
+            $value = $classMetadata->getFieldValue($owner, $classMetadata->getFieldForColumn($referenced));
+
+            if (!\is_scalar($value)) {
+                return null;
+            }
+
+            $where[] = $platform->quoteIdentifier($name).' = ?';
+            $values[] = $value;
+        }
+
+        // COUNT rather than a LIMIT, which every platform spells differently: one owner's
+        // join rows are few, and this runs on the rarest branch there is.
+        $rows = $em->getConnection()->fetchOne(
+            'SELECT COUNT(*) FROM '.$platform->quoteIdentifier($table).' WHERE '.implode(' AND ', $where),
+            $values,
+        );
+
+        return \is_numeric($rows) && (int) $rows === 0;
+    }
+
+    /**
+     * One entry of a Doctrine mapping, whichever of its two shapes it has.
+     *
+     * An array on ORM 2, an object over the same keys on ORM 3. Null for anything that is
+     * neither, and for a key that is not there — which is how an association with no join
+     * table answers, and is the only answer this needs to tell apart.
+     */
+    private static function mappingEntry(mixed $mapping, string $key): mixed
+    {
+        if (\is_array($mapping)) {
+            return $mapping[$key] ?? null;
+        }
+
+        return $mapping instanceof \ArrayAccess && $mapping->offsetExists($key) ? $mapping[$key] : null;
     }
 
     /**
@@ -1492,7 +1574,18 @@ final class AuditSubscriber
     {
         try {
             $elementMetadata = $em->getClassMetadata($element::class);
-            $changeSet = $added === null ? $em->getUnitOfWork()->getEntityChangeSet($element) : [];
+
+            // Corrected, like everything else built from a change set. Which owner an
+            // element is arriving FROM is read out of the change set of its own reference
+            // back, and the unit of work answers that from a value a refused flush left
+            // behind: a line the database had under A, re-pointed at B by a flush that was
+            // refused and then at C by the retry, was recorded as leaving B — a crate that
+            // never held it — while A kept it in its history for ever. Since the change set
+            // a record is built from was taught to start where the column did, this was the
+            // one reader left asking the unit of work directly.
+            $changeSet = $added === null
+                ? self::sidesFrom($em->getUnitOfWork()->getEntityChangeSet($element), $this->changeSets[spl_object_id($element)] ?? [])
+                : [];
 
             foreach ($elementMetadata->getAssociationNames() as $association) {
                 if (!$elementMetadata->isSingleValuedAssociation($association) || $elementMetadata->isAssociationInverseSide($association)) {
@@ -1521,7 +1614,14 @@ final class AuditSubscriber
                 // current values, so for a nulled back-ref the old owner survives only
                 // there — then the original data, then the object itself.
                 if ($added === false) {
-                    $deletedChangeSet = $em->getUnitOfWork()->getEntityChangeSet($element);
+                    // Corrected the same way, so that the two roads read one thing. No
+                    // fixture tells this one apart: a removal after a refused re-pointing
+                    // comes back naming the right owner already, because what the change
+                    // set of a deleted element says and what the original data says still
+                    // agree there. The road above is the one with a scenario, and a reader
+                    // that corrects on one road and not the other is the shape this round
+                    // spent three findings on.
+                    $deletedChangeSet = self::sidesFrom($em->getUnitOfWork()->getEntityChangeSet($element), $this->changeSets[spl_object_id($element)] ?? []);
                     $owner = \array_key_exists($association, $deletedChangeSet) && \is_array($deletedChangeSet[$association])
                         ? $deletedChangeSet[$association][0] ?? null
                         : ($em->getUnitOfWork()->getOriginalEntityData($element)[$association] ?? $current);
@@ -1914,20 +2014,30 @@ final class AuditSubscriber
             if ($replacing) {
                 $prefix = ElementKey::of($field, $id).'.';
 
-                // This flush's bucket only. What another flush collected about the same
-                // element is that flush's answer, and a correction made here is not news
-                // about it — it is also cheaper, the scan being over what one flush has
-                // rather than everything the owner ever collected.
-                foreach (array_keys($this->elementChanges[$key][1][$flush] ?? []) as $name) {
-                    if (str_starts_with($name, $prefix)) {
-                        unset($this->elementChanges[$key][1][$flush][$name]);
+                // Every bucket, not only this flush's. This is the element read again
+                // after preUpdate, which is the last word about it in this operation:
+                // Doctrine has recomputed, and the statement that follows writes exactly
+                // that. An earlier answer about the same element — including one an inner
+                // flush really wrote — is superseded, because the owner gets one record
+                // for the operation and that record says where the column ended up.
+                //
+                // The stamps cannot reach this on their own. A value put back where it
+                // started produces no change at all, and "no change" has no key to carry a
+                // stamp on, so the older answer would win by default. The probe had a line
+                // go 1, then 9 by an inner flush, then back to 1 by the outer one: the
+                // column never moved and the history said it had.
+                foreach ($this->elementChanges[$key][1] ?? [] as $its => $bucket) {
+                    foreach (array_keys($bucket) as $name) {
+                        if (str_starts_with($name, $prefix)) {
+                            unset($this->elementChanges[$key][1][$its][$name]);
+                        }
                     }
-                }
 
-                // A bucket emptied by that is taken away with the keys it held, so that
-                // "the owner has collected nothing" stays one question rather than two.
-                if (($this->elementChanges[$key][1][$flush] ?? null) === []) {
-                    unset($this->elementChanges[$key][1][$flush]);
+                    // A bucket emptied by that is taken away with the keys it held, so that
+                    // "the owner has collected nothing" stays one question rather than two.
+                    if (($this->elementChanges[$key][1][$its] ?? null) === []) {
+                        unset($this->elementChanges[$key][1][$its]);
+                    }
                 }
             }
 
