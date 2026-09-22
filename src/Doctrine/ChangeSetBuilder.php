@@ -86,7 +86,16 @@ final class ChangeSetBuilder
                 // speak, so the two cannot both describe one emptying.
                     \array_key_exists($field, $emptied) => new Change(
                         self::representAll($emptied[$field], $represent),
-                        self::representAll(self::contentsOf($classMetadata->getFieldValue($entity, $field)), $represent),
+                        // What the property holds is the new side of an OWNING collection,
+                        // whose rows Doctrine writes from it. For an inverse one it is not:
+                        // the rows belong to the elements, so an element left in the
+                        // replacement is deleted with the rest and never put back -- the
+                        // record said it had survived -- and an element newly added
+                        // arrives through its own insertion, which the membership road
+                        // records, so reading it here described one arrival twice.
+                        $classMetadata->isAssociationInverseSide($field)
+                            ? []
+                            : self::representAll(self::contentsOf($classMetadata->getFieldValue($entity, $field)), $represent),
                     ),
                     $classMetadata->isAssociationInverseSide($field) => null,
                     default => $this->collectionChange($classMetadata->getFieldValue($entity, $field), $represent),

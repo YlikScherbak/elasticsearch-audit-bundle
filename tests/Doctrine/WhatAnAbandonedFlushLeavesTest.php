@@ -1918,6 +1918,137 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         );
     }
 
+    public function testReplacingAnInverseCollectionWithoutOrphanRemovalRecordsNoDeletion(): void
+    {
+        // Doctrine puts a replaced collection on the deletion schedule whatever the
+        // association says; whether anything is deleted is decided later, in the
+        // persister, which returns at once unless the association has orphanRemoval --
+        // the rows belong to the elements and the inverse side is not what is persisted.
+        // Collected from the schedule alone, a replacement was recorded as an emptying
+        // while both rows stayed exactly where they were.
+        $depot = new Depot('north');
+        $depot->add(new PackingCase('shelf-a', 10));
+        $depot->add(new PackingCase('shelf-b', 20));
+        $this->em->persist($depot);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $depot->cases = new ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame(
+            2,
+            (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM PackingCase WHERE depot_id IS NOT NULL'),
+            'the premise: nothing was deleted',
+        );
+
+        self::assertSame([], $this->documents(), 'an emptying that never happened was recorded');
+    }
+
+    public function testAReplacementCannotKeepAnExistingOrphanAliveOnlyInTheAudit(): void
+    {
+        // The replacement keeps one of the elements that were already there. Doctrine
+        // deletes the old collection by the owner's key, which takes that one with the
+        // rest, and does not put it back: it is a managed entity, not a new one, and the
+        // inverse side is not what inserts rows. Reading the new side off the property
+        // said it had survived.
+        $crate = new Crate('C-1');
+        $crate->add($first = new CrateItem('SKU-1'));
+        $crate->add(new CrateItem('SKU-2'));
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $crate->items = new ArrayCollection([$first]);
+        $this->em->flush();
+
+        self::assertSame(
+            0,
+            (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem WHERE crate_id = ?', [$crate->code]),
+            'the premise: the element left in the replacement went with the rest',
+        );
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates);
+        self::assertSame(
+            ['old' => ['SKU-1', 'SKU-2'], 'new' => []],
+            $crates[0]['changes']['items'] ?? null,
+            'the history has an element surviving a deletion it did not survive',
+        );
+    }
+
+    public function testReplacingACollectionWithANewElementDoesNotDescribeItsArrivalTwice(): void
+    {
+        // Both roads have something to say here and they are not saying the same thing:
+        // the replaced collection leaves a snapshot of what went, and the new element is
+        // an insertion of its own, which the membership road records. Reading the new side
+        // off the property put the arrival in both of them, in one document.
+        $crate = new Crate('C-1');
+        $crate->add(new CrateItem('SKU-OLD'));
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $crate->items = new ArrayCollection();
+        $crate->add($new = new CrateItem('SKU-NEW'));
+        $this->em->flush();
+
+        self::assertSame(
+            ['SKU-NEW'],
+            $this->em->getConnection()->fetchFirstColumn('SELECT sku FROM CrateItem WHERE crate_id = ?', [$crate->code]),
+            'the premise: the old line went and the new one arrived',
+        );
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates);
+        self::assertSame(
+            [
+                'items' => ['old' => ['SKU-OLD'], 'new' => []],
+                'items.'.$new->id => ['old' => null, 'new' => 'SKU-NEW'],
+            ],
+            array_intersect_key($crates[0]['changes'], ['items' => true, 'items.'.$new->id => true]),
+            'one arrival is described twice, or one departure is missing',
+        );
+    }
+
+    public function testAnEmptyingUnderAFilterStillNamesEveryRowTheDeleteTook(): void
+    {
+        // clear() on an owning side takes its snapshot on the way out, so what the
+        // collection held has to be read back -- and reading it through the ORM asks the
+        // application's filters, which are its opinion about what its users should see.
+        // The DELETE takes the rows whatever that opinion is. A filter hiding every
+        // element left no record at all while both join rows went.
+        $route = new Route('R-1');
+        $route->stops->add($first = new Stop('Alpha'));
+        $route->stops->add($second = new Stop('Beta'));
+        $this->em->persist($first);
+        $this->em->persist($second);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getConfiguration()->addFilter('hide_stops', HideEveryStop::class);
+        $this->em->getFilters()->enable('hide_stops');
+
+        $route->stops->clear();
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM route_stop'), 'the premise: both rows went');
+
+        $routes = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'route'));
+
+        self::assertCount(1, $routes, 'the emptying was not recorded at all');
+        self::assertSame(['old' => ['Alpha', 'Beta'], 'new' => []], $routes[0]['changes']['stops'] ?? null);
+
+        self::assertTrue($this->em->getFilters()->isEnabled('hide_stops'), 'the application got its filter back disabled');
+    }
+
     private function silenceOurPostFlush(): AuditSubscriber
     {
         foreach ($this->em->getEventManager()->getListeners(Events::postFlush) as $listener) {

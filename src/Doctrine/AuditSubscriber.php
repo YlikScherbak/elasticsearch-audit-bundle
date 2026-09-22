@@ -582,10 +582,32 @@ final class AuditSubscriber
                     continue; // not audited: nothing to say about it
                 }
 
+                // And nothing to say about one Doctrine will not carry out. A collection
+                // is put on this schedule by being replaced or cleared, and the check for
+                // whether anything is deleted happens later, in the persister:
+                // OneToManyPersister::delete() returns at once unless the association has
+                // orphanRemoval, because the rows belong to the elements and the inverse
+                // side is not what is persisted. Collected anyway, a replacement of such a
+                // collection was recorded as an emptying while both rows stayed exactly
+                // where they were.
+                if (self::mappingEntry($mapping, 'mappedBy') !== null && self::mappingEntry($mapping, 'orphanRemoval') !== true) {
+                    continue;
+                }
+
                 $held = $collection->getSnapshot();
 
                 if ($held === []) {
-                    $held = $uow->getCollectionPersister($mapping)->slice($collection, 0, null);
+                    // Underneath the filters, for the same reason the rows question is
+                    // asked underneath them: what this needs is the members the DELETE
+                    // will take, and a DELETE by the owner's key takes them whether or not
+                    // a soft-delete filter would have shown them. Asked through the
+                    // persister as it stands, a filter that hides half the elements halved
+                    // the record, and one that hides all of them left no record at all
+                    // while the rows went.
+                    $held = self::withoutTheApplicationsFilters(
+                        $em,
+                        static fn (): array => $uow->getCollectionPersister($mapping)->slice($collection, 0, null),
+                    );
                 }
 
                 if ($this->theLastFlushWasPublishedLate && $held !== [] && $this->theJoinRowsAreGone($em, $owner, $field) === true) {
@@ -1039,6 +1061,40 @@ final class AuditSubscriber
         }
 
         return $asked;
+    }
+
+    /**
+     * Reads something through the ORM with the application's filters put aside.
+     *
+     * A filter is the application's opinion about what its users should see, and this
+     * listener's questions are about what the database holds -- the two are different
+     * questions and the second one is the one a history has to answer. Suspended rather
+     * than disabled: a suspended filter keeps the parameters it was given and comes back
+     * as the same instance, which a disable-and-enable pair does not.
+     *
+     * @template T
+     *
+     * @param \Closure(): T $read
+     *
+     * @return T
+     */
+    private static function withoutTheApplicationsFilters(EntityManagerInterface $em, \Closure $read): mixed
+    {
+        $filters = $em->getFilters();
+        $suspended = [];
+
+        foreach (array_keys($filters->getEnabledFilters()) as $name) {
+            $filters->suspend($name);
+            $suspended[] = $name;
+        }
+
+        try {
+            return $read();
+        } finally {
+            foreach ($suspended as $name) {
+                $filters->restore($name);
+            }
+        }
     }
 
     /**
