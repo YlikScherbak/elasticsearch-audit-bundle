@@ -610,8 +610,13 @@ final class AuditWriter
      * Asked here rather than assembled by the caller because the clock and the actor
      * resolver are this writer's, and a second opinion about either would be a second
      * answer to "when did this happen".
+     *
+     * Always answers. What can fail inside it fails into a weaker answer — a timestamp
+     * from the system clock, an actor of null — rather than into no answer, because the
+     * caller that has no answer asks again later, and later is the whole problem this
+     * exists to solve.
      */
-    public function provenance(): ?Provenance
+    public function provenance(): Provenance
     {
         // Every part of this runs application code — a clock an application may have
         // replaced, an actor resolver reading a security token, an enricher reading the
@@ -625,9 +630,16 @@ final class AuditWriter
         //
         // So each part is behind the policy, and what survives a failure is kept:
         //
-        // - the clock first. Without a timestamp there is no moment at all, so this
-        //   answers with none and the writer falls back to asking again per record,
-        //   inside the try it has always had;
+        // - the clock first, and a clock that throws is stood in for by the system one,
+        //   read here, where the change is happening. Not because the two agree — an
+        //   application that configured a clock configured it for a reason, and this is
+        //   explicitly a different answer — but because of what the alternative was:
+        //   with no moment at all, the records of this flush were completed by asking
+        //   again wherever they were finally written, which for a flush whose publishing
+        //   was swallowed is a later request entirely. Measured: Alice's change came back
+        //   stamped at Bob's time and signed with his name. A timestamp from a second
+        //   source at the right moment is a smaller lie than one from the right source at
+        //   the wrong moment, and the failure is reported either way;
         // - the actor next, and its failure costs the actor only. A record dated
         //   correctly with no actor is better history than no record;
         // - the moment's enrichers last, and they run whether or not the actor
@@ -641,7 +653,7 @@ final class AuditWriter
         } catch (\Throwable $e) {
             $this->reportFailure($e, null);
 
-            return null;
+            $at = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         }
 
         try {

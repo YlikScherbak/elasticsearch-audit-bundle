@@ -136,9 +136,8 @@ final class WhenSettlingTheMomentFailsTest extends DoctrineTestCase
 
     public function testAClockThatThrowsDoesNotTakeTheOperationEither(): void
     {
-        // Without a timestamp there is no moment at all, so the flush settles none and
-        // the writer falls back to asking per record — inside the guard it has always
-        // had. What must not happen is the exception reaching the application.
+        // The system clock stands in for the broken one, read where the change is
+        // happening. What must not happen is the exception reaching the application.
         $this->clock = new class implements ClockInterface {
             public function now(): \DateTimeImmutable
             {
@@ -152,6 +151,101 @@ final class WhenSettlingTheMomentFailsTest extends DoctrineTestCase
 
         self::assertCount(1, $this->em->getRepository(Article::class)->findAll(), 'the business flush did not survive a broken clock');
         self::assertNotSame([], $this->logs, 'and nothing was said about it');
+    }
+
+    public function testABrokenClockDoesNotHandTheRecordToWhoeverWritesItLater(): void
+    {
+        // Answering with no moment at all was not the cheap option it looked like. The
+        // records of that flush were then completed wherever they were finally written
+        // -- and for a flush whose publishing a stranger's postFlush listener swallowed,
+        // that is a later request, with a different person logged in and a different
+        // clock reading. Alice's change came back stamped at Bob's time and signed with
+        // his name, which is a worse answer than a timestamp from a clock nobody
+        // configured.
+        $who = new class implements ActorResolverInterface {
+            public ?string $actor = 'alice';
+
+            public function resolve(): ?string
+            {
+                return $this->actor;
+            }
+        };
+
+        $when = new class implements ClockInterface {
+            public bool $broken = true;
+
+            public function now(): \DateTimeImmutable
+            {
+                if ($this->broken) {
+                    throw new \RuntimeException('the clock is not available');
+                }
+
+                return new \DateTimeImmutable('2126-09-22 15:30:00', new \DateTimeZone('UTC'));
+            }
+        };
+
+        $this->actors = $who;
+        $this->clock = $when;
+        $this->attachListener(FailurePolicy::Log);
+
+        $this->em->persist($article = new Article('Alice wrote this'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        // Alice's flush, with the clock broken and nobody there to publish it.
+        $ours = $this->silenceOurPostFlush();
+        $before = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $article->title = 'Alice edited this';
+        $this->em->flush();
+        $after = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $this->restorePostFlush($ours);
+
+        // Bob's, a working clock and a year that could not be mistaken for today.
+        $who->actor = 'bob';
+        $when->broken = false;
+
+        $this->em->persist(new Article('Bob writes something'));
+        $this->em->flush();
+
+        $records = [];
+
+        foreach ($this->documents() as $document) {
+            $records[$document['changes']['title']['new'] ?? '?'] = $document;
+        }
+
+        $alice = $records['Alice edited this'] ?? null;
+
+        self::assertIsArray($alice, 'the premise: the swallowed flush was written late');
+        self::assertSame('alice', $alice['source'], 'the record was signed by whoever happened to be acting when it was written');
+
+        $stamped = new \DateTimeImmutable($alice['loggedAt'], new \DateTimeZone('UTC'));
+
+        self::assertGreaterThanOrEqual($before->getTimestamp(), $stamped->getTimestamp(), 'the record was stamped before its own flush ran');
+        self::assertLessThanOrEqual($after->getTimestamp(), $stamped->getTimestamp(), 'the record was stamped with a moment later than its own flush — the moment it was written, most likely');
+
+        self::assertNotSame([], array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'Audit record could not be written: RuntimeException'),
+        ), sprintf("the broken clock was stood in for without a word about it; what was logged:\n%s", implode("\n", $this->logs)));
+    }
+
+    private function silenceOurPostFlush(): \Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber
+    {
+        foreach ($this->em->getEventManager()->getListeners(\Doctrine\ORM\Events::postFlush) as $listener) {
+            if ($listener instanceof \Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber) {
+                $this->em->getEventManager()->removeEventListener([\Doctrine\ORM\Events::postFlush], $listener);
+
+                return $listener;
+            }
+        }
+
+        self::fail('no audit listener was attached to postFlush');
+    }
+
+    private function restorePostFlush(\Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber $listener): void
+    {
+        $this->em->getEventManager()->addEventListener([\Doctrine\ORM\Events::postFlush], $listener);
     }
 
     public function testAClockThatThrowsUnderThrowRefusesTheOperationRatherThanTheRecord(): void

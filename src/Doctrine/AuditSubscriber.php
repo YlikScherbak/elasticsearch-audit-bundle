@@ -193,12 +193,14 @@ final class AuditSubscriber
      * timestamp — would then be the later flush's. What is kept here is the answer as it
      * stood where the change happened, handed to the writer when the records finally go.
      *
-     * Null when settling it failed — a clock or a resolver that threw, reported through
-     * the failure policy where it happened. The records of that flush are then completed
-     * the way they were before this map existed: asking again, per record, inside the
-     * writer's own guard.
+     * There is always one. Settling it can fail — a clock or a resolver that threw,
+     * reported through the failure policy where it happened — and what a failure costs is
+     * a weaker answer rather than no answer: the system clock in place of the configured
+     * one, an actor of null. No answer used to mean the records of that flush were
+     * completed wherever they were finally written, which for a flush whose publishing
+     * was swallowed is a later request, with somebody else logged in.
      *
-     * @var array<int, Provenance|null>
+     * @var array<int, Provenance>
      */
     private array $provenance = [];
 
