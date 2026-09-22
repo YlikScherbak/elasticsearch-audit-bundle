@@ -1147,8 +1147,12 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         try {
             $this->em->flush();
             self::fail('on_failure: throw did not reach the caller');
-        } catch (WriteFailedException) {
-            // which is what the caller asked for
+        } catch (WriteFailedException $e) {
+            // Which is what the caller asked for -- and about the record that was
+            // actually refused. "Something was thrown" would pass just as well if the
+            // exception were the last stretch's, or one this method wrapped itself
+            // around a run that had nothing wrong with it.
+            self::assertSame($article->id, $e->record?->objectId, 'the exception the caller got is not about the record that was refused');
         }
 
         self::assertSame(
@@ -1156,6 +1160,82 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
             array_map(static fn (array $d): string => $d['changes']['title']['new'] ?? '?', $this->documents()),
             'the stretch after the one that failed was thrown away with it',
         );
+    }
+
+    public function testTheExceptionTheCallerGetsIsTheFirstRunsAndNotTheLast(): void
+    {
+        // Every stretch refused, so there is a choice about which failure comes out. It
+        // is the first, because that is the one writeAll() reported at the time; the
+        // later ones are reported too, and raising the last of them would tell the caller
+        // about the record furthest from what went wrong. The same order a single
+        // writeAll() keeps, for the same reason.
+        $refusing = new class implements AuditEnricherInterface {
+            public bool $armed = false;
+
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                if ($this->armed) {
+                    throw new \RuntimeException('this record cannot be enriched');
+                }
+
+                return $record;
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $this->attachListener(FailurePolicy::Throw, null, [$refusing]);
+
+        $this->em->persist($article = new Article('Alice wrote this'));
+        $this->em->persist($aside = new Article('Aside'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+                $this->aside->title = 'Bob changed this from inside';
+                $this->em->flush();
+            }
+        });
+
+        $refusing->armed = true;
+        $article->title = 'Alice edited this';
+
+        try {
+            $this->em->flush();
+            self::fail('on_failure: throw did not reach the caller');
+        } catch (WriteFailedException $e) {
+            self::assertSame($article->id, $e->record?->objectId, 'the caller was told about a later stretch than the one that failed first');
+        }
+
+        self::assertSame([], $this->documents(), 'the premise: every stretch was refused');
     }
 
     public function testTheListenerKeepsNoMomentsAfterTheFlushThatMadeThem(): void

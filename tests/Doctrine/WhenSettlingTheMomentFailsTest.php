@@ -303,5 +303,11 @@ final class WhenSettlingTheMomentFailsTest extends DoctrineTestCase
         $this->reopen();
 
         self::assertSame([], $this->documents(), 'a record was written for an operation that was refused');
+
+        // And the half of "refused" that matters to the application. An audit trail with
+        // nothing in it for a row that is in the database is the outcome this policy
+        // exists to make impossible, and only the row says so: the raise has to land
+        // before the transaction, not after it.
+        self::assertCount(0, $this->em->getRepository(Article::class)->findAll(), 'the operation was committed and the audit complained about it afterwards');
     }
 }
