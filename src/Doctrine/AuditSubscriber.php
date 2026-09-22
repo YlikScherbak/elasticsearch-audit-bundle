@@ -267,6 +267,40 @@ final class AuditSubscriber
      */
     private array $changeSets = [];
 
+    /**
+     * Which flush computed each of those change sets, by the same object id.
+     *
+     * Only ever read when a flush turns out never to have happened, and then only to know
+     * whose snapshot is whose. Beside the map rather than inside it because every reader
+     * of a change set wants the change set, and a shape that makes them all unwrap
+     * something is a shape that spreads.
+     *
+     * @var array<int, int>
+     */
+    private array $changeSetFlush = [];
+
+    /**
+     * What the row still held, for an entity a flush computed a change set for and then
+     * never wrote.
+     *
+     * Computing a change set is not free of consequence: Doctrine takes the new values to
+     * be the entity's original data from then on. So a flush refused in its own onFlush
+     * leaves the unit of work believing the row holds what it was about to write, and the
+     * flush that really carries the change out a moment later reports it as starting from
+     * there. Measured: a title the column took straight from "One" to "Three" was recorded
+     * as going from "Two", a value the column never held — and the same for a line inside
+     * a tracked collection, the two roads meeting here because both are built from the
+     * change set above.
+     *
+     * Kept when the flush is discarded, where its snapshot is still the latest one, and
+     * spent by whichever flush computes a change set for that entity next. The earliest
+     * answer wins: two refusals in a row still leave the row holding what it held before
+     * either of them.
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private array $neverWritten = [];
+
     /** Reported once per flush: a hundred entities would otherwise say the same thing a hundred times. */
     private bool $reportedLostChangeSets = false;
 
@@ -378,7 +412,7 @@ final class AuditSubscriber
             // measured rather than assumed - about 60 bytes per entity, the array's own
             // structure, because PHP shares the values rather than copying them. The
             // figure and the flush it came from are in the README.
-            $this->changeSets[spl_object_id($element)] = $uow->getEntityChangeSet($element);
+            $this->rememberChangeSet($element, $uow->getEntityChangeSet($element), $flush);
             $this->rememberContext($em, $element, $flush);
 
             $this->collectElementChanges($em, $element, $flush);
@@ -391,7 +425,7 @@ final class AuditSubscriber
             // An insertion's change set dies in the same cleanup as an update's: a
             // create whose postPersist runs after somebody's nested flush would
             // otherwise say an entity appeared with no values at all.
-            $this->changeSets[spl_object_id($element)] = $uow->getEntityChangeSet($element);
+            $this->rememberChangeSet($element, $uow->getEntityChangeSet($element), $flush);
             $this->rememberContext($em, $element, $flush);
 
             $this->collectElementChanges($em, $element, $flush, added: true);
@@ -995,8 +1029,63 @@ final class AuditSubscriber
      * bucket that owner has left, and deriving it again cannot fall out of step with the
      * buckets the way a second rule about it would.
      */
+    /**
+     * Keeps a change set, under the flush that computed it and corrected for whatever a
+     * flush before it planned and never wrote.
+     *
+     * The two together so they cannot drift: a snapshot whose number is somebody else's
+     * is a snapshot that will be handed forward as the wrong row's history.
+     *
+     * @param array<string, mixed> $set
+     */
+    private function rememberChangeSet(object $entity, array $set, int $flush): void
+    {
+        $key = spl_object_id($entity);
+        $held = $this->neverWritten[$key] ?? [];
+
+        foreach ($set as $field => $sides) {
+            if (!\is_array($sides) || !\array_key_exists(1, $sides) || !\array_key_exists($field, $held)) {
+                continue;
+            }
+
+            // The side the column really came from, in place of the one the unit of work
+            // believes because a flush that never happened told it so. The new side is
+            // left alone: that one is about to be written, and it is the only part of
+            // this Doctrine is right about.
+            $set[$field] = [$held[$field], $sides[1]];
+        }
+
+        // Spent, not kept. What a flush that never happened left behind is true of the
+        // column only until something writes it, and the next flush to compute a change
+        // set here is the one that will: held on to, it would still be correcting the
+        // flush after THAT one, whose row really had moved. If this flush is refused as
+        // well, its own discarding puts the same answer back, because the side it is
+        // being corrected to is the side it hands forward.
+        unset($this->neverWritten[$key]);
+
+        $this->changeSets[$key] = $set;
+        $this->changeSetFlush[$key] = $flush;
+    }
+
     private function forgetWhatThisFlushCollected(int $flush): void
     {
+        foreach ($this->changeSetFlush as $key => $its) {
+            if ($its !== $flush) {
+                continue;
+            }
+
+            // Its snapshot is the latest one for that entity — a flush discarded here was
+            // refused before it wrote anything, so nothing has computed a change set for
+            // it since — which makes the side it came from what the column still holds.
+            foreach ($this->changeSets[$key] ?? [] as $field => $sides) {
+                if (\is_array($sides) && \array_key_exists(0, $sides)) {
+                    $this->neverWritten[$key][$field] ??= $sides[0];
+                }
+            }
+
+            unset($this->changeSets[$key], $this->changeSetFlush[$key]);
+        }
+
         foreach ([&$this->elementChanges, &$this->elementMembership, &$this->emptiedCollections] as &$map) {
             foreach ($map as $owner => [, $byFlush]) {
                 unset($byFlush[$flush]);
@@ -1045,6 +1134,8 @@ final class AuditSubscriber
         // two rules for one thing, and the second made the first unobservable.
         $this->provenance = [];
         $this->changeSets = [];
+        $this->changeSetFlush = [];
+        $this->neverWritten = [];
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
@@ -1211,7 +1302,7 @@ final class AuditSubscriber
 
         // Merged rather than replaced, and for the same reason the owner's own fields
         // are: what the row went FROM is only in the snapshot.
-        $this->changeSets[spl_object_id($element)] = self::sidesFrom($current, $snapshot);
+        $this->rememberChangeSet($element, self::sidesFrom($current, $snapshot), $flush ?? 0);
         $this->collectElementChanges($em, $element, $flush, replacing: true);
     }
 

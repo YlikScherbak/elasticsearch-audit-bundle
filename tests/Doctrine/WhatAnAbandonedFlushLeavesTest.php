@@ -710,6 +710,205 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         );
     }
 
+    public function testWhatADeadInnerFlushPlannedAndALaterOneCarriedOutIsRecordedByThatLaterOne(): void
+    {
+        // The other direction, and the one a fix for the first can get wrong: the change
+        // the refused flush planned really does happen, a moment later, because the
+        // application flushes again. Taking the dead flush's share away must not take the
+        // live flush's answer about the same line with it.
+        [, $item] = $this->aCrateWithOneLine();
+        $this->em->persist($article = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+
+        $em = $this->em;
+
+        $this->changeAndFlushFromInside(static function () use ($item): void {
+            $item->quantity = 9;
+        }, static function () use ($item, $em): void {
+            // What an application does about a refusal it can recover from.
+            $item->quantity = 3;
+            $em->flush();
+        });
+
+        $article->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame(3, $this->quantityInTheDatabase($item), 'the premise: the second attempt went through');
+        self::assertSame(
+            ['items.1.quantity' => ['old' => 1, 'new' => 3]],
+            $this->linesRecordedFor('crate'),
+            'the change the second attempt made was taken away with the first attempt',
+        );
+    }
+
+    public function testTheFromSideIsWhatTheColumnHeldAndNotWhatARefusedFlushPlanned(): void
+    {
+        // Computing a change set is not free of consequence: Doctrine takes the new
+        // values to be the entity's original data from then on. So a flush refused in its
+        // own onFlush leaves the unit of work believing the row already holds what it was
+        // about to write, and the flush that really carries the change out reports it as
+        // starting from there. The column went straight from One to Three; the history
+        // said it went from Two, a value it never held.
+        $this->em->persist($subject = new Article('One'));
+        $this->em->persist($trigger = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+
+        $em = $this->em;
+
+        $this->changeAndFlushFromInside(static function () use ($subject): void {
+            $subject->title = 'Two';
+        }, static function () use ($subject, $em): void {
+            $subject->title = 'Three';
+            $em->flush();
+        });
+
+        $trigger->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame('Three', $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$subject->id]), 'the premise: the column took the second attempt');
+
+        $titles = [];
+
+        foreach ($this->documents() as $document) {
+            $titles[(string) $document['objectId']] = $document['changes']['title'];
+        }
+
+        self::assertSame(
+            ['old' => 'One', 'new' => 'Three'],
+            $titles[(string) $subject->id] ?? null,
+            'the history starts the change from a value the column never held',
+        );
+    }
+
+    public function testTheCorrectionIsSpentByTheFlushThatWritesAndNotKeptForTheNextOne(): void
+    {
+        // What a refused flush left behind is true of the column only until something
+        // writes it. Here the second attempt goes through -- One to Three, correctly --
+        // and then a third change follows it. That one starts from Three, which is what
+        // the column now holds, and a correction still lying around would have started it
+        // from One and claimed a step the row never took.
+        $this->em->persist($subject = new Article('One'));
+        $this->em->persist($trigger = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+
+        $em = $this->em;
+
+        $this->changeAndFlushFromInside(static function () use ($subject): void {
+            $subject->title = 'Two';
+        }, static function () use ($subject, $em): void {
+            $subject->title = 'Three';
+            $em->flush();
+
+            $subject->title = 'Four';
+            $em->flush();
+        });
+
+        $trigger->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame('Four', $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$subject->id]), 'the premise: the column took both attempts that went through');
+
+        $steps = [];
+
+        foreach ($this->documents() as $document) {
+            if ((string) $document['objectId'] === (string) $subject->id) {
+                $steps[] = [$document['changes']['title']['old'], $document['changes']['title']['new']];
+            }
+        }
+
+        self::assertSame([['One', 'Three'], ['Three', 'Four']], $steps, 'the history does not read as one step after another');
+    }
+
+    public function testAFlushBeingDiscardedHandsForwardOnlyItsOwnChangeSets(): void
+    {
+        // The live flush has already written One -> Two and has the record to show for
+        // it. Then an inner flush is refused, and a third change follows. Handing the
+        // live flush's change set forward along with the refused one's would correct a
+        // step that needs no correcting: the second record would start from One again,
+        // and the history would read as two changes from the same value rather than one
+        // after the other.
+        $this->em->persist($subject = new Article('One'));
+        $this->em->persist($trigger = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+
+        $em = $this->em;
+
+        $this->changeAndFlushFromInside(static function (): void {
+            // Nothing of its own: the refused flush is here only to be refused, with the
+            // live flush's change set already taken and its record already built.
+        }, static function () use ($subject, $em): void {
+            $subject->title = 'Three';
+            $em->flush();
+        });
+
+        $subject->title = 'Two';
+        $trigger->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame('Three', $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$subject->id]), 'the premise: the column took both changes');
+
+        $steps = [];
+
+        foreach ($this->documents() as $document) {
+            if ((string) $document['objectId'] === (string) $subject->id) {
+                $steps[] = [$document['changes']['title']['old'], $document['changes']['title']['new']];
+            }
+        }
+
+        self::assertSame([['One', 'Two'], ['Two', 'Three']], $steps, 'the history does not read as one step after another');
+    }
+
+    public function testTheContextBesideARecordIsNotWhatARefusedFlushPlannedForIt(): void
+    {
+        // The crate itself is not dirty in the live flush -- only a line inside it is --
+        // so its record is assembled after the commit, and the always-recorded field
+        // beside it is read from whatever change set the listener is holding for it. The
+        // refused flush had left one: it planned to seal the crate and never did. The
+        // record then carried "packed -> sealed" as the context of a change that was
+        // about a quantity, and the column still said packed.
+        [$crate, $item] = $this->aCrateWithOneLine();
+        $this->em->persist($trigger = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+        $this->changeAndFlushFromInside(static function () use ($crate): void {
+            $crate->status = 'sealed';
+        });
+
+        $item->quantity = 2;
+        $trigger->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame('packed', $this->em->getConnection()->fetchOne('SELECT status FROM Crate WHERE code = ?', [$crate->code]), 'the premise: the refused flush never sealed anything');
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates, 'the premise: the crate got a record for what happened inside it');
+        self::assertSame(
+            ['old' => 'packed', 'new' => 'packed'],
+            $crates[0]['changes']['status'] ?? null,
+            'the context beside the record is what a refused flush planned rather than what the column holds',
+        );
+    }
+
     /** @return array{0: Crate, 1: CrateItem} */
     private function aCrateWithOneLine(): array
     {
