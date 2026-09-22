@@ -57,6 +57,17 @@ final class AuditSubscriber
     public const EVENTS = [Events::onFlush, Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear];
 
     /**
+     * The number that means "no flush is collecting".
+     *
+     * Rather than null, which was the same statement in a second shape: a bucket keyed by
+     * the flush that filled it needs a key whatever the answer is, so every one of those
+     * had a `?? 0` beside it saying what null meant there — a dozen expressions whose
+     * other arm nothing could reach, because inside a flush there is always one. The
+     * counter starts at one, so zero is free to say it once.
+     */
+    private const NO_FLUSH = 0;
+
+    /**
      * Which classes have already been checked against Doctrine's mapping.
      *
      * Attribute declarations only. They are fixed per class — the same names, the same
@@ -86,7 +97,7 @@ final class AuditSubscriber
      * index when it merges what happened inside a collection into its owner's record,
      * and an index that means two things is an index that drifts.
      *
-     * @var list<int|null>
+     * @var list<int>
      */
     private array $pendingFlush = [];
 
@@ -101,7 +112,7 @@ final class AuditSubscriber
      * reason every other record does: a nested flush must not lend it its moment or its
      * context.
      *
-     * @var array<int, int|null>
+     * @var array<int, int>
      */
     private array $ownerFlush = [];
 
@@ -455,7 +466,7 @@ final class AuditSubscriber
      * with a regression behind it — a method that takes a flush number and uses a
      * different one is a second rule waiting for the arrangement that tells them apart.
      */
-    private function rememberContext(EntityManagerInterface $em, object $entity, ?int $flush): void
+    private function rememberContext(EntityManagerInterface $em, object $entity, int $flush): void
     {
         try {
             $metadata = $this->metadataFactory->for($entity);
@@ -469,7 +480,7 @@ final class AuditSubscriber
         if ($metadata === null || $metadata->alwaysRecorded === []) {
             // Written all the same, and empty: "asked, and there was nothing" is an
             // answer, and the callers that ask once per flush need to see it.
-            $this->contextAsFlushed[$flush ?? 0][spl_object_id($entity)] = [];
+            $this->contextAsFlushed[$flush][spl_object_id($entity)] = [];
 
             return;
         }
@@ -483,7 +494,7 @@ final class AuditSubscriber
             }
         }
 
-        $this->contextAsFlushed[$flush ?? 0][spl_object_id($entity)] = $context;
+        $this->contextAsFlushed[$flush][spl_object_id($entity)] = $context;
     }
 
     /**
@@ -541,7 +552,7 @@ final class AuditSubscriber
     {
         $record = $this->recordFor($args, AuditEvent::CREATE);
         $manager = self::entityManagerOf($args->getObjectManager());
-        $collecting = $manager === null ? null : $this->collectingNowAfterAStatement($manager);
+        $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
 
         if ($record !== null) {
             $this->pending[] = $record;
@@ -559,7 +570,7 @@ final class AuditSubscriber
         // ones: an element of a tracked collection is usually not audited itself, and
         // this is the only moment its final change set can be read.
         $manager = self::entityManagerOf($args->getObjectManager());
-        $collecting = $manager === null ? null : $this->collectingNowAfterAStatement($manager);
+        $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
 
         if ($manager !== null) {
             $this->refreshElementChanges($manager, $args->getObject(), $collecting);
@@ -647,7 +658,7 @@ final class AuditSubscriber
     public function postRemove(PostRemoveEventArgs $args): void
     {
         $manager = self::entityManagerOf($args->getObjectManager());
-        $collecting = $manager === null ? null : $this->collectingNowAfterAStatement($manager);
+        $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
 
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
@@ -691,9 +702,9 @@ final class AuditSubscriber
         // at or below this level belongs to a flush that is over. Asked here it also
         // answers the question this method starts with, because the outermost flush is
         // the one that leaves nothing behind.
-        $collecting = $em === null ? null : $this->collectingNow($em, theOneAtThisLevelCommitted: true);
+        $collecting = $em === null ? self::NO_FLUSH : $this->collectingNow($em, theOneAtThisLevelCommitted: true);
 
-        if ($collecting !== null || ($em !== null && $this->flushes !== [])) {
+        if ($collecting !== self::NO_FLUSH || ($em !== null && $this->flushes !== [])) {
             // An inner flush is over. What the outer flush collects from here on is filed
             // under the outer's number again — it is simply the one left on top — and the
             // outer's own postFlush does the publishing.
@@ -740,7 +751,7 @@ final class AuditSubscriber
                 // The flush that saw this owner, which is not always the one publishing:
                 // an inner flush may have run in between, and its number must not become
                 // the outer record's moment or the key its context is read under.
-                $flush = $this->ownerFlush[spl_object_id($owner)] ?? null;
+                $flush = $this->ownerFlush[spl_object_id($owner)] ?? self::NO_FLUSH;
 
                 if ($index !== null && isset($records[$index])) {
                     $merged = array_replace($records[$index]->changes, $changes);
@@ -781,10 +792,10 @@ final class AuditSubscriber
         $records = array_values($records);
         $collected = array_values($collected);
         $run = [];
-        $moment = null;
+        $moment = self::NO_FLUSH;
         $refused = null;
 
-        $send = function (array $run, ?int $moment) use (&$refused): void {
+        $send = function (array $run, int $moment) use (&$refused): void {
             try {
                 $this->writer->writeAll(array_values($run), $this->provenance[$moment] ?? null);
             } catch (\Throwable $e) {
@@ -796,7 +807,7 @@ final class AuditSubscriber
         };
 
         foreach ($records as $position => $record) {
-            $its = $collected[$position] ?? null;
+            $its = $collected[$position] ?? self::NO_FLUSH;
 
             if ($run !== [] && $its !== $moment) {
                 $send($run, $moment);
@@ -939,7 +950,7 @@ final class AuditSubscriber
      * touching it — the outer one, whose commit the whole history hangs off — and three
      * copies of a rule are three chances for it to stop being the same rule.
      */
-    private function rememberWhoSawTheOwner(int $owner, ?int $flush): void
+    private function rememberWhoSawTheOwner(int $owner, int $flush): void
     {
         $this->ownerFlush[$owner] ??= $flush;
     }
@@ -961,11 +972,11 @@ final class AuditSubscriber
      * the collecting-time callers take a number instead: there is no version of this
      * question that can be asked in the wrong place.
      */
-    private function collectingNow(EntityManagerInterface $em, bool $theOneAtThisLevelCommitted = false): ?int
+    private function collectingNow(EntityManagerInterface $em, bool $theOneAtThisLevelCommitted = false): int
     {
         $this->unwindTo($em, $em->getConnection()->getTransactionNestingLevel(), $theOneAtThisLevelCommitted);
 
-        return $this->flushes === [] ? null : $this->flushes[array_key_last($this->flushes)]['flush'];
+        return $this->flushes === [] ? self::NO_FLUSH : $this->flushes[array_key_last($this->flushes)]['flush'];
     }
 
     /**
@@ -978,7 +989,7 @@ final class AuditSubscriber
      * it is right until somebody moves a line. This listener has lost history three times
      * to per-flush state whose correctness rested on the order of two calls.
      */
-    private function collectingNowAfterAStatement(EntityManagerInterface $em): ?int
+    private function collectingNowAfterAStatement(EntityManagerInterface $em): int
     {
         $flush = $this->collectingNow($em);
 
@@ -1317,7 +1328,7 @@ final class AuditSubscriber
      * walking every element of every flush to discover that nothing changed is work
      * every application would pay for the few that need it.
      */
-    private function refreshElementChanges(EntityManagerInterface $em, object $element, ?int $flush): void
+    private function refreshElementChanges(EntityManagerInterface $em, object $element, int $flush): void
     {
         $current = $em->getUnitOfWork()->getEntityChangeSet($element);
         $snapshot = $this->changeSets[spl_object_id($element)] ?? null;
@@ -1331,7 +1342,7 @@ final class AuditSubscriber
 
         // Merged rather than replaced, and for the same reason the owner's own fields
         // are: what the row went FROM is only in the snapshot.
-        $this->rememberChangeSet($element, self::sidesFrom($current, $snapshot), $flush ?? 0);
+        $this->rememberChangeSet($element, self::sidesFrom($current, $snapshot), $flush);
         $this->collectElementChanges($em, $element, $flush, replacing: true);
     }
 
@@ -1343,7 +1354,7 @@ final class AuditSubscriber
      * already loaded, so this asks nothing of the database. A failure here is reported
      * like any other: an element that cannot be read must not fail the flush.
      */
-    private function collectElementChanges(EntityManagerInterface $em, object $element, ?int $flush, ?bool $added = null, bool $replacing = false): void
+    private function collectElementChanges(EntityManagerInterface $em, object $element, int $flush, ?bool $added = null, bool $replacing = false): void
     {
         try {
             $elementMetadata = $em->getClassMetadata($element::class);
@@ -1621,7 +1632,7 @@ final class AuditSubscriber
      * Holds what this element did against one owner, if that owner is audited and tracks
      * the collection this element belongs to.
      */
-    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, ?int $flush, ?bool $added, bool $replacing = false): void
+    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, int $flush, ?bool $added, bool $replacing = false): void
     {
         if (!\is_object($owner)) {
             return; // no owner on that side: nothing to write a history against
@@ -1650,7 +1661,7 @@ final class AuditSubscriber
         $this->holdElementChanges($em, $element, $owner, $metadata, $association, $flush, $added, $replacing);
     }
 
-    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, ?int $flush, ?bool $added = null, bool $replacing = false): void
+    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, int $flush, ?bool $added = null, bool $replacing = false): void
     {
         // An owner reached through its elements may have no event of its own — nothing on
         // it changed — so the loops in onFlush never offered it to rememberContext(). Its
@@ -1659,7 +1670,7 @@ final class AuditSubscriber
         // that postFlush belongs to the flush after it. Asked once per flush: the entry
         // is written even when it is empty, so a second element of the same owner finds
         // it rather than asking again.
-        if (!isset($this->contextAsFlushed[$flush ?? 0][spl_object_id($owner)])) {
+        if (!isset($this->contextAsFlushed[$flush][spl_object_id($owner)])) {
             $this->rememberContext($em, $owner, $flush);
         }
 
@@ -1695,7 +1706,7 @@ final class AuditSubscriber
             // is what is held until then.
             if ($added !== null) {
                 $membership = $this->elementMembership[$key][1] ?? [];
-                $held = $membership[$flush ?? 0] ?? [];
+                $held = $membership[$flush] ?? [];
                 $identifier = $this->identifierOf($em, $element);
 
                 // Asked of the unit of work, not of the identifier. "It has no id yet"
@@ -1730,7 +1741,7 @@ final class AuditSubscriber
                     'deferred' => $added && $inserting,
                     'id' => $identifier,
                 ];
-                $membership[$flush ?? 0] = $held;
+                $membership[$flush] = $held;
                 $this->elementMembership[$key] = [$owner, $membership];
                 $this->rememberWhoSawTheOwner($key, $flush);
 
@@ -1772,16 +1783,16 @@ final class AuditSubscriber
                 // element is that flush's answer, and a correction made here is not news
                 // about it — it is also cheaper, the scan being over what one flush has
                 // rather than everything the owner ever collected.
-                foreach (array_keys($this->elementChanges[$key][1][$flush ?? 0] ?? []) as $name) {
+                foreach (array_keys($this->elementChanges[$key][1][$flush] ?? []) as $name) {
                     if (str_starts_with($name, $prefix)) {
-                        unset($this->elementChanges[$key][1][$flush ?? 0][$name]);
+                        unset($this->elementChanges[$key][1][$flush][$name]);
                     }
                 }
 
                 // A bucket emptied by that is taken away with the keys it held, so that
                 // "the owner has collected nothing" stays one question rather than two.
-                if (($this->elementChanges[$key][1][$flush ?? 0] ?? null) === []) {
-                    unset($this->elementChanges[$key][1][$flush ?? 0]);
+                if (($this->elementChanges[$key][1][$flush] ?? null) === []) {
+                    unset($this->elementChanges[$key][1][$flush]);
                 }
             }
 
@@ -1804,7 +1815,7 @@ final class AuditSubscriber
             $this->rememberWhoSawTheOwner($key, $flush);
 
             foreach ($changes as $name => $change) {
-                $this->elementChanges[$key][1][$flush ?? 0][$name] = $change;
+                $this->elementChanges[$key][1][$flush][$name] = $change;
             }
         }
     }
@@ -1947,7 +1958,7 @@ final class AuditSubscriber
      *
      * @return array<string, Change|mixed>
      */
-    private function withContext(?EntityManagerInterface $em, object $owner, array $changes, ?int $flush = null): array
+    private function withContext(?EntityManagerInterface $em, object $owner, array $changes, int $flush): array
     {
         $metadata = $em === null ? null : $this->metadataFactory->for($owner);
 
@@ -1965,7 +1976,7 @@ final class AuditSubscriber
      *
      * @param array<string, Change> $changes
      */
-    private function recordForOwner(ObjectManager $manager, object $owner, array $changes, ?int $flush = null): ?AuditRecord
+    private function recordForOwner(ObjectManager $manager, object $owner, array $changes, int $flush): ?AuditRecord
     {
         $record = null;
 

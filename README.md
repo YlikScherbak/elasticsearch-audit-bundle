@@ -1454,6 +1454,15 @@ down with it — losing one history entry is better than losing the order that e
 Set `on_failure: throw` when the opposite holds (compliance logs): the failure surfaces as a
 `WriteFailedException` carrying the record.
 
+**A clock that throws is stood in for by the system clock, at the moment the change happens**
+(since 1.3), and the failure travels the policy like any other — so under `throw` the operation is
+refused, and under `log` the record is written with a timestamp the configured clock did not give
+it. This is a stated contract rather than a claim that the two agree: a clock is configured for a
+reason. It is the lesser of two wrong answers, because the alternative was no timestamp at all,
+and a record with no timestamp takes the one belonging to whatever finally writes it — which, for
+a flush whose publishing another listener swallowed, is a later request with somebody else logged
+in.
+
 **The actor and the object id are outside redaction, and that is a decision to make once.**
 A rule cannot name them — `source` and `objectId` are base fields, chosen when the record is built,
 and a rule that named one is refused rather than quietly ignored. So whatever the resolver returns
