@@ -659,6 +659,175 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         self::assertSame('alice', $crates[0]['source'], 'emptying a collection in the inner flush took an owner the outer one had already touched');
     }
 
+    public function testARemovalAskedForBeforeTheFlushStillBelongsToIt(): void
+    {
+        // preRemove runs at $em->remove(), not at the flush — so when the record is taken
+        // there is no flush to belong to yet. Carrying that answer forward made a removal
+        // published late take the publishing request's moment, which is the defect of
+        // this whole release, kept alive for deletions only.
+        $article = $this->alicePersisted();
+
+        // The remove() is asked for before anything flushes.
+        $this->em->remove($article);
+
+        $this->aliceChanges(static function (): void {});
+        $this->bobFlushes();
+
+        $removals = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['event'] === 'remove'));
+
+        self::assertCount(1, $removals, 'the premise: the removal was recorded');
+        self::assertSame('alice', $removals[0]['source'], 'a removal asked for before the flush was signed by whoever published it');
+        self::assertSame(self::ALICE, $removals[0]['loggedAt']);
+    }
+
+    public function testAnInnerFlushThatDiedDoesNotOwnWhatTheOuterOneDoesNext(): void
+    {
+        // The inner flush of the earlier tests reaches its own postFlush and says so.
+        // This one is refused in onFlush by a listener the application catches, so it
+        // never comes back at all — and everything the outer flush collects afterwards
+        // was being filed under a flush that never happened. The assertion is on the
+        // SECOND entity: a stack that is tidy by the end is no use if the record built in
+        // the middle already has the wrong moment on it.
+        $this->em->persist($first = new Article('First'));
+        $this->em->persist($second = new Article('Second'));
+        $this->em->persist($aside = new Article('Aside'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class {
+            private int $seen = 0;
+
+            public function onFlush(): void
+            {
+                // The outer flush passes; the inner one is refused.
+                if (++$this->seen === 2) {
+                    throw new \DomainException('this entity may not be saved');
+                }
+            }
+        });
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+                $this->aside->title = 'Bob changed this from inside';
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does when a listener refuses its inner flush
+                }
+            }
+        });
+
+        $first->title = 'First, edited by Alice';
+        $second->title = 'Second, edited by Alice';
+        $this->em->flush();
+
+        $records = [];
+
+        foreach ($this->documents() as $document) {
+            $records[$document['changes']['title']['new'] ?? '?'] = $document;
+        }
+
+        self::assertArrayHasKey('Second, edited by Alice', $records, 'the premise: the outer flush recorded both of its entities');
+        self::assertSame('alice', $records['Second, edited by Alice']['source'], 'what the outer flush did after the inner one died was filed under the flush that never happened');
+        self::assertSame(self::ALICE, $records['Second, edited by Alice']['loggedAt']);
+    }
+
+    public function testADeadInnerFlushDoesNotReachARemovalTheOuterOneMade(): void
+    {
+        // The two together, which is where a fix for either alone would still be wrong:
+        // an inner flush dies, the outer one then removes something, and the whole lot is
+        // published two requests later.
+        $this->em->persist($article = new Article('Alice wrote this'));
+        $this->em->persist($doomed = new Article('Alice removes this'));
+        $this->em->persist($aside = new Article('Aside'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class {
+            private int $seen = 0;
+
+            public function onFlush(): void
+            {
+                if (++$this->seen === 2) {
+                    throw new \DomainException('this entity may not be saved');
+                }
+            }
+        });
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+                $this->aside->title = 'Bob changed this from inside';
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // caught, as an application would
+                }
+            }
+        });
+
+        $ours = $this->ourListener();
+        $this->em->getEventManager()->removeEventListener([Events::postFlush], $ours);
+
+        $article->title = 'Alice edited this';
+        $this->em->remove($doomed);
+        $this->em->flush();
+
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $ours);
+
+        // A third request writes what that flush left behind.
+        $this->who->actor = 'carol';
+        $this->when->now = '2026-09-23 09:00:00';
+
+        $this->em->persist(new Article('Carol writes something'));
+        $this->em->flush();
+
+        $removals = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['event'] === 'remove'));
+
+        self::assertCount(1, $removals, 'the premise: the removal survived to be published');
+        self::assertSame('alice', $removals[0]['source'], 'the removal took the moment of the inner flush that died, or of the request that published it');
+        self::assertSame(self::ALICE, $removals[0]['loggedAt']);
+    }
+
     public function testTheListenerKeepsNoMomentsAfterTheFlushThatMadeThem(): void
     {
         // A worker runs for weeks and flushes millions of times. One Provenance per
@@ -672,10 +841,10 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         $this->em->flush();
 
         $held = new \ReflectionProperty(AuditSubscriber::class, 'provenance');
-        $collecting = new \ReflectionProperty(AuditSubscriber::class, 'collecting');
+        $flushes = new \ReflectionProperty(AuditSubscriber::class, 'flushes');
 
         self::assertSame([], $held->getValue($this->ourListener()), 'a moment stayed behind after the flush that settled it was published');
-        self::assertSame([], $collecting->getValue($this->ourListener()), 'and the flush it belonged to is still on the stack');
+        self::assertSame([], $flushes->getValue($this->ourListener()), 'and the flush it belonged to is still on the stack');
     }
 
     /**

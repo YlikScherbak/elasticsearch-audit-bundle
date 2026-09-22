@@ -94,6 +94,26 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
+- **A flush that died without saying so no longer owns what the next one does, and a removal
+  belongs to the flush that made it.** Two stacks were keeping one answer between them — the
+  transaction levels of the flushes in progress, and their numbers — and they came off by
+  different rules: the levels unwound against the connection, the numbers were popped one at a
+  time in `postFlush`. An inner flush refused in `onFlush` never reaches `postFlush`, so its
+  number stayed on top and everything the outer flush collected afterwards was filed under a
+  flush that never happened. It is one stack now, and nothing pops it: every read discards what
+  the current transaction level says is no longer live, so a flush that died is gone by the next
+  question rather than by the next `postFlush`.
+  <br>That rule rests on where Doctrine dispatches its events, which is a fact about the ORM
+  rather than a promise, so it is a canary: `onFlush` runs before the transaction begins, a
+  flush's events arrive one level deeper than its `onFlush` did, and an inner flush that died
+  never opened a transaction — which is what makes "at or below the current level" enough to
+  throw it away. The same fact is why the question may not be asked during `onFlush` at all, and
+  the code makes that impossible rather than documenting it: what `onFlush` collects is handed
+  the number, and there is no version of the question that takes no manager.
+  <br>`preRemove` runs at `$em->remove()`, before any flush exists, so the number it recorded
+  was "no flush at all" — and a removal published late then took the moment of whatever request
+  published it. It is asked in `postRemove` instead, which is inside the flush that did the
+  deleting.
 - **Settling the moment can no longer take the operation down with it.** The moment is
   settled in `onFlush` — the application's own flush — and everything settling it touches is
   application code: a clock an application may have replaced, an actor resolver reading a
