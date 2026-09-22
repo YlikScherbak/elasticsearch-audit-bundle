@@ -733,7 +733,7 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
 
         self::assertSame(2, $this->quantityInTheDatabase($item), 'the premise: the live flush wrote its own value');
         self::assertSame(
-            ['items.1.quantity' => ['old' => 1, 'new' => 2]],
+            [['items.1.quantity' => ['old' => 1, 'new' => 2]]],
             $this->linesRecordedFor('crate'),
             'the history disagrees with the column',
         );
@@ -779,7 +779,7 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
 
         self::assertSame(9, $this->quantityInTheDatabase($item), 'the premise: the inner flush wrote its row');
         self::assertSame(
-            ['items.1.quantity' => ['old' => 1, 'new' => 9]],
+            [['items.1.quantity' => ['old' => 1, 'new' => 9]]],
             $this->linesRecordedFor('crate'),
             'a flush that committed had its history thrown away because its postFlush was swallowed',
         );
@@ -814,7 +814,7 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
 
         self::assertSame(3, $this->quantityInTheDatabase($item), 'the premise: the second attempt went through');
         self::assertSame(
-            ['items.1.quantity' => ['old' => 1, 'new' => 3]],
+            [['items.1.quantity' => ['old' => 1, 'new' => 3]]],
             $this->linesRecordedFor('crate'),
             'the change the second attempt made was taken away with the first attempt',
         );
@@ -1000,28 +1000,92 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
     }
 
     /**
-     * What the history says happened inside a collection of that kind of owner: the keys
-     * naming an element, which are the ones these tests are about.
+     * What the history says happened inside a collection of that kind of owner, one entry
+     * per document: the keys naming an element, which are the ones these tests are about.
      *
-     * @return array<string, mixed>
+     * A list rather than one merged map. Merged, a first document saying the wrong thing
+     * was covered by a second saying the right thing, and the assertion could not tell
+     * "one correct record" from "a wrong record and a correction after it" — which is two
+     * of the things this file exists to catch.
+     *
+     * @return list<array<string, mixed>>
      */
     private function linesRecordedFor(string $objectType): array
     {
-        $lines = [];
+        $documents = [];
 
         foreach ($this->documents() as $document) {
             if ($document['objectType'] !== $objectType) {
                 continue;
             }
 
+            $lines = [];
+
             foreach ($document['changes'] as $field => $change) {
                 if (str_contains($field, '.')) {
                     $lines[$field] = $change;
                 }
             }
+
+            $documents[] = $lines;
         }
 
-        return $lines;
+        return $documents;
+    }
+
+    /**
+     * Runs something inside the preUpdate of one particular entity, once.
+     *
+     * preUpdate rather than postUpdate because it is the moment Doctrine will recompute
+     * the change set after: what the listener leaves the entity holding is what the
+     * statement writes. And of one particular entity because Doctrine groups its updates
+     * by class and the order of the groups is not portable.
+     */
+    private function inThePreUpdateOf(object $entity, \Closure $what): void
+    {
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], new class($this->em, $entity, $what) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $entity,
+                private readonly \Closure $what,
+            ) {
+            }
+
+            public function preUpdate(\Doctrine\ORM\Event\PreUpdateEventArgs $args): void
+            {
+                if ($this->ran || $args->getObject() !== $this->entity) {
+                    return;
+                }
+
+                $this->ran = true;
+                ($this->what)($this->entity, $this->em);
+            }
+        });
+    }
+
+    private function refuseOneFlush(): void
+    {
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class {
+            private bool $refused = false;
+
+            public function onFlush(): void
+            {
+                if ($this->refused) {
+                    return;
+                }
+
+                $this->refused = true;
+
+                throw new \DomainException('this flush may not go through');
+            }
+        });
+    }
+
+    private function titleInTheDatabase(Article $article): string
+    {
+        return (string) $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]);
     }
 
     private function refuseTheSecondFlush(): void
@@ -1079,6 +1143,274 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
                 }
             }
         });
+    }
+
+    public function testAnAbortedTopLevelFlushKeepsTheOriginalValueForItsRetry(): void
+    {
+        // No nesting at all, which is why this one matters most: an ordinary flush is
+        // refused, the application catches it, changes the value again and flushes. The
+        // refused flush had already moved Doctrine's idea of the original data, and the
+        // correction that says otherwise was created by the discarding and then thrown
+        // away two lines later by the forgetting that follows it -- so the retry recorded
+        // a step from a value the column never held.
+        $this->em->persist($article = new Article('One'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseOneFlush();
+
+        $article->title = 'Two';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+            // what an application does when a listener refuses its flush
+        }
+
+        self::assertSame('One', $this->titleInTheDatabase($article), 'the premise: the refused flush wrote nothing');
+
+        $article->title = 'Three';
+        $this->em->flush();
+
+        self::assertSame('Three', $this->titleInTheDatabase($article), 'the premise: the retry went through');
+
+        self::assertSame(
+            [['old' => 'One', 'new' => 'Three']],
+            array_map(static fn (array $d): mixed => $d['changes']['title'], $this->documents()),
+            'the history of the retry starts from a value the column never held',
+        );
+    }
+
+    public function testTheCorrectionIsSpentFieldByFieldAndNotEntityByEntity(): void
+    {
+        // The refused flush planned two fields. The flush that recovers changes only one
+        // of them, and the other is changed later still. Taking the whole entry when the
+        // first was spent threw away a correction nobody had used, and the later change
+        // started from the value the refused flush had planned.
+        $this->em->persist($article = new Article('One'));
+        $article->status = 'draft';
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseOneFlush();
+
+        $article->title = 'Two';
+        $article->status = 'sent';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        $article->status = 'archived';
+        $this->em->flush();
+
+        $article->title = 'Three';
+        $this->em->flush();
+
+        self::assertSame(
+            [
+                ['status' => ['old' => 'draft', 'new' => 'archived']],
+                ['title' => ['old' => 'One', 'new' => 'Three']],
+            ],
+            array_map(
+                static fn (array $d): array => array_filter(
+                    $d['changes'],
+                    static fn (array $c): bool => $c['old'] !== $c['new'],
+                ),
+                $this->documents(),
+            ),
+            'a correction nobody had used was thrown away with one that had been',
+        );
+    }
+
+    public function testAnInnerFlushDoesNotRefileWhatTheOuterOneStillHasToWrite(): void
+    {
+        // A flush started from a lifecycle listener shares the outer flush's unit of work,
+        // and getScheduledEntityUpdates() there still holds the outer flush's own
+        // entities: executeUpdates() takes one off the list only after its statement. So
+        // the inner flush's onFlush was handed rows it would never write, filed them under
+        // its own number, and its discarding then threw away the correction the outer
+        // flush had made and handed the outer's old side forward as if it were unwritten.
+        $this->em->persist($subject = new Article('One'));
+        $this->em->persist($trigger = new Article('Trigger'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $refusals = new class {
+            public int $seen = 0;
+
+            public function onFlush(): void
+            {
+                // The first flush below is refused, and so is the inner one.
+                if (++$this->seen === 1 || $this->seen === 3) {
+                    throw new \DomainException('refused');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $refusals);
+
+        $subject->title = 'Two';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        $subject->title = 'Three';
+
+        $this->inThePreUpdateOf($trigger, static function (object $entity, EntityManagerInterface $em): void {
+            try {
+                $em->flush();
+            } catch (\DomainException) {
+            }
+        });
+
+        $trigger->title = 'Trigger, edited';
+        $this->em->flush();
+
+        self::assertSame('Three', $this->titleInTheDatabase($subject), 'the premise: the column took the second value');
+
+        $titles = [];
+
+        foreach ($this->documents() as $document) {
+            $titles[(string) $document['objectId']] = $document['changes']['title'];
+        }
+
+        self::assertSame(
+            ['old' => 'One', 'new' => 'Three'],
+            $titles[(string) $subject->id] ?? null,
+            'the inner flush took the outer one\'s correction away with its own discarding',
+        );
+    }
+
+    public function testAnOuterUpdateAfterADeadInnerFlushRebuildsItsElementChanges(): void
+    {
+        // The inner flush is started from the element's own preUpdate, so what it plans
+        // is what the statement would have written -- and it is refused. The handler then
+        // puts a third value on the element and returns, Doctrine recomputes the change
+        // set, and the outer flush writes that. The owner's history has to end up saying
+        // what the column took, not what the outer flush planned before any of this.
+        [, $item] = $this->aCrateWithOneLine();
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseTheSecondFlush();
+        $this->inThePreUpdateOf($item, static function (CrateItem $item, EntityManagerInterface $em): void {
+            $item->quantity = 9;
+
+            try {
+                $em->flush();
+            } catch (\DomainException) {
+            }
+
+            $item->quantity = 3;
+        });
+
+        $item->quantity = 2;
+        $this->em->flush();
+
+        self::assertSame(3, $this->quantityInTheDatabase($item), 'the premise: the column took the value the handler left');
+        self::assertSame(
+            [['items.1.quantity' => ['old' => 1, 'new' => 3]]],
+            $this->linesRecordedFor('crate'),
+            'the history says what the outer flush planned rather than what it wrote',
+        );
+    }
+
+    public function testAnOuterWriteAfterASuccessfulInnerWriteWinsInTheOwnersHistory(): void
+    {
+        // The same shape with the inner flush living. It really writes 9, and then the
+        // outer flush really writes 3 -- afterwards, although its number is lower, because
+        // a number says when a flush BEGAN. Ordered by number the inner flush's earlier
+        // value won, and the owner's history ended at a value the column no longer held.
+        [, $item] = $this->aCrateWithOneLine();
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $seen = [];
+
+        $this->inThePreUpdateOf($item, static function (CrateItem $item, EntityManagerInterface $em) use (&$seen): void {
+            $item->quantity = 9;
+            $em->flush();
+
+            $seen[] = (int) $em->getConnection()->fetchOne('SELECT quantity FROM CrateItem WHERE id = ?', [$item->id]);
+
+            $item->quantity = 3;
+        });
+
+        $item->quantity = 2;
+        $this->em->flush();
+
+        self::assertSame([9], $seen, 'the premise: the inner flush wrote its own value first');
+        self::assertSame(3, $this->quantityInTheDatabase($item), 'the premise: the outer flush wrote after it');
+        self::assertSame(
+            [['items.1.quantity' => ['old' => 1, 'new' => 3]]],
+            $this->linesRecordedFor('crate'),
+            'the owner\'s history ends at the value the inner flush wrote rather than the one the column holds',
+        );
+    }
+
+    public function testAnEmptyingWhoseOwnPostFlushWasSwallowedIsStillWrittenLate(): void
+    {
+        // A join table emptied, which raises no entity event at all: no insert, no update,
+        // no removal, so nothing says the flush reached its statements. The question that
+        // stands in for it used to be the unit of work's schedule -- and a postFlush
+        // listener that throws leaves every schedule exactly as a refusal would, because
+        // UnitOfWork::commit() calls postCommitCleanup() after dispatching postFlush with
+        // no try/finally between them. The rows were deleted and the history was dropped
+        // with the warning that says nothing could vouch for the flush.
+        $route = new Route('R-1');
+        $route->stops->add($first = new Stop('Alpha'));
+        $route->stops->add($second = new Stop('Beta'));
+        $this->em->persist($first);
+        $this->em->persist($second);
+        $this->em->persist($route);
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $breaker = new class {
+            public bool $armed = false;
+
+            public function postFlush(): void
+            {
+                if ($this->armed) {
+                    $this->armed = false;
+
+                    throw new \DomainException('somebody else exploded in postFlush');
+                }
+            }
+        };
+
+        $ours = $this->silenceOurPostFlush();
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $breaker);
+        $this->restorePostFlush($ours);
+
+        $route->stops->clear();
+        $breaker->armed = true;
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+            // the application copes
+        }
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM route_stop'), 'the premise: the rows were deleted');
+
+        // Somebody else's operation, which is what carries the old records out.
+        $this->em->persist(new Article('Bob writes something'));
+        $this->em->flush();
+
+        $routes = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'route'));
+
+        self::assertCount(1, $routes, 'the emptying was dropped, or recorded more than once');
+        self::assertSame(['old' => ['Alpha', 'Beta'], 'new' => []], $routes[0]['changes']['stops'] ?? null);
     }
 
     private function silenceOurPostFlush(): AuditSubscriber

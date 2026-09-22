@@ -19,6 +19,7 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
+use Doctrine\ORM\PersistentCollection;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\OnFlushEventArgs;
 use Doctrine\ORM\Event\PostFlushEventArgs;
@@ -127,9 +128,10 @@ final class AuditSubscriber
      * one bucket per owner meant the later flush simply wrote over the earlier one's,
      * whichever of the two turned out to be real.
      *
-     * Read back merged in flush order, which is the same answer one bucket gave.
+     * Read back by the stamp each entry carries, the highest per key winning, which is
+     * the answer one bucket gave by being written over.
      *
-     * @var array<int, array{0: object, 1: array<int, array<string, Change>>}>
+     * @var array<int, array{0: object, 1: array<int, array<string, array{at: int, change: Change}>>}>
      */
     private array $elementChanges = [];
 
@@ -138,7 +140,7 @@ final class AuditSubscriber
      * the flush that collected them. {@see self::$elementChanges} for why the number is
      * where it is.
      *
-     * @var array<int, array{0: object, 1: array<int, array<string, array{element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>>}>
+     * @var array<int, array{0: object, 1: array<int, array<string, array{at: int, element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>>}>
      */
     private array $elementMembership = [];
 
@@ -183,6 +185,22 @@ final class AuditSubscriber
      * @var array<int, array<int, array<string, mixed>>>
      */
     private array $contextAsFlushed = [];
+
+    /**
+     * How many things one operation has collected about the elements of a tracked
+     * collection, counting up.
+     *
+     * Every one of them is stamped with it, and the merge keeps the highest stamp per
+     * key. A flush number cannot do that job: it says when a flush BEGAN, and an outer
+     * flush writes its rows after an inner one it started -- so an outer flush recording
+     * the value the column finally took lost to the inner flush's earlier value, which had
+     * the higher number. Doctrine recomputes a change set in preUpdate and the statement
+     * follows it, so the last thing recorded about a line is the one the row agrees with.
+     *
+     * Let go with the flush: the stamps only ever order what one operation collected, and
+     * nothing compares two operations' stamps.
+     */
+    private int $wrote = 0;
 
     /**
      * Which flush this is, counting from the first one this listener sees.
@@ -281,14 +299,19 @@ final class AuditSubscriber
     private array $changeSets = [];
 
     /**
-     * Which flush computed each of those change sets, by the same object id.
+     * Which flush computed each of those change sets, and the entity it was about, by
+     * the same object id.
      *
-     * Only ever read when a flush turns out never to have happened, and then only to know
-     * whose snapshot is whose. Beside the map rather than inside it because every reader
-     * of a change set wants the change set, and a shape that makes them all unwrap
-     * something is a shape that spreads.
+     * Only ever read when a flush turns out never to have happened -- to know whose
+     * snapshot is whose, and to reach the entity the row belongs to, which an object id
+     * cannot do. Beside the map rather than inside it because every reader of a change
+     * set wants the change set, and a shape that makes them all unwrap something is a
+     * shape that spreads.
      *
-     * @var array<int, int>
+     * The claim lasts until the owning flush writes the row; {@see
+     * theRowNowMatchesTheObject()} lets it go.
+     *
+     * @var array<int, array{entity: object, flush: int}>
      */
     private array $changeSetFlush = [];
 
@@ -306,13 +329,26 @@ final class AuditSubscriber
      * change set above.
      *
      * Kept when the flush is discarded, where its snapshot is still the latest one, and
-     * spent by whichever flush computes a change set for that entity next. The earliest
-     * answer wins: two refusals in a row still leave the row holding what it held before
-     * either of them.
+     * spent field by field by whichever flush computes a change set naming that field
+     * next. Field by field because a flush plans several and the flush that recovers may
+     * change only one: taking the whole entry then threw away a correction nobody had
+     * used, and the next change to that other field started from a value the column never
+     * held.
      *
-     * @var array<int, array<string, mixed>>
+     * **Not per flush, and not let go with one.** This is what the ROW holds, and a row
+     * does not care which flush is collecting: an application that catches a refusal and
+     * retries at the top level ends its first flush entirely before the second begins, and
+     * a correction let go in between is a correction that was needed one line later. It
+     * lives until something writes the entity or the manager is cleared.
+     *
+     * A WeakMap rather than a map keyed by object id, because it now outlives the
+     * operation that filled it: PHP hands a freed object's id to the next one, and an
+     * entry that outlived its entity would correct a different row entirely. It also
+     * means an entity nobody holds any more takes its entry with it.
+     *
+     * @var \WeakMap<object, array<string, mixed>>
      */
-    private array $neverWritten = [];
+    private \WeakMap $neverWritten;
 
     /** Reported once per flush: a hundred entities would otherwise say the same thing a hundred times. */
     private bool $reportedLostChangeSets = false;
@@ -384,6 +420,7 @@ final class AuditSubscriber
         ?LoggerInterface $logger = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
+        $this->neverWritten = new \WeakMap();
     }
 
     private readonly LoggerInterface $logger;
@@ -534,6 +571,17 @@ final class AuditSubscriber
                     $held = $uow->getCollectionPersister($mapping)->slice($collection, 0, null);
                 }
 
+                if ($held === []) {
+                    // Nothing to say it about. A collection that was already empty is one,
+                    // and so is a deletion still on the schedule after it was carried out —
+                    // which is what a postFlush listener that threw leaves behind, since
+                    // postCommitCleanup() never ran to clear it. Recorded anyway, that
+                    // second one became an update with no changes at all, published by
+                    // whichever flush came next: a record of something that did not happen
+                    // during it, attached to a row nobody touched.
+                    continue;
+                }
+
                 $this->emptiedCollections[spl_object_id($owner)][0] = $owner;
                 $this->rememberWhoSawTheOwner(spl_object_id($owner), $flush);
                 $this->emptiedCollections[spl_object_id($owner)][1][$flush][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
@@ -553,6 +601,7 @@ final class AuditSubscriber
         $record = $this->recordFor($args, AuditEvent::CREATE);
         $manager = self::entityManagerOf($args->getObjectManager());
         $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
+        $this->theRowNowMatchesTheObject($args->getObject());
 
         if ($record !== null) {
             $this->pending[] = $record;
@@ -577,6 +626,7 @@ final class AuditSubscriber
         }
 
         $record = $this->recordFor($args, AuditEvent::UPDATE);
+        $this->theRowNowMatchesTheObject($args->getObject());
 
         if ($record === null) {
             return;
@@ -659,6 +709,8 @@ final class AuditSubscriber
     {
         $manager = self::entityManagerOf($args->getObjectManager());
         $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
+
+        $this->theRowNowMatchesTheObject($args->getObject());
 
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
@@ -894,48 +946,62 @@ final class AuditSubscriber
     }
 
     /**
-     * Whether the collections the flush on the stack emptied were really emptied.
+     * Whether the collections this flush emptied were really emptied.
      *
-     * A flush whose only news is a `clear()` has no statements of its own to be asked
+     * A flush whose only news is a `clear()` has no statement of its own to be asked
      * about: the owner is never dirtied, so no entity event fires and its entry's `ran`
      * stays false however well the flush went. Asked only that way, the one kind of
      * history this listener had to be taught to keep would be dropped again — and with
      * the warning about a flush that was interrupted, which it was not.
      *
-     * The unit of work answers instead, and about the collection rather than the entity.
-     * Scheduled deletions are cleared in postCommitCleanup(), so one that never got
-     * there is still on the list when the next flush computes its own — and that flush
-     * carries it out and collects it again. Still scheduled, then, means the flush that
-     * scheduled it did not commit: drop what it collected, and this flush will record
-     * the emptying once, properly. Gone from the list means it committed.
+     * **Asked of the database, because every cheaper witness lies here.** The unit of
+     * work's schedule was the earlier answer: a scheduled deletion is cleared in
+     * postCommitCleanup(), so one still on the list meant the flush that scheduled it did
+     * not commit. That is true of a flush a veto aborted and false of the case this whole
+     * branch exists for — `UnitOfWork::commit()` dispatches postFlush and calls
+     * postCommitCleanup() afterwards, with no try/finally between them, so a postFlush
+     * listener that throws leaves every schedule exactly as a refusal would. The two
+     * states are identical from here, and one of them has the rows deleted.
      *
-     * Asked of this flush's unit of work, which is the one that rescheduled it — and
-     * which is the abandoned flush's own, or the check above has already said the
-     * manager is gone.
+     * So the rows are asked. A collection the owner still has rows for was not emptied;
+     * no rows, and the DELETE went through. One query per owner, and only on the branch
+     * where a flush left state behind without a single statement to show for it.
+     *
+     * A collection that was empty before the flush cannot be told apart this way, and is
+     * not worth telling apart: emptying an empty collection records nothing either way.
      */
     private function theEmptiedCollectionsWentThrough(EntityManagerInterface $em, int $flush): bool
     {
-        $owners = [];
+        $asked = false;
 
-        foreach ($this->emptiedCollections as $key => [, $byFlush]) {
-            if (isset($byFlush[$flush])) {
-                $owners[$key] = true;
+        foreach ($this->emptiedCollections as [$owner, $byFlush]) {
+            foreach (array_keys($byFlush[$flush] ?? []) as $field) {
+                try {
+                    $collection = $em->getClassMetadata($owner::class)->getFieldValue($owner, $field);
+
+                    if (!$collection instanceof PersistentCollection) {
+                        continue;
+                    }
+
+                    $asked = true;
+
+                    if ($em->getUnitOfWork()->getCollectionPersister($collection->getMapping())->count($collection) > 0) {
+                        return false;
+                    }
+                } catch (\Throwable $e) {
+                    // The one question this listener asks of the database on this road,
+                    // and a question that fails must not take the flush with it. What it
+                    // could not establish is treated as not established: the records go,
+                    // which is the answer this branch gives when nothing can vouch for
+                    // them.
+                    $this->writer->reportFailure($e, null);
+
+                    return false;
+                }
             }
         }
 
-        if ($owners === []) {
-            return false;
-        }
-
-        foreach ($em->getUnitOfWork()->getScheduledCollectionDeletions() as $collection) {
-            $owner = $collection->getOwner();
-
-            if ($owner !== null && isset($owners[spl_object_id($owner)])) {
-                return false;
-            }
-        }
-
-        return true;
+        return $asked;
     }
 
     /**
@@ -1069,7 +1135,23 @@ final class AuditSubscriber
     private function rememberChangeSet(object $entity, array $set, int $flush): void
     {
         $key = spl_object_id($entity);
-        $held = $this->neverWritten[$key] ?? [];
+
+        // Not ours to re-file. A flush started from a lifecycle listener shares the outer
+        // flush's unit of work, and getScheduledEntityUpdates() there still holds the
+        // outer flush's own entities: executeUpdates() takes one off the list only after
+        // its statement. So the inner flush's onFlush is handed rows it will never write,
+        // and filing them under its number meant its discarding threw away the correction
+        // the outer flush had made and handed the outer's own old side forward as if it
+        // were unwritten.
+        //
+        // Ownership lasts until the owning flush writes the row, and post* below says
+        // when that is. Until then the snapshot is what that flush computed, and neither
+        // the values nor the number move.
+        if (($this->changeSetFlush[$key]['flush'] ?? $flush) !== $flush) {
+            return;
+        }
+
+        $held = $this->neverWritten[$entity] ?? [];
 
         foreach ($set as $field => $sides) {
             if (!\is_array($sides) || !\array_key_exists(1, $sides) || !\array_key_exists($field, $held)) {
@@ -1081,34 +1163,60 @@ final class AuditSubscriber
             // left alone: that one is about to be written, and it is the only part of
             // this Doctrine is right about.
             $set[$field] = [$held[$field], $sides[1]];
+
+            unset($held[$field]);
         }
 
-        // Spent, not kept. What a flush that never happened left behind is true of the
-        // column only until something writes it, and the next flush to compute a change
-        // set here is the one that will: held on to, it would still be correcting the
-        // flush after THAT one, whose row really had moved. If this flush is refused as
-        // well, its own discarding puts the same answer back, because the side it is
-        // being corrected to is the side it hands forward.
-        unset($this->neverWritten[$key]);
+        // Spent, and only what was spent. What a flush that never happened left behind is
+        // true of the column until something writes it, and the flush computing this
+        // change set is the one that will -- for the fields it names, and for no others.
+        // If this flush is refused as well, its own discarding puts the same answers back,
+        // because the sides it is being corrected to are the sides it hands forward.
+        if ($held === []) {
+            unset($this->neverWritten[$entity]);
+        } else {
+            $this->neverWritten[$entity] = $held;
+        }
 
         $this->changeSets[$key] = $set;
-        $this->changeSetFlush[$key] = $flush;
+        $this->changeSetFlush[$key] = ['entity' => $entity, 'flush' => $flush];
+    }
+
+    /**
+     * Doctrine has written this entity: whatever flush computed the change set it was
+     * written from has no further claim on it.
+     *
+     * The snapshot itself stays -- publishing reads it after the commit -- but it stops
+     * being evidence of what the row still holds, which is the only thing the number is
+     * for. A flush discarded after this must not hand the old side forward, because the
+     * statement already moved the row past it; and the next flush to compute a change set
+     * for this entity is describing a later state and owns it.
+     */
+    private function theRowNowMatchesTheObject(object $entity): void
+    {
+        unset($this->changeSetFlush[spl_object_id($entity)]);
     }
 
     private function forgetWhatThisFlushCollected(int $flush): void
     {
         foreach ($this->changeSetFlush as $key => $its) {
-            if ($its !== $flush) {
+            if ($its['flush'] !== $flush) {
                 continue;
             }
 
             // Its snapshot is the latest one for that entity — a flush discarded here was
             // refused before it wrote anything, so nothing has computed a change set for
             // it since — which makes the side it came from what the column still holds.
+            $held = $this->neverWritten[$its['entity']] ?? [];
+
             foreach ($this->changeSets[$key] ?? [] as $field => $sides) {
                 if (\is_array($sides) && \array_key_exists(0, $sides)) {
-                    $this->neverWritten[$key][$field] ??= $sides[0];
+                    $held[$field] ??= $sides[0];
                 }
+            }
+
+            if ($held !== []) {
+                $this->neverWritten[$its['entity']] = $held;
             }
 
             unset($this->changeSets[$key], $this->changeSetFlush[$key]);
@@ -1165,6 +1273,7 @@ final class AuditSubscriber
         $this->elementMembership = [];
         $this->ownerFlush = [];
         $this->flushes = [];
+        $this->wrote = 0;
         $this->failureWhileBuilding = null;
 
         // Everything, not this flush's entry: forgetting happens when nothing is live —
@@ -1175,7 +1284,6 @@ final class AuditSubscriber
         $this->provenance = [];
         $this->changeSets = [];
         $this->changeSetFlush = [];
-        $this->neverWritten = [];
         $this->emptiedCollections = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
@@ -1214,6 +1322,13 @@ final class AuditSubscriber
         // anything, so popping one level would leave the stack describing a flush that no
         // longer exists.
         $this->forgetThisFlush();
+
+        // And what the rows were believed to hold, which the clear has just made
+        // unanswerable: a cleared manager means either a flush that failed and rolled
+        // back, or an application throwing its objects away. Either way nothing here
+        // knows what the columns hold any more, and a correction is a claim about a
+        // column.
+        $this->neverWritten = new \WeakMap();
     }
 
     /**
@@ -1726,6 +1841,7 @@ final class AuditSubscriber
                 $inserting = $identifier === null || $em->getUnitOfWork()->isScheduledForInsert($element);
 
                 $held[$field.'#'.spl_object_id($element)] = [
+                    'at' => ++$this->wrote,
                     'element' => $element,
                     'added' => $added,
                     'field' => $field,
@@ -1815,7 +1931,7 @@ final class AuditSubscriber
             $this->rememberWhoSawTheOwner($key, $flush);
 
             foreach ($changes as $name => $change) {
-                $this->elementChanges[$key][1][$flush][$name] = $change;
+                $this->elementChanges[$key][1][$flush][$name] = ['at' => ++$this->wrote, 'change' => $change];
             }
         }
     }
@@ -1860,13 +1976,16 @@ final class AuditSubscriber
         $byOwner = [];
 
         foreach ($this->elementChanges as $key => [$owner, $byFlush]) {
-            $byOwner[$key] = [$owner, self::inFlushOrder($byFlush)];
+            $byOwner[$key] = [$owner, array_map(
+                static fn (array $entry): Change => $entry['change'],
+                self::latestPerKey($byFlush),
+            )];
         }
 
         foreach ($this->elementMembership as $key => [$owner, $byFlush]) {
             $changes = $byOwner[$key][1] ?? [];
 
-            foreach (self::inFlushOrder($byFlush) as $entry) {
+            foreach (self::latestPerKey($byFlush) as $entry) {
                 // An inserted element had no identifier when it was collected; it has one now.
                 $id = $entry['id'] ?? ($em === null ? null : $this->identifierOf($em, $entry['element']));
 
@@ -1914,11 +2033,55 @@ final class AuditSubscriber
     /**
      * What several flushes collected about one owner, read as one answer.
      *
-     * In flush order and later winning, which is what a single bucket did by arriving
-     * later — the buckets exist so that a flush's share can be taken away again, not to
-     * change what the flushes that stayed add up to. Sorted rather than trusted to the
-     * insertion order: a flush publishing what an earlier one left writes into an older
-     * bucket after a newer one exists.
+     * By the stamp on each entry, the latest winning — which is what a single bucket did
+     * by being written over, and what the flush numbers could not do. A flush's number
+     * says when it BEGAN: an inner flush always has the higher one, and yet the outer
+     * flush it was started from goes on to write its own rows afterwards. Ordered by
+     * number, an outer flush recording the value the column finally took lost to the
+     * inner flush's earlier value; the probe had the column holding 3 and the history
+     * ending at 9.
+     *
+     * The buckets stay because a flush's share has to be removable, which is a different
+     * question from whose answer is the current one.
+     *
+     * @template T of array{at: int}
+     *
+     * @param array<int, array<string, T>> $byFlush
+     *
+     * @return array<string, T>
+     */
+    private static function latestPerKey(array $byFlush): array
+    {
+        // The one bucket handed back as it is, which is every ordinary flush. Merging it
+        // would copy everything one owner collected — the memcpy the write side is
+        // written key by key to avoid, put back at the other end.
+        if (\count($byFlush) === 1) {
+            return reset($byFlush);
+        }
+
+        $latest = [];
+        $stamps = [];
+
+        foreach ($byFlush as $bucket) {
+            foreach ($bucket as $name => $entry) {
+                $at = $entry['at'];
+
+                if (($stamps[$name] ?? -1) < $at) {
+                    $stamps[$name] = $at;
+                    $latest[$name] = $entry;
+                }
+            }
+        }
+
+        return $latest;
+    }
+
+    /**
+     * The same for what an emptied collection held, which carries no stamp.
+     *
+     * It does not need one: this is what a collection held BEFORE a flush emptied it, and
+     * two flushes emptying the same collection is two emptyings, of which the later is
+     * the one the record being built is about.
      *
      * @template T
      *
@@ -1928,9 +2091,6 @@ final class AuditSubscriber
      */
     private static function inFlushOrder(array $byFlush): array
     {
-        // The one bucket handed back as it is, which is every ordinary flush. Merging it
-        // would be array_replace() copying everything one owner collected — the memcpy
-        // the write side is written key by key to avoid, put back at the other end.
         if (\count($byFlush) === 1) {
             return reset($byFlush);
         }

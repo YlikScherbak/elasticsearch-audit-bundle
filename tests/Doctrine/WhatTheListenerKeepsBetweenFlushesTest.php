@@ -38,6 +38,7 @@ final class WhatTheListenerKeepsBetweenFlushesTest extends TestCase
         'checkedTracking' => 'a cache of what a class declared, which is fixed for the life of the process: the same names, the same representers, the same tracked fields for every instance.',
         'flush' => 'the counter that hands out the numbers. It only ever goes up, and a number given twice is the whole problem it exists to prevent.',
         'flushingManager' => 'a weak reference to the manager of the flush on the stack, replaced by every flush that begins and read only to tell an abandoned flush from a swallowed one.',
+        'neverWritten' => 'what a ROW holds, which is not a fact about any flush: an application that catches a refusal and retries at the top level ends its first flush before the second begins, and a correction let go in between is one that was needed a line later. Released field by field as something writes the field, and wholesale by onClear(), where a cleared manager makes every such claim unanswerable.',
     ];
 
     public function testEveryFieldIsEitherLetGoWithItsFlushOrSaysWhyNot(): void
@@ -125,8 +126,21 @@ final class WhatTheListenerKeepsBetweenFlushesTest extends TestCase
 
         self::assertMatchesRegularExpression('/\$this->\w+ = /', $body, sprintf('%s() was read as assigning nothing, which means this is reading the wrong lines', $method));
 
-        preg_match_all('/\$this->(\w+) = /', $body, $found);
+        preg_match_all('/\$this->(\w+) = (.*)$/m', $body, $found, \PREG_SET_ORDER);
 
-        return array_values(array_unique($found[1]));
+        $assigned = [];
+
+        foreach ($found as [, $field, $value]) {
+            // "Assigned" has to mean assigned something else. `$this->pending =
+            // $this->pending;` reads as a decision and is none, and a guard that counts it
+            // is a guard that can be satisfied by writing nothing.
+            if (trim($value) === '$this->'.$field.';') {
+                continue;
+            }
+
+            $assigned[$field] = true;
+        }
+
+        return array_keys($assigned);
     }
 }
