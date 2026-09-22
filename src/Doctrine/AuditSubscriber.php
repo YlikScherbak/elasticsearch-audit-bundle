@@ -496,9 +496,10 @@ final class AuditSubscriber
         // ones: an element of a tracked collection is usually not audited itself, and
         // this is the only moment its final change set can be read.
         $manager = self::entityManagerOf($args->getObjectManager());
+        $collecting = $manager === null ? null : $this->collectingNow($manager);
 
         if ($manager !== null) {
-            $this->refreshElementChanges($manager, $args->getObject(), $this->collectingNow($manager));
+            $this->refreshElementChanges($manager, $args->getObject(), $collecting);
         }
 
         $record = $this->recordFor($args, AuditEvent::UPDATE);
@@ -516,8 +517,58 @@ final class AuditSubscriber
             return;
         }
 
+        $already = $this->pendingIndexByEntity[spl_object_id($entity)] ?? null;
+
+        if ($already !== null
+            && ($this->pending[$already] ?? null)?->event === AuditEvent::UPDATE
+            && $manager !== null
+            && $manager->getUnitOfWork()->getEntityChangeSet($entity) === []
+        ) {
+            // The same UPDATE announced a second time. A flush started from a lifecycle
+            // listener runs on the outer flush's unit of work and carries out whatever it
+            // finds scheduled — including the outer flush's own remaining updates — and
+            // when the outer flush then resumes its list, it dispatches postUpdate for a
+            // row somebody else already wrote. Measured rather than deduced: in
+            // DoctrineCanariesTest the second announcement arrives one level up with an
+            // empty change set, because the unit of work consumed it the first time.
+            //
+            // That emptiness is the whole of the test, and it needs the pending record
+            // beside it: a change set the listener cannot see is also what a nested flush
+            // leaves behind when its postCommitCleanup() empties the one still running,
+            // which is why this listener keeps a snapshot at all. Nothing pending means a
+            // first announcement of a change set that went missing, and it is recorded.
+            // Something pending, for an update, means the announcement is the second.
+            //
+            // A second, real update of the same entity in the same operation is not this
+            // and must not be folded into the first: the unit of work still holds its
+            // change set, which is what the emptiness asks about, and
+            // WhoseMomentALateRecordCarriesTest walks One -> Two -> Three through a
+            // listener to say so.
+            //
+            // The update the pending record has to be is the one part of this no fixture
+            // reaches, and it is left escaping rather than claimed equivalent. It would
+            // take an entity created earlier in the operation whose later update is
+            // announced with nothing left in the unit of work — three flushes deep, where
+            // Doctrine's own documentation stops promising anything. Without it a
+            // creation would be overwritten by an update of the same row, and a history
+            // saying a thing was edited when it appeared is the kind of wrong this bundle
+            // refuses to produce.
+            //
+            // Recorded once, and under the flush that is collecting NOW: the re-announcing
+            // loop belongs to the outer flush, the change was made before it started, and
+            // its commit is the one the row hangs off. Appending instead put the same
+            // change in the history twice, signed by two different people.
+            // Spliced rather than assigned by key: both of these are lists whose indexes
+            // are each other's, and writing through a key is how an index that means two
+            // things starts.
+            array_splice($this->pending, $already, 1, [$record]);
+            array_splice($this->pendingFlush, $already, 1, [$collecting]);
+
+            return;
+        }
+
         $this->pending[] = $record;
-        $this->pendingFlush[] = $manager === null ? null : $this->collectingNow($manager);
+        $this->pendingFlush[] = $collecting;
         $this->pendingIndexByEntity[spl_object_id($entity)] = array_key_last($this->pending);
     }
 

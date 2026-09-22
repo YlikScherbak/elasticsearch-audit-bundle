@@ -836,8 +836,65 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
             $this->documents(),
         );
 
-        self::assertContains(['Second, edited by Alice', 'alice'], $signed, "the outer flush's work was signed by the actor of the flush that logged the refusal");
-        self::assertContains(['Bob logged the refusal', 'bob'], $signed, 'and the flush that logged the refusal keeps its own actor');
+        // The whole history of the operation, and nothing else. Alice's two changes are
+        // hers although the flush that logged the refusal carried one of them out, and
+        // that flush's own change is Bob's.
+        self::assertSame([
+            ['First, edited by Alice', 'alice'],
+            ['Second, edited by Alice', 'alice'],
+            ['Bob logged the refusal', 'bob'],
+        ], $signed);
+    }
+
+    public function testAnEntityUpdatedTwiceInOneOperationHasTwoRecords(): void
+    {
+        // The other side of recording a re-announced statement once. Here both
+        // announcements are real: the flush writes One -> Two, a listener changes the
+        // value again and flushes, and that flush writes Two -> Three. Two statements,
+        // two steps, and a history that skipped the first would be a row's value
+        // appearing from nowhere.
+        //
+        // What tells this from the re-announcement is the unit of work: it still holds a
+        // change set for the entity here, and holds nothing the second time the same
+        // statement is announced.
+        $this->em->persist($article = new Article('One'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $article, $this->who) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly Article $article,
+                private readonly object $who,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->who->actor = 'bob';
+                $this->article->title = 'Three';
+                $this->em->flush();
+            }
+        });
+
+        $article->title = 'Two';
+        $this->em->flush();
+
+        self::assertSame([
+            [['One', 'Two'], 'alice'],
+            [['Two', 'Three'], 'bob'],
+        ], array_map(
+            static fn (array $d): array => [[$d['changes']['title']['old'], $d['changes']['title']['new']], $d['source']],
+            $this->documents(),
+        ), 'a real second update of the same entity was folded into the first one');
     }
 
     public function testADeadInnerFlushDoesNotReachARemovalTheOuterOneMade(): void
