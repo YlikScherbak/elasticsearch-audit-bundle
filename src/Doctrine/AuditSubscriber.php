@@ -105,10 +105,30 @@ final class AuditSubscriber
      */
     private array $ownerFlush = [];
 
-    /** @var array<int, array{0: object, 1: array<string, Change>}> changes inside tracked collection elements, keyed by the owner's object id */
+    /**
+     * Changes inside tracked collection elements, by the owner's object id and then by
+     * the flush that collected them.
+     *
+     * The flush is inside rather than outside because the owner is what the record is
+     * built for, and the object beside it is the only thing some flushes have to build
+     * one from. What the number does is keep two flushes' answers about the same field
+     * apart: they share a key — "lines.42.quantity" names a column, not an occasion — so
+     * one bucket per owner meant the later flush simply wrote over the earlier one's,
+     * whichever of the two turned out to be real.
+     *
+     * Read back merged in flush order, which is the same answer one bucket gave.
+     *
+     * @var array<int, array{0: object, 1: array<int, array<string, Change>>}>
+     */
     private array $elementChanges = [];
 
-    /** @var array<int, array{0: object, 1: array<string, array{element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>}> elements a tracked collection gained or lost, keyed by the owner's object id */
+    /**
+     * Elements a tracked collection gained or lost, by the owner's object id and then by
+     * the flush that collected them. {@see self::$elementChanges} for why the number is
+     * where it is.
+     *
+     * @var array<int, array{0: object, 1: array<int, array<string, array{element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>>}>
+     */
     private array $elementMembership = [];
 
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
@@ -180,6 +200,9 @@ final class AuditSubscriber
      * Only ever used as a key. It does not survive the process and does not mean
      * anything outside it — two workers number their flushes the same way and never
      * compare notes.
+     *
+     * Counting from one, so that zero is free to mean "no flush is collecting" wherever
+     * something has to be filed under a number and there is none.
      */
     private int $flush = 0;
 
@@ -235,7 +258,10 @@ final class AuditSubscriber
      * only inside those is a record that never exists. postFlush builds one from here
      * instead, and needs the entity to build it from.
      *
-     * @var array<int, array{0: object, 1: array<string, list<object>>}>
+     * Keyed by the owner's object id and then by the flush that saw the emptying, for
+     * the reason {@see self::$elementChanges} gives.
+     *
+     * @var array<int, array{0: object, 1: array<int, array<string, list<object>>>}>
      */
     private array $emptiedCollections = [];
 
@@ -455,7 +481,7 @@ final class AuditSubscriber
 
                 $this->emptiedCollections[spl_object_id($owner)][0] = $owner;
                 $this->rememberWhoSawTheOwner(spl_object_id($owner), $flush);
-                $this->emptiedCollections[spl_object_id($owner)][1][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
+                $this->emptiedCollections[spl_object_id($owner)][1][$flush][$field] = array_values(array_filter($held, static fn (mixed $element): bool => \is_object($element)));
             } catch (\Throwable $e) {
                 // Reading the old membership back is the one part of this listener that
                 // asks the database a question of its own, and a question that fails must
@@ -1451,7 +1477,8 @@ final class AuditSubscriber
             // An element being inserted is named after the flush, not here; the object
             // is what is held until then.
             if ($added !== null) {
-                $held = $this->elementMembership[$key][1] ?? [];
+                $membership = $this->elementMembership[$key][1] ?? [];
+                $held = $membership[$flush ?? 0] ?? [];
                 $identifier = $this->identifierOf($em, $element);
 
                 // Asked of the unit of work, not of the identifier. "It has no id yet"
@@ -1486,7 +1513,8 @@ final class AuditSubscriber
                     'deferred' => $added && $inserting,
                     'id' => $identifier,
                 ];
-                $this->elementMembership[$key] = [$owner, $held];
+                $membership[$flush ?? 0] = $held;
+                $this->elementMembership[$key] = [$owner, $membership];
                 $this->rememberWhoSawTheOwner($key, $flush);
 
                 continue;
@@ -1523,10 +1551,20 @@ final class AuditSubscriber
             if ($replacing) {
                 $prefix = ElementKey::of($field, $id).'.';
 
-                foreach (array_keys($this->elementChanges[$key][1] ?? []) as $name) {
+                // This flush's bucket only. What another flush collected about the same
+                // element is that flush's answer, and a correction made here is not news
+                // about it — it is also cheaper, the scan being over what one flush has
+                // rather than everything the owner ever collected.
+                foreach (array_keys($this->elementChanges[$key][1][$flush ?? 0] ?? []) as $name) {
                     if (str_starts_with($name, $prefix)) {
-                        unset($this->elementChanges[$key][1][$name]);
+                        unset($this->elementChanges[$key][1][$flush ?? 0][$name]);
                     }
+                }
+
+                // A bucket emptied by that is taken away with the keys it held, so that
+                // "the owner has collected nothing" stays one question rather than two.
+                if (($this->elementChanges[$key][1][$flush ?? 0] ?? null) === []) {
+                    unset($this->elementChanges[$key][1][$flush ?? 0]);
                 }
             }
 
@@ -1549,7 +1587,7 @@ final class AuditSubscriber
             $this->rememberWhoSawTheOwner($key, $flush);
 
             foreach ($changes as $name => $change) {
-                $this->elementChanges[$key][1][$name] = $change;
+                $this->elementChanges[$key][1][$flush ?? 0][$name] = $change;
             }
         }
     }
@@ -1593,14 +1631,14 @@ final class AuditSubscriber
         $em = self::entityManagerOf($manager);
         $byOwner = [];
 
-        foreach ($this->elementChanges as $key => [$owner, $changes]) {
-            $byOwner[$key] = [$owner, $changes];
+        foreach ($this->elementChanges as $key => [$owner, $byFlush]) {
+            $byOwner[$key] = [$owner, self::inFlushOrder($byFlush)];
         }
 
-        foreach ($this->elementMembership as $key => [$owner, $entries]) {
+        foreach ($this->elementMembership as $key => [$owner, $byFlush]) {
             $changes = $byOwner[$key][1] ?? [];
 
-            foreach ($entries as $entry) {
+            foreach (self::inFlushOrder($byFlush) as $entry) {
                 // An inserted element had no identifier when it was collected; it has one now.
                 $id = $entry['id'] ?? ($em === null ? null : $this->identifierOf($em, $entry['element']));
 
@@ -1643,6 +1681,35 @@ final class AuditSubscriber
         }
 
         return array_values($byOwner);
+    }
+
+    /**
+     * What several flushes collected about one owner, read as one answer.
+     *
+     * In flush order and later winning, which is what a single bucket did by arriving
+     * later — the buckets exist so that a flush's share can be taken away again, not to
+     * change what the flushes that stayed add up to. Sorted rather than trusted to the
+     * insertion order: a flush publishing what an earlier one left writes into an older
+     * bucket after a newer one exists.
+     *
+     * @template T
+     *
+     * @param array<int, array<string, T>> $byFlush
+     *
+     * @return array<string, T>
+     */
+    private static function inFlushOrder(array $byFlush): array
+    {
+        // The one bucket handed back as it is, which is every ordinary flush. Merging it
+        // would be array_replace() copying everything one owner collected — the memcpy
+        // the write side is written key by key to avoid, put back at the other end.
+        if (\count($byFlush) === 1) {
+            return reset($byFlush);
+        }
+
+        ksort($byFlush);
+
+        return array_replace([], ...array_values($byFlush));
     }
 
     /**
@@ -1699,7 +1766,7 @@ final class AuditSubscriber
                 return null;
             }
 
-            $emptied = $this->emptiedCollections[spl_object_id($owner)][1] ?? [];
+            $emptied = self::inFlushOrder($this->emptiedCollections[spl_object_id($owner)][1] ?? []);
 
             if ($emptied !== []) {
                 // Built here rather than merged in as a ready Change, because what an
@@ -1878,7 +1945,7 @@ final class AuditSubscriber
             $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
 
             if ($withChanges) {
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), $this->emptiedCollections[spl_object_id($entity)][1] ?? [], $this->contextAsFlushed[$this->collectingNow($em)][spl_object_id($entity)] ?? []));
+                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), self::inFlushOrder($this->emptiedCollections[spl_object_id($entity)][1] ?? []), $this->contextAsFlushed[$this->collectingNow($em)][spl_object_id($entity)] ?? []));
             }
 
             return $record;
