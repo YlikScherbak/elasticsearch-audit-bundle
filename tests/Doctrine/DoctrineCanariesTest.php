@@ -377,6 +377,121 @@ final class DoctrineCanariesTest extends TestCase
     }
 
     /**
+     * Backs the rule that decides which flush is collecting right now.
+     *
+     * The listener keeps a stack of the flushes it is inside, each entry remembering the
+     * transaction level its `onFlush` arrived at. Which entry is the current one is
+     * decided by comparing that level with the connection's level at the moment the
+     * question is asked — and the whole rule rests on two facts about the ORM that are
+     * observable rather than promised:
+     *
+     * - a flush's `onFlush` is dispatched BEFORE its transaction begins, and every
+     *   lifecycle event of that flush arrives one level deeper than its `onFlush` did;
+     * - an inner flush that dies in `onFlush` never opened a transaction, so the level
+     *   stays where it was — and the outer flush's next event therefore arrives at a
+     *   level EQUAL to the one the dead inner pushed at.
+     *
+     * That second fact is what lets "discard every entry at or below the current level"
+     * throw away a dead inner before anything is recorded under its number. If it stops
+     * holding, the listener records the outer flush's later work under the moment of a
+     * flush that never happened.
+     */
+    public function testAtWhatDepthEachEventOfAFlushArrives(): void
+    {
+        foreach ([false, true] as $killTheInner) {
+            $trace = [];
+            $em = new EntityManager(DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $this->config), $this->config);
+            (new SchemaTool($em))->createSchema($em->getMetadataFactory()->getAllMetadata());
+
+            $em->persist($first = new Article('First'));
+            $em->persist($second = new Article('Second'));
+            $em->persist($aside = new Article('Aside'));
+            $em->flush();
+
+            $watcher = new class($trace) {
+                /** @param list<string> $trace */
+                public function __construct(private array &$trace)
+                {
+                }
+
+                public function onFlush(OnFlushEventArgs $args): void
+                {
+                    $this->trace[] = 'onFlush '.$args->getObjectManager()->getConnection()->getTransactionNestingLevel();
+                }
+
+                public function postUpdate(PostUpdateEventArgs $args): void
+                {
+                    $this->trace[] = 'postUpdate '.$args->getObjectManager()->getConnection()->getTransactionNestingLevel();
+                }
+            };
+            $em->getEventManager()->addEventListener([Events::onFlush, Events::postUpdate], $watcher);
+
+            if ($killTheInner) {
+                $em->getEventManager()->addEventListener([Events::onFlush], new class {
+                    private int $seen = 0;
+
+                    public function onFlush(): void
+                    {
+                        if (++$this->seen === 2) {
+                            throw new \DomainException('the inner flush is refused');
+                        }
+                    }
+                });
+            }
+
+            $em->getEventManager()->addEventListener([Events::postUpdate], new class($em, $aside) {
+                private bool $ran = false;
+
+                public function __construct(private readonly EntityManagerInterface $em, private readonly Article $aside)
+                {
+                }
+
+                public function postUpdate(): void
+                {
+                    if ($this->ran) {
+                        return;
+                    }
+
+                    $this->ran = true;
+                    $this->aside->title = 'changed from inside';
+
+                    try {
+                        $this->em->flush();
+                    } catch (\DomainException) {
+                        // what the application does when a listener refuses its inner flush
+                    }
+                }
+            });
+
+            $first->title = 'first, edited';
+            $second->title = 'second, edited';
+            $em->flush();
+
+            $where = $killTheInner ? 'with a dead inner flush' : 'with a live one';
+
+            self::assertSame('onFlush 0', $trace[0] ?? null, sprintf('%s: onFlush is dispatched inside the transaction now', $where));
+            self::assertSame('postUpdate 1', $trace[1] ?? null, sprintf('%s: a flush event no longer arrives one level below its own onFlush', $where));
+            self::assertSame('onFlush 1', $trace[2] ?? null, sprintf('%s: the inner flush did not push at the level its events arrive at', $where));
+
+            if ($killTheInner) {
+                // The inner one never opened a transaction, so the outer flush's next
+                // event arrives at the level the dead inner pushed at — which is what
+                // makes "at or below the current level" enough to throw it away.
+                self::assertSame('postUpdate 1', $trace[3] ?? null, 'a dead inner flush left the level somewhere else than where it pushed');
+                self::assertCount(4, $trace, 'with a dead inner flush there is nothing else to see');
+
+                continue;
+            }
+
+            // The inner flush picks up whatever the outer one had not executed yet, so
+            // how many events it runs is its own business; at what level they arrive is
+            // the fact being pinned.
+            self::assertSame('postUpdate 2', $trace[3] ?? null, 'a live inner flush no longer runs its own events deeper than its push');
+            self::assertSame('postUpdate 1', $trace[array_key_last($trace)] ?? null, 'the outer flush came back at a different level than it left');
+        }
+    }
+
+    /**
      * Backs the listener's handling of a failed flush.
      *
      * `UnitOfWork::commit()` closes the manager when anything inside its own try
