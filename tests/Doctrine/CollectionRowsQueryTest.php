@@ -65,7 +65,13 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
 
         [$sql] = $this->counting(Route::class, new Route('R-1'), $mapping) ?? [null];
 
-        self::assertSame('SELECT COUNT(*) FROM "route_stop" WHERE route_id = ?', $sql);
+        // Asked of the platform rather than written out: every one of them spells a quoted
+        // name its own way, and a test that picks one spells the database it was written
+        // on rather than the rule.
+        $platform = $this->em->getConnection()->getDatabasePlatform();
+
+        self::assertInstanceOf(AbstractPlatform::class, $platform);
+        self::assertSame('SELECT COUNT(*) FROM '.$platform->quoteIdentifier('route_stop').' WHERE route_id = ?', $sql);
     }
 
     public function testAnInverseOneToManyIsCountedInTheElementsTable(): void
