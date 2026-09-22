@@ -95,7 +95,7 @@
         // answer. They are there because the method is handed a snapshot the listener
         // kept, and a snapshot is only as well-formed as whoever filled it.
         DecrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::2269", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2069"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::2283", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2083"],
         },
 
         // The same premise one method further on. forgetWhatThisFlushCollected() reads
@@ -105,7 +105,7 @@
         // reaches the same place. The guard is there because the map is the listener's
         // own and a snapshot is only as well-formed as whoever filled it.
         IncrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1213", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2069"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1213", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2083"],
         },
         LogicalAnd: {
             ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1213"],
@@ -123,7 +123,7 @@
 
 
         LogicalOr: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::2269", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::2147"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::2283", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::2161"],
         },
 
         // Two guards that never fire, kept for the day they can.
@@ -147,7 +147,7 @@
         // below every stamp whether it is -1, 0 or -2, or absent and read as null. Four
         // ways of writing one question.
         LessThan: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2069"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2083"],
         },
 
         // And the bucket handed back as it is when there is only one of it, which every
@@ -156,7 +156,7 @@
         // everything one owner collected, which is the memcpy the write side goes key by
         // key to avoid.
         ReturnRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable::1680", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2095"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable::1694", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2109"],
         },
 
         // Two `continue`s with nothing behind them to skip, each for its own reason.
@@ -175,7 +175,7 @@
         //   collections through one property. Whatever follows a match either fails
         //   those guards and skips itself, or is the same mapping written twice.
         Continue_: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::elementChanges::188", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::holdElementChanges::1921"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::elementChanges::188", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::holdElementChanges::1935"],
         },
 
         // The always-recorded context of an owner that had no event of its own is applied
@@ -186,7 +186,7 @@
         // loses the context, and WhoseMomentALateRecordCarriesTest fails on it, which is
         // the property being pinned. One mutant, one fact, one guard.
         Coalesce: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::2171", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2069"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::2185", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::latestPerKey::2083"],
         },
 
         // An owner whose collection was emptied is remembered twice: once where the
@@ -212,7 +212,7 @@
         // Doctrine makes in writing. The Stringable arm beside it is reached, and has a
         // test.
         CastString: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::stringify::2383"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::stringify::2397"],
         },
     },
     // Its own floor, and well below the other run's, because this listener is the code

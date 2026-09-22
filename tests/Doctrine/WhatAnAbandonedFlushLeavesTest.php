@@ -1506,6 +1506,88 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         );
     }
 
+    public function testAFieldAPreUpdateListenerAddsStartsFromWhatTheColumnHeld(): void
+    {
+        // The field is not in the change set the flush took in onFlush -- a normaliser in
+        // preUpdate brings it in, and Doctrine merges it through
+        // recomputeSingleEntityChangeSet(). The side the unit of work reports it from is
+        // the one an earlier, refused flush left behind, and the correction that says
+        // otherwise is only reached for such a field on one road.
+        $this->em->persist($article = new Article('One'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseOneFlush();
+
+        $article->title = 'Two';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        self::assertSame('One', $this->titleInTheDatabase($article), 'the premise: the refused flush wrote nothing');
+
+        $this->inThePreUpdateOf($article, static function (Article $article, EntityManagerInterface $em): void {
+            $article->title = 'Three';
+            $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(Article::class), $article);
+        });
+
+        // Somebody else's change is what puts the entity in the flush at all.
+        $article->publishedAt = new \DateTimeImmutable('2026-01-01 00:00:00');
+        $this->em->flush();
+
+        self::assertSame('Three', $this->titleInTheDatabase($article), 'the premise: the statement wrote what preUpdate left');
+
+        self::assertSame(
+            [['old' => 'One', 'new' => 'Three']],
+            array_map(static fn (array $d): mixed => $d['changes']['title'], $this->documents()),
+            'a field preUpdate added started from a value the column never held',
+        );
+    }
+
+    public function testAndTheStatementThatWroteItSpendsTheCorrection(): void
+    {
+        // The other half of the same road. A correction left unspent is still there for
+        // the flush after the one that wrote the column, which then starts its change from
+        // a value two writes old -- and under whoever happens to be acting by then.
+        $this->em->persist($article = new Article('One'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->refuseOneFlush();
+
+        $article->title = 'Two';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+        }
+
+        $this->inThePreUpdateOf($article, static function (Article $article, EntityManagerInterface $em): void {
+            $article->title = 'Three';
+            $em->getUnitOfWork()->recomputeSingleEntityChangeSet($em->getClassMetadata(Article::class), $article);
+        });
+
+        $article->publishedAt = new \DateTimeImmutable('2026-01-01 00:00:00');
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $article->title = 'Four';
+        $this->em->flush();
+
+        self::assertSame('Four', $this->titleInTheDatabase($article), 'the premise: the third change went through');
+
+        self::assertSame(
+            [['old' => 'Three', 'new' => 'Four']],
+            array_map(static fn (array $d): mixed => $d['changes']['title'], $this->documents()),
+            'the change after the one that wrote the column started from a value two writes old',
+        );
+    }
+
     private function silenceOurPostFlush(): AuditSubscriber
     {
         foreach ($this->em->getEventManager()->getListeners(Events::postFlush) as $listener) {

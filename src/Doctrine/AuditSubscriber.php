@@ -622,7 +622,7 @@ final class AuditSubscriber
         $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
 
         if ($manager !== null) {
-            $this->refreshElementChanges($manager, $args->getObject(), $collecting);
+            $this->readTheChangeSetAgainAfterPreUpdate($manager, $args->getObject(), $collecting);
         }
 
         $record = $this->recordFor($args, AuditEvent::UPDATE);
@@ -1429,21 +1429,35 @@ final class AuditSubscriber
     }
 
     /**
-     * What an element did, asked again after its own preUpdate has had its say.
+     * The change set read again, after preUpdate has had its say.
      *
-     * Element changes are collected in onFlush, which is before Doctrine builds the
-     * UPDATE - and a preUpdate listener may still correct the value, which Doctrine
-     * merges in through recomputeSingleEntityChangeSet(). An audited entity's own
-     * fields already survive that, because its record is built from the change set the
-     * unit of work holds at postUpdate; its lines did not. The history then said a line
-     * went to 7 while the row took 5, which is the one kind of wrong an audit trail
-     * must not be: not thin, but confidently mistaken.
+     * A change set is taken in onFlush, which is before Doctrine builds the UPDATE — and a
+     * preUpdate listener may still correct a value, or bring in a field that was not in
+     * it, which Doctrine merges through recomputeSingleEntityChangeSet(). What the
+     * statement writes is that later answer.
+     *
+     * **For every updated entity, and not only the elements of a tracked collection.**
+     * The elements are why this exists — their changes are folded into the owner's record
+     * from what was collected in onFlush, so a correction that never reached it had the
+     * history saying a line went to 7 while the row took 5 — but narrowing it to them
+     * would take two other things down with it, and neither is obvious from here:
+     *
+     * - a field a preUpdate listener ADDS is not in the snapshot at all, and {@see
+     *   sidesFrom()} keeps such a field exactly as the unit of work reports it. After a
+     *   refused flush the unit of work reports it from a value the column never took, and
+     *   {@see $neverWritten} is what says otherwise — spent by rememberChangeSet(), which
+     *   is reached for that field on this road and no other;
+     * - and the same call is what SPENDS the correction, so leaving it unspent here means
+     *   it is still there for the flush after the one that wrote the column, which then
+     *   starts its change from a value two writes old. Measured, with this one call taken
+     *   out: One to Three recorded as "Two to Three", and the next change to "Four"
+     *   recorded as starting from "One", under a third actor.
      *
      * Only when the change set actually moved. A correction in preUpdate is rare, and
-     * walking every element of every flush to discover that nothing changed is work
-     * every application would pay for the few that need it.
+     * walking every entity of every flush to discover that nothing changed is work every
+     * application would pay for the few that need it.
      */
-    private function refreshElementChanges(EntityManagerInterface $em, object $element, int $flush): void
+    private function readTheChangeSetAgainAfterPreUpdate(EntityManagerInterface $em, object $element, int $flush): void
     {
         $current = $em->getUnitOfWork()->getEntityChangeSet($element);
         $snapshot = $this->changeSets[spl_object_id($element)] ?? null;
