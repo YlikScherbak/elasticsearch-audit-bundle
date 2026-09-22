@@ -725,7 +725,7 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         $this->refuseTheSecondFlush();
         $this->changeAndFlushFromInside(static function () use ($item): void {
             $item->quantity = 9;
-        });
+        }, after: $item);
 
         $item->quantity = 2;
         $article->title = 'Trigger, edited';
@@ -1038,21 +1038,30 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         });
     }
 
-    private function changeAndFlushFromInside(\Closure $change, ?\Closure $andThen = null): void
+    /**
+     * @param object|null $after the entity whose own update must have happened first,
+     *        when the scenario depends on it. Doctrine groups its updates by class and
+     *        the order of the groups is not something to build a test on: the same
+     *        fixtures put a line's UPDATE before the entity that triggers this on one
+     *        machine and after it on another, which is the difference between the column
+     *        taking the live flush's value and taking the refused one's.
+     */
+    private function changeAndFlushFromInside(\Closure $change, ?\Closure $andThen = null, ?object $after = null): void
     {
-        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $change, $andThen) {
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $change, $andThen, $after) {
             private bool $ran = false;
 
             public function __construct(
                 private readonly EntityManagerInterface $em,
                 private readonly \Closure $change,
                 private readonly ?\Closure $andThen,
+                private readonly ?object $after,
             ) {
             }
 
-            public function postUpdate(): void
+            public function postUpdate(\Doctrine\ORM\Event\PostUpdateEventArgs $args): void
             {
-                if ($this->ran) {
+                if ($this->ran || ($this->after !== null && $args->getObject() !== $this->after)) {
                     return;
                 }
 

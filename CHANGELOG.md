@@ -137,6 +137,71 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   was "no flush at all" — and a removal published late then took the moment of whatever request
   published it. It is asked in `postRemove` instead, which is inside the flush that did the
   deleting.
+  <br>The unwinding is now the same rule wherever it is read. A flush *starting* had one of its
+  own — "not deeper than the top entry" — and the two agree while the stack holds one entry and
+  disagree the moment it holds two, which is what a listener refusing an inner flush and the
+  application flushing again to log it produces. The dead one pushed at the level the retry
+  begins at, so the retry read itself as an abandoned outer and published everything the live
+  outer flush had collected: before its commit, and signed by whoever was acting in the listener
+  that started the dead one. Levels now say which flushes are over, and what is left underneath
+  says whether anything is still live.
+- **A flush that never ran no longer leaves its work for the next one to publish.** A flush
+  refused in its own `onFlush` has already computed its change sets by then, and what it planned
+  to do inside a tracked collection was sitting in the outer flush's state. The outer one
+  committed and published it, so the history said a line went from 1 to 9 while the column still
+  held 1 — and where both flushes had touched the same field, the refused one's answer had
+  written over the live one's, because `lines.42.quantity` names a column rather than an
+  occasion.
+  <br>Whether a flush ran is now kept per flush rather than as one flag for all of them, and what
+  a tracked collection collected is kept per flush with it, so a flush that ran nothing takes its
+  own share away and the live flush's answer about the same line comes back. What "ran" means is
+  Doctrine's statements and not this listener's `postFlush`: an inner flush whose own `postFlush`
+  a stranger's listener swallowed had nonetheless written its row, and judging it by whether we
+  saw it finish would throw away history that agrees with the database. A flush whose only news
+  was an emptied collection has no statement to show and is asked about its collections instead,
+  and a flush in its own `postFlush` says so outright — `postFlush` is dispatched by a commit
+  that went through, and dispatched *before* `postCommitCleanup()` clears the schedules the
+  other question reads.
+- **A change now starts from where the column was, not from where a refused flush left it.**
+  Computing a change set is not free of consequence: Doctrine takes the new values to be the
+  entity's original data from then on. So a flush refused in its own `onFlush` leaves the unit of
+  work believing the row already holds what it was about to write, and the flush that really
+  carries the change out a moment later reports it as starting from there. A title the column
+  took straight from `One` to `Three` was recorded as going from `Two`; a line whose quantity
+  went from 1 to 3 was recorded as going from 9. Neither value was ever in the database.
+  <br>A flush being discarded now hands forward what it had found the row holding, and the next
+  flush to compute a change set for that entity spends it — spends, because what a flush that
+  never happened left behind is true of the column only until something writes it. Only its own
+  change sets travel that way: handing the live flush's forward as well corrects a step that
+  needs no correcting, and the history then reads as two changes from the same value rather than
+  one after the other.
+- **A statement Doctrine announces twice is recorded once.** A flush started from a lifecycle
+  listener runs on the outer flush's unit of work and carries out whatever it finds scheduled
+  there, including the outer flush's own remaining updates. When the outer flush resumed its
+  list, Doctrine dispatched `postUpdate` for a row somebody else had already written, and the
+  change went into the history a second time — two documents for one statement, signed by two
+  different people, because the two announcements arrive under two flushes. The second
+  announcement is told apart by the unit of work having nothing left to say about the entity,
+  and the one record kept goes under the flush that is collecting now, whose commit the row
+  hangs off. A real second update of the same entity still has a change set, and is still two
+  records.
+- **A removal drafted before a flush survives that flush finding an older one's state behind
+  it.** `$em->remove()` fires `preRemove` where it is called, so the record it takes belongs to
+  the flush about to run. A flush whose first act was to publish an earlier flush's records
+  late — or to drop them — forgot everything on the way, and that record with it: the row was
+  deleted and the history said nothing at all about the deletion. Such a draft is also no longer
+  counted among the records being written late, since `publish()` never writes one; the warning
+  was naming a record that was not going anywhere.
+- **A clock that throws is stood in for where the change is, rather than leaving the record to
+  whoever writes it.** Answering with no moment at all meant the records of that flush were
+  completed wherever they were finally written, which for a flush whose publishing was swallowed
+  is a later request: Alice's change came back stamped at Bob's time and signed with his name.
+  The system clock now stands in, read in `onFlush`, and the failure is reported through the
+  failure policy as before. Not because the two clocks agree — an application that configured a
+  clock configured it for a reason, and this is explicitly a different answer — but because a
+  timestamp from a second source at the right moment is a smaller mistake than one from the right
+  source at the wrong moment with the wrong name attached. `AuditWriter::provenance()` therefore
+  always answers; what can fail inside it fails into a weaker answer rather than into none.
 - **Settling the moment can no longer take the operation down with it.** The moment is
   settled in `onFlush` — the application's own flush — and everything settling it touches is
   application code: a clock an application may have replaced, an actor resolver reading a

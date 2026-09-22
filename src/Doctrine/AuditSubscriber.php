@@ -445,6 +445,15 @@ final class AuditSubscriber
      *
      * Only what a declaration names, and only for audited entities — the declaration is
      * read here anyway, a line further down, for the elements this entity may own.
+     *
+     * Filed under the number it is handed and not under the counter. The two are the same
+     * from onFlush, where the flush collecting is the last one to have been given a
+     * number, and they are not from postUpdate: a flush that ran in between has moved the
+     * counter on, and the owner's context would then be written under that flush's number
+     * while everything that reads it asks under the owner's. No fixture reaches the
+     * difference, which is why this is a statement about the method rather than a fix
+     * with a regression behind it — a method that takes a flush number and uses a
+     * different one is a second rule waiting for the arrangement that tells them apart.
      */
     private function rememberContext(EntityManagerInterface $em, object $entity, ?int $flush): void
     {
@@ -460,7 +469,7 @@ final class AuditSubscriber
         if ($metadata === null || $metadata->alwaysRecorded === []) {
             // Written all the same, and empty: "asked, and there was nothing" is an
             // answer, and the callers that ask once per flush need to see it.
-            $this->contextAsFlushed[$this->flush][spl_object_id($entity)] = [];
+            $this->contextAsFlushed[$flush ?? 0][spl_object_id($entity)] = [];
 
             return;
         }
@@ -474,7 +483,7 @@ final class AuditSubscriber
             }
         }
 
-        $this->contextAsFlushed[$this->flush][spl_object_id($entity)] = $context;
+        $this->contextAsFlushed[$flush ?? 0][spl_object_id($entity)] = $context;
     }
 
     /**
@@ -1650,7 +1659,7 @@ final class AuditSubscriber
         // that postFlush belongs to the flush after it. Asked once per flush: the entry
         // is written even when it is empty, so a second element of the same owner finds
         // it rather than asking again.
-        if (!isset($this->contextAsFlushed[$this->flush][spl_object_id($owner)])) {
+        if (!isset($this->contextAsFlushed[$flush ?? 0][spl_object_id($owner)])) {
             $this->rememberContext($em, $owner, $flush);
         }
 
