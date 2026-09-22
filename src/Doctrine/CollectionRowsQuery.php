@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine;
 
-use Doctrine\DBAL\ParameterType;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\ORM\Mapping\ClassMetadata;
 
@@ -45,7 +44,7 @@ final class CollectionRowsQuery
      *                                             shape; unused by the other
      * @param ClassMetadata<object>       $owner
      *
-     * @return array{0: string, 1: list<mixed>, 2: list<ParameterType|string>}|null
+     * @return array{0: string, 1: list<mixed>, 2: list<string>}|null
      */
     public static function counting(
         AbstractPlatform $platform,
@@ -89,11 +88,13 @@ final class CollectionRowsQuery
             $of = $owner->getFieldForColumn($referenced);
             $where[] = self::named($platform, $name, $column).' = ?';
             $values[] = $owner->getFieldValue($entity, $of);
-            // The column's own type, so that an identifier which is an object — a UUID
-            // stored as binary, say — is converted the way the column stores it rather
-            // than handed over as whatever it happens to cast to. A field with no declared
-            // type gets the behaviour a query with no types at all would have.
-            $types[] = $owner->getTypeOfField($of) ?? ParameterType::STRING;
+            // The column's own type, by name, so that an identifier which is an object —
+            // a UUID stored as binary, say — is converted the way the column stores it
+            // rather than handed over as whatever it happens to cast to. By name because
+            // that is the one spelling both supported DBAL majors take: the enum this
+            // reached for first is an enum on one of them and a class of integer constants
+            // on the other, and only the older analyser said so.
+            $types[] = $owner->getTypeOfField($of) ?? 'string';
         }
 
         // The schema with the name, because a name alone is a different table on a

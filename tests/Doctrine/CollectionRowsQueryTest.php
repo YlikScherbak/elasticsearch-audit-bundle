@@ -8,7 +8,6 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\CollectionRowsQuery;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
-use Doctrine\DBAL\ParameterType;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\ORM\Mapping\ClassMetadata;
 
@@ -158,7 +157,7 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
         // Which is what a query with no types at all would do. The metadata is asked
         // first, so a column that stores an identifier as binary is converted the way it
         // stores it rather than handed over as whatever it casts to.
-        self::assertSame(ParameterType::STRING, CollectionRowsQuery::entry(['x' => ParameterType::STRING], 'x'));
+        self::assertSame('string', CollectionRowsQuery::entry(['x' => 'string'], 'x'));
         self::assertNull(CollectionRowsQuery::entry(['x' => 1], 'y'));
         self::assertNull(CollectionRowsQuery::entry('not a mapping at all', 'x'));
     }
@@ -167,7 +166,7 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
      * @param class-string             $owner
      * @param ClassMetadata<object>|null $target
      *
-     * @return array{0: string, 1: list<mixed>, 2: list<ParameterType|string>}|null
+     * @return array{0: string, 1: list<mixed>, 2: list<string>}|null
      */
     private function counting(string $owner, object $entity, mixed $mapping, ?ClassMetadata $target = null): ?array
     {
