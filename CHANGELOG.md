@@ -177,7 +177,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   one after the other.
 - **A flush whose only news was an emptied collection, and whose publishing another
   listener swallowed, no longer loses that history — and no longer leaves a phantom
-  behind.** Such a flush has no statement of its own to be asked about: `clear()` dirties
+  behind** (in the field since **1.2.4**, where recording an emptied collection was
+  added). Such a flush has no statement of its own to be asked about: `clear()` dirties
   nothing on the owner, so Doctrine raises no entity event for it. What stood in for the
   question was the unit of work's schedule, on the premise that a deletion still listed
   there belongs to a flush that did not commit. `UnitOfWork::commit()` dispatches
@@ -305,6 +306,19 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   moment is not something a patch release may do: an enricher that reads the request's route will
   still describe the later request. `MomentEnricherInterface`, above, is the opt-in way to move
   one — a new interface rather than a changed meaning for the old one.
+  <br>**Since when, and what this does not do.** The road that publishes a swallowed flush's
+  records late has been here since **1.0.0**, and every record that went out along it was
+  completed from the writing moment: `source` from whoever was logged in then, `loggedAt` from the
+  clock then, the record **id** built from that timestamp — so such records also sort into the
+  history at the wrong place — and any attributes an enricher took from the request. Upgrading
+  fixes what is written from now on and **does not touch what is already in the index**: those
+  documents cannot be corrected, because the moment they should have carried was never written
+  down anywhere. If it matters which of them are affected, they are the ones whose `loggedAt`
+  belongs to a different request from the change they describe; from **1.3** the new `writtenAt`
+  makes the two visible side by side, but only for documents written from here on.
+  <br>It needs a `postFlush` listener registered before this bundle's, and one that throws, so an
+  installation with none has nothing to look for — the warning this listener logs when it
+  publishes late is the sign that there was one.
 
 ## [1.2.4] - 2026-09-21
 

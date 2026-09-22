@@ -26,6 +26,16 @@ use PHPUnit\Framework\TestCase;
  * Deliberately a reading of the source rather than a behaviour. There is no arrangement
  * of fixtures that says "this map is never cleared"; there is only every scenario nobody
  * thought of, which is where all four of them were found.
+ *
+ * **And what it does not do, which is the other half of the same sentence.** Five rounds
+ * of review found about twenty defects in this listener, and every one of them had one
+ * shape: state filed under somebody else's number, or let go at the wrong moment. This
+ * catches the first mechanically — a field with no decision about it fails here the day
+ * it is added. The second is still held by docblocks and tests: a field cleared too early
+ * satisfies this exactly as well as one cleared at the right moment, and one of the
+ * defects of the fifth round was precisely that. Whether the moment can be checked
+ * mechanically too is the open question, and the place to start if there is ever a sixth
+ * round.
  */
 final class WhatTheListenerKeepsBetweenFlushesTest extends TestCase
 {
