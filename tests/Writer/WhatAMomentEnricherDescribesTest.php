@@ -226,24 +226,27 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         self::assertSame('/checkout', $this->gateway->only('audit_log')['route'] ?? null);
     }
 
-    public function testAndIsToldSoWithBothValues(): void
+    public function testAndIsToldSoWithoutEitherValue(): void
     {
         // Silently discarding it would leave an application with two enrichers, one of
-        // which does nothing, and no way to find out which. Both values are in the
-        // message because choosing between them is the application's decision.
-        $this->writer([
-            self::describing(['route' => '/checkout']),
-            self::enriching(['route' => '/whatever-is-running-now']),
-        ])->record('order', 1, 'updated');
+        // which does nothing, and no way to find out which. Which attribute and which
+        // enricher is enough to find it; neither value is here, because this runs before
+        // redaction and a value that a rule covers — or one nested inside an attribute no
+        // rule names — would be in the log while the document had a placeholder.
+        $ordinary = self::enriching(['route' => '/whatever-is-running-now']);
+
+        $this->writer([self::describing(['route' => '/checkout']), $ordinary])->record('order', 1, 'updated');
 
         $said = $this->logs[0]['message'] ?? '';
 
-        self::assertStringContainsString('route', $said, 'nothing was logged about the discarded value');
-        // Which attribute, what was kept, what was thrown away: all three, because a
-        // message naming two of them sends somebody looking through their enrichers.
+        self::assertStringContainsString('route', $said, 'nothing was logged about the collision');
+        self::assertStringContainsString($ordinary::class, $said, 'the message does not say which enricher did it');
         self::assertSame('route', $this->logs[0]['context']['attribute'] ?? null);
-        self::assertSame('/checkout', $this->logs[0]['context']['kept'] ?? null);
-        self::assertSame('/whatever-is-running-now', $this->logs[0]['context']['discarded'] ?? null);
+
+        $context = json_encode($this->logs[0]['context'] ?? [], \JSON_THROW_ON_ERROR);
+
+        self::assertStringNotContainsString('/checkout', $context, 'the value the moment described is in the log');
+        self::assertStringNotContainsString('/whatever-is-running-now', $context, 'and so is the one that was discarded');
     }
 
     public function testAnAttributeTheCallerSetWinsAndIsNotDefended(): void
@@ -261,43 +264,44 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         self::assertSame([], $this->logs, 'the moment defended an attribute it never set');
     }
 
-    public function testTheValuesAreNotRepeatedWhenARuleCoversTheField(): void
+    public function testASecretNestedInsideAnAttributeIsNotInTheLogEither(): void
     {
-        // The report above exists to tell an application which of its two enrichers is
-        // doing nothing, and it did that by putting both values in the log. Redaction
-        // happens on the way out, after this runs, so for a field under a rule this was
-        // the one place that held both values in the clear while the document that
-        // reached Elasticsearch held neither.
+        // The first attempt at this withheld the values when a redaction rule named the
+        // attribute — and a rule names a field while redaction walks into the values, so
+        // a secret one level down, under a key no rule mentions, went into the log while
+        // the document had a placeholder in its place. Asking the redactor about the top
+        // key was a second implementation of the redaction rules standing next to the
+        // first and disagreeing with it.
         $this->writer([
-            self::describing(['token' => 'ALICE_SECRET_7c1f']),
-            self::enriching(['token' => 'BOB_SECRET_9a2e']),
-        ], new ChangeRedactor(['token']))->record('user', 7, 'update');
+            self::describing(['context' => ['password' => 'ALICE_SECRET_7c1f']]),
+            self::enriching(['context' => ['password' => 'BOB_SECRET_9a2e']]),
+        ], new ChangeRedactor(['password']))->record('user', 7, 'update');
 
         $said = json_encode($this->logs, \JSON_THROW_ON_ERROR);
 
-        self::assertStringNotContainsString('ALICE_SECRET_7c1f', $said, 'the value the moment described reached the log');
+        self::assertStringNotContainsString('ALICE_SECRET_7c1f', $said, 'a secret nested inside the attribute reached the log');
         self::assertStringNotContainsString('BOB_SECRET_9a2e', $said, 'and so did the one that was discarded');
 
         // Still reported, and still actionable: which attribute and which enricher.
-        self::assertStringContainsString('token', $this->logs[0]['message'] ?? '');
-        self::assertStringContainsString('redaction rule', $this->logs[0]['message'] ?? '');
-        self::assertSame('token', $this->logs[0]['context']['attribute'] ?? null);
+        self::assertStringContainsString('context', $this->logs[0]['message'] ?? '');
+        self::assertSame('context', $this->logs[0]['context']['attribute'] ?? null);
+
+        $document = json_encode($this->gateway->only('audit_log'), \JSON_THROW_ON_ERROR);
+
+        self::assertStringNotContainsString('ALICE_SECRET_7c1f', $document, 'the premise: the document itself is redacted');
     }
 
-    public function testARedactedCollisionDoesNotSilenceTheOnesAfterIt(): void
+    public function testEveryAttributeTakenOverIsReportedNotJustTheFirst(): void
     {
-        // Two attributes taken at once, the first of them under a rule. Withholding its
-        // values must not end the report: the second is an ordinary field, and an
-        // application with two enrichers still needs to be told about it.
+        // Two attributes taken at once, and both of them named: an application with two
+        // enrichers needs to know about every field they disagree on, not the first.
         $this->writer([
             self::describing(['token' => 'ALICE_SECRET_7c1f', 'route' => '/checkout']),
             self::enriching(['token' => 'BOB_SECRET_9a2e', 'route' => '/whatever-is-running-now']),
         ], new ChangeRedactor(['token']))->record('user', 7, 'update');
 
-        self::assertCount(2, $this->logs, 'the redacted one ended the report instead of skipping its values');
-        self::assertSame('token', $this->logs[0]['context']['attribute'] ?? null);
-        self::assertSame('route', $this->logs[1]['context']['attribute'] ?? null);
-        self::assertSame('/checkout', $this->logs[1]['context']['kept'] ?? null);
+        self::assertCount(2, $this->logs, 'only one of the two collisions was reported');
+        self::assertSame(['token', 'route'], array_column(array_column($this->logs, 'context'), 'attribute'));
     }
 
     public function testAFailingMomentEnricherDoesNotRepeatItsOwnException(): void

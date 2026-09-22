@@ -765,11 +765,17 @@ final class AuditWriter
      * both values are in the message, because which of the two is wanted is a decision
      * only the application can make, and it cannot make it without seeing them.
      *
-     * A value under a redaction rule is named and not repeated. Redaction happens on
-     * the way out, in prepare(), and this runs before it — so the one place that knew
-     * both values was putting both of them in the log while the document that reached
-     * Elasticsearch had neither. The rule is asked of the redactor rather than guessed
-     * from the value, which is what redacts() is public for.
+     * Neither value is in the message. Redaction happens on the way out, in prepare(),
+     * and this runs before it — so the one place that knew both values was putting both
+     * of them in the log while the document that reached Elasticsearch had neither.
+     * Showing them "unless a rule covers the field" was the first attempt and was not
+     * enough: a rule names a field, redaction walks into the values, and a secret nested
+     * inside an attribute nobody named went into the log while the document had a
+     * placeholder in its place. A second implementation of the redaction rules, standing
+     * next to the first and disagreeing with it.
+     *
+     * So the channel is closed rather than narrowed. Which attribute and which enricher
+     * is what an application acts on; deciding between two values is not the log's job.
      *
      * @param array<string, mixed> $moment
      */
@@ -788,17 +794,7 @@ final class AuditWriter
         }
 
         foreach ($taken as $name => $value) {
-            if ($this->redactor?->redacts($record->objectType, $name) === true) {
-                $this->say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept. Neither value is repeated here: "%s" is covered by a redaction rule.', $enricher::class, $name, $name), ['attribute' => $name]);
-
-                continue;
-            }
-
-            $this->say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept.', $enricher::class, $name), [
-                'attribute' => $name,
-                'kept' => $value,
-                'discarded' => $record->attributes[$name] ?? null,
-            ]);
+            $this->say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept. Neither value is repeated here.', $enricher::class, $name), ['attribute' => $name]);
         }
 
         return $record->withAttributes($taken);

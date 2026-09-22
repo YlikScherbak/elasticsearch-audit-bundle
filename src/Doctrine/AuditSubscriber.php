@@ -657,16 +657,36 @@ final class AuditSubscriber
         // Nearly always there is exactly one run; there are two or three when a
         // lifecycle listener called flush() in the middle of this one, and then each
         // stretch goes out with the moment its own flush settled.
+        //
+        // One run failing does not cost the rest. Under on_failure: throw a refused
+        // record leaves writeAll() as an exception, and stopping there would drop every
+        // later run — records of changes that are already committed, thrown away because
+        // something else could not be written. A single writeAll() never did that: it
+        // tries every record and raises afterwards. The runs are held to the same
+        // promise, and the first exception is the one the caller gets, because it is the
+        // one writeAll() already reported.
         $records = array_values($records);
         $collected = array_values($collected);
         $run = [];
         $moment = null;
+        $refused = null;
+
+        $send = function (array $run, ?int $moment) use (&$refused): void {
+            try {
+                $this->writer->writeAll(array_values($run), $this->provenance[$moment] ?? null);
+            } catch (\Throwable $e) {
+                // Kept, not reported: writeAll() has already put this through the failure
+                // policy — logged it, or dispatched it — and saying it again here would
+                // be one failure in the log twice.
+                $refused ??= $e;
+            }
+        };
 
         foreach ($records as $position => $record) {
             $its = $collected[$position] ?? null;
 
             if ($run !== [] && $its !== $moment) {
-                $this->writer->writeAll($run, $this->provenance[$moment] ?? null);
+                $send($run, $moment);
                 $run = [];
             }
 
@@ -675,7 +695,11 @@ final class AuditSubscriber
         }
 
         if ($run !== []) {
-            $this->writer->writeAll($run, $this->provenance[$moment] ?? null);
+            $send($run, $moment);
+        }
+
+        if ($refused !== null) {
+            throw $refused;
         }
 
         // And only now, with everything that could be written on its way out. If

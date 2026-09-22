@@ -205,12 +205,15 @@ final class EveryChannelSweepTest extends TestCase
             new class implements MomentEnricherInterface {
                 public function describe(): array
                 {
-                    return ['password' => EveryChannelSweepTest::secret()];
+                    // Nested under a key no rule names: the rules name a field, redaction
+                    // walks into the values, and asking the redactor about the top key
+                    // was the version of this guard that let the one below through.
+                    return ['context' => ['password' => EveryChannelSweepTest::secret()]];
                 }
 
                 public function mapping(): array
                 {
-                    return ['password' => ['type' => 'keyword']];
+                    return [];
                 }
             },
             new class implements AuditEnricherInterface {
@@ -221,12 +224,12 @@ final class EveryChannelSweepTest extends TestCase
 
                 public function enrich(AuditRecord $record): AuditRecord
                 {
-                    return $record->withAttributes(['password' => 'the other '.EveryChannelSweepTest::secret()]);
+                    return $record->withAttributes(['context' => ['password' => 'the other '.EveryChannelSweepTest::secret()]]);
                 }
 
                 public function mapping(): array
                 {
-                    return ['password' => ['type' => 'keyword']];
+                    return [];
                 }
             },
         ]);

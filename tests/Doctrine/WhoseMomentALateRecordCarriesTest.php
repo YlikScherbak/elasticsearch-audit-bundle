@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
@@ -854,6 +855,89 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         self::assertCount(1, $documents, 'the premise: the cleared flush is gone and only Bob is left');
         self::assertSame('bob', $documents[0]['source'], 'Bob is change was written as Alice, from before the clear');
         self::assertSame(self::BOB, $documents[0]['loggedAt']);
+    }
+
+    public function testOneRunFailingDoesNotThrowAwayTheRecordsOfTheOthers(): void
+    {
+        // Under on_failure: throw a refused record leaves writeAll() as an exception.
+        // Publishing walks the records in stretches that share a moment, and stopping at
+        // the first exception dropped every stretch after it — records of changes that
+        // are already committed, thrown away because something else could not be written.
+        // A single writeAll() never did that: it tries every record and raises after.
+        $refusing = new class implements AuditEnricherInterface {
+            public bool $armed = false;
+            public int $seen = 0;
+
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                // The outer flush's record is collected first, so this refuses the first
+                // stretch and leaves the one the inner flush made.
+                if ($this->armed && ++$this->seen === 1) {
+                    throw new \RuntimeException('this record cannot be enriched');
+                }
+
+                return $record;
+            }
+
+            public function mapping(): array
+            {
+                return [];
+            }
+        };
+
+        $this->attachListener(FailurePolicy::Throw, null, [$refusing]);
+
+        $this->em->persist($article = new Article('Alice wrote this'));
+        $this->em->persist($aside = new Article('Aside'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $this->who, $this->when, $aside) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly Article $aside,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->who->actor = 'bob';
+                $this->when->now = WhoseMomentALateRecordCarriesTest::bobsMoment();
+                $this->aside->title = 'Bob changed this from inside';
+                $this->em->flush();
+            }
+        });
+
+        $refusing->armed = true;
+        $article->title = 'Alice edited this';
+
+        try {
+            $this->em->flush();
+            self::fail('on_failure: throw did not reach the caller');
+        } catch (WriteFailedException) {
+            // which is what the caller asked for
+        }
+
+        self::assertSame(
+            ['Bob changed this from inside'],
+            array_map(static fn (array $d): string => $d['changes']['title']['new'] ?? '?', $this->documents()),
+            'the stretch after the one that failed was thrown away with it',
+        );
     }
 
     public function testTheListenerKeepsNoMomentsAfterTheFlushThatMadeThem(): void

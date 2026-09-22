@@ -94,6 +94,21 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
+- **One stretch of records failing no longer throws away the ones after it, and the collision
+  report no longer repeats any value at all.** Publishing walks the records of a flush in
+  stretches that share a moment, and under `on_failure: throw` a refused record leaves
+  `writeAll()` as an exception — so stopping at the first one dropped every stretch behind it:
+  records of changes that are already committed, thrown away because something else could not be
+  written. A single `writeAll()` never did that; it tries every record and raises afterwards, and
+  the stretches are held to the same promise. The first exception is what the caller gets, and it
+  is not reported a second time — `writeAll()` has already put it through the policy.
+  <br>The report about two enrichers describing the same attribute now names the attribute and
+  the enricher and neither value. Withholding them only when a redaction rule named the field was
+  not enough: a rule names a field, redaction walks into the values, and a secret nested inside an
+  attribute nobody named went into the log while the document had a placeholder in its place —
+  a second implementation of the redaction rules standing next to the first and disagreeing with
+  it. Which attribute and which enricher is what an application acts on; choosing between two
+  values was never the log's job.
 - **A `clear()` between two operations no longer hands the second one the first's moment.**
   `onClear` was a second copy of the listener's forgetting, written out by hand, and it fell
   behind: the fields added for the per-flush moment were never added to it. So a clear after a
