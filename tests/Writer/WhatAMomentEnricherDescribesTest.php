@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Writer;
 
 use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
+use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\MomentEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ScopedEnricherInterface;
@@ -18,6 +19,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Transport\SyncTransport;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
+use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
 use PHPUnit\Framework\TestCase;
@@ -121,6 +123,52 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
 
         self::assertSame(1, $counting->asked, 'a batch written without a provenance asked for the moment once per record');
         self::assertSame([1, 1, 1], array_column($this->gateway->documents['audit_log'], 'sequence'));
+    }
+
+    public function testSettlingTheMomentForABatchStaysBehindTheFailurePolicy(): void
+    {
+        // The moment is settled for the batch, which means the clock and the actor
+        // resolver are asked before any record is looked at — and that is inside the
+        // guard, not before it. A resolver that throws used to come out of this method
+        // raw, past on_failure entirely, and take with it a record that needed nothing
+        // from it.
+        $angry = new class implements ActorResolverInterface {
+            public function resolve(): ?string
+            {
+                throw new \RuntimeException('the security token store is not configured here');
+            }
+        };
+
+        $transport = new SyncTransport($this->gateway, new FrozenClock());
+        $writer = new AuditWriter($transport, $transport, new IndexResolver('audit_log'), $angry, new FrozenClock(), [], FailurePolicy::Log, $this->logger());
+
+        $writer->writeAll([(new AuditRecord('order', 1, 'update', new \DateTimeImmutable('2026-09-21 10:00:00'), 'alice'))->withId('rec-1')]);
+
+        self::assertCount(1, $this->gateway->documents['audit_log'] ?? [], 'a record that needed nothing from the resolver was lost to it');
+        self::assertSame('alice', $this->gateway->only('audit_log')['source'] ?? null, 'and what it did carry was thrown away');
+        self::assertNotSame([], $this->logs, 'the failure went unreported');
+    }
+
+    public function testAnEmptyBatchAsksNobodyAnything(): void
+    {
+        $asked = 0;
+        $counting = new class($asked) implements ActorResolverInterface {
+            public function __construct(private int &$asked)
+            {
+            }
+
+            public function resolve(): ?string
+            {
+                ++$this->asked;
+
+                return 'alice';
+            }
+        };
+
+        $transport = new SyncTransport($this->gateway, new FrozenClock());
+        (new AuditWriter($transport, $transport, new IndexResolver('audit_log'), $counting, new FrozenClock()))->writeAll([]);
+
+        self::assertSame(0, $asked, 'a batch with nothing in it settled a moment for nobody');
     }
 
     public function testOneThatClaimsAScopeIsRefusedRatherThanHalfHonoured(): void

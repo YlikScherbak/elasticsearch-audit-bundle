@@ -94,6 +94,28 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
+- **Settling the moment can no longer take the operation down with it.** The moment is
+  settled in `onFlush` — the application's own flush — and everything settling it touches is
+  application code: a clock an application may have replaced, an actor resolver reading a
+  security token, an enricher reading the request. Before this release the actor was resolved
+  inside the writer, where a failure met `on_failure`; taking it earlier took it out from
+  behind that guard, and a resolver that threw killed the flush it was there to describe. Under
+  `on_failure: log` that is the oldest promise this bundle makes, broken the wrong way round: an
+  audit log that can take the business operation down is worse than a gap in the history.
+  <br>Each part is behind the policy now, and what survives a failure is kept. The clock first:
+  without a timestamp there is no moment at all, so the flush settles none and the writer falls
+  back to asking per record, inside the guard it has always had. The actor next, and its failure
+  costs the actor only — a record dated correctly with no actor is better history than no
+  record. The moment's enrichers last, and they run whether or not the actor answered, because
+  what they describe does not depend on who was acting.
+  <br>`source: null` therefore means the record has no settled actor and does not say why; the
+  failure is reported where every other audit failure is. An installation that needs the
+  difference to be visible chooses `on_failure: throw` — and then the raise happens in
+  `onFlush`, before the transaction, so the operation is refused rather than committed without
+  its history.
+  <br>The same call in `AuditWriter::writeAll()` was outside the guard too, so a batch of
+  records that needed nothing from the resolver was lost to it. And a batch with nothing in it
+  now settles nothing: there is no moment to describe and nobody to ask about it.
 - **Four promises this release made and did not keep, found by reviewing the candidate.**
   `writeAll()` asked every moment enricher again for each record of a batch when nobody handed it
   a provenance — which is every batch an application assembles itself, and the promise says never

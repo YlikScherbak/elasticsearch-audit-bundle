@@ -194,7 +194,12 @@ final class AuditSubscriber
      * timestamp — would then be the later flush's. What is kept here is the answer as it
      * stood where the change happened, handed to the writer when the records finally go.
      *
-     * @var array<int, Provenance>
+     * Null when settling it failed — a clock or a resolver that threw, reported through
+     * the failure policy where it happened. The records of that flush are then completed
+     * the way they were before this map existed: asking again, per record, inside the
+     * writer's own guard.
+     *
+     * @var array<int, Provenance|null>
      */
     private array $provenance = [];
 

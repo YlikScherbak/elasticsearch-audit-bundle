@@ -206,10 +206,20 @@ final class AuditWriter
      */
     public function writeAll(array $records, ?Provenance $provenance = null): void
     {
+        if ($records === []) {
+            return;
+        }
+
         // A batch is one moment. The listener passes the one its flush settled; anybody
         // calling this directly gets one settled here, once — rather than each record
         // asking the clock, the actor resolver and every moment enricher again, which is
-        // the per-record answer this method exists to avoid.
+        // the per-record answer this method exists to avoid. A batch with nothing in it
+        // settles nothing: there is no moment to describe and nobody to ask about it.
+        //
+        // Asking this early used to be unsafe — the clock and the actor resolver are
+        // application code and their failures went past the failure policy — and the
+        // guard for that now lives inside provenance() itself, which is where it
+        // belongs: every caller of it is protected rather than this one.
         $provenance ??= $this->provenance();
 
         $outgoing = [];
@@ -601,13 +611,48 @@ final class AuditWriter
      * resolver are this writer's, and a second opinion about either would be a second
      * answer to "when did this happen".
      */
-    public function provenance(): Provenance
+    public function provenance(): ?Provenance
     {
-        return new Provenance(
-            \DateTimeImmutable::createFromInterface($this->clock->now()),
-            $this->actorResolver->resolve(),
-            $this->describeTheMoment(),
-        );
+        // Every part of this runs application code — a clock an application may have
+        // replaced, an actor resolver reading a security token, an enricher reading the
+        // request — and it runs from the Doctrine listener's onFlush, which is the
+        // application's own flush. Before this release the actor was resolved inside
+        // complete(), where a failure met the failure policy; taking it earlier took it
+        // out from behind that guard, and a resolver throwing then killed the operation
+        // it was supposed to be describing. Under on_failure: log that is the oldest
+        // promise this bundle makes, broken: an audit log that can take the business
+        // operation down is worse than a gap in the history.
+        //
+        // So each part is behind the policy, and what survives a failure is kept:
+        //
+        // - the clock first. Without a timestamp there is no moment at all, so this
+        //   answers with none and the writer falls back to asking again per record,
+        //   inside the try it has always had;
+        // - the actor next, and its failure costs the actor only. A record dated
+        //   correctly with no actor is better history than no record;
+        // - the moment's enrichers last, and they run whether or not the actor
+        //   answered: what they describe does not depend on who was acting.
+        //
+        // Under on_failure: throw the report raises, from onFlush — which refuses the
+        // operation before the database write rather than after it. That is what "throw"
+        // asks for, and the same shape as coalescing.on_overflow: throw.
+        try {
+            $at = \DateTimeImmutable::createFromInterface($this->clock->now());
+        } catch (\Throwable $e) {
+            $this->reportFailure($e, null);
+
+            return null;
+        }
+
+        try {
+            $actor = $this->actorResolver->resolve();
+        } catch (\Throwable $e) {
+            $this->reportFailure($e, null);
+
+            $actor = null;
+        }
+
+        return new Provenance($at, $actor, $this->describeTheMoment());
     }
 
     /**
