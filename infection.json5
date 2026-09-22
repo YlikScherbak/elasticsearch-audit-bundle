@@ -204,7 +204,7 @@
         //   Removing the filter is caught; removing the re-listing cannot be.
         // - `?? null` and `?? []` on an array read that PHP answers with null anyway.
         Coalesce: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::356", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute::83", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk::72", "Borsche\\ElasticsearchAuditBundle\\Writer\\AuditWriter::prepare::571"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold::356", "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::execute::83", "Borsche\\ElasticsearchAuditBundle\\Command\\MappingComparison::walk::72", "Borsche\\ElasticsearchAuditBundle\\Writer\\AuditWriter::prepare::581"],
         },
         // The writer's and the transport's equivalents:
         //

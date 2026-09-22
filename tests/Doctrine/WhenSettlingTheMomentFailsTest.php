@@ -154,6 +154,36 @@ final class WhenSettlingTheMomentFailsTest extends DoctrineTestCase
         self::assertNotSame([], $this->logs, 'and nothing was said about it');
     }
 
+    public function testAClockThatThrowsUnderThrowRefusesTheOperationRatherThanTheRecord(): void
+    {
+        // Why the clock's failure is reported where it happens rather than left to the
+        // records. Settling the moment runs in onFlush, before the transaction; the
+        // per-record fallback runs in postFlush, after the commit. Under on_failure:
+        // throw those are two different outcomes for the same broken clock — an
+        // operation refused, or an operation committed and then complained about — and
+        // the audit trail must not be the second one.
+        $this->clock = new class implements ClockInterface {
+            public function now(): \DateTimeImmutable
+            {
+                throw new \RuntimeException('the clock is not available');
+            }
+        };
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist(new Article('Alice wrote this'));
+
+        try {
+            $this->em->flush();
+            self::fail('on_failure: throw let the operation through');
+        } catch (\Throwable) {
+            // which is what the caller asked for
+        }
+
+        $this->reopen();
+
+        self::assertCount(0, $this->em->getRepository(Article::class)->findAll(), 'the row was committed and the audit complained afterwards');
+    }
+
     public function testUnderThrowTheOperationIsRefusedRatherThanCommittedWithoutHistory(): void
     {
         // The other policy, and the reason settling the moment early is not a problem
