@@ -1017,6 +1017,15 @@ final class AuditSubscriber
      * an association with no join table, or an identifier this cannot turn into a
      * parameter. The caller reads null as "not established", which is what it also reads
      * "there are rows" as — the two differ to a person and not to the decision.
+     *
+     * **None of those answers has a fixture, and they are left escaping rather than
+     * claimed equivalent.** An association with no join table cannot arrive here: emptying
+     * one raises entity events for its elements, which proves the flush ran and means this
+     * question is never asked. A mapping Doctrine built is well-formed, and the arm of
+     * each shape test that the installed ORM major cannot take is not reachable while it
+     * is installed. What is left is reading a mapping at analysis level 8, which costs one
+     * branch per step whether or not anything can take the other one; the alternative is a
+     * suppression, and a suppression says nothing to the next reader.
      */
     private function theJoinRowsAreGone(EntityManagerInterface $em, object $owner, string $field): ?bool
     {
