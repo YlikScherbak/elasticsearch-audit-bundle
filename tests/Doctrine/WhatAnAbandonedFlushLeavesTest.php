@@ -468,17 +468,46 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         ), 'the deletion was dropped, so the history still shows a row that is gone');
     }
 
-    public function testARemovalThatWasCalledOffIsStillOneOfTheRecordsCountedAndCarried(): void
+    public function testARemovalDraftedBeforeAFlushSurvivesTheLatePublicationOfAnother(): void
+    {
+        // $em->remove() fires preRemove where it is called, before any flush exists, so
+        // the record it takes belongs to the flush about to run. If that flush's first
+        // act is to find an earlier one's state behind it and publish it late, the
+        // forgetting that follows used to take this with it -- the row was deleted and
+        // the history said nothing at all about it.
+        $this->em->persist($old = new Article('Edited earlier'));
+        $this->em->persist($doomed = new Article('To be deleted'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $listener = $this->silenceOurPostFlush();
+        $old->title = 'Edited earlier, by somebody else';
+        $this->em->flush();
+        $this->restorePostFlush($listener);
+
+        // Drafted here, before the flush that will both publish the old record and do
+        // the deleting.
+        $this->em->remove($doomed);
+        $this->em->flush();
+
+        self::assertCount(1, $this->em->getRepository(Article::class)->findAll(), 'the premise: the row was deleted');
+
+        self::assertSame(
+            ['update', 'remove'],
+            array_map(static fn (array $d): string => $d['event'], $this->documents()),
+            'the deletion this flush carried out was forgotten with the records it published for the last one',
+        );
+    }
+
+    public function testARemovalCalledOffIsNotCountedAsARecordBeingWrittenLate(): void
     {
         // A deletion the application changed its mind about, which is an ordinary thing
         // for a listener to do. preRemove has already taken the record; postRemove never
-        // runs, because no row was deleted; so it stays where preRemove put it while
-        // everything else the flush wrote sits in the other list.
-        //
-        // That is the only state in which the two lists are both occupied, and it is
-        // what the guard and the count are written for. Read as one list, the flush is
-        // reported at half its size and — worse — a flush whose *only* record is in the
-        // other one is read as having collected nothing and is dropped.
+        // runs, because no row was deleted; so it stays where preRemove put it. It is not
+        // one of the records being written late, though, because publish() never writes
+        // one of those -- counting it made the warning name a record that was not going
+        // anywhere.
         $this->em->persist($article = new Article('To be deleted'));
         $this->em->flush();
 
@@ -496,17 +525,16 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
 
         self::assertNotSame([], array_filter(
             $this->logs,
-            static fn (string $line): bool => str_contains($line, '2 audit record(s) are being written now, late'),
-        ), sprintf("the warning counted one of the two lists; what was logged:
-%s", implode("
-", $this->logs)));
+            static fn (string $line): bool => str_contains($line, '1 audit record(s) are being written now, late'),
+        ), sprintf("the warning counted a record that was never written; what was logged:\n%s", implode("\n", $this->logs)));
     }
 
-    public function testTheDroppedWarningCountsBothListsToo(): void
+    public function testTheDroppedWarningCountsWhatIsReallyDropped(): void
     {
         // The same sum on the other ending, where the records are not written at all.
         // "Nothing can vouch for this flush" is already the worst news in the file; it
-        // has to come with the right number attached.
+        // has to come with the right number attached -- and a removal waiting for a flush
+        // that has not happened yet is not part of it.
         $this->em->persist($article = new Article('To be deleted'));
         $this->em->flush();
 
@@ -532,10 +560,57 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
 
         self::assertNotSame([], array_filter(
             $this->logs,
-            static fn (string $line): bool => str_contains($line, '2 audit record(s) it had collected are dropped'),
-        ), sprintf("no warning said two records were dropped; what was logged:
-%s", implode("
-", $this->logs)));
+            static fn (string $line): bool => str_contains($line, '1 audit record(s) it had collected are dropped'),
+        ), sprintf("the warning counted a record nobody was dropping; what was logged:\n%s", implode("\n", $this->logs)));
+    }
+
+    public function testARemovalDraftedBeforeAFlushSurvivesTheDroppingOfAnother(): void
+    {
+        // The same at the other ending. A flush is refused in its own onFlush and the
+        // application carries on: it removes something and flushes again. That flush's
+        // first act is to find the refused one's state behind it and drop it, and the
+        // record drafted for this one went with it -- the row was deleted with no history
+        // of the deletion.
+        $this->em->persist($doomed = new Article('To be deleted'));
+        $this->em->persist($other = new Article('Something else'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $this->em->getEventManager()->addEventListener([Events::onFlush], new class {
+            private bool $refused = false;
+
+            public function onFlush(): void
+            {
+                if ($this->refused) {
+                    return;
+                }
+
+                $this->refused = true;
+
+                throw new \DomainException('this flush may not go through');
+            }
+        });
+
+        $other->title = 'Something else, edited';
+
+        try {
+            $this->em->flush();
+        } catch (\DomainException) {
+            // what an application does when a listener refuses its flush
+        }
+
+        // Drafted after the refusal and before the flush that will carry it out.
+        $this->em->remove($doomed);
+        $this->em->flush();
+
+        self::assertCount(1, $this->em->getRepository(Article::class)->findAll(), 'the premise: the row was deleted');
+
+        self::assertContains(
+            'remove',
+            array_map(static fn (array $d): string => $d['event'], $this->documents()),
+            'the deletion was dropped with the state of the flush that was refused',
+        );
     }
 
     public function testAFlushWhoseManagerIsGoneHasItsRecordsDroppedAndSaysHowMany(): void

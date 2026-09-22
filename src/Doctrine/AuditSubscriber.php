@@ -815,17 +815,23 @@ final class AuditSubscriber
     /**
      * How many records the flush on the stack has collected, wherever it put them.
      *
-     * Three places, and asking only the first one was a way to lose history without
-     * saying so. Finished records sit in the pending list. A removal's record is taken
-     * in preRemove and waits apart until postRemove moves it across. And what happened
-     * inside a tracked collection is held against its owner until postFlush builds the
-     * record from it — which is the whole point of that map: **an owner whose own
-     * columns did not change gets no event from Doctrine at all**, so nothing about it
-     * ever reaches the pending list.
+     * Two places, and asking only the first one was a way to lose history without
+     * saying so. Finished records sit in the pending list. And what happened inside a
+     * tracked collection is held against its owner until postFlush builds the record
+     * from it — which is the whole point of that map: **an owner whose own columns did
+     * not change gets no event from Doctrine at all**, so nothing about it ever reaches
+     * the pending list.
      *
-     * That last one is why this exists. A flush whose only news came from inside a
+     * That second one is why this exists. A flush whose only news came from inside a
      * collection was read as a flush that collected nothing: its rows were committed,
      * its records were dropped, and the warning said zero records were lost.
+     *
+     * A removal drafted in preRemove is deliberately not among them. It is not something
+     * this flush collected — it is a record waiting for the flush that will do the
+     * deleting, which may be the one about to start — and publish() never writes one.
+     * Counted here it made the warning say a record was being written late that was not
+     * being written at all, and it let a flush with nothing to publish take the branch
+     * that says it is publishing.
      *
      * Counted once per owner, and not at all for an owner already in the pending list —
      * publish() folds what its elements did into the record that is there rather than
@@ -833,7 +839,7 @@ final class AuditSubscriber
      */
     private function collectedSoFar(): int
     {
-        $count = \count($this->pending) + \count($this->pendingRemovals);
+        $count = \count($this->pending);
 
         $owners = array_unique(array_merge(
             array_keys($this->elementChanges),
@@ -1115,11 +1121,23 @@ final class AuditSubscriber
         unset($this->provenance[$flush], $this->contextAsFlushed[$flush]);
     }
 
-    private function forgetThisFlush(): void
+    /**
+     * @param bool $keepingWhatWasDraftedForTheNextFlush whether a removal's record taken
+     *        in preRemove survives this. It does when the forgetting is a flush STARTING
+     *        and finding the last one's state behind it: `$em->remove()` fires preRemove
+     *        where it is called, before any flush exists, so a record drafted there
+     *        belongs to the flush about to run and not to the one that left. Swept up
+     *        with the rest, the deletion was committed with no history of it at all —
+     *        and the more so on the road that publishes late, where an operation's first
+     *        act is to write somebody else's records and its second was to lose its own.
+     */
+    private function forgetThisFlush(bool $keepingWhatWasDraftedForTheNextFlush = false): void
     {
+        $drafts = $keepingWhatWasDraftedForTheNextFlush ? $this->pendingRemovals : [];
+
         $this->pending = [];
         $this->pendingFlush = [];
-        $this->pendingRemovals = [];
+        $this->pendingRemovals = $drafts;
         $this->pendingIndexByEntity = [];
         $this->elementChanges = [];
         $this->elementMembership = [];
@@ -1224,7 +1242,7 @@ final class AuditSubscriber
                 } catch (\Throwable $e) {
                     $this->writer->reportFailure($e, null);
                 } finally {
-                    $this->forgetThisFlush();
+                    $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
                 }
             } else {
                 // Nothing was collected; or the flush never reached a statement,
@@ -1235,7 +1253,7 @@ final class AuditSubscriber
                 // that describes rows nobody has is worse than history that is missing.
                 $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => $collected]);
 
-                $this->forgetThisFlush();
+                $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
             }
         }
 
