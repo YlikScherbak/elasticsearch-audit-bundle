@@ -159,6 +159,23 @@ final class WhatTheConnectionShowsTheLogTest extends TestCase
         self::assertSame($statements[0], $statements[1], 'and what the connection is asked');
     }
 
+    public function testParametersPassedToExecuteAreNumberedAsBoundOnesAre(): void
+    {
+        // DBAL 3 lets a driver statement be given its parameters in execute(), as a list
+        // counted from zero. The log numbers placeholders from one, as bindValue() does.
+        $connection = $this->observed(false);
+        $driver = method_exists($connection, 'getWrappedConnection') ? $connection->getWrappedConnection() : null;
+
+        if (!$driver instanceof \Doctrine\DBAL\Driver\Connection || (new \ReflectionMethod(\Doctrine\DBAL\Driver\Statement::class, 'execute'))->getNumberOfParameters() === 0) {
+            self::markTestSkipped('Only DBAL 3 takes parameters in execute().');
+        }
+
+        $this->aRow($connection, 1);
+        $driver->prepare('UPDATE probe_row SET quantity = ? WHERE id = ?')->execute([4, 1]);
+
+        self::assertSame([1 => 4, 2 => 1], $this->log->statement($this->log->position())['params'] ?? null);
+    }
+
     #[DataProvider('savepointModes')]
     public function testReadsAreNotHeld(bool $savepoints): void
     {

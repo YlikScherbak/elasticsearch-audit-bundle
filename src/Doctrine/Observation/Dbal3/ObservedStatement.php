@@ -60,7 +60,11 @@ final class ObservedStatement extends AbstractStatementMiddleware
      */
     public function execute($params = null): Result
     {
-        $bound = $params ?? $this->references + $this->params;
+        // Positional parameters passed to execute() come as a list counted from zero; bound
+        // one by one they are counted from one, and so is every placeholder the log reads.
+        $bound = $params === null
+            ? $this->references + $this->params
+            : (array_is_list($params) && $params !== [] ? array_combine(range(1, \count($params)), $params) : $params);
 
         try {
             $result = parent::execute($params);
