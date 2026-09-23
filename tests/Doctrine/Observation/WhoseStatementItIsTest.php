@@ -20,15 +20,25 @@ use Doctrine\ORM\Events;
  * is listed with its owner and fate, so a statement given to the wrong flush shows as that,
  * not as a missing one.
  */
-final class WhoseStatementItIsTest extends DoctrineTestCase
+class WhoseStatementItIsTest extends DoctrineTestCase
 {
     private StatementLog $log;
+
+    /** Whether nested transactions use savepoints; DBAL 3 does not unless told to, DBAL 4 always does. */
+    protected bool $savepoints = false;
 
     protected function setUp(): void
     {
         parent::setUp();
 
-        $this->log = $this->watchTheConnection();
+        $this->log = $this->watchTheConnection(savepoints: $this->savepoints);
+    }
+
+    private function nestedTransactionsAreSeen(): bool
+    {
+        $connection = $this->em->getConnection();
+
+        return !method_exists($connection, 'getNestTransactionsWithSavepoints') || $connection->getNestTransactionsWithSavepoints();
     }
 
     public function testAFlushOwnsWhatItRan(): void
@@ -61,8 +71,7 @@ final class WhoseStatementItIsTest extends DoctrineTestCase
         // Without savepoints -- DBAL 3's default -- a nested transaction opens nothing on the
         // wire, so there is no frame for the nested flush to own and its statement is the
         // enclosing flush's. A limit of watching the connection, and written down as one.
-        $connection = $this->em->getConnection();
-        $nested = !method_exists($connection, 'getNestTransactionsWithSavepoints') || $connection->getNestTransactionsWithSavepoints() ? 'flush 3' : 'flush 2';
+        $nested = $this->nestedTransactionsAreSeen() ? 'flush 3' : 'flush 2';
 
         self::assertSame([
             ['UPDATE CrateItem quantity=2', 'flush 2', StatementLog::COMMITTED],
@@ -139,8 +148,7 @@ final class WhoseStatementItIsTest extends DoctrineTestCase
         $from = $this->log->position();
         $x->quantity = 2;
 
-        $connection = $this->em->getConnection();
-        $savepoints = !method_exists($connection, 'getNestTransactionsWithSavepoints') || $connection->getNestTransactionsWithSavepoints();
+        $savepoints = $this->nestedTransactionsAreSeen();
 
         try {
             $this->em->flush();
@@ -155,6 +163,140 @@ final class WhoseStatementItIsTest extends DoctrineTestCase
             ['UPDATE CrateItem quantity=2', 'flush 2', StatementLog::VOID],
             ['UPDATE CrateItem quantity=7', 'flush 2', StatementLog::VOID],
         ], $this->since($from), 'the dead flush\'s frame stops being its own the moment it is rolled back to');
+    }
+
+    public function testTheOuterFlushClaimsItsOwnFrameAfterANestedOneOpenedOneInsideIt(): void
+    {
+        // S1e: the nested flush is started from a listener ahead of this one, so by the time
+        // the outer flush has an event to claim its frame by, the nested flush has opened
+        // -- and closed -- one inside it. The outer flush's is the one directly inside what
+        // was open when it marked, not the last one opened.
+        [, $x, $y] = $this->aCrateWithTwoLines();
+
+        $listener = new class($x, function () use ($x): void {
+            $x->quantity = 5;
+            $this->em->flush();
+        }) {
+            private bool $ran = false;
+
+            public function __construct(private readonly object $entity, private readonly \Closure $what)
+            {
+            }
+
+            public function postUpdate(PostUpdateEventArgs $args): void
+            {
+                if ($this->ran || $args->getObject() !== $this->entity) {
+                    return;
+                }
+
+                $this->ran = true;
+                ($this->what)();
+            }
+        };
+
+        $events = $this->em->getEventManager();
+        $there = $events->getListeners(Events::postUpdate);
+
+        foreach ($there as $one) {
+            $events->removeEventListener([Events::postUpdate], $one);
+        }
+
+        $events->addEventListener([Events::postUpdate], $listener);
+
+        foreach ($there as $one) {
+            $events->addEventListener([Events::postUpdate], $one);
+        }
+
+        $from = $this->log->position();
+        $x->quantity = 2;
+        $y->quantity = 2;
+        $this->em->flush();
+
+        $nested = $this->nestedTransactionsAreSeen() ? 'flush 3' : 'flush 2';
+        $said = $this->since($from);
+
+        // The nested flush writes X = 5 and the outer flush's leftover Y, and ORM 2 and 3 do
+        // not write them in the same order. Which of the two comes first is Doctrine's, and
+        // not what this is about; whose they are is.
+        $inside = \array_slice($said, 1);
+        sort($inside);
+
+        self::assertSame(['UPDATE CrateItem quantity=2', 'flush 2', StatementLog::COMMITTED], $said[0] ?? null, 'the outer flush\'s own statement');
+        self::assertSame([
+            ['UPDATE CrateItem quantity=2', $nested, StatementLog::COMMITTED],
+            ['UPDATE CrateItem quantity=5', $nested, StatementLog::COMMITTED],
+        ], $inside);
+    }
+
+    public function testAnApplicationTransactionAfterARefusedFlushDoesNotInheritItsLabel(): void
+    {
+        // A nested flush says it is about to begin and is refused before it opens anything;
+        // the application then opens a transaction of its own inside the outer flush. That
+        // transaction is not the dead flush's, and what runs in it belongs to the flush it
+        // runs inside.
+        [, $x] = $this->aCrateWithTwoLines();
+
+        $this->inThePostUpdateOf($x, function (): void {
+            $veto = new class {
+                public function onFlush(): void
+                {
+                    throw new \DomainException('refused');
+                }
+            };
+            $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+            try {
+                $this->em->flush();
+            } catch (\DomainException) {
+            } finally {
+                $this->em->getEventManager()->removeEventListener([Events::onFlush], $veto);
+            }
+
+            $connection = $this->em->getConnection();
+            $connection->beginTransaction();
+            $connection->executeStatement('UPDATE Crate SET status = ? WHERE code = ?', ['audited', 'C-1']);
+            $connection->commit();
+        });
+
+        $from = $this->log->position();
+        $x->quantity = 2;
+        $this->em->flush();
+
+        self::assertSame([
+            ['UPDATE CrateItem quantity=2', 'flush 2', StatementLog::COMMITTED],
+            ['UPDATE Crate status=\'audited\'', 'flush 2', StatementLog::COMMITTED],
+        ], $this->since($from));
+    }
+
+    public function testASavepointAnotherListenerOpensInOnFlushDoesNotTakeTheLabel(): void
+    {
+        // Between this listener's onFlush and the transaction Doctrine begins for the flush,
+        // a listener behind it opens and closes a transaction of its own. The flush's frame is
+        // the one Doctrine opens after that, and it is that one the flush's statements run in.
+        [, $x] = $this->aCrateWithTwoLines();
+
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction(); // so that the listener's is a savepoint, not a BEGIN
+
+        $busy = new class {
+            public function onFlush(\Doctrine\ORM\Event\OnFlushEventArgs $args): void
+            {
+                $connection = $args->getObjectManager()->getConnection();
+                $connection->beginTransaction();
+                $connection->commit();
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $busy);
+
+        $from = $this->log->position();
+        $x->quantity = 2;
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::onFlush], $busy);
+        $connection->commit();
+
+        // Without savepoints the flush, nested in the application's transaction, opens
+        // nothing of its own, and its statement is the application's transaction's.
+        self::assertSame([['UPDATE CrateItem quantity=2', $this->nestedTransactionsAreSeen() ? 'flush 2' : 'nobody', StatementLog::COMMITTED]], $this->since($from));
     }
 
     public function testTheObserverRunsNoStatementOfItsOwn(): void

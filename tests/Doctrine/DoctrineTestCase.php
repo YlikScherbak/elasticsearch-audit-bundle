@@ -127,7 +127,7 @@ abstract class DoctrineTestCase extends TestCase
      * The observer goes outside the statement logger, so a statement it ran of its own
      * would be in $queries -- it runs none, and a test says so.
      */
-    protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log): StatementLog
+    protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log, bool $savepoints = false): StatementLog
     {
         $this->statements = new StatementLog();
 
@@ -137,6 +137,10 @@ abstract class DoctrineTestCase extends TestCase
         $this->connection = DriverManager::getConnection(TestConnection::params(), $this->ormConfig);
         $this->ormConfig->setMiddlewares($middlewares);
         TestConnection::reset($this->connection);
+
+        if ($savepoints && method_exists($this->connection, 'setNestTransactionsWithSavepoints')) {
+            $this->connection->setNestTransactionsWithSavepoints(true);
+        }
 
         $this->em = new EntityManager($this->connection, $this->ormConfig);
         (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());

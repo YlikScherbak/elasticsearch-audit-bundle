@@ -33,11 +33,16 @@ namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
  * and its rollback is not seen at all. The connection marks the transaction rollback-only and
  * refuses the outer commit, so what is seen is the outermost ROLLBACK, and that voids the lot.
  *
- * **Whose statement it is.** A flush says it is about to begin -- {@see label()} -- and the
- * next frame opened carries its number. A flush that never opened one (refused before its
- * transaction began) owns nothing, and what runs after it belongs to whatever frame is open
- * around it. So a frame, not a moment, decides ownership: the same statement run by a nested
- * flush on behalf of the outer one is the nested flush's statement, because that is the frame
+ * **Whose statement it is.** A flush marks where the log stands when it is about to begin --
+ * {@see mark()} -- and, once one of its statements has run, claims the frame Doctrine opened
+ * for it: the last one opened since the mark, directly inside the frame that was open then.
+ * {@see claim()} is after the fact on purpose. A label handed ahead to "the next frame
+ * opened" was taken by whatever opened first: a listener's own transaction in onFlush,
+ * before Doctrine began the flush's, or -- when the flush was refused before it began -- the
+ * application's next transaction, which inherited a dead flush's number. A flush that never
+ * reaches a statement claims nothing, and what runs after it belongs to whatever frame is
+ * open around it. So a frame, not a moment, decides ownership: the same statement run by a
+ * nested flush on behalf of the outer one is the nested flush's, because that is the frame
  * it ran in.
  *
  * Nothing here parses SQL beyond recognising the three savepoint statements, and nothing here
@@ -53,7 +58,7 @@ final class StatementLog
     /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool}> by sequence number */
     private array $statements = [];
 
-    /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, open: bool, committed: bool}> by identity */
+    /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, open: bool, committed: bool, dead: bool}> by identity, in the order they were opened */
     private array $frames = [];
 
     /** @var list<int> the frames open now, outermost first */
@@ -63,24 +68,50 @@ final class StatementLog
 
     private int $nextFrame = 0;
 
-    private ?int $label = null;
+    /**
+     * Where the log stands: the last frame opened so far, and the frame open now.
+     *
+     * Taken in onFlush, before Doctrine begins the flush's transaction, and handed back to
+     * {@see claim()} once it has.
+     *
+     * @return array{0: int, 1: int|null}
+     */
+    public function mark(): array
+    {
+        return [$this->nextFrame, $this->open === [] ? null : $this->open[\count($this->open) - 1]];
+    }
 
     /**
-     * The next frame opened belongs to this flush.
+     * The flush that marked the log owns the frame Doctrine opened for it.
      *
-     * Said in onFlush, which Doctrine calls right before it begins the flush's transaction.
-     * A later label replaces an earlier one that was never taken up: a flush refused in
-     * onFlush opened nothing, and the next flush to open something is the next one to say so.
+     * That is the last frame opened since the mark directly inside the frame that was open
+     * then: a transaction another listener opened and closed in onFlush came first, and a
+     * flush nested inside this one opens its frames further in. Claiming again is nothing,
+     * and a frame already rolled back to is not claimed -- it belonged to a flush that died.
+     *
+     * @param array{0: int, 1: int|null} $mark
      */
-    public function label(int $flush): void
+    public function claim(array $mark, int $flush): void
     {
-        $this->label = $flush;
+        [$after, $enclosing] = $mark;
+
+        for ($frame = $this->nextFrame; $frame > $after; --$frame) {
+            if (!isset($this->frames[$frame]) || $this->frames[$frame]['parent'] !== $enclosing) {
+                continue;
+            }
+
+            if ($this->frames[$frame]['label'] === null && !$this->frames[$frame]['dead']) {
+                $this->frames[$frame]['label'] = $flush;
+            }
+
+            return;
+        }
     }
 
     /** The outermost transaction began. */
     public function began(): void
     {
-        $this->open($this->label, null);
+        $this->open(null);
     }
 
     /** The outermost transaction committed: what survived in it is final. */
@@ -117,7 +148,7 @@ final class StatementLog
     public function executed(string $sql, array $params, int|string|null $affected, bool $failed = false): ?int
     {
         if (preg_match('/^\s*SAVEPOINT\s+(\S+)\s*$/i', $sql, $m) === 1) {
-            $this->open($this->label, $m[1]);
+            $this->open($m[1]);
 
             return null;
         }
@@ -263,19 +294,19 @@ final class StatementLog
         return \count($this->statements) + \count($this->frames);
     }
 
-    private function open(?int $label, ?string $savepoint): void
+    private function open(?string $savepoint): void
     {
         $parent = $this->open === [] ? null : $this->open[\count($this->open) - 1];
 
         $this->frames[++$this->nextFrame] = [
             'parent' => $parent,
-            'label' => $label,
+            'label' => null,
             'savepoint' => $savepoint,
             'open' => true,
             'committed' => false,
+            'dead' => false,
         ];
         $this->open[] = $this->nextFrame;
-        $this->label = null;
     }
 
     private function close(int $frame, bool $committed = false): void
@@ -326,7 +357,10 @@ final class StatementLog
         // transaction back to its savepoint and lowers its level: what runs next is the
         // enclosing flush's, which is carrying on -- and left under the dead flush's number,
         // the outer flush's committed statements would have gone with it.
-        $this->frames[$frame]['label'] = null;
+        if (isset($this->frames[$frame])) {
+            $this->frames[$frame]['label'] = null;
+            $this->frames[$frame]['dead'] = true;
+        }
     }
 
     /** Voids every statement executed in this frame, or in a frame inside it, after a sequence number. */

@@ -24,17 +24,20 @@ final class StatementLogTest extends TestCase
         // a depth, would void the first one's statement with the second's.
         $log = new StatementLog();
 
-        $log->label(1);
+        $mark1 = $log->mark();
         $log->began();
+        $log->claim($mark1, 1);
         $outer = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [2, 1], 1);
 
-        $log->label(2);
+        $mark2 = $log->mark();
         $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $log->claim($mark2, 2);
         $released = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [5, 1], 1);
         $log->executed('RELEASE SAVEPOINT DOCTRINE_2', [], 0);
 
-        $log->label(3);
+        $mark3 = $log->mark();
         $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $log->claim($mark3, 3);
         $dead = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [7, 2], 1);
         $log->executed('ROLLBACK TO SAVEPOINT DOCTRINE_2', [], 0);
 
@@ -86,16 +89,19 @@ final class StatementLogTest extends TestCase
         // between the two -- statements that commit.
         $log = new StatementLog();
 
-        $log->label(1);
+        $mark1 = $log->mark();
         $log->began();
-        $log->label(2);
+        $log->claim($mark1, 1);
+        $mark2 = $log->mark();
         $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $log->claim($mark2, 2);
         $firstDead = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [7, 2], 1);
         $log->executed('ROLLBACK TO SAVEPOINT DOCTRINE_2', [], 0);
         $between = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [2, 1], 1);
 
-        $log->label(3);
+        $mark3 = $log->mark();
         $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $log->claim($mark3, 3);
         $secondDead = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [9, 2], 1);
         $log->executed('ROLLBACK TO SAVEPOINT DOCTRINE_2', [], 0);
         $last = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [3, 1], 1);
@@ -112,14 +118,83 @@ final class StatementLogTest extends TestCase
         self::assertSame([1, 1], [$log->ownerOf($between), $log->ownerOf($last)], 'both belong to the outer flush');
     }
 
+    public function testAFrameAnotherListenerOpenedFirstIsNotTheFlushs(): void
+    {
+        // Between a flush's onFlush and the transaction Doctrine begins for it, a listener
+        // behind this one opens and closes its own. The flush claims after its statement
+        // ran, and what it claims is the last frame opened since it marked, directly inside
+        // the one open then -- Doctrine's.
+        $log = new StatementLog();
+
+        $outer = $log->mark();
+        $log->began();
+        $log->claim($outer, 1);
+
+        $mark = $log->mark();
+        $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $theirs = $log->executed('INSERT INTO audit_note (text) VALUES (?)', [1 => 'x'], 1);
+        $log->executed('RELEASE SAVEPOINT DOCTRINE_2', [], 0);
+        $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $ours = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [1 => 2, 2 => 1], 1);
+        $log->claim($mark, 2);
+        $log->executed('RELEASE SAVEPOINT DOCTRINE_2', [], 0);
+        $log->committed();
+
+        self::assertNotNull($theirs);
+        self::assertNotNull($ours);
+        self::assertSame([1, 2], [$log->ownerOf($theirs), $log->ownerOf($ours)]);
+    }
+
+    public function testAFlushThatNeverBeganLendsNothingToTheNextTransaction(): void
+    {
+        $log = new StatementLog();
+
+        $outer = $log->mark();
+        $log->began();
+        $log->claim($outer, 1);
+
+        $log->mark(); // flush 2 is refused before it begins, and never claims
+        $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $application = $log->executed('UPDATE Crate SET status = ? WHERE code = ?', [1 => 'audited', 2 => 'C-1'], 1);
+        $log->executed('RELEASE SAVEPOINT DOCTRINE_2', [], 0);
+        $log->committed();
+
+        self::assertNotNull($application);
+        self::assertSame(1, $log->ownerOf($application), 'the application\'s transaction runs inside flush 1, and is not flush 2\'s');
+    }
+
+    public function testAFrameRolledBackToIsNotClaimedAfterwards(): void
+    {
+        // A flush that claims late -- its only claim is at postFlush -- must not take back a
+        // frame its death already gave up.
+        $log = new StatementLog();
+
+        $outer = $log->mark();
+        $log->began();
+        $log->claim($outer, 1);
+
+        $mark = $log->mark();
+        $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [1 => 7, 2 => 2], 1);
+        $log->executed('ROLLBACK TO SAVEPOINT DOCTRINE_2', [], 0);
+        $after = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [1 => 2, 2 => 1], 1);
+        $log->claim($mark, 2);
+        $log->committed();
+
+        self::assertNotNull($after);
+        self::assertSame(1, $log->ownerOf($after));
+    }
+
     public function testAReleaseMakesNothingFinal(): void
     {
         $log = new StatementLog();
 
-        $log->label(1);
+        $mark1 = $log->mark();
         $log->began();
-        $log->label(2);
+        $log->claim($mark1, 1);
+        $mark2 = $log->mark();
         $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $log->claim($mark2, 2);
         $nested = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [5, 1], 1);
         $log->executed('RELEASE SAVEPOINT DOCTRINE_2', [], 0);
 
@@ -138,9 +213,10 @@ final class StatementLogTest extends TestCase
         // leftovers, and change sets the dead one computed -- is the outer flush's.
         $log = new StatementLog();
 
-        $log->label(1);
+        $mark1 = $log->mark();
         $log->began();
-        $log->label(2);
+        $log->claim($mark1, 1);
+        $log->mark(); // flush 2 never begins
         $next = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [9, 2], 1);
         $log->committed();
 
@@ -155,10 +231,12 @@ final class StatementLogTest extends TestCase
         // change set had merged into it, and that is whose it is.
         $log = new StatementLog();
 
-        $log->label(1);
+        $mark1 = $log->mark();
         $log->began();
-        $log->label(2);
+        $log->claim($mark1, 1);
+        $mark2 = $log->mark();
         $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+        $log->claim($mark2, 2);
         $leftover = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [7, 2], 1);
         $log->executed('RELEASE SAVEPOINT DOCTRINE_2', [], 0);
         $log->committed();
@@ -175,10 +253,11 @@ final class StatementLogTest extends TestCase
         // everything.
         $log = new StatementLog();
 
-        $log->label(1);
+        $mark1 = $log->mark();
         $log->began();
+        $log->claim($mark1, 1);
         $outer = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [2, 1], 1);
-        $log->label(2);
+        $log->mark(); // flush 2 never begins
         $nested = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [7, 2], 1);
         $log->rolledBack();
 
@@ -211,8 +290,9 @@ final class StatementLogTest extends TestCase
         $log->began();
 
         for ($flush = 1; $flush <= 500; ++$flush) {
-            $log->label($flush);
+            $mark = $log->mark();
             $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
+            $log->claim($mark, $flush);
 
             for ($i = 0; $i < 20; ++$i) {
                 $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [$i, $flush], 1);
@@ -238,8 +318,9 @@ final class StatementLogTest extends TestCase
         // its fate and its owner are read off that frame.
         $log = new StatementLog();
 
-        $log->label(1);
+        $mark1 = $log->mark();
         $log->began();
+        $log->claim($mark1, 1);
         $log->executed('UPDATE Article SET title = ? WHERE id = ?', ['a', 1], 1);
         $log->forgetUpTo($log->position());
 

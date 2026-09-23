@@ -222,6 +222,14 @@ final class AuditSubscriber
      */
     private array $rowOwners = [];
 
+    /**
+     * Where the statement log stood when each flush was about to begin, by flush -- handed
+     * back to it when the flush claims the frame its statements ran in.
+     *
+     * @var array<int, array{0: int, 1: int|null}>
+     */
+    private array $statementMarks = [];
+
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
     private array $pendingIndexByEntity = [];
 
@@ -542,10 +550,14 @@ final class AuditSubscriber
         // lines can make one flush's moment overwrite another's.
         $flush = ++$this->flush;
 
-        // Doctrine begins the flush's transaction right after onFlush; whatever frame the
-        // connection opens next is this flush's. A listener behind this one that refuses
-        // the flush leaves it with none, and the next flush's label replaces this one.
-        $this->statements?->label($flush);
+        // Where the connection stands before Doctrine begins this flush's transaction. The
+        // frame is claimed once one of the flush's statements has run, not handed ahead to
+        // whatever opens next: a listener behind this one may open a transaction of its own
+        // first, and a flush refused before it began must not lend its number to the next
+        // transaction the application opens.
+        if ($this->statements !== null) {
+            $this->statementMarks[$flush] = $this->statements->mark();
+        }
 
         $this->beginFlush($em, $flush);
 
@@ -972,6 +984,23 @@ final class AuditSubscriber
         // nothing, and the next flush read the stack as abandoned and dropped
         // everything the outer one had committed.
         $em = self::entityManagerOf($args->getObjectManager());
+
+        // A flush that ran no entity statement -- only a collection's -- has had no event to
+        // claim its frame by. The flush finishing is the one whose level the connection is
+        // back at, not the one on top: a nested flush refused before it began is still on
+        // the stack here, and claiming for it hands it whatever transaction the application
+        // opened after it died.
+        if ($em !== null) {
+            $level = $em->getConnection()->getTransactionNestingLevel();
+
+            foreach (array_reverse($this->flushes) as $entry) {
+                if ($entry['level'] === $level) {
+                    $this->claimTheFrameOf($entry['flush']);
+
+                    break;
+                }
+            }
+        }
 
         // The same discarding every other reader does, and for the same reason: an entry
         // at or below this level belongs to a flush that is over. Asked here it also
@@ -1950,7 +1979,19 @@ final class AuditSubscriber
             $this->flushes[] = $entry;
         }
 
+        $this->claimTheFrameOf($flush);
+
         return $flush;
+    }
+
+    /**
+     * Tells the statement log, when there is one, which frame this flush's statements ran in.
+     */
+    private function claimTheFrameOf(int $flush): void
+    {
+        if ($this->statements !== null && isset($this->statementMarks[$flush])) {
+            $this->statements->claim($this->statementMarks[$flush], $flush);
+        }
     }
 
     /**
@@ -2141,7 +2182,7 @@ final class AuditSubscriber
             }
         }
 
-        unset($this->provenance[$flush], $this->contextAsFlushed[$flush]);
+        unset($this->provenance[$flush], $this->contextAsFlushed[$flush], $this->statementMarks[$flush]);
     }
 
     /**
@@ -2182,6 +2223,7 @@ final class AuditSubscriber
         $this->vanishedEntirely = [];
         $this->sweptBy = [];
         $this->rowOwners = [];
+        $this->statementMarks = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
     }
