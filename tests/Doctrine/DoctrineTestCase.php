@@ -11,6 +11,8 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Tests\TestConnection;
@@ -115,6 +117,34 @@ abstract class DoctrineTestCase extends TestCase
         $this->em = new EntityManager($this->connection, $this->ormConfig, $this->em->getEventManager());
     }
 
+    /** What the connection did, once {@see watchTheConnection()} has been asked for. */
+    protected ?StatementLog $statements = null;
+
+    /**
+     * The same connection and manager as setUp() makes, with the connection watched, and a
+     * listener told about the log attached.
+     *
+     * The observer goes outside the statement logger, so a statement it ran of its own
+     * would be in $queries -- it runs none, and a test says so.
+     */
+    protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log): StatementLog
+    {
+        $this->statements = new StatementLog();
+
+        $middlewares = $this->ormConfig->getMiddlewares();
+        $this->ormConfig->setMiddlewares([...$middlewares, new ObservingMiddleware($this->statements)]);
+
+        $this->connection = DriverManager::getConnection(TestConnection::params(), $this->ormConfig);
+        $this->ormConfig->setMiddlewares($middlewares);
+        TestConnection::reset($this->connection);
+
+        $this->em = new EntityManager($this->connection, $this->ormConfig);
+        (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
+        $this->attachListener($policy);
+
+        return $this->statements;
+    }
+
     /**
      * @param iterable<AuditEnricherInterface> $enrichers
      */
@@ -135,8 +165,8 @@ abstract class DoctrineTestCase extends TestCase
         }
 
         $listener = $comparator === null
-            ? new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, logger: $this->logger())
-            : new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator, logger: $this->logger());
+            ? new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, logger: $this->logger(), statements: $this->statements)
+            : new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator, logger: $this->logger(), statements: $this->statements);
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, $listener);
     }
 

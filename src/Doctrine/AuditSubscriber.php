@@ -11,6 +11,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\TracksCollectionElementsInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -493,12 +494,22 @@ final class AuditSubscriber
      */
     private array $flushes = [];
 
+    /*
+     * $statements: what the connection did, when something is watching it.
+     *
+     * Told only which flush is about to begin its transaction, so that the frame the
+     * connection opens next carries this flush's number -- and nothing is read back from
+     * it yet: the listener's rules are what they were, and the log is compared against
+     * them in the tests before anything is decided from it. Null wherever the connection
+     * is not watched, which today is everywhere outside those tests.
+     */
     public function __construct(
         private readonly AuditWriter $writer,
         private readonly AuditMetadataFactory $metadataFactory,
         private readonly bool $skipEmptyUpdates = true,
         private readonly ValueComparatorInterface $comparator = new ValueComparator(),
         ?LoggerInterface $logger = null,
+        private readonly ?StatementLog $statements = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
@@ -530,6 +541,11 @@ final class AuditSubscriber
         // correctness rested on the order of two calls, and no rearrangement of these
         // lines can make one flush's moment overwrite another's.
         $flush = ++$this->flush;
+
+        // Doctrine begins the flush's transaction right after onFlush; whatever frame the
+        // connection opens next is this flush's. A listener behind this one that refuses
+        // the flush leaves it with none, and the next flush's label replaces this one.
+        $this->statements?->label($flush);
 
         $this->beginFlush($em, $flush);
 
