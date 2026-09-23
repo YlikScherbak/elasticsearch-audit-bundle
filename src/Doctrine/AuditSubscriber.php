@@ -157,7 +157,11 @@ final class AuditSubscriber
      * Only for an emptying that takes the ELEMENTS' rows. An owning many-to-many deletes
      * join rows and leaves every element where it was.
      *
-     * @var array<int, object>
+     * By the flush whose emptying took the row, so that a flush that dies takes its
+     * word with it: a nested flush refused after its onFlush collected an emptying never
+     * ran the DELETE, and the rows it said were going are exactly where they were.
+     *
+     * @var array<int, array<int, object>>
      */
     private array $takenByAnEmptying = [];
 
@@ -174,9 +178,29 @@ final class AuditSubscriber
      * and an emptying about to be written down is filtered against all of it and not only
      * against what the call that is running happened to find.
      *
-     * @var array<int, object>
+     * By the flush that concluded it, for the reason {@see $takenByAnEmptying} gives.
+     *
+     * @var array<int, array<int, object>>
      */
     private array $vanishedEntirely = [];
+
+    /**
+     * What each flush changed in ANOTHER flush's collected state, so it can be put back.
+     *
+     * The sweep that drops statements about rows an emptying takes reaches every flush of
+     * the operation, because a flush nested inside another files its part under its own
+     * number. That makes it the one place a flush alters what a different flush collected,
+     * and a flush can die after doing it: a nested flush refused by a listener behind this
+     * one had already swept the OUTER flush's "1 -> 2" away, the outer flush went on to
+     * write that UPDATE, and the row changed with no history of it. Discarding the dead
+     * flush's own buckets was never going to restore somebody else's.
+     *
+     * Kept as the bucket as it stood before this flush first touched it, per map, owner
+     * and bucket, so that putting it back is a copy and not a reconstruction.
+     *
+     * @var array<int, array<string, array{0: string, 1: int, 2: int, 3: object, 4: array<array-key, mixed>}>>
+     */
+    private array $sweptBy = [];
 
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
     private array $pendingIndexByEntity = [];
@@ -720,7 +744,7 @@ final class AuditSubscriber
 
                 if ($mappedBy !== null) {
                     foreach ($byIdentifier as $element) {
-                        $this->takenByAnEmptying[spl_object_id($element)] = $element;
+                        $this->takenByAnEmptying[$flush][spl_object_id($element)] = $element;
                     }
                 }
 
@@ -732,7 +756,7 @@ final class AuditSubscriber
                 $left = array_filter(
                     $byIdentifier,
                     fn (object $element): bool => !\in_array($element, $vanished, true)
-                        && !isset($this->vanishedEntirely[spl_object_id($element)]),
+                        && !self::inAnyFlush($this->vanishedEntirely, $element),
                 );
 
                 if ($left === []) {
@@ -1219,16 +1243,20 @@ final class AuditSubscriber
      * established", the same as "there are rows": the two differ to a person and not to the
      * decision.
      *
-     * One caller is left, and it only ever arrives here with a join table. Collecting the
-     * membership asked this too until it was replaced by reading the rows outright, and
-     * what remains is the question asked AFTER the commit -- which is only reached by a
-     * flush that emptied a collection and ran no statement of its own. An inverse
-     * collection with orphanRemoval is never one: its emptying removes the elements, every
-     * removal is a statement, and the flag is up before this is asked. So the arm of
-     * {@see CollectionRowsQuery} that reads the table off the element's metadata is not
-     * reached from here, and its tests are the class's own. Measured with a probe rather
-     * than reasoned -- a test written for that arm passed without exercising it, which is
-     * how this was noticed at all.
+     * One caller is left: the question asked AFTER the commit, of a flush that emptied a
+     * collection and ran no statement of its own. Both shapes of collection arrive here.
+     *
+     * The inverse one was said, for a day, never to arrive -- an inverse collection with
+     * orphanRemoval cannot be emptied without a statement, so the flag is always up before
+     * this is asked. That is true of a FRESH emptying and it was the only one the probe
+     * looked at. A stale one is different: a collection deletion still on Doctrine's
+     * schedule after a swallowed postFlush is handed to the next flush and carried out by
+     * it, and that flush may have nothing else to do -- no statement of its own, the flag
+     * down, and this asked about a collection mapped by its elements. With the arm that
+     * reads the elements' table taken out, the answer was "cannot say", the emptying was
+     * dropped with the flush, and a row that really went was never mentioned. Found by a
+     * generated sequence, 2390, the first time the arm was missing; it is in the list of
+     * sequences that tell a rule apart so it is found every time.
      */
     private function theJoinRowsAreGone(EntityManagerInterface $em, object $owner, string $field): ?bool
     {
@@ -1315,7 +1343,7 @@ final class AuditSubscriber
                     // By identity, so no name is involved and nothing else can be meant.
                     if ($entry['added'] === true && \in_array($entry['element'], $held, true)) {
                         $vanished[] = $entry['element'];
-                        $this->vanishedEntirely[spl_object_id($entry['element'])] = $entry['element'];
+                        $this->vanishedEntirely[$flush][spl_object_id($entry['element'])] = $entry['element'];
                     }
                 }
             }
@@ -1327,10 +1355,17 @@ final class AuditSubscriber
             foreach ($byFlush as $its => $entries) {
                 // Both directions. Dropping only the arrival leaves the departure of a row
                 // that was never there to depart from.
-                $byFlush[$its] = array_filter(
+                $left = array_filter(
                     $entries,
                     static fn (array $entry): bool => !\in_array($entry['element'], $vanished, true),
                 );
+
+                if (\count($left) === \count($entries)) {
+                    continue;
+                }
+
+                $this->beforeTouching('membership', $key, $its, $flush);
+                $byFlush[$its] = $left;
             }
 
             $this->elementMembership[$key] = [$owner, $byFlush];
@@ -1363,6 +1398,7 @@ final class AuditSubscriber
                 foreach (array_keys($byFlush[$its]) as $name) {
                     foreach ($prefixes as $prefix) {
                         if (str_starts_with($name, $prefix)) {
+                            $this->beforeTouching('changes', $key, $its, $flush);
                             unset($this->elementChanges[$key][1][$its][$name]);
 
                             break;
@@ -1382,6 +1418,69 @@ final class AuditSubscriber
     }
 
     /**
+     * Whether any live flush of this operation has put this element in the set.
+     *
+     * @param array<int, array<int, object>> $byFlush
+     */
+    private static function inAnyFlush(array $byFlush, object $element): bool
+    {
+        foreach ($byFlush as $elements) {
+            if (isset($elements[spl_object_id($element)])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Records a bucket of another flush as it stands, before this flush first changes it.
+     *
+     * A flush's own buckets are not recorded: they go when it does, and restoring one
+     * would bring back something the flush that is dying collected.
+     */
+    private function beforeTouching(string $map, int $key, int $its, int $flush): void
+    {
+        if ($its === $flush) {
+            return;
+        }
+
+        $slot = $map.'|'.$key.'|'.$its;
+
+        if (isset($this->sweptBy[$flush][$slot])) {
+            return; // the first sight of it is the one to put back
+        }
+
+        $source = match ($map) {
+            'membership' => $this->elementMembership,
+            'changes' => $this->elementChanges,
+            default => $this->emptiedCollections,
+        };
+
+        if (!isset($source[$key][1][$its])) {
+            return;
+        }
+
+        $this->sweptBy[$flush][$slot] = [$map, $key, $its, $source[$key][0], $source[$key][1][$its]];
+    }
+
+    /**
+     * Puts back what a dying flush changed in the buckets of flushes that are still live.
+     */
+    private function putBackWhatThisFlushSwept(int $flush): void
+    {
+        foreach ($this->sweptBy[$flush] ?? [] as [$map, $key, $its, $owner, $bucket]) {
+            match ($map) {
+                'membership' => $this->elementMembership[$key] = [$owner, [$its => $bucket] + ($this->elementMembership[$key][1] ?? [])],
+                'changes' => $this->elementChanges[$key] = [$owner, [$its => $bucket] + ($this->elementChanges[$key][1] ?? [])],
+                default => $this->emptiedCollections[$key] = [$owner, [$its => $bucket] + ($this->emptiedCollections[$key][1] ?? [])],
+            };
+        }
+
+        unset($this->sweptBy[$flush]);
+    }
+
+    /**
      * Takes a line out of every emptying this operation has recorded.
      *
      * Called when the line turns out to have ARRIVED during the operation whose emptying
@@ -1390,7 +1489,7 @@ final class AuditSubscriber
      * emptying may have been written down before the arrival was seen -- a flush nested
      * inside another does things in that order -- which is why this reaches back.
      */
-    private function forgetThisLineWasEverInACollection(object $element): void
+    private function forgetThisLineWasEverInACollection(object $element, int $flush): void
     {
         foreach ($this->emptiedCollections as $key => [$owner, $byFlush]) {
             $touched = false;
@@ -1403,6 +1502,7 @@ final class AuditSubscriber
                         continue;
                     }
 
+                    $this->beforeTouching('emptied', $key, $its, $flush);
                     $touched = true;
 
                     if ($left === []) {
@@ -1446,7 +1546,7 @@ final class AuditSubscriber
      * Anything unreadable falls back to the original data, which is the answer this had
      * before it could ask.
      */
-    private function whoseRowItIs(EntityManagerInterface $em, object $element, string $association, object $named, object $originally): object
+    private function whoseRowItIs(EntityManagerInterface $em, object $element, string $association, ?object $named, ?object $originally): ?object
     {
         try {
             $metadata = $em->getClassMetadata($element::class);
@@ -1480,8 +1580,16 @@ final class AuditSubscriber
 
             $has = $rows[0]['owner'];
 
+            // Nobody is an answer here too. The row with no owner in its column is the one
+            // thing this reader exists to be able to say, and it used to fall through to
+            // the original data -- somebody -- because both candidates were required to be
+            // somebody before it was asked.
+            if ($has === null) {
+                return null;
+            }
+
             foreach ([$named, $originally] as $candidate) {
-                if ($has !== null && (string) $has === (string) ($this->identifierOf($em, $candidate) ?? '')) {
+                if ($candidate !== null && (string) $has === (string) ($this->identifierOf($em, $candidate) ?? '')) {
                     return $candidate;
                 }
             }
@@ -1541,19 +1649,36 @@ final class AuditSubscriber
     {
         try {
             $metadata = $em->getClassMetadata($element::class);
-            $planned = self::sidesFrom(
-                $em->getUnitOfWork()->getEntityChangeSet($element),
-                $this->changeSets[spl_object_id($element)] ?? [],
-            );
+
+            // What this listener knows about the column, and never the unit of work's change
+            // set on its own. That set is spent the moment its UPDATE runs and Doctrine does
+            // not clear it when a postFlush listener throws, so a rename that WAS written,
+            // followed by an emptying, read the leftover and named the deleted row by the
+            // name it had before the rename. Whose row is going already stopped trusting
+            // that leftover; the fields of the same element were still trusting it.
+            //
+            // Two things know. What a refused flush left unwritten, which is the only record
+            // of a column a refusal moved Doctrine past without moving the row. And this
+            // listener's own change set, which is dropped once the row matches the object
+            // and so is only there while its statement is still to run.
+            $kept = $this->neverWritten[$element] ?? [];
+            $ours = $this->changeSets[spl_object_id($element)] ?? [];
 
             $stored = [];
 
             foreach ($metadata->getFieldNames() as $name) {
-                $was = \array_key_exists($name, $planned) && \is_array($planned[$name])
-                    ? $planned[$name][0] ?? null
-                    : null;
+                if (\array_key_exists($name, $kept)) {
+                    $was = $kept[$name];
+                } elseif (\array_key_exists($name, $ours) && \is_array($ours[$name]) && \array_key_exists(0, $ours[$name])) {
+                    $was = $ours[$name][0];
+                } else {
+                    continue; // nothing says this column holds anything other than the object
+                }
 
-                if ($was !== null && $was !== $metadata->getFieldValue($element, $name)) {
+                // A stored NULL is a value like any other. It used to be taken for "nothing
+                // known", so a nullable column that held nothing and was given something
+                // in the same flush as its row went was shown with the value it never got.
+                if ($was !== $metadata->getFieldValue($element, $name)) {
                     $stored[$name] = $was;
                 }
             }
@@ -1565,7 +1690,11 @@ final class AuditSubscriber
             $copy = $metadata->newInstance();
 
             foreach ($metadata->getFieldNames() as $name) {
-                $metadata->setFieldValue($copy, $name, $stored[$name] ?? $metadata->getFieldValue($element, $name));
+                $metadata->setFieldValue(
+                    $copy,
+                    $name,
+                    \array_key_exists($name, $stored) ? $stored[$name] : $metadata->getFieldValue($element, $name),
+                );
             }
 
             foreach ($metadata->getAssociationNames() as $name) {
@@ -1818,6 +1947,12 @@ final class AuditSubscriber
             unset($this->changeSets[$key], $this->changeSetFlush[$key]);
         }
 
+        // What it swept out of the flushes still running goes back before anything else
+        // is read, and what it concluded about rows being taken goes with it: its DELETE
+        // never ran.
+        $this->putBackWhatThisFlushSwept($flush);
+        unset($this->takenByAnEmptying[$flush], $this->vanishedEntirely[$flush]);
+
         foreach ([&$this->elementChanges, &$this->elementMembership, &$this->emptiedCollections] as &$map) {
             foreach ($map as $owner => [, $byFlush]) {
                 unset($byFlush[$flush]);
@@ -1883,6 +2018,7 @@ final class AuditSubscriber
         $this->emptiedCollections = [];
         $this->takenByAnEmptying = [];
         $this->vanishedEntirely = [];
+        $this->sweptBy = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
     }
@@ -2229,11 +2365,23 @@ final class AuditSubscriber
                     // where two readers contradict each other, which needs a re-pointing
                     // and a deletion of the same element.
                     $kept = $this->neverWritten[$element] ?? [];
-                    $originally = $em->getUnitOfWork()->getOriginalEntityData($element)[$association] ?? null;
+                    $original = $em->getUnitOfWork()->getOriginalEntityData($element);
+                    $originally = $original[$association] ?? null;
+
+                    // Whether each of the two has an answer at all, which is not the same as
+                    // whether its answer is somebody. The original data holds a detached line
+                    // as a null under a key that is there, and a change set that says a line
+                    // was detached says so with a null new side: both are answers, "nobody".
+                    // They used to be asked only when both named somebody, so a detach that
+                    // was WRITTEN, and then a delete, took the change set's leftover owner
+                    // and described the same departure a second time -- from a crate the row
+                    // had already left.
+                    $changeSetSays = \array_key_exists($association, $deletedChangeSet) && \is_array($deletedChangeSet[$association]);
+                    $originalSays = \array_key_exists($association, $original);
 
                     $owner = match (true) {
                         \array_key_exists($association, $kept) => $kept[$association],
-                        $named !== null && $originally !== null && $named !== $originally
+                        $changeSetSays && $originalSays && $named !== $originally
                             => $this->whoseRowItIs($em, $element, $association, $named, $originally),
                         default => $originally ?? $named ?? $current,
                     };
@@ -2521,10 +2669,10 @@ final class AuditSubscriber
         //
         // A DEPARTURE is left alone. A line that was already there and is going is
         // history, whichever road records it.
-        if ($added !== false && isset($this->takenByAnEmptying[spl_object_id($element)])) {
+        if ($added !== false && self::inAnyFlush($this->takenByAnEmptying, $element)) {
             if ($added === true) {
-                $this->vanishedEntirely[spl_object_id($element)] = $element;
-                $this->forgetThisLineWasEverInACollection($element);
+                $this->vanishedEntirely[$flush][spl_object_id($element)] = $element;
+                $this->forgetThisLineWasEverInACollection($element, $flush);
             }
 
             return;

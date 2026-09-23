@@ -227,6 +227,63 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         );
     }
 
+    /**
+     * The sequences that tell a rule apart, run on every build and not only in the long job.
+     *
+     * The search runs sixty sequences in the suite and three thousand in a job of its own,
+     * and every defect it found beyond the sixty was found out there -- where mutation
+     * testing never goes, because this test runs once per mutant and three thousand
+     * sequences is past its timeout. A rule only a far seed could tell apart was guarded by
+     * a job that runs once and seen by nothing that asks whether its guard works.
+     *
+     * **Measured, not remembered.** Each rule was taken out and three thousand sequences
+     * were run against what was left; these are the seeds that failed. A seed's meaning is
+     * the vocabulary it was drawn from, and the list was right to be distrusted: one seed
+     * that had found a defect in the morning had stopped telling anything apart by the
+     * afternoon, because a fix in between moved the road it was on. So it is re-measured
+     * whenever the vocabulary or those rules change, and not kept on the strength of what a
+     * seed once found.
+     *
+     * @var array<string, list<int>>
+     */
+    private const TELLS_APART = [
+        // theseRowsAreGoing()'s set of rows an emptying took, asked whenever something new
+        // is about to be written -- because a nested flush writes its part after the sweep.
+        'the rows an emptying took stay taken for the rest of the operation' => [151, 378, 1087, 1416, 2943],
+
+        // The emptying filtered against everything that vanished, and not only against what
+        // the call that is running happened to find.
+        'an emptying collected after the sweep leaves out what already vanished' => [949, 1516, 2557],
+
+        // The question asked after a commit reads the ELEMENTS' table for a collection
+        // mapped by them. A stale deletion handed to a flush with nothing else to do asks
+        // it; with that shape taken out, the emptying was dropped and a row that went was
+        // never mentioned.
+        'the rows question reads an inverse collection too' => [2390],
+
+        // Not a rule of the listener: the narrowing of this search's own generator, which
+        // stops the operations that EMPTY a collection sweeping up a phantom. Without it,
+        // these produce the divergence the search declares out of scope.
+        'the emptying steps ask whether the crate holds a phantom' => [534, 1038, 1599, 2105, 2972],
+    ];
+
+    public function testTheSequencesThatTellARuleApartStillDescribeWhatTheRowsDid(): void
+    {
+        $wrong = [];
+
+        foreach (self::TELLS_APART as $rule => $seeds) {
+            foreach ($seeds as $seed) {
+                $said = $this->whatOneSequenceSaid($seed);
+
+                if ($said !== null) {
+                    $wrong[] = $rule."\n".$said['story'];
+                }
+            }
+        }
+
+        self::assertSame([], $wrong, implode("\n\n", $wrong));
+    }
+
     public function testTheOracleItselfCountsRepeatsRatherThanSets(): void
     {
         // The search is worth exactly what its oracle can see, and the commonest shape it

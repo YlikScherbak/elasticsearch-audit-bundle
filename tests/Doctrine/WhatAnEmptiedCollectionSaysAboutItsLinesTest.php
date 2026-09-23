@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Bin;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\BinItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Catalogue;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
@@ -511,6 +513,188 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
 
         self::assertContains('C-1 items lost SKU-OLD', $said, 'what the column held');
         self::assertNotContains('C-1 items lost SKU-REFUSED', $said, 'not what a refused flush wanted it to hold');
+    }
+
+    public function testARefusedInnerEmptyingDoesNotEraseTheOuterUpdate(): void
+    {
+        // The sweep that drops statements about rows an emptying takes reaches every flush
+        // of the operation, so it is the one place a flush alters what ANOTHER flush
+        // collected -- and a flush can die after doing it. Here a flush nested inside the
+        // outer one empties the crate and is refused before any SQL of its own; the outer
+        // flush goes on and writes its UPDATE. The inner flush had already swept the
+        // outer's "1 -> 2" away, and discarding the inner flush's own buckets was never
+        // going to bring back somebody else's: the row changed with no history of it.
+        $this->attachListener(FailurePolicy::Log);
+
+        $this->em->persist($crate = new Crate('C-1'));
+        $crate->add($line = new CrateItem('SKU-1', 1));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $inner = new class($this->em, $crate, $line) {
+            public bool $refused = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly Crate $crate,
+                private readonly CrateItem $line,
+            ) {
+            }
+
+            public function preUpdate(PreUpdateEventArgs $args): void
+            {
+                if ($this->refused || $args->getObject() !== $this->line) {
+                    return;
+                }
+
+                $this->crate->items = new ArrayCollection();
+
+                $veto = new class {
+                    public function onFlush(): void
+                    {
+                        throw new \DomainException('the inner flush is refused');
+                    }
+                };
+
+                $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    $this->refused = true;
+                } finally {
+                    $this->em->getEventManager()->removeEventListener([Events::onFlush], $veto);
+                }
+            }
+        };
+
+        $line->quantity = 2;
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], $inner);
+
+        try {
+            $this->em->flush();
+        } finally {
+            $this->em->getEventManager()->removeEventListener([Events::preUpdate], $inner);
+        }
+
+        self::assertTrue($inner->refused, 'the premise: the inner flush was refused before its SQL');
+        self::assertSame(2, (int) $this->em->getConnection()->fetchOne('SELECT quantity FROM CrateItem'), 'and the outer one wrote its UPDATE');
+
+        $changes = array_merge(...array_values(array_map(
+            static fn (array $document): array => $document['changes'] ?? [],
+            $this->documents(),
+        )));
+
+        self::assertSame(['old' => 1, 'new' => 2], $changes['items.'.$line->id.'.quantity'] ?? null, 'the change the row really took');
+        self::assertNotContains('C-1 items lost SKU-1', $this->everyStatement(), 'and no departure: the DELETE never ran');
+
+        // And the line is not left believed-gone: its next change is history like any other.
+        $this->gateway->documents = [];
+        $line->quantity = 3;
+        $this->em->flush();
+
+        $changes = array_merge(...array_values(array_map(
+            static fn (array $document): array => $document['changes'] ?? [],
+            $this->documents(),
+        )));
+
+        self::assertSame(['old' => 2, 'new' => 3], $changes['items.'.$line->id.'.quantity'] ?? null, 'the next change is recorded normally');
+    }
+
+    public function testAnEmptyingAfterACommittedRenameNamesTheCommittedValue(): void
+    {
+        // The mirror of the refused rename, and the reason the two readers of a copy are
+        // what they are. Here the rename WAS written; what was not cleared is the unit of
+        // work's change set, because a postFlush listener threw. Read from there -- which
+        // is what the copy used to do -- the deleted row was named by the name it had
+        // before a rename that had already reached it. Whose row is going had stopped
+        // trusting that leftover; the fields of the same element were still trusting it.
+        [$crate, , $first] = $this->twoCratesAndALine();
+
+        $first->sku = 'SKU-RENAMED';
+        $this->flushWithTheirPostFlushThrowing();
+
+        self::assertSame(
+            'SKU-RENAMED',
+            (string) $this->em->getConnection()->fetchOne('SELECT sku FROM CrateItem WHERE id = ?', [$first->id]),
+            'the premise: the rename is in the column',
+        );
+
+        $this->gateway->documents = [];
+
+        $crate->items = new ArrayCollection();
+        $this->em->flush();
+
+        // The emptying's own statement: the rename, published late in the same batch, is a
+        // change inside the line and says SKU-1 truthfully, about a moment before.
+        $emptied = [];
+
+        foreach ($this->documents() as $document) {
+            foreach ((array) ($document['changes']['items']['old'] ?? []) as $name) {
+                $emptied[] = (string) $name;
+            }
+        }
+
+        self::assertContains('SKU-RENAMED', $emptied, 'the name the row died with');
+        self::assertNotContains('SKU-1', $emptied, 'not the one it had before a rename that was written');
+    }
+
+    public function testDeletingAfterACommittedDetachDoesNotRepeatTheDeparture(): void
+    {
+        // "Nobody" is an answer on every reader, and the fifth was the one left asking for
+        // somebody. A line detached by a flush that WAS written -- its postFlush thrown --
+        // and deleted afterwards: the column holds NULL, the original data holds NULL, and
+        // the change set left behind still says the line came from the crate. Asked only
+        // when both named somebody, the row was never consulted and the detach was
+        // described a second time.
+        [, , $first] = $this->twoCratesAndALine();
+
+        $first->crate = null;
+        $this->flushWithTheirPostFlushThrowing();
+
+        self::assertNull(
+            $this->em->getConnection()->fetchOne('SELECT crate_id FROM CrateItem WHERE id = ?', [$first->id]),
+            'the premise: the detach is in the column',
+        );
+
+        $this->em->remove($first);
+        $this->em->flush();
+
+        self::assertCount(1, array_keys($this->everyStatement(), 'C-1 items lost SKU-1', true), 'the detach, once; the delete took a row no crate held');
+    }
+
+    public function testAnEmptyingPreservesANullStoredValueInItsRepresentation(): void
+    {
+        // A stored NULL is a value, and it was being taken for "nothing known". A column
+        // that held nothing, given something in the same flush as its row was taken, was
+        // shown with the value it never received -- the collection's DELETE runs first and
+        // the UPDATE finds no row.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist($bin = new Bin('B-1'));
+        $bin->add($empty = new BinItem('SKU-1', null));
+        $bin->add($full = new BinItem('SKU-2', 4));
+        $this->em->flush();
+
+        self::assertNull($this->em->getConnection()->fetchOne('SELECT count FROM BinItem WHERE id = ?', [$empty->id]), 'the premise: nothing is stored');
+
+        $this->gateway->documents = [];
+
+        $empty->count = 5;
+        $full->count = 9;
+        $bin->items = new ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM BinItem'), 'both rows went');
+
+        $said = $this->everyStatement();
+
+        self::assertContains('B-1 items lost SKU-1: unset', $said, 'the NULL the row held');
+        self::assertNotContains('B-1 items lost SKU-1: 5', $said, 'not what it was about to be given');
+
+        // The control, so that this cannot pass by showing nothing of the value at all.
+        self::assertContains('B-1 items lost SKU-2: 4', $said, 'a stored value is shown as stored');
     }
 
     /**
