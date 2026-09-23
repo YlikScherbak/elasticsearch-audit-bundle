@@ -115,6 +115,31 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private int $from = 0;
 
     /**
+     * How many lines this sequence has made, which is what a new line is named by.
+     *
+     * They were named by the crate's object id and by how many statements had run, and
+     * neither is a function of the seed: an object id depends on everything the process
+     * allocated before, so a seed drew the same steps and wrote its disagreement under a
+     * different name depending on which tests ran first -- and an entry of KNOWN, matched
+     * exactly, stopped matching. A count of statements moves whenever the listener asks
+     * the database one question more or less, which is exactly what the next phase changes.
+     */
+    private int $made = 0;
+
+    /**
+     * Readings of the tables taken INSIDE a step, at the edges of a nested flush.
+     *
+     * The rows are read before and after every step, and the difference is what happened.
+     * A flush nested inside another writes in the middle of a step, so two UPDATEs of one
+     * column -- the outer flush's and then the nested one's -- netted to one change between
+     * the readings, while the history rightly said both. The nested helpers read the tables
+     * on either side of the inner flush, and the step is taken apart at those points.
+     *
+     * @var list<array<string, array<string, array<string, mixed>>>>
+     */
+    private array $checkpoints = [];
+
+    /**
      * Every line the world started with and every line a step has made since.
      *
      * A property rather than part of the world, because a step adds to it: the world used
@@ -156,11 +181,253 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * @var array<int, array{says: string, because: string}>
      */
     private const KNOWN = [
-        // Empty. It has held entries three times in two days and been emptied three
-        // times, and only once by the fix written for what was on it -- twice a fix for
-        // something else took the whole list, which is the argument for keeping such
-        // things in a list a test checks rather than in a note.
+        12 => ['says' => 'missing ["crate C-1 gained SKU-added-1","crate C-1 gained SKU-new-2","crate C-1 lost SKU-added-1","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        14 => ['says' => 'missing ["crate C-1 gained SKU-1","crate C-1 lost SKU-1"], invented []', 'because' => self::CAME_AND_WENT],
+        41 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        43 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        45 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        52 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        72 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        88 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        89 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        97 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        98 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        126 => ['says' => 'missing ["crate C-1 gained SKU-2","crate C-1 line SKU-2 quantity 1 -> 2","crate C-1 lost SKU-2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        140 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        148 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        153 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        156 => ['says' => 'missing ["crate C-1 line SKU-2 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        165 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        192 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        234 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        240 => ['says' => 'missing ["crate C-1 gained SKU-added-1","crate C-1 line SKU-1 quantity 1 -> 2","crate C-1 lost SKU-added-1"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        246 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        251 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        263 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        277 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        280 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        294 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        332 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        335 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        352 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-1","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        363 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        378 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        407 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        421 => ['says' => 'missing ["crate C-1 gained SKU-added-3","crate C-1 gained SKU-new-2","crate C-1 lost SKU-added-3","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        462 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        479 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        490 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        501 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        517 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        534 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        543 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        558 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        594 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        612 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        644 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        645 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        661 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        704 => ['says' => 'missing ["crate C-1 gained SKU-1","crate C-1 lost SKU-1"], invented []', 'because' => self::CAME_AND_WENT],
+        716 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        729 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        730 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        767 => ['says' => 'missing ["crate C-1 gained SKU-added-2","crate C-1 gained SKU-new-1","crate C-1 lost SKU-added-2","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        784 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        788 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        798 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        799 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        824 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        843 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        846 => ['says' => 'missing ["crate C-1 gained SKU-added-1","crate C-1 lost SKU-added-1"], invented []', 'because' => self::CAME_AND_WENT],
+        856 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        864 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        897 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        898 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        913 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        915 => ['says' => 'missing ["crate C-1 gained SKU-3","crate C-1 gained SKU-new-1","crate C-1 lost SKU-3","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        947 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        949 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        954 => ['says' => 'missing ["crate C-1 gained SKU-3","crate C-1 gained SKU-added-1","crate C-1 lost SKU-3","crate C-1 lost SKU-added-1"], invented []', 'because' => self::CAME_AND_WENT],
+        973 => ['says' => 'missing ["crate C-1 gained SKU-new-3","crate C-1 lost SKU-new-3"], invented []', 'because' => self::CAME_AND_WENT],
+        983 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1006 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1025 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1036 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1038 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1049 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1053 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1064 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 gained SKU-new-1","crate C-1 lost SKU-LOOSE","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1097 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1121 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1130 => ['says' => 'missing ["crate C-1 gained SKU-added-2","crate C-1 gained SKU-new-1","crate C-1 lost SKU-added-2","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1149 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        1158 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1169 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1176 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1180 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1201 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1210 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1212 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1219 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1221 => ['says' => 'missing ["crate C-1 gained SKU-added-1","crate C-1 line SKU-2 quantity 1 -> 2","crate C-1 lost SKU-added-1"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1224 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1235 => ['says' => 'missing ["crate C-1 gained SKU-1","crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-1","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1237 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1259 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1276 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1279 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1295 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        1300 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1301 => ['says' => 'missing ["crate C-1 gained SKU-added-1","crate C-1 lost SKU-added-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1316 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1330 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1347 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1352 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1362 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1372 => ['says' => 'missing ["crate C-1 gained SKU-added-1","crate C-1 lost SKU-added-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1381 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1399 => ['says' => 'missing ["crate C-1 gained SKU-3","crate C-1 lost SKU-3"], invented []', 'because' => self::CAME_AND_WENT],
+        1401 => ['says' => 'missing ["crate C-1 gained SKU-1","crate C-1 line SKU-1 quantity 1 -> 2","crate C-1 lost SKU-1"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1402 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        1407 => ['says' => 'missing ["crate C-1 line SKU-3 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1413 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1416 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1419 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1424 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1436 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1462 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1467 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1478 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1499 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1500 => ['says' => 'missing ["crate C-1 gained SKU-3","crate C-1 lost SKU-3"], invented []', 'because' => self::CAME_AND_WENT],
+        1513 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1535 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1542 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1564 => ['says' => 'missing ["crate C-1 line SKU-2 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1601 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1616 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1629 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1660 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1662 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1673 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1684 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1687 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1698 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1706 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1749 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        1754 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1775 => ['says' => 'missing ["crate C-1 gained SKU-1","crate C-1 lost SKU-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1800 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1808 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1844 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1859 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1870 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1885 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1891 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1894 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1899 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1938 => ['says' => 'missing ["crate C-1 gained SKU-3","crate C-1 lost SKU-3"], invented []', 'because' => self::CAME_AND_WENT],
+        1951 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        1959 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1962 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1967 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        1968 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1971 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1982 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        1993 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        1994 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2002 => ['says' => 'missing ["crate C-1 gained SKU-new-3","crate C-1 lost SKU-new-3"], invented []', 'because' => self::CAME_AND_WENT],
+        2019 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2026 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2028 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        2077 => ['says' => 'missing ["crate C-1 gained SKU-added-2","crate C-1 gained SKU-new-1","crate C-1 lost SKU-added-2","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2093 => ['says' => 'missing ["crate C-1 line SKU-2 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2098 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2108 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2130 => ['says' => 'missing ["crate C-1 gained SKU-added-2","crate C-1 gained SKU-new-1","crate C-1 lost SKU-added-2","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2136 => ['says' => 'missing ["crate C-1 gained SKU-added-2","crate C-1 gained SKU-new-1","crate C-1 lost SKU-added-2","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2153 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2159 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2211 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        2217 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2225 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2234 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2280 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2322 => ['says' => 'missing ["crate C-1 gained SKU-2","crate C-1 lost SKU-2"], invented []', 'because' => self::CAME_AND_WENT],
+        2331 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        2352 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2359 => ['says' => 'missing ["crate C-1 line SKU-2 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2363 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2407 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2462 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2479 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2485 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2490 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 3"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2506 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2507 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2567 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2577 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2584 => ['says' => 'missing ["crate C-1 gained SKU-1","crate C-1 lost SKU-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2585 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2589 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2602 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2606 => ['says' => 'missing ["crate C-1 gained SKU-added-2","crate C-1 gained SKU-new-1","crate C-1 lost SKU-added-2","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2617 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 2 -> 3"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2620 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        2626 => ['says' => 'missing ["crate C-1 gained SKU-1","crate C-1 lost SKU-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2634 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        2649 => ['says' => 'missing ["crate C-1 gained SKU-added-1","crate C-1 lost SKU-added-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2657 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2660 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        2661 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2663 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2697 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2725 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2729 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2751 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2760 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2765 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2766 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2784 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2799 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2801 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2811 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2812 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2825 => ['says' => 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []', 'because' => self::CAME_AND_WENT],
+        2837 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 2 -> 3"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2843 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2856 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2894 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2903 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2926 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2931 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2937 => ['says' => 'missing ["crate C-1 gained SKU-LOOSE","crate C-1 lost SKU-LOOSE"], invented []', 'because' => self::CAME_AND_WENT],
+        2939 => ['says' => 'missing ["crate C-1 line SKU-1 quantity 1 -> 2"], invented []', 'because' => self::SWEPT_ACROSS_FLUSHES],
+        2953 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2970 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
+        2983 => ['says' => 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []', 'because' => self::CAME_AND_WENT],
     ];
+
+    /**
+     * Why most of KNOWN is there: a rule of the listener's, taken out in a later phase.
+     *
+     * A line one flush of an operation inserted and a later flush of it took the row of was
+     * treated as having no history -- the record was about the operation, and over the
+     * operation nothing happened to it. The rows say it arrived and left, and the decision
+     * since is that the history says what each flush did; grouping by the operation is what
+     * a frame is for.
+     */
+    private const CAME_AND_WENT = 'a line that came and went across the flushes of one operation is dropped; the history is to describe each flush';
+
+    /**
+     * And the rest: the same sweep reaching a change another flush had already written.
+     *
+     * The outer flush wrote a line's quantity; a flush nested after that statement emptied
+     * the collection, and dropping what was said about a line whose row is going reached
+     * every flush of the operation, the outer one's written change included. A change that
+     * really reached the row is lost -- not a rule, a defect of the same sweep.
+     */
+    private const SWEPT_ACROSS_FLUSHES = 'the sweep for a row that is going reaches a change the outer flush had already written';
 
     /** The tables this reads, and the column that names each row in a statement. */
     private const TABLES = [
@@ -233,50 +500,98 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * The search runs sixty sequences in the suite and three thousand in a job of its own,
      * and every defect it found beyond the sixty was found out there -- where mutation
      * testing never goes, because this test runs once per mutant and three thousand
-     * sequences is past its timeout. A rule only a far seed could tell apart was guarded by
-     * a job that runs once and seen by nothing that asks whether its guard works.
+     * sequences is past its timeout.
+     *
+     * **Kept as the steps, not as the seeds.** A seed is a function of the generator, and
+     * the generator grows every round: the next word added to the vocabulary makes every
+     * seed draw a different sequence, and a list of seeds would go on passing while
+     * describing fourteen other things. The seed each was drawn by is kept beside it, as
+     * where it was found and nothing more.
      *
      * **Measured, not remembered.** Each rule was taken out and three thousand sequences
-     * were run against what was left; these are the seeds that failed. A seed's meaning is
-     * the vocabulary it was drawn from, and the list was right to be distrusted: one seed
-     * that had found a defect in the morning had stopped telling anything apart by the
-     * afternoon, because a fix in between moved the road it was on. So it is re-measured
-     * whenever the vocabulary or those rules change, and not kept on the strength of what a
-     * seed once found.
+     * run against what was left; these are the ones that failed. One seed that found a
+     * defect in the morning had stopped telling anything apart by the afternoon, because a
+     * fix in between moved the road it was on -- so the list is re-measured when a rule
+     * changes, and a sequence that stops telling its rule apart is taken off rather than
+     * kept for what it once found.
      *
-     * @var array<string, list<int>>
+     * **An excuse is one disagreement, named exactly.** A sequence may carry, as a fourth
+     * element, the one thing it is known not to describe yet -- a rule of the listener's
+     * that the history has since been decided against, which is not what the sequence is
+     * there to tell apart. The rule it guards is still told apart: taking it out changes
+     * what the sequence says, and the excuse no longer matches.
+     *
+     * @var array<string, list<array{0: int, 1: bool, 2: list<string>, 3?: string}>>
      */
     private const TELLS_APART = [
-        // theseRowsAreGoing()'s set of rows an emptying took, asked whenever something new
-        // is about to be written -- because a nested flush writes its part after the sweep.
-        'the rows an emptying took stay taken for the rest of the operation' => [151, 378, 1087, 1416, 2943],
+        // theseRowsAreGoing()'s set of rows an emptying took, asked whenever something new is
+        // about to be written -- because a nested flush writes its part after the sweep.
+        'the rows an emptying took stay taken for the rest of the operation' => [
+            // drawn by seed 151
+            [3, false, ['replace the crate', 'add a line', 'flush, publishing swallowed', 'change a line', 'flush, with one nested inside', 'flush']],
+            // drawn by seed 378
+            [0, true, ['move a line', 'replace the crate with a new line', 'flush, with one nested inside', 'replace the crate with a new line', 'flush', 'add a namesake', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 1087
+            [6, false, ['change a line', 'replace the crate with a new line', 'add a line', 'flush, refused', 'change a line', 'flush, with one nested inside', 'flush'], 'missing ["crate C-1 gained SKU-added-2","crate C-1 gained SKU-new-1","crate C-1 lost SKU-added-2","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 1416
+            [5, false, ['remove a line', 'move a line', 'replace the crate with a new line', 'flush, with one nested inside', 'move a line back', 'flush, publishing swallowed', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 2943
+            [6, false, ['change a line', 'add a line', 'flush, refused', 'replace the crate', 'flush, with one nested inside', 'replace the crate', 'flush, refused', 'flush'], 'missing ["crate C-1 gained SKU-added-1","crate C-1 lost SKU-added-1"], invented []'], // excused: see CAME_AND_WENT
+        ],
 
         // The emptying filtered against everything that vanished, and not only against what
         // the call that is running happened to find.
-        'an emptying collected after the sweep leaves out what already vanished' => [949, 1516, 2557],
+        'an emptying collected after the sweep leaves out what already vanished' => [
+            // drawn by seed 949
+            [2, false, ['replace the crate with a new line', 'flush, refused', 'replace the crate with a new line', 'flush, with one nested inside', 'add a line', 'flush', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-1","crate C-1 lost SKU-new-2"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 1516
+            [6, true, ['replace the crate', 'flush, refused', 'move a line', 'replace the crate with a new line', 'move a line', 'flush, with one nested inside', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 2557
+            [1, false, ['empty the crate', 'flush', 'replace the crate with a new line', 'add a namesake', 'flush, publishing swallowed', 'replace the crate with a new line', 'flush, with one nested inside', 'flush'], 'missing ["crate C-1 gained SKU-new-2","crate C-1 lost SKU-new-2"], invented []'], // excused: see CAME_AND_WENT
+        ],
 
-        // The question asked after a commit reads the ELEMENTS' table for a collection
-        // mapped by them. A stale deletion handed to a flush with nothing else to do asks
-        // it; with that shape taken out, the emptying was dropped and a row that went was
-        // never mentioned.
-        'the rows question reads an inverse collection too' => [2390],
+        // The question asked after a commit reads the ELEMENTS' table for a collection mapped by
+        // them. A stale deletion handed to a flush with nothing else to do asks it; with that
+        // shape taken out, the emptying was dropped and a row that went was never mentioned.
+        'the rows question reads an inverse collection too' => [
+            // drawn by seed 2390
+            [0, false, ['replace the crate with a new line', 'flush, publishing swallowed', 'add a namesake', 'flush, publishing swallowed', 'flush']],
+        ],
 
-        // Not a rule of the listener: the narrowing of this search's own generator, which
-        // stops the operations that EMPTY a collection sweeping up a phantom. Without it,
-        // these produce the divergence the search declares out of scope.
-        'the emptying steps ask whether the crate holds a phantom' => [534, 1038, 1599, 2105, 2972],
+        // NOT a rule of the listener: the narrowing of this search's own generator, which stops
+        // the operations that EMPTY a collection sweeping up a phantom. These are kept so that
+        // the narrowing cannot be lifted without the search saying so -- and they are not a
+        // guard of anything in the bundle, which is why they are separate from the rest.
+        'the emptying steps ask whether the crate holds a phantom' => [
+            // drawn by seed 534
+            [2, false, ['replace the crate with a new line', 'flush, with one nested inside', 'empty the crate', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 1038
+            [0, false, ['replace the crate with a new line', 'flush, with one nested inside', 'empty the crate', 'edit the article', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 1599
+            [4, false, ['edit the article', 'flush', 'replace the crate with a new line', 'flush, with one nested inside', 'empty the crate', 'flush, with one nested inside', 'add a namesake', 'flush', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 2105
+            [7, false, ['move a line', 'flush, with one nested inside', 'replace the crate with a new line', 'flush, with one nested inside', 'empty the crate', 'move a line', 'flush', 'flush'], 'missing ["crate C-1 gained SKU-new-1","crate C-1 lost SKU-new-1"], invented []'], // excused: see CAME_AND_WENT
+            // drawn by seed 2972
+            [4, false, ['empty the crate', 'replace the crate with a new line', 'flush, publishing swallowed', 'move a line', 'flush', 'empty the crate', 'flush']],
+        ],
+
     ];
 
     public function testTheSequencesThatTellARuleApartStillDescribeWhatTheRowsDid(): void
     {
         $wrong = [];
 
-        foreach (self::TELLS_APART as $rule => $seeds) {
-            foreach ($seeds as $seed) {
-                $said = $this->whatOneSequenceSaid($seed);
+        foreach (self::TELLS_APART as $rule => $sequences) {
+            foreach ($sequences as $sequence) {
+                [$shape, $filtered, $steps] = $sequence;
+                $excused = $sequence[3] ?? null;
+                $said = $this->whatTheseStepsSaid($shape, $filtered, $steps);
 
-                if ($said !== null) {
-                    $wrong[] = $rule."\n".$said['story'];
+                // Excused for exactly one disagreement, as KNOWN is, and checked both ways:
+                // a sequence that starts describing the rows correctly has its excuse taken
+                // off rather than left to cover whatever comes next.
+                if (($said['says'] ?? null) !== $excused) {
+                    $wrong[] = $rule."\n".($said['story'] ?? '  now described correctly; take its excuse off: '.$excused);
                 }
             }
         }
@@ -326,19 +641,46 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private function whatOneSequenceSaid(int $seed): ?array
     {
+        return $this->whatTheseStepsSaid(...self::drawn($seed), seed: $seed);
+    }
+
+    /**
+     * What a seed draws: the world's shape, whether the filter is on, and the steps.
+     *
+     * Split out of running them because a seed is a function of the generator, and the
+     * generator grows every round -- the steps a seed drew are what a regression has to
+     * hold, or widening the vocabulary renames every one of them and none says so.
+     *
+     * @return array{0: int, 1: bool, 2: list<string>}
+     */
+    private static function drawn(int $seed): array
+    {
+        $drawing = new self('drawing');
+        $drawing->from = $seed;
+        $steps = $drawing->aSequence();
+
+        return [$drawing->next(8), $drawing->next(4) === 0, $steps];
+    }
+
+    /**
+     * @param list<string> $steps
+     *
+     * @return array{says: string, story: string}|null
+     */
+    private function whatTheseStepsSaid(int $shape, bool $filtered, array $steps, int $seed = 0): ?array
+    {
         $this->setUp();
         $this->attachListener(FailurePolicy::Log);
+        $this->made = 0;
 
-        $this->from = $seed;
-        $steps = $this->aSequence();
-        $world = $this->aWorld($this->next(8));
+        $world = $this->aWorld($shape);
 
         // Over the rows under test, and not over a table nothing here touches. This used
         // to enable a filter that hides Stops, in a world made of Articles, Crates and
         // CrateItems -- on for a quarter of every run and covering nothing. Hiding every
         // line is the soft-delete shape at its most extreme, and it is what makes "asked
         // underneath the application's filters" a claim this can break.
-        if ($this->next(4) === 0) {
+        if ($filtered) {
             $this->em->getConfiguration()->addFilter('hide_lines', HideEveryLine::class);
             $this->em->getFilters()->enable('hide_lines');
         }
@@ -356,9 +698,14 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             // Around each flush of its own, not around the sequence. A line that leaves a
             // crate and comes back nets to nothing over a sequence and is two things that
             // happened, and the history is right to say both.
-            $before = $this->snapshot();
+            $this->checkpoints = [];
+            $points = [$this->snapshot()];
             $this->apply($step, $world);
-            $rows = array_merge($rows, $this->statementsBetween($before, $this->snapshot()));
+            $points = [...$points, ...$this->checkpoints, $this->snapshot()];
+
+            for ($i = 1, $n = \count($points); $i < $n; ++$i) {
+                $rows = array_merge($rows, $this->statementsBetween($points[$i - 1], $points[$i]));
+            }
         }
 
         sort($rows);
@@ -437,10 +784,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
 
             // How the flush that carries it out ends.
-            $steps[] = match ($this->next(8)) {
+            $steps[] = match ($this->next(11)) {
                 0 => 'flush, refused',
                 1 => 'flush, publishing swallowed',
                 2 => 'flush, with one nested inside',
+                3 => 'flush, and after the statement a nested one edits the article',
+                4 => 'flush, and after the statement a nested one empties the crate',
+                5 => 'flush, and after the statement a nested one empties the crate and is refused',
                 default => 'flush',
             };
         }
@@ -539,7 +889,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             'change a line' => $lines === [] ? null : $lines[0]->quantity = ($lines[0]->quantity ?? 0) + 1,
             'move a line' => $lines === [] ? null : $lines[0]->crate = $world['other'],
             'move a line back' => $elsewhere === [] || $this->aReplacementIsWaiting ? null : $elsewhere[0]->crate = $crate,
-            'add a line' => $crate->add($this->lines[] = new CrateItem('SKU-'.spl_object_id($crate).'-'.\count($this->queries))),
+            'add a line' => $crate->add($this->lines[] = new CrateItem('SKU-added-'.++$this->made)),
             'add a namesake' => $lines === [] ? null : $crate->add($this->lines[] = new CrateItem($lines[0]->sku)),
             'remove a line' => $lines === [] ? null : $this->em->remove($lines[0]),
             'empty the crate' => $this->holdsAPhantom($crate) ? null : $this->empty($crate),
@@ -550,6 +900,19 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             'flush, refused' => $this->flushRefused(),
             'flush, publishing swallowed' => $this->flushWithTheirPostFlushThrowing(),
             'flush, with one nested inside' => $this->flushWithOneNestedInside($world['article']),
+            'flush, and after the statement a nested one edits the article' => $this->flushWithOneNestedAfter(static function () use ($world): void {
+                $world['article']->title = 'from after';
+            }, refused: false),
+            'flush, and after the statement a nested one empties the crate' => $this->flushWithOneNestedAfter(function () use ($crate): void {
+                if (!$this->holdsAPhantom($crate)) {
+                    $crate->items = new ArrayCollection();
+                }
+            }, refused: false),
+            'flush, and after the statement a nested one empties the crate and is refused' => $this->flushWithOneNestedAfter(function () use ($crate): void {
+                if (!$this->holdsAPhantom($crate)) {
+                    $crate->items = new ArrayCollection();
+                }
+            }, refused: true),
             default => throw new \LogicException('no such step: '.$step),
         };
     }
@@ -600,7 +963,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private function replaceWithANewLine(Crate $crate): void
     {
         $this->replace($crate, []);
-        $crate->add(new CrateItem('SKU-new-'.\count($this->queries)));
+        $crate->add(new CrateItem('SKU-new-'.++$this->made));
     }
 
     private function flush(): void
@@ -656,12 +1019,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     {
         $this->aReplacementIsWaiting = false;
 
-        $inner = new class($this->em, $article) {
+        $inner = new class($this->em, $article, $this->aroundTheNestedFlush(...)) {
             private bool $ran = false;
 
             public function __construct(
                 private readonly \Doctrine\ORM\EntityManagerInterface $em,
                 private readonly Article $article,
+                private readonly \Closure $around,
             ) {
             }
 
@@ -673,7 +1037,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
                 $this->ran = true;
                 $this->article->title = 'from inside';
-                $this->em->flush();
+                ($this->around)(fn () => $this->em->flush());
             }
         };
 
@@ -685,6 +1049,96 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             // Whatever the application could not complete is not this test's subject.
         } finally {
             $this->em->getEventManager()->removeEventListener([Events::preUpdate], $inner);
+        }
+    }
+
+    /**
+     * Runs a nested flush with a reading of the tables on either side of it.
+     *
+     * The reading after is taken in a finally, so that a refused nested flush -- which
+     * writes nothing -- still marks where it was.
+     */
+    private function aroundTheNestedFlush(\Closure $flush): void
+    {
+        $this->checkpoints[] = $this->snapshot();
+
+        try {
+            $flush();
+        } finally {
+            $this->checkpoints[] = $this->snapshot();
+        }
+    }
+
+    /**
+     * A flush that starts another one AFTER a statement has reached the row.
+     *
+     * The first kind of nesting here starts from preUpdate, which is before the UPDATE of
+     * the entity it fires for. Four defects in two rounds of review lived after it instead,
+     * in postUpdate, and none of them could be generated: an arrival is recorded in the
+     * outer flush's postUpdate, a change set is spent the moment its UPDATE runs, and
+     * anything a nested flush does to the outer flush's state from before that point
+     * cannot reach what only exists after it. This starts from the first postUpdate the
+     * outer flush raises -- after this listener's own -- so the nested flush sees the rows
+     * as the outer flush has already written them.
+     *
+     * Refused, on request, by a listener behind this one: the shape a dying nested flush
+     * takes, whose sweep of the outer flush's buckets has to be put back.
+     */
+    private function flushWithOneNestedAfter(\Closure $what, bool $refused): void
+    {
+        $this->aReplacementIsWaiting = false;
+
+        $inner = new class($this->em, $what, $refused, $this->aroundTheNestedFlush(...)) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly \Doctrine\ORM\EntityManagerInterface $em,
+                private readonly \Closure $what,
+                private readonly bool $refused,
+                private readonly \Closure $around,
+            ) {
+            }
+
+            public function postUpdate(): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                ($this->what)();
+
+                $veto = $this->refused ? new class {
+                    public function onFlush(): void
+                    {
+                        throw new \DomainException('the nested flush is refused');
+                    }
+                } : null;
+
+                if ($veto !== null) {
+                    $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+                }
+
+                try {
+                    ($this->around)(fn () => $this->em->flush());
+                } catch (\DomainException) {
+                    // what an application does about a listener that refuses its flush
+                } finally {
+                    if ($veto !== null) {
+                        $this->em->getEventManager()->removeEventListener([Events::onFlush], $veto);
+                    }
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $inner);
+
+        try {
+            $this->em->flush();
+        } catch (\Throwable) {
+            // Whatever the application could not complete is not this test's subject.
+        } finally {
+            $this->em->getEventManager()->removeEventListener([Events::postUpdate], $inner);
         }
     }
 
