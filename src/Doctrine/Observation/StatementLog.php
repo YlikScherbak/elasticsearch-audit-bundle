@@ -146,6 +146,18 @@ final class StatementLog
         return $this->sequence;
     }
 
+    /**
+     * Whether a statement only reads, and so is not worth holding.
+     *
+     * A read changes nothing a history could be about, and a batch import runs a great many
+     * of them inside the transaction the log has to hold until it ends. A statement this
+     * cannot tell about -- a CTE that writes starts with WITH -- is kept.
+     */
+    public static function onlyReads(string $sql): bool
+    {
+        return preg_match('/^\s*(SELECT|SHOW|PRAGMA|EXPLAIN)\b/i', $sql) === 1;
+    }
+
     /** Where the log has got to, for a caller that wants to know what ran after this point. */
     public function position(): int
     {

@@ -1,5 +1,6 @@
 includes:
     - vendor/phpstan/phpstan-strict-rules/rules.neon
+    - phpstan-dbal.php
 
 parameters:
     level: 8
