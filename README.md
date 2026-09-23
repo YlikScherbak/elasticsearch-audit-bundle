@@ -322,6 +322,12 @@ What gets recorded, and what deliberately does not:
   (`doctrine.skip_empty_updates`, default `true`).
 - **Collections** are recorded as the snapshot against the current contents, only when dirty. A
   lazy collection is loaded first, so the `old` side is real, not empty.
+- **An emptied collection is read back from the rows**, not from Doctrine's snapshot of it.
+  Clearing or replacing a collection is the operation Doctrine reports by saying nothing — a
+  `DELETE` and no change set — so what it held has to be asked for, and the snapshot is what the
+  collection held when it was last synchronised with the database rather than now. That is one
+  `SELECT` per emptied audited collection, underneath any ORM filters, and it is the only question
+  this listener asks the database on its own. (since 1.3.0)
 - **Removes carry no changes**, only the identifier — which is captured in `preRemove`, while the
   entity still has one.
 

@@ -94,6 +94,121 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
+- **What an emptied collection says about its lines now comes from the rows, and fifteen things it
+  used to say are gone.** Emptying an audited collection is the operation Doctrine reports by
+  saying nothing, so the membership has to be read back — and it was read out of Doctrine's
+  snapshot of the collection, which is what that collection held when it was last synchronised
+  with the database. Every road that changes a membership without re-synchronising it left the
+  snapshot describing a different moment: a line moved to another owner by its own side never
+  dirties the collection it left, and a collection deletion still on the schedule is handed to the
+  next flush with the membership of the one before — which is what a `postFlush` listener that
+  throws leaves behind, since `postFlush` is dispatched before `postCommitCleanup()` with nothing
+  between them. A history that says
+  a line was lost from a collection it left two flushes ago, or says nothing at all about one that
+  joined since, is worse than a thin one. **It asks the rows now** — one `SELECT` per emptied
+  collection, which is what the question it replaced already cost, and it answers more: an empty
+  result is "nothing left to empty" and needs no second query to establish it.
+  <br>**Which owner a departure belongs to** is asked of four things in the order of how close
+  each stands to the row. What a refused flush left unwritten comes first, because a refusal is
+  the one event that moves Doctrine's record of a row without moving the row — computing a change
+  set refreshes the original data, and then nothing is written, so a line re-pointed by a refused
+  flush and deleted afterwards had its departure recorded against the owner it was going to. Then
+  the original data, which is Doctrine's record of the row as the database last had it. Then the
+  change set, which answers only when this flush itself overwrote the original data — the
+  Maker-style `removeItem()`, where the back-ref is nulled and `orphanRemoval` schedules the
+  delete. Read change-set-first, which is where this started, a line moved by a flush whose
+  publishing was swallowed and deleted by the next one was recorded as leaving the owner it had
+  already left, while the owner whose row actually went was never told. A change set that names
+  nothing no longer ends the question either: an element inserted by a swallowed flush and deleted
+  by the next one read "arrived from nowhere" as where it departed from, and the departure was
+  written nowhere at all while the row went.
+  <br>**Nothing else a flush says about a line whose row that flush's `DELETE` takes** is written
+  any more. Doctrine carries out a collection's deletion before it writes entity updates, so an
+  `UPDATE` for such a line matches nothing — and Doctrine reports it as having happened, because
+  its own state has the line alive and only the database knows otherwise. Both the arrival at the
+  new owner and the change inside the line were recorded. Elements being inserted are untouched by
+  this: their row is not there for the `DELETE` to take and their `INSERT` runs after it, so a
+  collection replaced by one holding a new line really does gain it.
+  <br>**The whole-collection form subtracts only departures, and it subtracts by identifier.** It
+  leaves out what the element form already said, and what the two forms can both describe is a
+  departure — counting an arrival as already said took a line out of the emptying because a
+  namesake was joining. It used to match by what an element is *shown* as, because a deleted
+  element has had its generated identifier cleared by the time a record is built. Two lines of one
+  crate may carry the same name, so one departure named for one of them took both out and a row
+  went with nothing said. The identifiers are read in `onFlush`, where they are still there, and
+  the two forms meet on those.
+  <br>**A departure has no owner when the row had none.** The reader that knows what a refused
+  flush left unwritten is asked whether it *has* an answer, not what its answer is: for a line
+  whose row has no owner at all, offered one by a flush that was then refused and deleted
+  afterwards, that answer is `null` — and reading `null` as silence sent the question on to the
+  original data, which the refused flush had already moved to the owner the line never reached.
+  Only that first reader is key-aware; the original data answers `null` under a key that is there
+  too, and there it means "this flush has just overwritten me", which is exactly when the change
+  set is the one that knows.
+  <br>**Emptying a many-to-many says nothing about the lines themselves.** The rule above — that
+  nothing else a flush says about a line whose row it is taking is written — applies only where
+  the `DELETE` takes the *elements'* rows, which is the inverse side with `orphanRemoval`. An
+  owning many-to-many has its join rows deleted and leaves every line where it was, alive and
+  writable, so an `UPDATE` after that deletion reaches its row; applied there, the rule threw away
+  a change that really happened. A change inside an element is also named by the collection's
+  field and the element's identifier and by nothing that says which class it is, so two owners
+  with same-named collections of different classes wrote the same string — matched now only where
+  the owner's collection really holds the class the emptying is about.
+  <br>**An emptying names what the row held, not what the object is about to hold.** Reading the
+  rows says which elements the `DELETE` takes; it does not say what they hold, because Doctrine
+  hands back the objects it already has rather than overwriting their fields with what the
+  `SELECT` read — the only thing it could do without discarding the application's unsaved work. A
+  line renamed and never written was named in the history of its own deletion by a value no row
+  ever held: the collection's `DELETE` takes the row first, so the `UPDATE` finds nothing. The
+  representer is run against an object carrying what the columns hold, built with the metadata's
+  own instantiator and only where something really is unsaved.
+  <br>**Whose row is going, when two readers contradict each other, is asked of the row.**
+  A line re-pointed and then deleted leaves the change set naming one owner and the original
+  data naming the other, and which of them is right depends on something neither of them
+  knows: whether the `UPDATE` ran. It did when an earlier flush wrote the move and only its
+  publishing was swallowed, and it did not when the deletion is in the same flush and takes
+  the row first. Both read change set `[A, B]` with original data `B`. One `SELECT` of one
+  column settles it, asked underneath the application's filters and only where the two
+  contradict — which needs the same element to be re-pointed and deleted.
+  <br>**A line put back where its row already is moves nowhere.** A flush that was refused
+  leaves Doctrine believing the line moved while the column never did, so putting it back
+  writes an `UPDATE` that changes nothing — and Doctrine reports the change, because its own
+  idea of the row went away and came back. The corrected old side and the new side are the
+  same owner, and that owner both lost and gained the line under one key: whichever was
+  written second is what the history said happened.
+  <br>**A change inside a line no crate owns belongs to no crate.** The same reader, on the
+  road an ordinary change takes. Nothing about the association changed in that flush, so the
+  object is normally right about who owns the line — except after a refusal, where the flush
+  that offered it an owner wrote nothing, and what changed inside the line was recorded
+  against a collection that has never held it.
+  <br>**An emptying is collected once per operation, by the flush that saw it first.** A
+  collection deletion stays on Doctrine's schedule until `postCommitCleanup()`, and a flush
+  started from inside another shares the outer one's unit of work — so the inner flush is
+  handed a deletion the outer one has already carried out, and asking the rows then reads a
+  table the `DELETE` has been through. Both were collected and the later answer replaced the
+  earlier: a crate that really lost two lines was recorded as losing a third that had been
+  inserted in between and was gone by the end.
+  <br>**What a flush says about a line whose row is going is dropped whichever flush said
+  it.** That sweep ran over the current flush only, and a flush nested inside another files
+  its arrival, its change and the deletion that takes the row under different numbers. Both
+  directions go now: dropping only the arrival leaves the departure of a row that was never
+  there to depart from.
+  <br>**And the rows an emptying takes are remembered, not swept once.** The sweep saw
+  whatever happened to be written down when it ran, which with a nested flush is a matter of
+  ordering; the set is consulted whenever something new is about to be recorded, and an
+  arrival that turns up afterwards takes the line out of the emptying as well.
+  <br>Five of the nine were found by a generated search — a thousand sequences of ordinary
+  operations, each checked against what the tables actually did before and after every commit —
+  after the same search at sixty sequences had passed. Twenty of the next hundred and forty
+  failed, and every one was real. Four more were found by review and confirmed by running
+  them, and widening what the search may generate — namesakes, a line no crate owns, several
+  operations before one flush, a filter over the rows under test rather than over a table the
+  search never touches — found three more. Teaching it to start a flush from inside another
+  found the last three on its first run: four rounds of this candidate's review had lived in
+  that shape and the search could not reach any of it. It now runs at three thousand
+  sequences in a CI job of its own. Twelve of the fifteen have a test of their own that was
+  watched failing against the fix taken back out; the other three are guarded by the search,
+  which is said where each of them lives, with the seed that fails without it.
 - **One stretch of records failing no longer throws away the ones after it, and the collision
   report no longer repeats any value at all.** Publishing walks the records of a flush in
   stretches that share a moment, and under `on_failure: throw` a refused record leaves
