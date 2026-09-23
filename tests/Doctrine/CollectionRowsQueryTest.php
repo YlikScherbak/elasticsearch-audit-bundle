@@ -120,6 +120,24 @@ final class CollectionRowsQueryTest extends DoctrineTestCase
         self::assertNull($this->counting(Route::class, new Route('R-1'), $mapping));
     }
 
+    public function testAJoinTableWithNoNameSaysNothing(): void
+    {
+        // One of the three things the guard asks about, and the only one of them a
+        // mutation could remove without any test noticing. Written out rather than taken
+        // from the metadata, for the same reason as the next one: a mapping Doctrine
+        // built always names its table.
+        $mapping = ['joinTable' => ['joinColumns' => [['name' => 'route_id', 'referencedColumnName' => 'id']]]];
+
+        self::assertNull($this->counting(Route::class, new Route('R-1'), $mapping));
+    }
+
+    public function testJoinColumnsThatAreNotAListSayNothing(): void
+    {
+        $mapping = ['joinTable' => ['name' => 'route_stop', 'joinColumns' => 'route_id']];
+
+        self::assertNull($this->counting(Route::class, new Route('R-1'), $mapping));
+    }
+
     public function testAColumnTheMappingDoesNotNameSaysNothing(): void
     {
         // Written out rather than taken from the metadata and spoiled: the newer ORM's

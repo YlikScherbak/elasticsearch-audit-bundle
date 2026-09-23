@@ -24,4 +24,13 @@ class CrateItem
     {
         return $this->sku;
     }
+
+    /**
+     * A representer that reads the line's own association, which is ordinary and is the
+     * reason anything showing a deleted element has to carry its associations too.
+     */
+    public function getSkuUnderItsCrate(): string
+    {
+        return $this->sku.'@'.($this->crate?->code ?? 'nowhere');
+    }
 }

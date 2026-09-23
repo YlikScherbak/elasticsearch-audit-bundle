@@ -39,7 +39,7 @@ final class ChangeSetBuilder
 
     /**
      * @param array<string, mixed>|null   $changeSet
-     * @param array<string, list<object>> $emptied   what an owning collection held before this flush
+     * @param array<string, array<int|string, object>> $emptied   what an owning collection held before this flush
      *                                               emptied it, by field: the one source left once
      *                                               clear() has taken its own empty snapshot
      * @param array<string, mixed>        $asFlushed what the always-recorded fields held when the
@@ -231,6 +231,7 @@ final class ChangeSetBuilder
      * Each element as the history should show it.
      *
      * @param list<object>                 $elements
+     * @param array<int|string, object> $elements
      * @param (callable(object): mixed)|null $represent
      *
      * @return list<mixed>

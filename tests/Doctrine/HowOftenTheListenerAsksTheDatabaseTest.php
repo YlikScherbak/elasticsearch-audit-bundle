@@ -20,9 +20,10 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
  *
  * The listener asks the database exactly one question of its own, and only in one
  * situation. Emptying an audited collection is the operation Doctrine reports by saying
- * nothing — it issues a DELETE and leaves no change set — so the old membership has to
- * be read back, or the history cannot say what was in it. That question is worth one
- * SELECT, and it must not be asked on behalf of a collection nobody audits.
+ * nothing — it issues a DELETE and leaves no change set — so the membership has to be
+ * read back, or the history cannot say what was in it. That question is worth one
+ * SELECT, it is one SELECT, and it must not be asked on behalf of a collection nobody
+ * audits.
  *
  * Everything else is free. Auditing what changed inside ten thousand lines of an order
  * reads what the unit of work already holds, so the cost is the application's own
@@ -56,19 +57,21 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
 
         $read = self::selects($this->queries);
 
-        // Two questions, and they are different ones. The first asks whether the rows are
-        // still there, because a collection can arrive on the schedule holding a snapshot
-        // of rows that are already gone -- a flush whose publishing was swallowed leaves
-        // its deletion listed, and a collection cleared and committed keeps its snapshot
-        // when it is then replaced. Recorded either way, that is a document about rows the
-        // operation never touched. The second reads back what the collection held, which
-        // clear() has already taken away.
+        // One question, and it is the only one. It reads what the rows hold for this
+        // owner, which is both of the things this needs to know: which elements the
+        // DELETE is about to take, and -- by coming back empty -- that there is nothing
+        // left to take at all.
         //
-        // Asked every time rather than only where a flush looked suspicious: that was the
-        // cheaper rule, and two of the roads above have nothing suspicious about them.
-        self::assertCount(2, $read, 'two questions, each asked once');
-        self::assertStringContainsString('route_stop', $read[0], 'the first reads the membership back');
-        self::assertStringContainsString('COUNT(*)', $read[1], 'the second asks whether the rows are still there');
+        // It was two for a while: a COUNT asking whether the rows were still there, and
+        // this SELECT only where the collection had no snapshot to read. The snapshot was
+        // the mistake. It is Doctrine's record of the collection as of the last time it
+        // was synchronised with the database, and every road that changes the membership
+        // without re-synchronising it -- a line moved by its own side, a flush whose
+        // publishing was swallowed, a deletion still on the schedule after it was carried
+        // out -- left it describing a different moment from this one. Asking the rows
+        // instead answers both questions with one SELECT and cannot be stale.
+        self::assertCount(1, $read, 'one question, asked once');
+        self::assertStringContainsString('route_stop', $read[0], 'it reads the membership back');
     }
 
     public function testACollectionThatDidNotMoveIsNotLoadedToFindThatOut(): void
