@@ -49,7 +49,7 @@
         //
         // collectionChange::250 is the fourth, over a list it built itself.
         UnwrapArrayValues: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::representAll::220", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::250", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::contentsOf::234", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::744"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::representAll::220", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::collectionChange::250", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::contentsOf::234", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::768"],
         },
 
         // collectionChange builds the list a collection is recorded as, and it is
@@ -68,7 +68,7 @@
         // reachable here — it is reachable in the job that runs the ORM this one does
         // not, which is why the arm stays.
         Ternary: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::605"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::629"],
         },
 
         // The manager of the flush on the stack, read through a weak reference that is
@@ -76,7 +76,7 @@
         // reached only when the stack is not empty, and the stack is only ever appended
         // to beside that reference — so it is never null where the question is asked.
         NullSafeMethodCall: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::1958"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::2094"],
         },
 
         // Publishing a flush that committed late runs application code, so it is wrapped
@@ -85,7 +85,7 @@
         // thing. The finally stays because the day something is added that can escape,
         // the flush still has to be forgotten.
         UnwrapFinally: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::1975"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::beginFlush::2111"],
         },
 
         // asTheEntityNowStands walks a Doctrine change set, whose entries are always a
@@ -95,7 +95,7 @@
         // answer. They are there because the method is handed a snapshot the listener
         // kept, and a snapshot is only as well-formed as whoever filled it.
         DecrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::3171", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2846"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::3319", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2994"],
         },
 
         // The same premise one method further on. forgetWhatThisFlushCollected() reads
@@ -105,10 +105,10 @@
         // reaches the same place. The guard is there because the map is the listener's
         // own and a snapshot is only as well-formed as whoever filled it.
         IncrementInteger: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1809", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2846"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1938", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2994"],
         },
         LogicalAnd: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1809"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1938"],
         },
 
         // What a flush that never happened had found the row holding, filled once and
@@ -118,12 +118,12 @@
         // spent it in between. "The earliest answer wins" and "the only answer wins" are
         // therefore the same rule, and the ??= says which one is meant.
         AssignCoalesce: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1810"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::forgetWhatThisFlushCollected::1939"],
         },
 
 
         LogicalOr: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::3171", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::3066"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::asTheEntityNowStands::3319", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::recordForOwner::3214"],
         },
 
         // Two guards that never fire, kept for the day they can.
@@ -147,11 +147,11 @@
         // below every stamp whether it is -1, 0 or -2, or absent and read as null. Four
         // ways of writing one question.
         LessThan: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2846"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2994"],
         },
 
         ReturnRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable::2429"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable::2577"],
         },
 
         // Two `continue`s with nothing behind them to skip, each for its own reason.
@@ -170,7 +170,7 @@
         //   collections through one property. Whatever follows a match either fails
         //   those guards and skips itself, or is the same mapping written twice.
         Continue_: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::elementChanges::188", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::holdElementChanges::2705"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\ChangeSetBuilder::elementChanges::188", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::holdElementChanges::2853"],
         },
 
         // The always-recorded context of an owner that had no event of its own is applied
@@ -181,7 +181,7 @@
         // loses the context, and WhoseMomentALateRecordCarriesTest fails on it, which is
         // the property being pinned. One mutant, one fact, one guard.
         Coalesce: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::withWhatWasEmptied::3046", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2846"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::withWhatWasEmptied::3194", "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::whoseAnswerIsCurrent::2994"],
         },
 
         // An owner whose collection was emptied is remembered twice: once where the
@@ -195,7 +195,7 @@
         // road into it that is not also a membership change would find the map already
         // filled in.
         MethodCallRemoval: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::743"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::rememberWhatIsBeingEmptied::767"],
         },
 
         // stringify's arm for a BackedEnum, which nothing reaches: Doctrine hands an
@@ -207,7 +207,7 @@
         // Doctrine makes in writing. The Stringable arm beside it is reached, and has a
         // test.
         CastString: {
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::stringify::3291"],
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::stringify::3439"],
         },
     },
     // Its own floor, and well below the other run's, because this listener is the code
@@ -255,28 +255,32 @@
     // writing more tests for this class, and inventing a caller to keep a number is the
     // thing this file exists to argue against. Measured with a probe: a test written to
     // reach that arm passed without reaching it, which is how it was noticed.
-    // Lowered again, 96 -> 94, against 94.6 measured, and the reason is written here
-    // rather than worked around in the code.
+    // 94, and this job is RED against it on purpose: 92.7 measured (86 of 1177).
     //
-    // Two days of work on this listener fixed seventeen defects and rewrote most of the
-    // collection-emptying road to do it. New code arrives with new mutants, and the tests
-    // that came with it were written against BEHAVIOUR -- what the history says when the
-    // rows say something else -- rather than against branches. That is the right way round
-    // and it costs a few points every time the area is rebuilt.
+    // It was lowered 96 -> 94 once with a reason, and that reason was wrong. It said seven
+    // of the escaping mutants were structural because the arm of CollectionRowsQuery that
+    // reads the elements' table was reached by nothing in the listener -- measured with a
+    // probe. The probe had walked one road, a fresh emptying. The arm was taken out on
+    // that basis, and the search found the road it had missed within one run of three
+    // thousand sequences: a stale deletion, handed after a swallowed postFlush to a flush
+    // with nothing else to do, asks exactly that question. The arm is back, the sequence
+    // that found it is a regression, and those seven mutants are mostly killed by it.
     //
-    // Seven of the sixty are structural: theJoinRowsAreGone() has one caller left, the
-    // question asked after the commit, and the arm of CollectionRowsQuery that reads a
-    // table off the element's metadata is not reached from the listener at all. Measured
-    // with a probe, written at the method. No test of this class can kill them.
+    // What is red now is new code with one guard where it needs three: the log that lets
+    // a nested flush which dies put back what it swept out of the flushes still running.
+    // It rolls back three maps -- arrivals, changes, emptyings -- and a test reaches only
+    // the changes. Tests written for the other two passed without reaching the log, and
+    // were taken out rather than kept as guards that guard nothing. Whether those two can
+    // be reached at all is an open question, and it is not going to be answered by saying
+    // "unreachable" an hour after that word turned out wrong about the arm above.
     //
-    // The rest is ordinary triage and it is worth doing -- the technique that works is
-    // transcribing a generated sequence literally, step for step, which killed several of
-    // them today when composing a readable scenario could not. It is on the list for 1.4,
-    // and it is not worth holding a release with seventeen fixes in it.
+    // So the floor is not lowered a third time to make the job pass. Both reviewers of this
+    // round said as much, and they were right: two lowerings in three days is the tool not
+    // seeing what kills the mutants, not the code getting harder. A release waits for this
+    // job, which is what release.yml's gate is for.
     //
-    // What the score is NOT allowed to do is stand in for the search. Three thousand
-    // generated sequences run green against the rows with an empty list of known
-    // failures, which is the stronger statement and the one that found the seventeen.
+    // What the score still does not do is stand in for the search: three thousand
+    // sequences run green against the rows, and the list of known failures is empty.
     minCoveredMsi: 94,
     // Six times the other run's. A test here is a schema and an EntityManager before it
     // is an assertion, so the work per mutant is a second or two rather than well under
