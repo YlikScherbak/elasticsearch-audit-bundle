@@ -94,7 +94,7 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Fixed
-- **What an emptied collection says about its lines now comes from the rows, and fifteen things it
+- **What an emptied collection says about its lines now comes from the rows, and nineteen things it
   used to say are gone.** Emptying an audited collection is the operation Doctrine reports by
   saying nothing, so the membership has to be read back — and it was read out of Doctrine's
   snapshot of the collection, which is what that collection held when it was last synchronised
@@ -206,9 +206,29 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   search never touches — found three more. Teaching it to start a flush from inside another
   found the last three on its first run: four rounds of this candidate's review had lived in
   that shape and the search could not reach any of it. It now runs at three thousand
-  sequences in a CI job of its own. Twelve of the fifteen have a test of their own that was
-  watched failing against the fix taken back out; the other three are guarded by the search,
-  which is said where each of them lives, with the seed that fails without it.
+  sequences in a CI job of its own.
+  <br>**A flush nested inside another that dies no longer takes the outer flush's history with
+  it.** Dropping what a flush says about a line whose row is going reaches every flush of the
+  operation, which made it the one place a flush changes what ANOTHER flush collected -- and a
+  nested flush can be refused after doing it. The outer flush's "1 -> 2" was swept away, the
+  outer flush went on to write that UPDATE, and the row changed with no history of it. A
+  dying flush now puts back what it swept, and takes with it what it concluded about rows
+  being taken: its DELETE never ran.
+  <br>**What is shown of a deleted line no longer comes from a change set Doctrine has already
+  written.** The unit of work does not clear a change set when a postFlush listener throws, so
+  a rename that WAS written, followed by an emptying, named the row by the name it had before
+  the rename. Whose row is going had already stopped trusting that leftover; the fields of the
+  same element were still trusting it. Both now ask only what this listener knows about the
+  column.
+  <br>**"Nobody" is an answer on every reader of whose row is going.** The reader that asks the
+  database was consulted only when two readers both named somebody, so a detach that was
+  written, followed by a delete, took the change set's leftover owner and described the same
+  departure twice. And a stored NULL is a value: a nullable column that held nothing, given
+  something in the same flush as its row went, was shown with what it never received.
+  <br>The sequences that tell each of these rules apart are run on every build as regressions,
+  not only in the long job -- measured by taking each rule out and seeing which of three
+  thousand sequences fail, rather than kept from memory. One seed that found a defect in the
+  morning had stopped telling anything apart by the afternoon.
 - **One stretch of records failing no longer throws away the ones after it, and the collision
   report no longer repeats any value at all.** Publishing walks the records of a flush in
   stretches that share a moment, and under `on_failure: throw` a refused record leaves
