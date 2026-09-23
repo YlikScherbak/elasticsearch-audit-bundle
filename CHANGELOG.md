@@ -229,6 +229,21 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   not only in the long job -- measured by taking each rule out and seeing which of three
   thousand sequences fail, rather than kept from memory. One seed that found a defect in the
   morning had stopped telling anything apart by the afternoon.
+  <br>**An emptying run from inside the outer flush's postUpdate names the row by what it holds.**
+  This listener's own change set outlives its statement on purpose -- publishing reads it after
+  the commit -- and it was read as if its presence meant "not yet written". A flush nested after
+  a rename had reached the row emptied the collection and named the line by the name the UPDATE
+  had just replaced. What says a statement is still to run is the flush number beside the set.
+  <br>**Putting a line back where its row already is records what changed inside it.** That is
+  not a move, and it no longer takes the move's road -- which records no fields of the line,
+  because an owner a line arrives at never held its old values. The quantity changed in the same
+  flush as the line was put back was written to the row and to nobody's history.
+- **Removing many lines the way Maker generates it asks the database once, not once per line.**
+  `removeItem()` nulls the back-reference and lets orphanRemoval delete the row, so the change set
+  names the owner and the original data names nobody -- the one condition on which the listener
+  asks the row whose it is. It asked line by line, inside the application's transaction: a
+  thousand lines removed was a thousand SELECTs. It is one per class and association now, asked
+  in onFlush before any deletion is walked, underneath the application's filters as before.
 - **One stretch of records failing no longer throws away the ones after it, and the collision
   report no longer repeats any value at all.** Publishing walks the records of a flush in
   stretches that share a moment, and under `on_failure: throw` a refused record leaves

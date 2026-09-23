@@ -202,6 +202,25 @@ final class AuditSubscriber
      */
     private array $sweptBy = [];
 
+    /**
+     * What the rows say about the owners of the lines this flush is deleting, asked once.
+     *
+     * The reader of whose row is going asks the database where two readers contradict
+     * each other, and one of the commonest ways to delete a child in a Symfony application
+     * makes them contradict every time: Maker's removeItem() nulls the back-reference and
+     * lets orphanRemoval delete the row, so the change set names the owner and the original
+     * data names nobody. Asked line by line, removing a thousand lines was a thousand
+     * SELECTs inside the application's transaction. It is one per class now, asked in
+     * onFlush before the deletions are walked, while every row is still where it was.
+     *
+     * Keyed by object id and then by association; a value of false means "the row was not
+     * there to ask about", which is a different answer from a column holding NULL. Lives
+     * for one onFlush and is emptied at the end of it.
+     *
+     * @var array<int, array<string, int|string|false|null>>
+     */
+    private array $rowOwners = [];
+
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
     private array $pendingIndexByEntity = [];
 
@@ -543,9 +562,13 @@ final class AuditSubscriber
             $this->collectElementChanges($em, $element, $flush, added: true);
         }
 
+        $this->askTheRowsAboutTheDeparted($em, $uow->getScheduledEntityDeletions());
+
         foreach ($uow->getScheduledEntityDeletions() as $element) {
             $this->collectElementChanges($em, $element, $flush, added: false);
         }
+
+        $this->rowOwners = [];
 
         $this->rememberWhatIsBeingEmptied($em, $flush);
     }
@@ -1530,6 +1553,106 @@ final class AuditSubscriber
     }
 
     /**
+     * What the change set and the original data say a departing line's owner was, and
+     * whether they contradict each other -- the one condition on which the row is asked.
+     *
+     * Each is asked whether it HAS an answer as well as what it is: the original data
+     * holds a detached line as a null under a key that is there, and that is "nobody", not
+     * silence. Used by the reader of whose row is going and by the pass that asks the rows
+     * for a whole flush at once, so that the two agree on which lines need asking.
+     *
+     * @return array{0: ?object, 1: ?object, 2: bool}
+     */
+    private function whatTheReadersOfADepartureSay(EntityManagerInterface $em, object $element, string $association): array
+    {
+        $changeSet = self::sidesFrom($em->getUnitOfWork()->getEntityChangeSet($element), $this->changeSets[spl_object_id($element)] ?? []);
+        $changeSetSays = \array_key_exists($association, $changeSet) && \is_array($changeSet[$association]);
+        $named = $changeSetSays ? $changeSet[$association][0] ?? null : null;
+
+        $original = $em->getUnitOfWork()->getOriginalEntityData($element);
+        $originally = $original[$association] ?? null;
+
+        $named = \is_object($named) ? $named : null;
+        $originally = \is_object($originally) ? $originally : null;
+
+        return [$named, $originally, $changeSetSays && \array_key_exists($association, $original) && $named !== $originally];
+    }
+
+    /**
+     * Asks the rows, one statement per class, about every departing line whose readers
+     * contradict each other -- before any of them is walked, while the rows are there.
+     *
+     * @param iterable<object> $departing
+     */
+    private function askTheRowsAboutTheDeparted(EntityManagerInterface $em, iterable $departing): void
+    {
+        /** @var array<string, array{0: string, 1: string, 2: array<string, list<object>>}> $groups */
+        $groups = [];
+
+        foreach ($departing as $element) {
+            try {
+                $metadata = $em->getClassMetadata($element::class);
+                $identifier = $metadata->getIdentifierFieldNames();
+
+                if (\count($identifier) !== 1 || isset($this->neverWritten[$element]) && $this->neverWritten[$element] !== []) {
+                    continue; // a composite key is asked line by line; a refusal already knows
+                }
+
+                foreach ($metadata->getAssociationNames() as $association) {
+                    if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {
+                        continue;
+                    }
+
+                    if (!$this->whatTheReadersOfADepartureSay($em, $element, $association)[2]) {
+                        continue;
+                    }
+
+                    $id = $metadata->getIdentifierValues($element)[$identifier[0]] ?? null;
+
+                    if ($id === null) {
+                        continue;
+                    }
+
+                    $groups[$element::class.'|'.$association] ??= [$element::class, $association, []];
+                    $groups[$element::class.'|'.$association][2][(string) $id][] = $element;
+                }
+            } catch (\Throwable) {
+                continue; // what cannot be batched is asked line by line, as it was
+            }
+        }
+
+        foreach ($groups as [$class, $association, $byId]) {
+            try {
+                $idField = $em->getClassMetadata($class)->getIdentifierFieldNames()[0];
+                $query = $em->createQuery(sprintf(
+                    'SELECT e.%1$s AS id, IDENTITY(e.%2$s) AS owner FROM %3$s e WHERE e.%1$s IN (:ids)',
+                    $idField,
+                    $association,
+                    $class,
+                ))->setParameter('ids', array_keys($byId));
+
+                /** @var list<array{id: mixed, owner: mixed}> $rows */
+                $rows = self::withoutTheApplicationsFilters($em, static fn (): array => $query->getScalarResult());
+                $found = [];
+
+                foreach ($rows as $row) {
+                    $found[(string) $row['id']] = $row['owner'];
+                }
+
+                foreach ($byId as $id => $elements) {
+                    foreach ($elements as $element) {
+                        $answer = \array_key_exists($id, $found) ? $found[$id] : false;
+                        $this->rowOwners[spl_object_id($element)][$association] = \is_int($answer) || \is_string($answer) || $answer === null || $answer === false ? $answer : (string) $answer;
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Asked line by line instead, as it was before there was a batch.
+                $this->writer->reportFailure($e, null);
+            }
+        }
+    }
+
+    /**
      * Which of two owners the element's row actually names, asked of the database.
      *
      * Called only where the change set and the original data contradict each other about
@@ -1548,6 +1671,12 @@ final class AuditSubscriber
      */
     private function whoseRowItIs(EntityManagerInterface $em, object $element, string $association, ?object $named, ?object $originally): ?object
     {
+        $key = spl_object_id($element);
+
+        if (isset($this->rowOwners[$key]) && \array_key_exists($association, $this->rowOwners[$key])) {
+            return $this->whichOfTheTwo($em, $this->rowOwners[$key][$association], $named, $originally);
+        }
+
         try {
             $metadata = $em->getClassMetadata($element::class);
             $identifier = $metadata->getIdentifierValues($element);
@@ -1578,23 +1707,7 @@ final class AuditSubscriber
                 return $originally; // the row has gone already; nothing here can improve on this
             }
 
-            $has = $rows[0]['owner'];
-
-            // Nobody is an answer here too. The row with no owner in its column is the one
-            // thing this reader exists to be able to say, and it used to fall through to
-            // the original data -- somebody -- because both candidates were required to be
-            // somebody before it was asked.
-            if ($has === null) {
-                return null;
-            }
-
-            foreach ([$named, $originally] as $candidate) {
-                if ($candidate !== null && (string) $has === (string) ($this->identifierOf($em, $candidate) ?? '')) {
-                    return $candidate;
-                }
-            }
-
-            return $originally;
+            return $this->whichOfTheTwo($em, $rows[0]['owner'], $named, $originally);
         } catch (\Throwable $e) {
             // The one question this listener asks of the database on this road, and a
             // question that fails must not take the flush with it.
@@ -1602,6 +1715,34 @@ final class AuditSubscriber
 
             return $originally;
         }
+    }
+
+    /**
+     * Which of the two candidates the owner column the row holds names.
+     *
+     * Nobody is an answer: the row with no owner in its column is the one thing this reader
+     * exists to be able to say, and it used to fall through to the original data --
+     * somebody -- because both candidates were required to be somebody before it was asked.
+     * False, from the batch, is the row not being there to ask about at all, and the
+     * original data is what this had before it could ask.
+     */
+    private function whichOfTheTwo(EntityManagerInterface $em, mixed $has, ?object $named, ?object $originally): ?object
+    {
+        if ($has === false) {
+            return $originally;
+        }
+
+        if ($has === null) {
+            return null;
+        }
+
+        foreach ([$named, $originally] as $candidate) {
+            if ($candidate !== null && (string) $has === (string) ($this->identifierOf($em, $candidate) ?? '')) {
+                return $candidate;
+            }
+        }
+
+        return $originally;
     }
 
     /**
@@ -1659,10 +1800,15 @@ final class AuditSubscriber
             //
             // Two things know. What a refused flush left unwritten, which is the only record
             // of a column a refusal moved Doctrine past without moving the row. And this
-            // listener's own change set, which is dropped once the row matches the object
-            // and so is only there while its statement is still to run.
+            // listener's own change set -- but only while its statement is still to run,
+            // which is what the flush number beside it says. The set itself outlives the
+            // statement on purpose: publishing reads it after the commit. It was read here
+            // as if its presence meant "not yet written", and a flush nested inside the
+            // outer flush's postUpdate -- after the UPDATE had reached the row -- emptied the
+            // collection and named the row by the value the UPDATE had just replaced.
             $kept = $this->neverWritten[$element] ?? [];
-            $ours = $this->changeSets[spl_object_id($element)] ?? [];
+            $key = spl_object_id($element);
+            $ours = isset($this->changeSetFlush[$key]) ? $this->changeSets[$key] ?? [] : [];
 
             $stored = [];
 
@@ -2019,6 +2165,7 @@ final class AuditSubscriber
         $this->takenByAnEmptying = [];
         $this->vanishedEntirely = [];
         $this->sweptBy = [];
+        $this->rowOwners = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
     }
@@ -2254,20 +2401,23 @@ final class AuditSubscriber
                 // The element changed hands. Doctrine keeps that on the owning side — the
                 // element's own reference — so neither collection is dirty and, without
                 // reading the change set, both owners stay silent about it.
-                if (\array_key_exists($association, $changeSet) && \is_array($changeSet[$association])) {
-                    $from = $changeSet[$association][0] ?? null;
+                // Unless it changed hands for the same one. A line moved away by a flush
+                // that was refused is still in the row it started in, and putting it back
+                // writes an UPDATE that moves nothing -- Doctrine reports the change because
+                // its own idea of the row moved and came back, and sidesFrom() has already
+                // corrected the old side to what the column really holds. Recorded as a
+                // move, the owner both lost and gained the line under one key.
+                //
+                // Not a move, so not the move's road: it falls through to the ordinary
+                // one below, which is where what changed INSIDE the line is recorded. It
+                // used to stop here, and a quantity changed in the same flush as the line
+                // was put back was written to the row and to nobody's history.
+                $movedNowhere = \array_key_exists($association, $changeSet)
+                    && \is_array($changeSet[$association])
+                    && ($changeSet[$association][0] ?? null) === $current;
 
-                    // Unless it changed hands for the same one. A line moved away by a
-                    // flush that was refused is still in the row it started in, and
-                    // putting it back writes an UPDATE that moves nothing -- Doctrine
-                    // reports the change because its own idea of the row moved and came
-                    // back, and sidesFrom() has already corrected the old side to what the
-                    // column really holds. Recorded anyway, the owner both lost and gained
-                    // the line under one key, and whichever was written second is what the
-                    // history said happened.
-                    if ($from === $current) {
-                        continue;
-                    }
+                if (!$movedNowhere && \array_key_exists($association, $changeSet) && \is_array($changeSet[$association])) {
+                    $from = $changeSet[$association][0] ?? null;
 
                     $this->holdMembership($em, $element, $from, $association, $flush, added: false, replacing: $replacing);
                     $this->holdMembership($em, $element, $current, $association, $flush, added: true, replacing: $replacing);
@@ -2323,10 +2473,7 @@ final class AuditSubscriber
                     // Read in the other order -- change set first, which is where this
                     // started -- the two shapes above are each other's counter-example,
                     // and a generated sequence produced both.
-                    $deletedChangeSet = self::sidesFrom($em->getUnitOfWork()->getEntityChangeSet($element), $this->changeSets[spl_object_id($element)] ?? []);
-                    $named = \array_key_exists($association, $deletedChangeSet) && \is_array($deletedChangeSet[$association])
-                        ? $deletedChangeSet[$association][0] ?? null
-                        : null;
+                    [$named, $originally, $contradict] = $this->whatTheReadersOfADepartureSay($em, $element, $association);
 
                     // The first reader is asked whether it HAS an answer, and the rest are
                     // asked what their answer is. For this one, "nobody" is an answer: a
@@ -2365,8 +2512,6 @@ final class AuditSubscriber
                     // where two readers contradict each other, which needs a re-pointing
                     // and a deletion of the same element.
                     $kept = $this->neverWritten[$element] ?? [];
-                    $original = $em->getUnitOfWork()->getOriginalEntityData($element);
-                    $originally = $original[$association] ?? null;
 
                     // Whether each of the two has an answer at all, which is not the same as
                     // whether its answer is somebody. The original data holds a detached line
@@ -2376,13 +2521,9 @@ final class AuditSubscriber
                     // was WRITTEN, and then a delete, took the change set's leftover owner
                     // and described the same departure a second time -- from a crate the row
                     // had already left.
-                    $changeSetSays = \array_key_exists($association, $deletedChangeSet) && \is_array($deletedChangeSet[$association]);
-                    $originalSays = \array_key_exists($association, $original);
-
                     $owner = match (true) {
                         \array_key_exists($association, $kept) => $kept[$association],
-                        $changeSetSays && $originalSays && $named !== $originally
-                            => $this->whoseRowItIs($em, $element, $association, $named, $originally),
+                        $contradict => $this->whoseRowItIs($em, $element, $association, $named, $originally),
                         default => $originally ?? $named ?? $current,
                     };
 

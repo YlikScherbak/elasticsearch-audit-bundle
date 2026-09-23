@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
+use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
@@ -72,6 +75,53 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         // instead answers both questions with one SELECT and cannot be stale.
         self::assertCount(1, $read, 'one question, asked once');
         self::assertStringContainsString('route_stop', $read[0], 'it reads the membership back');
+    }
+
+    public function testRemovingManyLinesTheMakerWayAsksTheRowsOnce(): void
+    {
+        // Maker's removeItem() nulls the back-reference and lets orphanRemoval delete the
+        // row, which makes the two readers of whose row is going contradict each other for
+        // every line -- and a contradiction is what the row is asked about. Asked line by
+        // line, a hundred removals were a hundred SELECTs. The rows are asked once per class
+        // now, before the deletions are walked.
+        $this->attachListener(FailurePolicy::Log);
+
+        $this->em->persist($crate = new Crate('C-1'));
+        $lines = [];
+
+        for ($i = 0; $i < 100; ++$i) {
+            $crate->add($lines[] = new CrateItem('SKU-'.$i));
+        }
+
+        $this->em->flush();
+        $this->queries = [];
+
+        foreach ($lines as $line) {
+            $line->crate = null;
+            $crate->items->removeElement($line);
+        }
+
+        $this->em->flush();
+
+        self::assertCount(1, self::selects($this->queries), 'one question for a hundred lines');
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'and every one of them went');
+    }
+
+    public function testRemovingALineWhoseReadersAgreeAsksNothing(): void
+    {
+        // The ordinary $em->remove(): nothing about the owner changed, the readers agree,
+        // and nothing is asked. The batch must not turn every removal into a question.
+        $this->attachListener(FailurePolicy::Log);
+
+        $this->em->persist($crate = new Crate('C-1'));
+        $crate->add($line = new CrateItem('SKU-1'));
+        $this->em->flush();
+        $this->queries = [];
+
+        $this->em->remove($line);
+        $this->em->flush();
+
+        self::assertSame([], self::selects($this->queries), 'a removal nobody contradicts is asked about by nobody');
     }
 
     public function testACollectionThatDidNotMoveIsNotLoadedToFindThatOut(): void

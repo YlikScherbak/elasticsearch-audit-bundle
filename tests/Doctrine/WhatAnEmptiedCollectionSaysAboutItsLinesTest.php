@@ -602,6 +602,158 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
         self::assertSame(['old' => 2, 'new' => 3], $changes['items.'.$line->id.'.quantity'] ?? null, 'the next change is recorded normally');
     }
 
+    public function testAnInnerEmptyingAfterAnOuterRenameNamesTheValueAlreadyWritten(): void
+    {
+        // This listener's own change set outlives its statement, on purpose -- publishing
+        // reads it after the commit. It was read here as if its presence meant "not yet
+        // written". A flush nested inside the outer flush's postUpdate, after the rename had
+        // reached the row, empties the collection: the row holds the new name and was named
+        // by the old one. What says a statement is still to run is the flush number beside
+        // the set, and that is cleared the moment the row matches the object.
+        [$crate, , $first] = $this->twoCratesAndALine();
+
+        $this->gateway->documents = [];
+
+        $seen = [];
+        $inner = $this->inThePostUpdateOf($first, function () use ($crate, $first, &$seen): void {
+            $seen[] = (string) $this->em->getConnection()->fetchOne('SELECT sku FROM CrateItem WHERE id = ?', [$first->id]);
+            $crate->items = new ArrayCollection();
+            $this->em->flush();
+        });
+
+        $first->sku = 'SKU-RENAMED';
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $inner);
+
+        self::assertSame(['SKU-RENAMED'], $seen, 'the premise: the rename was in the row when the nested flush began, and it began once');
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'and the emptying took the rows');
+
+        $emptied = [];
+
+        foreach ($this->documents() as $document) {
+            foreach ((array) ($document['changes']['items']['old'] ?? []) as $name) {
+                $emptied[] = (string) $name;
+            }
+        }
+
+        self::assertContains('SKU-RENAMED', $emptied, 'what the row held when it went');
+        self::assertNotContains('SKU-1', $emptied, 'not what the UPDATE had already replaced');
+    }
+
+    public function testPuttingALineBackWhereItsRowIsStillRecordsItsQuantityChange(): void
+    {
+        // Putting a line back where its row already is moves nothing, and that is not a
+        // move -- so it must not take the move's road, which records no fields of the line
+        // because an owner a line ARRIVES at never held its old values. Here the owner held
+        // them all along. The quantity changed in the same flush was written to the row and
+        // to nobody's history.
+        [$crate, $other, $first] = $this->twoCratesAndALine();
+
+        $first->crate = $other;
+        $this->flushRefused();
+
+        self::assertSame(
+            ['crate_id' => 'C-1', 'quantity' => 1],
+            array_map(static fn (mixed $v): mixed => is_numeric($v) ? (int) $v : $v, (array) $this->em->getConnection()->fetchAssociative('SELECT crate_id, quantity FROM CrateItem WHERE id = ?', [$first->id])),
+            'the premise: the refusal left the row where it was',
+        );
+
+        $this->gateway->documents = [];
+
+        $first->crate = $crate;
+        $first->quantity = 2;
+        $this->em->flush();
+
+        $changes = array_merge(...array_values(array_map(
+            static fn (array $document): array => $document['changes'] ?? [],
+            $this->documents(),
+        )));
+
+        self::assertSame(['old' => 1, 'new' => 2], $changes['items.'.$first->id.'.quantity'] ?? null, 'the change the row really took');
+        self::assertArrayNotHasKey('items.'.$first->id, $changes, 'and no arrival or departure: nothing moved');
+    }
+
+    public function testARefusedNestedEmptyingAfterAMoveDoesNotEraseTheArrival(): void
+    {
+        // The membership half of what a dying nested flush puts back. The outer flush moves
+        // a line into the crate; after the UPDATE, in the line's postUpdate, a flush nested
+        // inside empties that crate -- the row it reads is already under it -- and is
+        // refused before its SQL. It had swept the outer flush's arrival away, and the outer
+        // flush committed the move with the crate never told.
+        $this->attachListener(FailurePolicy::Log);
+
+        $this->em->persist($crate = new Crate('C-1'));
+        $this->em->persist($other = new Crate('C-2'));
+        $other->add($line = new CrateItem('SKU-1'));
+        $this->em->flush();
+
+        $this->gateway->documents = [];
+
+        $refused = false;
+        $inner = $this->inThePostUpdateOf($line, function () use ($crate, &$refused): void {
+            $crate->items = new ArrayCollection();
+
+            $veto = new class {
+                public function onFlush(): void
+                {
+                    throw new \DomainException('the inner flush is refused');
+                }
+            };
+
+            $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+            try {
+                $this->em->flush();
+            } catch (\DomainException) {
+                $refused = true;
+            } finally {
+                $this->em->getEventManager()->removeEventListener([Events::onFlush], $veto);
+            }
+        });
+
+        $line->crate = $crate;
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $inner);
+
+        self::assertTrue($refused, 'the premise: the nested flush was refused');
+        self::assertSame('C-1', (string) $this->em->getConnection()->fetchOne('SELECT crate_id FROM CrateItem'), 'and the move was written');
+
+        $said = $this->everyStatement();
+
+        self::assertContains('C-1 items gained SKU-1', $said, 'the arrival the row made');
+        self::assertContains('C-2 items lost SKU-1', $said, 'and the departure');
+        self::assertNotContains('C-1 items lost SKU-1', $said, 'and no emptying: its DELETE never ran');
+    }
+
+    /**
+     * Runs something inside the postUpdate of one particular entity, once, AFTER this
+     * listener's own postUpdate -- which is where a statement has already reached the row.
+     */
+    private function inThePostUpdateOf(object $entity, \Closure $what): object
+    {
+        $listener = new class($entity, $what) {
+            private bool $ran = false;
+
+            public function __construct(private readonly object $entity, private readonly \Closure $what)
+            {
+            }
+
+            public function postUpdate(\Doctrine\ORM\Event\PostUpdateEventArgs $args): void
+            {
+                if ($this->ran || $args->getObject() !== $this->entity) {
+                    return;
+                }
+
+                $this->ran = true;
+                ($this->what)();
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $listener);
+
+        return $listener;
+    }
+
     public function testAnEmptyingAfterACommittedRenameNamesTheCommittedValue(): void
     {
         // The mirror of the refused rename, and the reason the two readers of a copy are
