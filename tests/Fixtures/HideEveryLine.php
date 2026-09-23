@@ -19,7 +19,15 @@ use Doctrine\ORM\Query\Filter\SQLFilter;
  */
 final class HideEveryLine extends SQLFilter
 {
-    public function addFilterConstraint(ClassMetadata $targetEntity, string $targetTableAlias): string
+    /**
+     * The alias is untyped, as in {@see HideEveryStop}: ORM 2 declares it without a type,
+     * and a subclass may not narrow it, while ORM 3 lets a subclass widen it. Typed, this
+     * fixture was a fatal error on the oldest supported ORM, which takes every Doctrine
+     * test with it because the attribute driver loads the whole directory.
+     *
+     * @param ClassMetadata<object> $targetEntity
+     */
+    public function addFilterConstraint(ClassMetadata $targetEntity, $targetTableAlias): string
     {
         return $targetEntity->getName() === CrateItem::class ? '1 = 0' : '';
     }

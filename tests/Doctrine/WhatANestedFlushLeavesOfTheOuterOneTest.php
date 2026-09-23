@@ -462,8 +462,14 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
             try {
                 $this->em->flush();
                 self::fail('the premise: without savepoints the outer commit is refused');
-            } catch (\Doctrine\ORM\OptimisticLockException $e) {
-                self::assertInstanceOf(\Doctrine\DBAL\ConnectionException::class, $e->getPrevious(), 'the premise: refused as rollback-only');
+            } catch (\Throwable $e) {
+                // ORM 3 wraps the refusal in an OptimisticLockException; ORM 2 lets the
+                // connection's own exception through. Either way it is the connection
+                // refusing a transaction marked rollback-only.
+                for ($cause = $e; $cause !== null && !$cause instanceof \Doctrine\DBAL\ConnectionException; $cause = $cause->getPrevious()) {
+                }
+
+                self::assertNotNull($cause, 'the premise: refused as rollback-only, not '.$e::class.': '.$e->getMessage());
             }
 
             $this->andTheApplicationGoesOn();
