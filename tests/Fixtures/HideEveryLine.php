@@ -1,0 +1,26 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Borsche\ElasticsearchAuditBundle\Tests\Fixtures;
+
+use Doctrine\ORM\Mapping\ClassMetadata;
+use Doctrine\ORM\Query\Filter\SQLFilter;
+
+/**
+ * An SQL filter over the very rows a history is being checked against.
+ *
+ * {@see HideEveryStop} does the same to Stops, and a search whose world is made of
+ * Articles, Crates and CrateItems can turn it on all day without a single row of its own
+ * being hidden. A filter is only a test of anything when it covers what is under test:
+ * this one hides every line, which is the ordinary soft-delete shape put at its most
+ * extreme, and it is what makes "asked underneath the application's filters" a claim the
+ * search can break rather than a sentence in a comment.
+ */
+final class HideEveryLine extends SQLFilter
+{
+    public function addFilterConstraint(ClassMetadata $targetEntity, string $targetTableAlias): string
+    {
+        return $targetEntity->getName() === CrateItem::class ? '1 = 0' : '';
+    }
+}

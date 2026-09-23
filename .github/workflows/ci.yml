@@ -342,6 +342,41 @@ jobs:
       - name: Enforce the mutation score floor
         run: php -d memory_limit=-1 tools/infection/vendor/bin/infection --threads=max --no-progress --no-interaction
 
+  # Three thousand generated sequences of ordinary operations, each checked against what
+  # the database actually did. It is a search rather than a guard -- what it finds is
+  # written out as a test of its own -- so it runs once here instead of in every job, and
+  # the suite's own default stays at sixty.
+  #
+  # Sixty is the number it ran at when it was written, and sixty was passing while twenty
+  # of the next hundred and forty were not. All twenty were real. Widening what it may
+  # generate then found three more in the first two thousand, and every one of those was
+  # real too. That is what this job is for: the search is only worth what it is allowed to
+  # search, and how far it is allowed to go.
+  #
+  # Not folded into the mutation job either, and for the opposite reason to the one below:
+  # this test covers nearly every line of the listener, so Infection would run three
+  # thousand sequences per mutant, and every one of them would time out.
+  model:
+    name: The model, at length
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Three thousand sequences against the rows
+        env:
+          AUDIT_MODEL_SEEDS: '3000'
+        run: vendor/bin/phpunit --filter WhatTheHistorySaysAgainstWhatTheRowsDid
+
   # Its own job, and not another directory in the one above, for two reasons that both
   # come from the same place: the tests for this listener build an EntityManager and a
   # schema apiece. They are slow, so the run takes five minutes rather than one and does

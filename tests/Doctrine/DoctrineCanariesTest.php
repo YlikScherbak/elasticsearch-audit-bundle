@@ -7,7 +7,10 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Basket;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\BasketItem;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
+use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
@@ -553,6 +556,79 @@ final class DoctrineCanariesTest extends TestCase
      * the method. The listener asks the class rather than the version, so what matters
      * is that the answer stays consistent with the ORM in use.
      */
+    /**
+     * Backs the first and third narrowing of `WhatTheHistorySaysAgainstWhatTheRowsDid`.
+     *
+     * That search will not replace a collection with one that keeps an element it already
+     * had, and will not touch a line Doctrine has whose row the database does not. Both
+     * rest on one claim: **replacing a collection takes the kept element's row with the
+     * rest and leaves the object managed as if nothing had happened.** If that is true,
+     * every step after such a replacement is operating on an object whose row is gone, and
+     * what a history says about it is between Doctrine and its own database.
+     *
+     * A claim of that shape has been wrong three times in this candidate's review, which
+     * is why it is measured here rather than asserted in a comment. Without this, "that is
+     * Doctrine's divergence and not ours" is the search excusing itself.
+     */
+    public function testAReplacementTakesTheKeptElementsRowAndKeepsTheObject(): void
+    {
+        $crate = new Crate('C-1');
+        $crate->add($kept = new CrateItem('SKU-1'));
+        $crate->add(new CrateItem('SKU-2'));
+
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $crate->items = new ArrayCollection([$kept]);
+        $this->em->flush();
+
+        self::assertSame(
+            0,
+            (int) $this->connection->fetchOne('SELECT COUNT(*) FROM CrateItem WHERE id = ?', [$kept->id]),
+            'the row of the element the replacement kept',
+        );
+
+        self::assertTrue($this->em->contains($kept), 'and Doctrine still has the object');
+        self::assertFalse($this->em->getUnitOfWork()->isScheduledForDelete($kept), 'with nothing scheduled to tell anyone');
+        self::assertNotNull($kept->id, 'and its identifier untouched, so nothing about it looks wrong');
+    }
+
+    /**
+     * Backs the second narrowing of `WhatTheHistorySaysAgainstWhatTheRowsDid`.
+     *
+     * That search will not touch a line while a REPLACEMENT of its collection is waiting
+     * for a flush, and the claim is that Doctrine reports an UPDATE that reached no row:
+     * collection deletions are executed before entity updates, so the DELETE takes the row
+     * first and the UPDATE matches nothing, while Doctrine's own state has the line alive
+     * with its new value.
+     *
+     * The same claim is what makes `AuditSubscriber::theseRowsAreGoing()` right, so a
+     * failure here is two things at once: the search may stop narrowing, and the listener
+     * is dropping facts it should be keeping.
+     */
+    public function testAnUpdateInTheSameFlushAsAReplacementReachesNoRow(): void
+    {
+        $crate = new Crate('C-1');
+        $crate->add($line = new CrateItem('SKU-1'));
+
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $id = $line->id;
+
+        $line->quantity = 9;
+        $crate->items = new ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame(
+            0,
+            (int) $this->connection->fetchOne('SELECT COUNT(*) FROM CrateItem WHERE id = ?', [$id]),
+            'the row went with the collection',
+        );
+
+        self::assertSame(9, $line->quantity, 'and Doctrine has the new value on an object with no row');
+    }
+
     public function testWhetherAPartialClearCanStillBeAskedAbout(): void
     {
         $args = new OnClearEventArgs($this->em);
