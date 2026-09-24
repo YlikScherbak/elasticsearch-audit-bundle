@@ -183,7 +183,18 @@ final class WhatAWorkerThatDiedLeavesBehindTest extends TestCase
         $this->handle($redelivered);
         $this->queue->ack($redelivered);
 
-        self::assertSame($documents, $this->gateway->documents['audit_log'], 'the redelivery wrote a second, different document');
+        // The same document but for writtenAt, which each attempt stamps with itself: the one
+        // in the index is the write that happened last, so that the gap between loggedAt and
+        // writtenAt says how late the history really was. Compared with it, this was one
+        // second from failing whenever the redelivery crossed a second boundary.
+        $without = static fn (array $documents): array => array_map(static function (array $document): array {
+            unset($document['writtenAt']);
+
+            return $document;
+        }, $documents);
+
+        self::assertSame($without($documents), $without($this->gateway->documents['audit_log']), 'the redelivery wrote a second, different document');
+        self::assertGreaterThanOrEqual($documents[0]['writtenAt'] ?? '', $this->gateway->documents['audit_log'][0]['writtenAt'] ?? '', 'and says when it was written again, not when it was first');
         self::assertSame($ids, $this->gateway->ids['audit_log'], 'the redelivery wrote under a different id, so the history now has the change twice');
         self::assertCount(1, $this->gateway->documents['audit_log']);
         self::assertNotNull($ids[0], 'the record reached the queue without an id, so the cluster would name each delivery itself');
