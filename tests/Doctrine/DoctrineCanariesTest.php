@@ -656,9 +656,9 @@ final class DoctrineCanariesTest extends TestCase
      * first and the UPDATE matches nothing, while Doctrine's own state has the line alive
      * with its new value.
      *
-     * The same claim is what makes `AuditSubscriber::theseRowsAreGoing()` right, so a
-     * failure here is two things at once: the search may stop narrowing, and the listener
-     * is dropping facts it should be keeping.
+     * The same claim is what the log's replay holds to -- an UPDATE after a DELETE of the
+     * same row reached nothing (`HistoryReplay`) -- so a failure here is two things at once:
+     * the search may stop narrowing, and the history is dropping facts it should be keeping.
      */
     public function testAnUpdateInTheSameFlushAsAReplacementReachesNoRow(): void
     {

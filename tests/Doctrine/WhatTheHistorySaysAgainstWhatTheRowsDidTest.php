@@ -410,8 +410,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             [6, true, ['change a line', 'move a line', 'flush', 'flush']], // drawn by seed 2710
         ],
 
-        // theseRowsAreGoing()'s set of rows an emptying took, asked whenever something new is
-        // about to be written -- because a nested flush writes its part after the sweep.
+        // Told apart the old listener's set of rows an emptying took, asked whenever something
+        // new was about to be written -- a nested flush writes its part after the sweep. The
+        // rule went with reading the log (3.2a); the sequences stay, as emptyings across
+        // nested, refused and swallowed flushes the replay has to get right.
         'the rows an emptying took stay taken for the rest of the operation' => [
             // drawn by seed 151
             [3, false, ['replace the crate', 'add a line', 'flush, publishing swallowed', 'change a line', 'flush, with one nested inside', 'flush']],
@@ -425,8 +427,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             [6, false, ['change a line', 'add a line', 'flush, refused', 'replace the crate', 'flush, with one nested inside', 'replace the crate', 'flush, refused', 'flush']],
         ],
 
-        // The emptying filtered against everything that vanished, and not only against what
-        // the call that is running happened to find.
+        // Told apart the old emptying filtered against everything that vanished, and not only
+        // against what the call running found. Gone with the rule (3.2a); kept for the same
+        // reason as the ones above.
         'an emptying collected after the sweep leaves out what already vanished' => [
             // drawn by seed 949
             [2, false, ['replace the crate with a new line', 'flush, refused', 'replace the crate with a new line', 'flush, with one nested inside', 'add a line', 'flush', 'flush']],

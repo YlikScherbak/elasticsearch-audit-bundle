@@ -132,78 +132,6 @@ final class AuditSubscriber
     private int $factsReadThrough = 0;
 
     /**
-     * Elements a tracked collection gained or lost, by the owner's object id and then by
-     * the flush that collected them.
-     *
-     * The flush is inside rather than outside because the owner is what the record is
-     * built for, and the object beside it is the only thing some flushes have to build
-     * one from. What the number does is keep two flushes' answers about the same element
-     * apart: they share a key -- "lines.42" names a row, not an occasion -- and read back
-     * by the stamp each entry carries, the highest per key winning.
-     *
-     * @var array<int, array{0: object, 1: array<int, array<string, array{at: int, element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>>}>
-     */
-    private array $elementMembership = [];
-
-    /**
-     * Elements whose rows an emptying of this operation has taken, by object id.
-     *
-     * Nothing this operation says afterwards about one of them is true: the row is gone,
-     * so an UPDATE for it reaches nothing and an INSERT that put it there belongs to a row
-     * the operation ends without. The sweep that drops such statements used to run once,
-     * where the emptying is collected, and a flush nested inside another writes its own
-     * afterwards -- so the same rule is kept here as well and consulted whenever something
-     * new is about to be written down.
-     *
-     * Only for an emptying that takes the ELEMENTS' rows. An owning many-to-many deletes
-     * join rows and leaves every element where it was.
-     *
-     * By the flush whose emptying took the row, so that a flush that dies takes its
-     * word with it: a nested flush refused after its onFlush collected an emptying never
-     * ran the DELETE, and the rows it said were going are exactly where they were.
-     *
-     * @var array<int, array<int, object>>
-     */
-    private array $takenByAnEmptying = [];
-
-    /**
-     * Elements this operation both brought in and took the row of, by object id.
-     *
-     * Nothing about one of them is history: it was in the table between two statements of
-     * one operation, and the record is about the operation.
-     *
-     * The sweep in theseRowsAreGoing() drops what the membership map already says about
-     * such a line. What it cannot reach is an emptying collected AFTERWARDS -- a flush
-     * nested inside another leaves a collection deletion for a later flush to carry out,
-     * and that flush reads the rows and finds the line still in them. So the set is kept,
-     * and an emptying about to be written down is filtered against all of it and not only
-     * against what the call that is running happened to find.
-     *
-     * By the flush that concluded it, for the reason {@see $takenByAnEmptying} gives.
-     *
-     * @var array<int, array<int, object>>
-     */
-    private array $vanishedEntirely = [];
-
-    /**
-     * What each flush changed in ANOTHER flush's collected state, so it can be put back.
-     *
-     * The sweep that drops statements about rows an emptying takes reaches every flush of
-     * the operation, because a flush nested inside another files its part under its own
-     * number. That makes it the one place a flush alters what a different flush collected,
-     * and a flush can die after doing it: a nested flush refused by a listener behind this
-     * one had already swept the OUTER flush's "1 -> 2" away, the outer flush went on to
-     * write that UPDATE, and the row changed with no history of it. Discarding the dead
-     * flush's own buckets was never going to restore somebody else's.
-     *
-     * Kept as the bucket as it stood before this flush first touched it, per map, owner
-     * and bucket, so that putting it back is a copy and not a reconstruction.
-     *
-     * @var array<int, array<string, array{0: string, 1: int, 2: int, 3: object, 4: array<array-key, mixed>}>>
-     */
-    private array $sweptBy = [];
-
-    /**
      * Where the statement log stood when each flush was about to begin, by flush -- handed
      * back to it when the flush claims the frame its statements ran in -- and the last
      * statement at that moment.
@@ -335,8 +263,9 @@ final class AuditSubscriber
      * only inside those is a record that never exists. postFlush builds one from here
      * instead, and needs the entity to build it from.
      *
-     * Keyed by the owner's object id and then by the flush that saw the emptying, for
-     * the reason {@see self::$elementMembership} gives.
+     * Keyed by the owner's object id and then by the flush that saw the emptying: the
+     * owner is what the record is built for, and the flush inside keeps two flushes'
+     * emptyings apart, so that a flush that dies takes its share with it.
      *
      * Each field's members are kept under their own identifiers, read in onFlush while
      * the rows are still there: Doctrine clears a generated id once a row is gone, and
@@ -881,10 +810,9 @@ final class AuditSubscriber
 
         $entity = $args->getObject();
 
-        // The check has to know about them before they are folded in, in postFlush: an
-        // update whose only change was inside a line of an order is still an update to
-        // that order.
-        if ($this->skipEmptyUpdates && !$record->hasChanges() && !$this->hasElementChanges($entity)) {
+        // What changed inside its elements is read from the log in postFlush and makes a
+        // record of its own there, so an update with nothing of its own is nothing here.
+        if ($this->skipEmptyUpdates && !$record->hasChanges()) {
             return;
         }
 
@@ -1071,7 +999,8 @@ final class AuditSubscriber
         // the same flush joins it rather than standing beside it.
         $recordOf = $this->pendingIndexByEntity;
 
-        foreach ($this->elementsByOwner($manager) as [$owner, $changes]) {
+        foreach ($this->ownersWhoseCollectionWasEmptied() as $owner) {
+            $changes = [];
             $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
 
             try {
@@ -1238,10 +1167,7 @@ final class AuditSubscriber
     {
         $count = \count($this->pending);
 
-        $owners = array_unique(array_merge(
-            array_keys($this->elementMembership),
-            array_keys($this->emptiedCollections),
-        ));
+        $owners = array_keys($this->emptiedCollections);
 
         // The flush each owner's record so far belongs to, as publish() will build it.
         $recordFlush = [];
@@ -1329,24 +1255,6 @@ final class AuditSubscriber
         }
     }
 
-
-    /**
-     * Everything the flush that is ending collected, dropped with it.
-     */
-    /**
-     * Puts back what a dying flush changed in the buckets of flushes that are still live.
-     */
-    private function putBackWhatThisFlushSwept(int $flush): void
-    {
-        foreach ($this->sweptBy[$flush] ?? [] as [$map, $key, $its, $owner, $bucket]) {
-            match ($map) {
-                'membership' => $this->elementMembership[$key] = [$owner, [$its => $bucket] + ($this->elementMembership[$key][1] ?? [])],
-                default => $this->emptiedCollections[$key] = [$owner, [$its => $bucket] + ($this->emptiedCollections[$key][1] ?? [])],
-            };
-        }
-
-        unset($this->sweptBy[$flush]);
-    }
 
     /**
      * The element as the DATABASE has it, for anything that has to show what went.
@@ -1709,35 +1617,23 @@ final class AuditSubscriber
             unset($this->changeSets[$key], $this->changeSetFlush[$key]);
         }
 
-        // What it swept out of the flushes still running goes back before anything else
-        // is read, and what it concluded about rows being taken goes with it: its DELETE
-        // never ran.
-        $this->putBackWhatThisFlushSwept($flush);
-        unset($this->takenByAnEmptying[$flush], $this->vanishedEntirely[$flush]);
+        foreach ($this->emptiedCollections as $owner => [, $byFlush]) {
+            unset($byFlush[$flush]);
 
-        foreach ([&$this->elementMembership, &$this->emptiedCollections] as &$map) {
-            foreach ($map as $owner => [, $byFlush]) {
-                unset($byFlush[$flush]);
+            if ($byFlush === []) {
+                unset($this->emptiedCollections[$owner]);
 
-                if ($byFlush === []) {
-                    unset($map[$owner]);
-
-                    continue;
-                }
-
-                $map[$owner][1] = $byFlush;
+                continue;
             }
-        }
 
-        unset($map);
+            $this->emptiedCollections[$owner][1] = $byFlush;
+        }
 
         $this->ownerFlush = [];
 
-        foreach ([$this->elementMembership, $this->emptiedCollections] as $map) {
-            foreach ($map as $owner => [, $byFlush]) {
-                foreach (array_keys($byFlush) as $bucket) {
-                    $this->ownerFlush[$owner] = min($this->ownerFlush[$owner] ?? $bucket, $bucket);
-                }
+        foreach ($this->emptiedCollections as $owner => [, $byFlush]) {
+            foreach (array_keys($byFlush) as $bucket) {
+                $this->ownerFlush[$owner] = min($this->ownerFlush[$owner] ?? $bucket, $bucket);
             }
         }
 
@@ -1762,7 +1658,6 @@ final class AuditSubscriber
         $this->pendingFlush = [];
         $this->pendingRemovals = $drafts;
         $this->pendingIndexByEntity = [];
-        $this->elementMembership = [];
         $this->ownerFlush = [];
         $this->flushes = [];
         $this->failureWhileBuilding = null;
@@ -1776,9 +1671,6 @@ final class AuditSubscriber
         $this->changeSets = [];
         $this->changeSetFlush = [];
         $this->emptiedCollections = [];
-        $this->takenByAnEmptying = [];
-        $this->vanishedEntirely = [];
-        $this->sweptBy = [];
         $this->statementMarks = [];
         $this->claimedThrough = [];
         $this->collectionsOnly = [];
@@ -2287,156 +2179,23 @@ final class AuditSubscriber
     }
 
     /**
-     * Whether this owner has news from inside a tracked collection, which is reason to
-     * keep a record its own columns left empty.
+     * The owners whose collection a flush took away whole, which have no record otherwise:
+     * `clear()` dirties nothing on the owner, so Doctrine raises no event for it, and every
+     * record built for an entity is built inside one. The rows went; recordForOwner() is
+     * what says so. (Only an owning many-to-many, until step 5: what any other collection
+     * went through is read from the connection's log.)
      *
-     * **It has not been possible to observe this changing anything, and that is written
-     * down rather than acted on.** Wired to answer no, the whole suite still passes:
-     * publish() builds a record for every owner that collected something, whether or not
-     * one is already pending, so the same document arrives either way — amended in place
-     * when this kept it, appended when it did not. Removing publish()'s half *is*
-     * observable, and WhatAnElementChangeIsMadeOfTest fails on it.
-     *
-     * What is left is an ordering argument that could not be turned into a test.
-     * Doctrine groups its updates by class, so an audited entity of another class that
-     * is updated after the owner's would sit between the two in the pending list — and
-     * then keeping the record here, rather than appending it in postFlush, is what puts
-     * the owner's line before it in the history. No arrangement of the fixtures produced
-     * that order, so the guard stays and is not claimed to be equivalent: "no test tells
-     * these apart" is not the same statement as "there is nothing to tell apart", and
-     * the mutant on this line is left escaping to say so.
+     * @return list<object>
      */
-    private function hasElementChanges(object $owner): bool
+    private function ownersWhoseCollectionWasEmptied(): array
     {
-        $key = spl_object_id($owner);
-
-        return isset($this->elementMembership[$key]);
+        return array_values(array_map(static fn (array $emptied): object => $emptied[0], $this->emptiedCollections));
     }
 
     /**
-     * Everything a tracked collection has to say about this flush, owner by owner:
-     * fields that changed inside an element, keyed "lines.42.quantity", and elements
-     * the collection gained or lost, keyed "lines.42" with one side null.
+     * What an emptied collection held, by the flushes that emptied it, as one answer.
      *
-     * @return list<array{0: object, 1: array<string, Change>}>
-     */
-    private function elementsByOwner(ObjectManager $manager): array
-    {
-        $em = self::entityManagerOf($manager);
-        $byOwner = [];
-
-        foreach ($this->elementMembership as $key => [$owner, $byFlush]) {
-            $changes = $byOwner[$key][1] ?? [];
-
-            foreach (self::theMembershipInForce($byFlush) as $entry) {
-                // An inserted element had no identifier when it was collected; it has one now.
-                $id = $entry['id'] ?? ($em === null ? null : $this->identifierOf($em, $entry['element']));
-
-                if ($id === null) {
-                    continue; // an element with no identifier is nothing the history can point at
-                }
-
-                if ($entry['deferred']) {
-                    try {
-                        // Now it has its identifier, so a representer that reads one has
-                        // something to read. It is the application's code, it runs after
-                        // the commit, and an exception escaping here would come out of
-                        // flush() for a database change that is already real — so it goes
-                        // through the failure policy like everything else the listener
-                        // does, and only this element is lost.
-                        $entry['value'] = self::represent($entry['element'], $entry['represent']);
-                    } catch (\Throwable $e) {
-                        $this->reportWhileBuilding($e);
-
-                        continue;
-                    }
-                }
-
-                $changes[ElementKey::of($entry['field'], $id)] = $entry['added']
-                    ? new Change(null, $entry['value'])
-                    : new Change($entry['value'], null);
-            }
-
-            $byOwner[$key] = [$owner, $changes];
-        }
-
-        // And the owners whose collection was taken away whole. Those are here for a
-        // different reason from the two above: not because their record needs something
-        // added to it, but because without this they have no record at all. `clear()`
-        // dirties nothing on the owner, so Doctrine raises no event for it, and every
-        // record built for an entity is built inside one. The rows went; recordForOwner()
-        // is what says so.
-        foreach ($this->emptiedCollections as $key => [$owner, $emptied]) {
-            $byOwner[$key] ??= [$owner, []];
-        }
-
-        return array_values($byOwner);
-    }
-
-    /**
-     * Which flush's answer about each key is the current one.
-     *
-     * By the stamp on each entry, the latest winning — which is what a single bucket did
-     * by being written over, and what the flush numbers could not do. A flush's number
-     * says when it BEGAN: an inner flush always has the higher one, and yet the outer
-     * flush it was started from goes on to write its own rows afterwards. Ordered by
-     * number, an outer flush recording the value the column finally took lost to the
-     * inner flush's earlier value; the probe had the column holding 3 and the history
-     * ending at 9.
-     *
-     * The buckets stay because a flush's share has to be removable, which is a different
-     * question from whose answer is the current one.
-     *
-     * The rule lives here and the two maps that follow it are readers: an entry of one is
-     * a Change and an entry of the other is an element's membership, and carrying one
-     * template through an accumulator is something the oldest supported static analyser
-     * cannot do. So the shapes are read apart and the comparison is written once.
-     *
-     * @param array<int, array<string, array{at: int}>> $byFlush
-     *
-     * @return array<string, int> the key, and the flush whose entry about it is current
-     */
-    private static function whoseAnswerIsCurrent(array $byFlush): array
-    {
-        $current = [];
-        $stamps = [];
-
-        foreach ($byFlush as $flush => $bucket) {
-            foreach ($bucket as $name => $entry) {
-                $at = $entry['at'];
-
-                if (($stamps[$name] ?? -1) < $at) {
-                    $stamps[$name] = $at;
-                    $current[$name] = $flush;
-                }
-            }
-        }
-
-        return $current;
-    }
-
-    /**
-     * The same for what its collection gained and lost.
-     *
-     * @param array<int, array<string, array{at: int, element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>> $byFlush
-     *
-     * @return array<string, array{at: int, element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>
-     */
-    private static function theMembershipInForce(array $byFlush): array
-    {
-        $entries = [];
-
-        foreach (self::whoseAnswerIsCurrent($byFlush) as $name => $flush) {
-            $entries[$name] = $byFlush[$flush][$name];
-        }
-
-        return $entries;
-    }
-
-    /**
-     * The same for what an emptied collection held, which carries no stamp.
-     *
-     * It does not need one: this is what a collection held BEFORE a flush emptied it, and
+     * No flush's answer outranks another's: this is what a collection held BEFORE a flush emptied it, and
      * two flushes emptying the same collection is two emptyings, of which the later is
      * the one the record being built is about.
      *
@@ -2455,14 +2214,6 @@ final class AuditSubscriber
         ksort($byFlush);
 
         return array_replace([], ...array_values($byFlush));
-    }
-
-    /**
-     * @param (callable(object): mixed)|null $represent
-     */
-    private static function represent(object $element, ?callable $represent): mixed
-    {
-        return $represent === null ? null : $represent($element);
     }
 
     /**

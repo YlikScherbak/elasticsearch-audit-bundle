@@ -341,13 +341,11 @@ final class WhatAnElementChangeIsMadeOfTest extends DoctrineTestCase
         // empty and skipped — which is what skip_empty_updates is for — and the news
         // from inside the element would go with it.
         //
-        // **Two things keep it, and only their pair is observable.** postUpdate asks
-        // hasElementChanges() before skipping an empty record, and postFlush builds a
-        // record for every owner that collected something, whether or not one is already
-        // pending. Remove either and the record still arrives — measured, both ways
-        // round, including the order it arrives in. Remove both and it is gone. So the
-        // assertion here is about the outcome and not about either line, and the guard
-        // in postUpdate is documented as an equivalent mutant for that reason.
+        // What keeps it is postFlush, which reads the line's change from the connection's
+        // log and builds the depot a record for it whether or not one is pending. postUpdate
+        // used to ask as well, before skipping an empty record, and that half was never
+        // observable -- it went with the membership it asked about. So the assertion here is
+        // about the outcome.
         $depot = new Depot('north');
         $depot->add($case = new PackingCase('shelf-a', 10));
 
