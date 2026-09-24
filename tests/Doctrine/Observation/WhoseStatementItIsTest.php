@@ -228,6 +228,38 @@ class WhoseStatementItIsTest extends DoctrineTestCase
         ], $inside);
     }
 
+    public function testAFlushAfterARefusedOneOwnsWhatItRan(): void
+    {
+        // The flush after a refused one begins by finding the refused one's state behind it
+        // and forgetting it -- and forgetting emptied the marks, including the one this flush
+        // had put down a moment earlier. Its statements then belonged to nobody: the facts
+        // were right and signed by no flush, and the history dropped them as a hole.
+        [, $x] = $this->aCrateWithTwoLines();
+
+        $veto = new class {
+            public function onFlush(): void
+            {
+                throw new \DomainException('refused');
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+        $x->quantity = 5;
+
+        try {
+            $this->em->flush();
+            self::fail('the premise: refused');
+        } catch (\DomainException) {
+        } finally {
+            $this->em->getEventManager()->removeEventListener([Events::onFlush], $veto);
+        }
+
+        $from = $this->log->position();
+        $x->quantity = 2;
+        $this->em->flush();
+
+        self::assertSame([['UPDATE CrateItem quantity=2', 'flush 3', StatementLog::COMMITTED]], $this->since($from));
+    }
+
     public function testAnApplicationTransactionAfterARefusedFlushDoesNotInheritItsLabel(): void
     {
         // A nested flush says it is about to begin and is refused before it opens anything;
@@ -295,8 +327,10 @@ class WhoseStatementItIsTest extends DoctrineTestCase
         $connection->commit();
 
         // Without savepoints the flush, nested in the application's transaction, opens
-        // nothing of its own, and its statement is the application's transaction's.
-        self::assertSame([['UPDATE CrateItem quantity=2', $this->nestedTransactionsAreSeen() ? 'flush 2' : 'nobody', StatementLog::COMMITTED]], $this->since($from));
+        // nothing of its own -- there is no frame to claim, and its statement used to be
+        // nobody's, which the history then dropped. It ran while the flush did and before the
+        // flush said anything else, so it is the flush's.
+        self::assertSame([['UPDATE CrateItem quantity=2', 'flush 2', StatementLog::COMMITTED]], $this->since($from));
     }
 
     public function testTheObserverRunsNoStatementOfItsOwn(): void

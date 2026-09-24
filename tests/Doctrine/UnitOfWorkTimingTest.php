@@ -137,9 +137,11 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
 
     public function testANestedFlushDoesNotConsumeTheOuterFlushsElementChanges(): void
     {
-        // elementChanges are collected in onFlush and folded in at postFlush. An inner
-        // flush emptying them leaves the outer owner's record without the changes its
-        // lines made — the record is written, and it is wrong rather than missing.
+        // Element changes used to be collected in onFlush and folded in at postFlush, and
+        // an inner flush emptying them left the outer owner's record without the changes its
+        // lines made. They are read from the statements now, and the line's UPDATE is run by
+        // the inner flush -- the shipment's postUpdate starts it while the line is still
+        // scheduled -- so it is that flush's record, beside the shipment's own.
         $shipment = $this->shipmentWithTwoLines();
         $this->flushFromPostUpdate();
 
@@ -147,11 +149,15 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         $shipment->lines->first()->quantity = 9;
         $this->em->flush();
 
-        $changes = $this->lastDocument()['changes'];
         $lineId = $shipment->lines->first()->id;
+        $said = [];
 
-        self::assertSame(['old' => 'SH-1', 'new' => 'SH-BOTH'], $changes['reference']);
-        self::assertSame(['old' => 1, 'new' => 9], $changes['lines.'.$lineId.'.quantity'], 'what the line did belongs to the same record');
+        foreach ($this->documents() as $document) {
+            $said = array_replace($said, $document['changes']);
+        }
+
+        self::assertSame(['old' => 'SH-1', 'new' => 'SH-BOTH'], $said['reference'] ?? null);
+        self::assertSame(['old' => 1, 'new' => 9], $said['lines.'.$lineId.'.quantity'] ?? null, 'what the line did is not lost to the inner flush');
     }
 
     public function testTheLostChangeSetIsReportedOnce(): void

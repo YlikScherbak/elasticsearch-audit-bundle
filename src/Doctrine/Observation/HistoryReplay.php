@@ -40,7 +40,7 @@ final class HistoryReplay
     /** @var array<string, array<string, true>> rows a DELETE that stayed done took */
     private array $gone = [];
 
-    /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null}> */
+    /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string}|null}> */
     private array $facts = [];
 
     /** @var list<string> */
@@ -198,7 +198,7 @@ final class HistoryReplay
     }
 
     /**
-     * @return list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null}>
+     * @return list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string}|null}>
      */
     public function facts(): array
     {
@@ -264,9 +264,14 @@ final class HistoryReplay
         return implode('|', $parts);
     }
 
-    private function said(string $type, string $id, string $field, mixed $old, mixed $new): void
+    /**
+     * @param array{owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string}|null $element
+     *        for a change inside an element: which owner and collection, which row and which field -- what a writer needs to
+     *        name it, where the strings above only describe it
+     */
+    private function said(string $type, string $id, string $field, mixed $old, mixed $new, ?array $element = null): void
     {
-        $this->facts[] = ['type' => $type, 'id' => $id, 'field' => $field, 'old' => $old, 'new' => $new, 'flush' => $this->log?->ownerOf($this->at)];
+        $this->facts[] = ['type' => $type, 'id' => $id, 'field' => $field, 'old' => $old, 'new' => $new, 'flush' => $this->log?->ownerOf($this->at), 'at' => $this->at, 'element' => $element];
     }
 
     private function forgetWhatWasTakenAfter(string $root, string $id, int $at): void
@@ -314,9 +319,7 @@ final class HistoryReplay
         $this->rows[$root][$id] = $row + $there;
         unset($this->gone[$root][$id]);
 
-        $owner = $this->ownerOf($metadata, $this->rows[$root][$id]);
-
-        if ($owner !== null && $there === []) {
+        foreach ($there === [] ? $this->ownersOf($metadata, $this->rows[$root][$id]) : [] as $owner) {
             $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id, null, $this->represent($metadata, $this->rows[$root][$id], $owner['metadata'], $owner['collection']));
         }
     }
@@ -342,8 +345,28 @@ final class HistoryReplay
         }
 
         $before = $this->rows[$root][$id];
-        $owner = $this->ownerOf($metadata, $before);
+        $owners = $this->ownersOf($metadata, $before);
         $audited = $this->audited->for($metadata->newInstance());
+
+        // An element this statement moves to another owner tells neither of them what else
+        // changed in it: the one it left never held the new value and the one it joined never
+        // held the old. Only through that association -- an owner it stays with on another is
+        // told, which is what that collection is tracked for.
+        $staying = [];
+
+        foreach ($owners as $owner) {
+            if (!\array_key_exists($owner['column'], $shape->assigned)) {
+                $staying[] = $owner; // the statement does not touch this foreign key
+
+                continue;
+            }
+
+            $parameter = $shape->assigned[$owner['column']];
+
+            if ($parameter !== null && self::scalar($params[$parameter] ?? null) === self::scalar($before[$owner['column']] ?? null)) {
+                $staying[] = $owner; // written, with the owner it already had
+            }
+        }
 
         foreach ($shape->assigned as $column => $parameter) {
             if ($parameter === null) {
@@ -359,7 +382,7 @@ final class HistoryReplay
             $field = $metadata->getFieldForColumn($column);
 
             if (!$metadata->hasField($field)) {
-                if ($owner !== null) {
+                if ($owners !== []) {
                     $this->doubts[] = 'an UPDATE of '.$root.'.'.$column.' this does not describe';
                 }
 
@@ -373,8 +396,17 @@ final class HistoryReplay
                 continue;
             }
 
-            if ($owner !== null) {
-                $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id.'.'.$field, $was, $is);
+            if ($owners !== []) {
+                foreach ($staying as $owner) {
+                    $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id.'.'.$field, $was, $is, [
+                        'owner' => $owner['metadata']->name,
+                        'ownerKey' => $owner['key'],
+                        'collection' => $owner['collection'],
+                        'class' => $metadata->rootEntityName,
+                        'key' => $key,
+                        'field' => $field,
+                    ]);
+                }
             } elseif ($audited !== null && \array_key_exists($field, $audited->fields)) {
                 $this->said($audited->objectType, $id, $field, $was, $is);
             }
@@ -401,9 +433,7 @@ final class HistoryReplay
             return;
         }
 
-        $owner = $this->ownerOf($metadata, $this->rows[$root][$id]);
-
-        if ($owner !== null) {
+        foreach ($this->ownersOf($metadata, $this->rows[$root][$id]) as $owner) {
             $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id, $this->represent($metadata, $this->rows[$root][$id], $owner['metadata'], $owner['collection']), null);
         }
 
@@ -431,6 +461,15 @@ final class HistoryReplay
         $value = array_values($binding->key ?? [])[0] ?? null;
         $root = $elements->rootEntityName;
         $held = [];
+
+        foreach (array_keys($this->rows[$root] ?? []) as $id) {
+            // A row first remembered after this statement is no account of what the table
+            // held when it ran -- the rule a single-row statement keeps too -- and counted
+            // here it made the rows the DELETE took one more than it said, and nothing was
+            // taken at all: an UPDATE of one of them afterwards, which reached no row, was
+            // then read as a change.
+            $this->forgetWhatWasTakenAfter($root, (string) $id, $this->at);
+        }
 
         foreach ($this->rows[$root] ?? [] as $id => $row) {
             if (!isset($this->gone[$root][$id]) && self::scalar($row[$column] ?? null) === self::scalar($value)) {
@@ -464,15 +503,18 @@ final class HistoryReplay
     }
 
     /**
-     * The owner a row's foreign key names, and the tracked collection it is an element of.
+     * Every owner a row's foreign keys name, with the audited collection it is an element of
+     * there: an element can belong to two -- a case on a pallet and in a depot.
      *
      * @param ClassMetadata<object> $metadata
      * @param array<string, mixed>  $row
      *
-     * @return array{type: string, id: string, collection: string, metadata: ClassMetadata<object>}|null
+     * @return list<array{type: string, id: string, key: mixed, column: string, collection: string, metadata: ClassMetadata<object>}>
      */
-    private function ownerOf(ClassMetadata $metadata, array $row): ?array
+    private function ownersOf(ClassMetadata $metadata, array $row): array
     {
+        $owners = [];
+
         foreach ($metadata->getAssociationNames() as $association) {
             if (!$metadata->isSingleValuedAssociation($association)) {
                 continue;
@@ -494,11 +536,11 @@ final class HistoryReplay
             $collection = $this->collectionOf($owner, $metadata, $association);
 
             if ($collection !== null) {
-                return ['type' => $collection['type'], 'id' => self::scalar($row[$column]), 'collection' => $collection['field'], 'metadata' => $owner];
+                $owners[] = ['type' => $collection['type'], 'id' => self::scalar($row[$column]), 'key' => $row[$column], 'column' => $column, 'collection' => $collection['field'], 'metadata' => $owner];
             }
         }
 
-        return null;
+        return $owners;
     }
 
     /**

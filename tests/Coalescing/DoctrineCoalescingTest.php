@@ -66,6 +66,80 @@ final class DoctrineCoalescingTest extends DoctrineTestCase
         self::assertSame(['old' => 'Draft', 'new' => 'Final'], $documents[0]['changes']['title']);
     }
 
+    public function testAnInnerWriteAndTheOuterOneAfterItFoldIntoOneInAFrame(): void
+    {
+        // Without a frame these are two records, 1 -> 9 by the nested flush and 9 -> 3 by the
+        // outer one (WhatAnAbandonedFlushLeavesTest). A frame is the operation as one answer.
+        [$crate, $line] = $this->aCrateWithOneLine();
+
+        $this->frame->coalesce(function () use ($line): void {
+            $this->inThePreUpdateOfTheLine($line, 9, 3);
+            $line->quantity = 2;
+            $this->em->flush();
+        });
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertCount(1, $crates);
+        self::assertSame(['old' => 1, 'new' => 3], $crates[0]['changes']['items.'.$line->id.'.quantity']);
+    }
+
+    public function testANestedWriteTheOuterFlushTakesBackLeavesNothingInAFrame(): void
+    {
+        // 1 -> 9, then 9 -> 1: two facts without a frame, and the operation as one answer is
+        // that nothing moved.
+        [, $line] = $this->aCrateWithOneLine();
+
+        $this->frame->coalesce(function () use ($line): void {
+            $this->inThePreUpdateOfTheLine($line, 9, 1);
+            $line->quantity = 2;
+            $this->em->flush();
+        });
+
+        self::assertSame([], array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate')));
+    }
+
+    /**
+     * @return array{0: \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate, 1: \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem}
+     */
+    private function aCrateWithOneLine(): array
+    {
+        $this->em->persist($crate = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('C-1'));
+        $crate->add($line = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem('SKU-1'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        return [$crate, $line];
+    }
+
+    /**
+     * Once, in the line's preUpdate: a nested flush writes $inner, and the outer flush is
+     * left to write $outer.
+     */
+    private function inThePreUpdateOfTheLine(object $line, int $inner, int $outer): void
+    {
+        $this->em->getEventManager()->addEventListener([\Doctrine\ORM\Events::preUpdate], new class($line, $inner, $outer) {
+            private bool $ran = false;
+
+            public function __construct(private readonly object $line, private readonly int $inner, private readonly int $outer)
+            {
+            }
+
+            public function preUpdate(\Doctrine\ORM\Event\PreUpdateEventArgs $args): void
+            {
+                if ($this->ran || $args->getObject() !== $this->line) {
+                    return;
+                }
+
+                $this->ran = true;
+                $em = $args->getObjectManager();
+                $this->line->quantity = $this->inner;
+                $em->flush();
+                $this->line->quantity = $this->outer;
+            }
+        });
+    }
+
     public function testAnAlwaysRecordedFieldStillGivesTheCoalescedRecordItsContext(): void
     {
         $article = new Article('Draft');

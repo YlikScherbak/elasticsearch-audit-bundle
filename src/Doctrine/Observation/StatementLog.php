@@ -55,7 +55,7 @@ final class StatementLog
     public const VOID = 'void';
     public const COMMITTED = 'committed';
 
-    /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool}> by sequence number */
+    /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int}> by sequence number */
     private array $statements = [];
 
     /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, open: bool, committed: bool, dead: bool}> by identity, in the order they were opened */
@@ -291,7 +291,25 @@ final class StatementLog
             $frame = $this->frames[$frame]['parent'];
         }
 
-        return null;
+        return $this->statements[$statement]['owner'] ?? null;
+    }
+
+    /**
+     * A flush owns what ran while it did and no frame says whose it is.
+     *
+     * A frame is how a flush is told apart, and a flush that opens none has nothing to claim:
+     * one nested in the application's transaction without savepoints -- DBAL 3's default --
+     * runs its beginTransaction() without a word on the wire. Called with the statements since
+     * the flush last said a statement of its own had run: a flush nested inside it claimed its
+     * own meanwhile, and a flush that died before running anything never calls this.
+     */
+    public function claimUnowned(int $after, int $upTo, int $flush): void
+    {
+        for ($statement = $after + 1; $statement <= $upTo; ++$statement) {
+            if (isset($this->statements[$statement]) && $this->ownerOf($statement) === null) {
+                $this->statements[$statement]['owner'] = $flush;
+            }
+        }
     }
 
     /**

@@ -181,47 +181,32 @@ final class ChangeSetBuilder
     }
 
     /**
-     * What changed inside one element of a tracked collection, keyed
-     * "collection.elementId.field" — "lines.42.quantity".
+     * One field of one element, as a statement changed it: its key and the change, or null
+     * when the declaration does not watch that field or the comparator says nothing moved.
      *
-     * Associations of the element are left out: representing one needs a callable, and
-     * an element has nowhere to declare it. The comparator is asked about
-     * "collection.field", without the id, because a rule about quantities is about
-     * quantities and not about element 42.
+     * The sides are what the row held and what the statement wrote, both through the
+     * column's type -- read from the connection, not from Doctrine's change set, which a
+     * flush nested inside another empties, fills from a refused flush, or describes as it
+     * was planned rather than as it was written.
      *
-     * @param bool|list<string>         $wanted    true for every field of the element that changed
-     * @param array<string, mixed>|null $changeSet what changed in the element, when the caller
-     *                                             knows better than the unit of work does
+     * The comparator is asked about "collection.field", without the id, because a rule
+     * about quantities is about quantities and not about element 42.
      *
-     * @return array<string, Change>
+     * @param bool|list<string> $wanted the element fields the collection watches; true for all of them
+     *
+     * @return array{0: string, 1: Change}|null
      */
-    public function elementChanges(string $objectType, string $collectionField, object $element, int|string $elementId, bool|array $wanted, ?array $changeSet = null): array
+    public function elementFieldChange(string $objectType, string $collectionField, int|string $elementId, string $field, mixed $old, mixed $new, bool|array $wanted): ?array
     {
-        $classMetadata = $this->em->getClassMetadata($element::class);
-        $changes = [];
-
-        // The caller's change set when it has one. It is what the unit of work said,
-        // with the old side of anything a preUpdate listener corrected taken from before
-        // the correction - which the unit of work itself no longer knows.
-        foreach ($changeSet ?? $this->em->getUnitOfWork()->getEntityChangeSet($element) as $field => $sides) {
-            if (!\is_array($sides) || $classMetadata->hasAssociation($field)) {
-                continue;
-            }
-
-            if (\is_array($wanted) && !\in_array($field, $wanted, true)) {
-                continue;
-            }
-
-            $change = new Change($sides[0] ?? null, $sides[1] ?? null);
-
-            if ($this->unchanged($objectType, $collectionField.'.'.$field, $change->old, $change->new)) {
-                continue;
-            }
-
-            $changes[ElementKey::field($collectionField, $elementId, $field)] = $change;
+        if (\is_array($wanted) && !\in_array($field, $wanted, true)) {
+            return null;
         }
 
-        return $changes;
+        if ($this->unchanged($objectType, $collectionField.'.'.$field, $old, $new)) {
+            return null;
+        }
+
+        return [ElementKey::field($collectionField, $elementId, $field), new Change($old, $new)];
     }
 
     /**

@@ -11,6 +11,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\TracksCollectionElementsInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ElementFieldRuns;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
@@ -122,27 +123,23 @@ final class AuditSubscriber
     private array $ownerFlush = [];
 
     /**
-     * Changes inside tracked collection elements, by the owner's object id and then by
+     * How far the connection's log has been read into the history: every fact of a
+     * statement at or before this position has been turned into records, or dropped with
+     * the flush it belonged to. A position in the log and not a flush number: without
+     * savepoints several flushes' statements share one frame, and a flush that ran nothing
+     * of its own still has to move this on past the ones before it.
+     */
+    private int $factsReadThrough = 0;
+
+    /**
+     * Elements a tracked collection gained or lost, by the owner's object id and then by
      * the flush that collected them.
      *
      * The flush is inside rather than outside because the owner is what the record is
      * built for, and the object beside it is the only thing some flushes have to build
-     * one from. What the number does is keep two flushes' answers about the same field
-     * apart: they share a key — "lines.42.quantity" names a column, not an occasion — so
-     * one bucket per owner meant the later flush simply wrote over the earlier one's,
-     * whichever of the two turned out to be real.
-     *
-     * Read back by the stamp each entry carries, the highest per key winning, which is
-     * the answer one bucket gave by being written over.
-     *
-     * @var array<int, array{0: object, 1: array<int, array<string, array{at: int, change: Change}>>}>
-     */
-    private array $elementChanges = [];
-
-    /**
-     * Elements a tracked collection gained or lost, by the owner's object id and then by
-     * the flush that collected them. {@see self::$elementChanges} for why the number is
-     * where it is.
+     * one from. What the number does is keep two flushes' answers about the same element
+     * apart: they share a key -- "lines.42" names a row, not an occasion -- and read back
+     * by the stamp each entry carries, the highest per key winning.
      *
      * @var array<int, array{0: object, 1: array<int, array<string, array{at: int, element: object, added: bool, field: string, represent: (callable(object): mixed)|null, value: mixed, deferred: bool, id: int|string|null}>>}>
      */
@@ -227,11 +224,15 @@ final class AuditSubscriber
 
     /**
      * Where the statement log stood when each flush was about to begin, by flush -- handed
-     * back to it when the flush claims the frame its statements ran in.
+     * back to it when the flush claims the frame its statements ran in -- and the last
+     * statement at that moment.
      *
-     * @var array<int, array{0: int, 1: int|null}>
+     * @var array<int, array{0: int, 1: int|null, 2: int}>
      */
     private array $statementMarks = [];
+
+    /** @var array<int, int> by flush: the last statement it has claimed what ran up to */
+    private array $claimedThrough = [];
 
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
     private array $pendingIndexByEntity = [];
@@ -358,7 +359,7 @@ final class AuditSubscriber
      * instead, and needs the entity to build it from.
      *
      * Keyed by the owner's object id and then by the flush that saw the emptying, for
-     * the reason {@see self::$elementChanges} gives.
+     * the reason {@see self::$elementMembership} gives.
      *
      * Each field's members are kept under their own identifiers, read in onFlush while
      * the rows are still there: Doctrine clears a generated id once a row is gone, and
@@ -521,7 +522,10 @@ final class AuditSubscriber
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
         $this->rows = new RowMemory($statements);
+        $this->elementRuns = new ElementFieldRuns($metadataFactory, $comparator, $this->logger, $this->identifierOf(...), $this->identifierFrom(...));
     }
+
+    private readonly ElementFieldRuns $elementRuns;
 
     /**
      * What each watched row held: remembered at preFlush and at a load inside a flush, and
@@ -588,9 +592,14 @@ final class AuditSubscriber
         // whatever opens next: a listener behind this one may open a transaction of its own
         // first, and a flush refused before it began must not lend its number to the next
         // transaction the application opens.
-        $this->statementMarks[$flush] = $this->statements->mark();
+        //
+        // Taken before beginFlush() and kept after it: finding an abandoned flush behind this
+        // one forgets everything that flush left, the marks with it, and this flush's own mark
+        // went too -- its statements then belonged to nobody.
+        $mark = [...$this->statements->mark(), $this->statements->position()];
 
         $this->beginFlush($em, $flush);
+        $this->statementMarks[$flush] = $mark;
 
         $this->provenance[$flush] = $this->writer->provenance();
 
@@ -1091,6 +1100,10 @@ final class AuditSubscriber
         // escaping would come out of flush() for a database change that is already
         // real. What the policy cannot do here is undo it: "throw" tells the caller,
         // it does not rewind the flush.
+        // Which record each owner already has, so that what changed inside its elements in
+        // the same flush joins it rather than standing beside it.
+        $recordOf = $this->pendingIndexByEntity;
+
         foreach ($this->elementsByOwner($manager) as [$owner, $changes]) {
             $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
 
@@ -1112,9 +1125,57 @@ final class AuditSubscriber
                 if ($record !== null) {
                     $records[] = $record;
                     $collected[] = $flush;
+                    $recordOf[spl_object_id($owner)] = array_key_last($records);
                 }
             } catch (\Throwable $e) {
                 $this->reportWhileBuilding($e, $index !== null ? ($records[$index] ?? null) : null);
+            }
+        }
+
+        // What changed inside the elements of tracked collections: what the statements the
+        // connection ran wrote, a record per owner and flush, in the order they ran. An
+        // owner's first run joins the record it already has for that flush; after that
+        // nothing goes back into an earlier record, or the history would list a later
+        // statement before an earlier one.
+        if ($em !== null) {
+            $runs = [];
+
+            try {
+                $runs = $this->elementFieldRuns($em, consume: true);
+            } catch (\Throwable $e) {
+                $this->reportWhileBuilding($e);
+            }
+
+            $seen = [];
+
+            foreach ($runs as $run) {
+                $owner = $run['owner'];
+
+                if ($owner === null) {
+                    continue;
+                }
+
+                $key = spl_object_id($owner);
+                $index = $recordOf[$key] ?? null;
+
+                try {
+                    if (!isset($seen[$key]) && $index !== null && isset($records[$index]) && ($collected[$index] ?? self::NO_FLUSH) === $run['flush']) {
+                        $seen[$key] = true;
+                        $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, array_replace($records[$index]->changes, $run['changes']), $run['flush']));
+
+                        continue;
+                    }
+
+                    $seen[$key] = true;
+                    $record = $this->recordForTheRows($em, $owner, $run['changes'], $run['flush']);
+
+                    if ($record !== null) {
+                        $records[] = $record;
+                        $collected[] = $run['flush'];
+                    }
+                } catch (\Throwable $e) {
+                    $this->reportWhileBuilding($e);
+                }
             }
         }
 
@@ -1206,20 +1267,47 @@ final class AuditSubscriber
      * publish() folds what its elements did into the record that is there rather than
      * writing a second one.
      */
-    private function collectedSoFar(): int
+    private function collectedSoFar(?EntityManagerInterface $em): int
     {
         $count = \count($this->pending);
 
         $owners = array_unique(array_merge(
-            array_keys($this->elementChanges),
             array_keys($this->elementMembership),
             array_keys($this->emptiedCollections),
         ));
 
+        // The flush each owner's record so far belongs to, as publish() will build it.
+        $recordFlush = [];
+
+        foreach ($this->pendingIndexByEntity as $owner => $index) {
+            $recordFlush[$owner] = $this->pendingFlush[$index] ?? self::NO_FLUSH;
+        }
+
         foreach ($owners as $owner) {
             if (!isset($this->pendingIndexByEntity[$owner])) {
                 ++$count;
+                $recordFlush[$owner] = $this->ownerFlush[$owner] ?? self::NO_FLUSH;
             }
+        }
+
+        // What changed inside elements is read from the log, a record per owner and flush --
+        // except an owner's first run, which joins the record it has for that flush.
+        $seen = [];
+
+        foreach ($em === null ? [] : $this->elementFieldRuns($em) as $run) {
+            $owner = $run['owner'] === null ? null : spl_object_id($run['owner']);
+
+            if ($owner !== null && !isset($seen[$owner]) && ($recordFlush[$owner] ?? null) === $run['flush']) {
+                $seen[$owner] = true;
+
+                continue;
+            }
+
+            if ($owner !== null) {
+                $seen[$owner] = true;
+            }
+
+            ++$count;
         }
 
         return $count;
@@ -1483,48 +1571,6 @@ final class AuditSubscriber
             $vanishedEverywhere = array_merge($vanishedEverywhere, $vanished);
         }
 
-        $prefixes = [];
-
-        foreach (array_keys($held) as $id) {
-            $prefixes[] = ElementKey::of($field, $id).'.';
-        }
-
-        foreach ($this->elementChanges as $key => [$owner, $byFlush]) {
-            // A change inside an element is named by the collection's field and the
-            // element's identifier, and neither says which class the element is. Two
-            // owners with a collection of the same name, holding different classes whose
-            // identifiers start at one, write the same string -- so "items.1.quantity" is
-            // matched here only for an owner whose `items` really does hold the class this
-            // emptying is about. Without that, emptying one owner's collection erased a
-            // change to an unrelated entity that happened to share a name and a number.
-            if ($target === null || !self::holdsTheSameClass($em, $owner, $field, $target)) {
-                continue;
-            }
-
-            // Every flush of this operation, for the same reason the arrivals above are
-            // taken from every one of them: a flush nested inside another writes the change
-            // under its own number, and the deletion that takes the row happens under
-            // another. The row is gone by the end of the operation either way.
-            foreach (array_keys($byFlush) as $its) {
-                foreach (array_keys($byFlush[$its]) as $name) {
-                    foreach ($prefixes as $prefix) {
-                        if (str_starts_with($name, $prefix)) {
-                            $this->beforeTouching('changes', $key, $its, $flush);
-                            unset($this->elementChanges[$key][1][$its][$name]);
-
-                            break;
-                        }
-                    }
-                }
-
-                // A bucket emptied by that is taken away with the keys it held, so that
-                // "the owner has collected nothing" stays one question rather than two.
-                if (($this->elementChanges[$key][1][$its] ?? null) === []) {
-                    unset($this->elementChanges[$key][1][$its]);
-                }
-            }
-        }
-
         return $vanishedEverywhere;
     }
 
@@ -1564,7 +1610,6 @@ final class AuditSubscriber
 
         $source = match ($map) {
             'membership' => $this->elementMembership,
-            'changes' => $this->elementChanges,
             default => $this->emptiedCollections,
         };
 
@@ -1583,7 +1628,6 @@ final class AuditSubscriber
         foreach ($this->sweptBy[$flush] ?? [] as [$map, $key, $its, $owner, $bucket]) {
             match ($map) {
                 'membership' => $this->elementMembership[$key] = [$owner, [$its => $bucket] + ($this->elementMembership[$key][1] ?? [])],
-                'changes' => $this->elementChanges[$key] = [$owner, [$its => $bucket] + ($this->elementChanges[$key][1] ?? [])],
                 default => $this->emptiedCollections[$key] = [$owner, [$its => $bucket] + ($this->emptiedCollections[$key][1] ?? [])],
             };
         }
@@ -1947,21 +1991,6 @@ final class AuditSubscriber
     }
 
     /**
-     * Whether this owner's collection of that name holds the class the emptying is about.
-     */
-    private static function holdsTheSameClass(EntityManagerInterface $em, object $owner, string $field, string $target): bool
-    {
-        try {
-            $metadata = $em->getClassMetadata($owner::class);
-
-            return $metadata->hasAssociation($field)
-                && $em->getClassMetadata($metadata->getAssociationTargetClass($field))->getName() === $em->getClassMetadata($target)->getName();
-        } catch (\Throwable) {
-            return false; // a mapping this cannot read is not one this may act on
-        }
-    }
-
-    /**
      * Notes which flush saw an owner whose record is built after the commit, the first
      * sighting winning.
      *
@@ -2032,9 +2061,17 @@ final class AuditSubscriber
      */
     private function claimTheFrameOf(int $flush): void
     {
-        if (isset($this->statementMarks[$flush])) {
-            $this->statements->claim($this->statementMarks[$flush], $flush);
+        if (!isset($this->statementMarks[$flush])) {
+            return;
         }
+
+        [$after, $enclosing, $last] = $this->statementMarks[$flush];
+        $this->statements->claim([$after, $enclosing], $flush);
+
+        // And what ran since this flush last said so, where no frame answers for it.
+        $now = $this->statements->position();
+        $this->statements->claimUnowned($this->claimedThrough[$flush] ?? $last, $now, $flush);
+        $this->claimedThrough[$flush] = $now;
     }
 
     /**
@@ -2199,7 +2236,7 @@ final class AuditSubscriber
         $this->putBackWhatThisFlushSwept($flush);
         unset($this->takenByAnEmptying[$flush], $this->vanishedEntirely[$flush]);
 
-        foreach ([&$this->elementChanges, &$this->elementMembership, &$this->emptiedCollections] as &$map) {
+        foreach ([&$this->elementMembership, &$this->emptiedCollections] as &$map) {
             foreach ($map as $owner => [, $byFlush]) {
                 unset($byFlush[$flush]);
 
@@ -2217,7 +2254,7 @@ final class AuditSubscriber
 
         $this->ownerFlush = [];
 
-        foreach ([$this->elementChanges, $this->elementMembership, $this->emptiedCollections] as $map) {
+        foreach ([$this->elementMembership, $this->emptiedCollections] as $map) {
             foreach ($map as $owner => [, $byFlush]) {
                 foreach (array_keys($byFlush) as $bucket) {
                     $this->ownerFlush[$owner] = min($this->ownerFlush[$owner] ?? $bucket, $bucket);
@@ -2225,7 +2262,7 @@ final class AuditSubscriber
             }
         }
 
-        unset($this->provenance[$flush], $this->contextAsFlushed[$flush], $this->statementMarks[$flush]);
+        unset($this->provenance[$flush], $this->contextAsFlushed[$flush], $this->statementMarks[$flush], $this->claimedThrough[$flush]);
     }
 
     /**
@@ -2246,7 +2283,6 @@ final class AuditSubscriber
         $this->pendingFlush = [];
         $this->pendingRemovals = $drafts;
         $this->pendingIndexByEntity = [];
-        $this->elementChanges = [];
         $this->elementMembership = [];
         $this->ownerFlush = [];
         $this->flushes = [];
@@ -2267,8 +2303,14 @@ final class AuditSubscriber
         $this->sweptBy = [];
         $this->rowOwners = [];
         $this->statementMarks = [];
+        $this->claimedThrough = [];
         $this->contextAsFlushed = [];
         $this->reportedLostChangeSets = false;
+
+        // Whatever the log holds from here back is spent: published by the flush that is
+        // ending, or dropped with the one that was found abandoned -- and in both cases not
+        // the business of the next flush, which would otherwise write it as its own.
+        $this->factsReadThrough = max($this->factsReadThrough, $this->statements->position());
     }
 
     /**
@@ -2344,7 +2386,7 @@ final class AuditSubscriber
 
             // Whatever the flushes that unwound left: the ones that ran nothing have
             // already taken their share away, so this counts what is really there.
-            $collected = $this->collectedSoFar();
+            $collected = $this->collectedSoFar($abandoned ?? $em);
 
             if ($abandoned !== null && $abandoned->isOpen() && $committed && $collected > 0) {
                 // Its manager is still open, so UnitOfWork::commit() did not fail — every
@@ -2461,7 +2503,7 @@ final class AuditSubscriber
         // back to where it started", although both arrive here with no change to record.
         // Read as the same, a second nested flush correcting one field of a line erased
         // the successful change another flush had made to a different field of it.
-        $this->collectElementChanges($em, $element, $flush, replacing: array_keys($current));
+        $this->collectElementChanges($em, $element, $flush);
     }
 
     /**
@@ -2473,9 +2515,8 @@ final class AuditSubscriber
      * like any other: an element that cannot be read must not fail the flush.
      */
     /**
-     * @param list<string>|null $replacing the element's fields this update is about, when it is being read again
      */
-    private function collectElementChanges(EntityManagerInterface $em, object $element, int $flush, ?bool $added = null, ?array $replacing = null): void
+    private function collectElementChanges(EntityManagerInterface $em, object $element, int $flush, ?bool $added = null): void
     {
         try {
             $elementMetadata = $em->getClassMetadata($element::class);
@@ -2520,8 +2561,8 @@ final class AuditSubscriber
                 if (!$movedNowhere && \array_key_exists($association, $changeSet) && \is_array($changeSet[$association])) {
                     $from = $changeSet[$association][0] ?? null;
 
-                    $this->holdMembership($em, $element, $from, $association, $flush, added: false, replacing: $replacing);
-                    $this->holdMembership($em, $element, $current, $association, $flush, added: true, replacing: $replacing);
+                    $this->holdMembership($em, $element, $from, $association, $flush, added: false);
+                    $this->holdMembership($em, $element, $current, $association, $flush, added: true);
 
                     // Its own fields are left out of this flush on purpose: the owner it
                     // arrived at never held the value it is arriving from.
@@ -2628,7 +2669,7 @@ final class AuditSubscriber
                         default => $originally ?? $named ?? $current,
                     };
 
-                    $this->holdMembership($em, $element, $owner, $association, $flush, added: false, replacing: $replacing);
+                    $this->holdMembership($em, $element, $owner, $association, $flush, added: false);
 
                     continue;
                 }
@@ -2650,7 +2691,6 @@ final class AuditSubscriber
                     $association,
                     $flush,
                     $added,
-                    $replacing,
                 );
             }
         } catch (\Throwable $e) {
@@ -2853,8 +2893,8 @@ final class AuditSubscriber
                 throw new DeclarationMistake(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $entity::class, $field, $reason));
             }
 
-            // And the field names, when the declaration names them. elementChanges()
-            // walks Doctrine's change set and skips whatever is not on the list, so a
+            // And the field names, when the declaration names them. Only the fields on the
+            // list are written into the history, whatever the statements set, so a
             // misspelling watched nothing at all, for the life of the application,
             // without a word — the same silence the checks above refuse, arrived at by a
             // likelier accident. Associations are named separately because element
@@ -2886,10 +2926,7 @@ final class AuditSubscriber
      * Holds what this element did against one owner, if that owner is audited and tracks
      * the collection this element belongs to.
      */
-    /**
-     * @param list<string>|null $replacing
-     */
-    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, int $flush, ?bool $added, ?array $replacing = null): void
+    private function holdMembership(EntityManagerInterface $em, object $element, mixed $owner, string $association, int $flush, ?bool $added): void
     {
         if (!\is_object($owner)) {
             return; // no owner on that side: nothing to write a history against
@@ -2934,13 +2971,10 @@ final class AuditSubscriber
         $this->assertAuditedFieldsAreThere($em, $owner, $metadata);
         $this->assertTrackedCollectionsAreServable($em, $owner, $metadata);
 
-        $this->holdElementChanges($em, $element, $owner, $metadata, $association, $flush, $added, $replacing);
+        $this->holdElementChanges($em, $element, $owner, $metadata, $association, $flush, $added);
     }
 
-    /**
-     * @param list<string>|null $replacing
-     */
-    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, int $flush, ?bool $added = null, ?array $replacing = null): void
+    private function holdElementChanges(EntityManagerInterface $em, object $element, object $owner, AuditMetadata $metadata, string $association, int $flush, ?bool $added = null): void
     {
         // An owner reached through its elements may have no event of its own — nothing on
         // it changed — so the loops in onFlush never offered it to rememberContext(). Its
@@ -2953,6 +2987,12 @@ final class AuditSubscriber
             $this->rememberContext($em, $owner, $flush);
         }
 
+        // What changed INSIDE the element is not collected here: it is read from the
+        // statements the connection ran, once the flush is over (elementFieldRuns()).
+        if ($added === null) {
+            return;
+        }
+
         $ownerMetadata = $em->getClassMetadata($owner::class);
 
         // Every audited to-many field, not only the tracked ones: membership is part of
@@ -2962,12 +3002,6 @@ final class AuditSubscriber
         // taken away — Doctrine keeps such a change on the element's own reference
         // back, so the owner's collection never goes dirty and nothing else notices.
         foreach (array_keys($metadata->fields) as $field) {
-            $wanted = $metadata->trackedElementFields($field);
-
-            if ($added === null && $wanted === null) {
-                continue; // no element tracking declared: nothing to look inside for
-            }
-
             // The collection has to be the other side of the very association this
             // element points back through; a second collection of the same class,
             // mapped by another field, is not this element's home.
@@ -2983,130 +3017,46 @@ final class AuditSubscriber
 
             // An element being inserted is named after the flush, not here; the object
             // is what is held until then.
-            if ($added !== null) {
-                $membership = $this->elementMembership[$key][1] ?? [];
-                $held = $membership[$flush] ?? [];
-                $identifier = $this->identifierOf($em, $element);
+            $membership = $this->elementMembership[$key][1] ?? [];
+            $held = $membership[$flush] ?? [];
+            $identifier = $this->identifierOf($em, $element);
 
-                // Asked of the unit of work, not of the identifier. "It has no id yet"
-                // is what an insertion looks like against an identity column — MySQL,
-                // SQLite, Postgres under DBAL 4 — where the value arrives with the
-                // INSERT. A sequence hands the id out at persist() time instead
-                // (Postgres maps a generated column that way under DBAL 3), and an
-                // assigned identifier is there from the constructor. Read as "not being
-                // inserted", those two ran the representer — the application's code —
-                // right here, inside onFlush, before UnitOfWork opens its transaction:
-                // one that threw took the application's flush down with it and the row
-                // was never written, while the very same code against an identity column
-                // committed the row and reported the audit failure afterwards, through
-                // the failure policy. The same application with the same configuration
-                // must not do opposite things to the data because of how its database
-                // hands out identifiers.
-                $inserting = $identifier === null || $em->getUnitOfWork()->isScheduledForInsert($element);
+            // Asked of the unit of work, not of the identifier. "It has no id yet"
+            // is what an insertion looks like against an identity column — MySQL,
+            // SQLite, Postgres under DBAL 4 — where the value arrives with the
+            // INSERT. A sequence hands the id out at persist() time instead
+            // (Postgres maps a generated column that way under DBAL 3), and an
+            // assigned identifier is there from the constructor. Read as "not being
+            // inserted", those two ran the representer — the application's code —
+            // right here, inside onFlush, before UnitOfWork opens its transaction:
+            // one that threw took the application's flush down with it and the row
+            // was never written, while the very same code against an identity column
+            // committed the row and reported the audit failure afterwards, through
+            // the failure policy. The same application with the same configuration
+            // must not do opposite things to the data because of how its database
+            // hands out identifiers.
+            $inserting = $identifier === null || $em->getUnitOfWork()->isScheduledForInsert($element);
 
-                $held[$field.'#'.spl_object_id($element)] = [
-                    'at' => ++$this->wrote,
-                    'element' => $element,
-                    'added' => $added,
-                    'field' => $field,
-                    'represent' => $metadata->fields[$field] ?? null,
-                    // A removal is represented now, while the element still has its
-                    // values: Doctrine clears a generated identifier once the row is
-                    // gone, and a representer reading one would find nothing after the
-                    // flush. An insertion is the other way round — its representer waits
-                    // for postFlush, where the row is real, the id is final whichever way
-                    // the database gave it out, and a failure travels the policy rather
-                    // than the flush.
-                    'value' => $added && $inserting ? null : self::represent($element, $metadata->fields[$field] ?? null),
-                    'deferred' => $added && $inserting,
-                    'id' => $identifier,
-                ];
-                $membership[$flush] = $held;
-                $this->elementMembership[$key] = [$owner, $membership];
-                $this->rememberWhoSawTheOwner($key, $flush);
-
-                continue;
-            }
-
-            $id = $this->identifierOf($em, $element);
-
-            if ($id === null) {
-                continue;
-            }
-
-            // From the snapshot rather than the unit of work: it is the same change set
-            // while nothing has corrected the element, and the corrected one - with the
-            // row's own old side - once something has.
-            $changes = (new ChangeSetBuilder($em, $this->comparator))->elementChanges(
-                $metadata->objectType,
-                $field,
-                $element,
-                $id,
-                $wanted,
-                $this->changeSets[spl_object_id($element)] ?? null,
-            );
-
-            // Replacing rather than adding, and only then. Asked a second time (after
-            // the element's preUpdate) a corrected value has to replace the planned one,
-            // and a value put back where it started has to disappear rather than linger
-            // as the change that never happened - so this element's keys go first. Only
-            // this element's: the same owner holds its other lines here too.
-            //
-            // The scan is worth avoiding when there is nothing to replace, which is every
-            // element of every ordinary flush. It walks everything the owner has
-            // collected so far, so ten thousand lines of one order cost fifty million
-            // prefix comparisons to discover that none of them matched.
-            if ($replacing !== null) {
-                $prefix = ElementKey::of($field, $id).'.';
-
-                // Every bucket, not only this flush's. This is the element read again
-                // after preUpdate, which is the last word about it in this operation:
-                // Doctrine has recomputed, and the statement that follows writes exactly
-                // that. An earlier answer about the same element — including one an inner
-                // flush really wrote — is superseded, because the owner gets one record
-                // for the operation and that record says where the column ended up.
-                //
-                // The stamps cannot reach this on their own. A value put back where it
-                // started produces no change at all, and "no change" has no key to carry a
-                // stamp on, so the older answer would win by default. The probe had a line
-                // go 1, then 9 by an inner flush, then back to 1 by the outer one: the
-                // column never moved and the history said it had.
-                foreach ($this->elementChanges[$key][1] ?? [] as $its => $bucket) {
-                    foreach (array_keys($bucket) as $name) {
-                        if (str_starts_with($name, $prefix) && \in_array(substr($name, \strlen($prefix)), $replacing, true)) {
-                            unset($this->elementChanges[$key][1][$its][$name]);
-                        }
-                    }
-
-                    // A bucket emptied by that is taken away with the keys it held, so that
-                    // "the owner has collected nothing" stays one question rather than two.
-                    if (($this->elementChanges[$key][1][$its] ?? null) === []) {
-                        unset($this->elementChanges[$key][1][$its]);
-                    }
-                }
-            }
-
-            if ($changes === [] && ($this->elementChanges[$key][1] ?? []) === []) {
-                // Present but empty reads as "something changed inside" to
-                // hasElementChanges(), which is how an update with no changes at all
-                // becomes a record.
-                unset($this->elementChanges[$key]);
-
-                continue;
-            }
-
-            // Written key by key rather than through array_replace(), which copies the
-            // whole of what the owner has collected every time another element arrives:
-            // the same quadratic cost, in memcpy instead of callbacks.
-            if (!isset($this->elementChanges[$key])) {
-                $this->elementChanges[$key] = [$owner, []];
-            }
-
+            $held[$field.'#'.spl_object_id($element)] = [
+                'at' => ++$this->wrote,
+                'element' => $element,
+                'added' => $added,
+                'field' => $field,
+                'represent' => $metadata->fields[$field] ?? null,
+                // A removal is represented now, while the element still has its
+                // values: Doctrine clears a generated identifier once the row is
+                // gone, and a representer reading one would find nothing after the
+                // flush. An insertion is the other way round — its representer waits
+                // for postFlush, where the row is real, the id is final whichever way
+                // the database gave it out, and a failure travels the policy rather
+                // than the flush.
+                'value' => $added && $inserting ? null : self::represent($element, $metadata->fields[$field] ?? null),
+                'deferred' => $added && $inserting,
+                'id' => $identifier,
+            ];
+            $membership[$flush] = $held;
+            $this->elementMembership[$key] = [$owner, $membership];
             $this->rememberWhoSawTheOwner($key, $flush);
-
-            foreach ($changes as $name => $change) {
-                $this->elementChanges[$key][1][$flush][$name] = ['at' => ++$this->wrote, 'change' => $change];
-            }
         }
     }
 
@@ -3134,7 +3084,7 @@ final class AuditSubscriber
     {
         $key = spl_object_id($owner);
 
-        return isset($this->elementChanges[$key]) || isset($this->elementMembership[$key]);
+        return isset($this->elementMembership[$key]);
     }
 
     /**
@@ -3148,10 +3098,6 @@ final class AuditSubscriber
     {
         $em = self::entityManagerOf($manager);
         $byOwner = [];
-
-        foreach ($this->elementChanges as $key => [$owner, $byFlush]) {
-            $byOwner[$key] = [$owner, self::theChangesInForce($byFlush)];
-        }
 
         foreach ($this->elementMembership as $key => [$owner, $byFlush]) {
             $changes = $byOwner[$key][1] ?? [];
@@ -3241,24 +3187,6 @@ final class AuditSubscriber
         }
 
         return $current;
-    }
-
-    /**
-     * What several flushes said changed inside one owner's elements, read as one answer.
-     *
-     * @param array<int, array<string, array{at: int, change: Change}>> $byFlush
-     *
-     * @return array<string, Change>
-     */
-    private static function theChangesInForce(array $byFlush): array
-    {
-        $changes = [];
-
-        foreach (self::whoseAnswerIsCurrent($byFlush) as $name => $flush) {
-            $changes[$name] = $byFlush[$flush][$name]['change'];
-        }
-
-        return $changes;
     }
 
     /**
@@ -3475,6 +3403,37 @@ final class AuditSubscriber
     }
 
     /**
+     * What changed inside the elements of tracked collections since the log was last read
+     * into the history: {@see ElementFieldRuns::of()}.
+     *
+     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>}>
+     */
+    private function elementFieldRuns(EntityManagerInterface $em, bool $consume = false): array
+    {
+        return $this->elementRuns->of($em, $this->rows->replayed($em), $this->factsReadThrough, $consume);
+    }
+
+    /**
+     * A record of what changed inside an owner's elements, and of nothing else: the
+     * emptying of a collection is the owner's other record's to say, and saying it here too
+     * would say it twice.
+     *
+     * @param array<string, Change> $changes
+     */
+    private function recordForTheRows(EntityManagerInterface $em, object $owner, array $changes, int $flush): ?AuditRecord
+    {
+        $metadata = $this->metadataFactory->for($owner);
+        $id = $this->identifierOf($em, $owner);
+
+        if ($metadata === null || $id === null) {
+            return null;
+        }
+
+        return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
+            ->withChanges($this->withContext($em, $owner, $changes, $flush));
+    }
+
+    /**
      * The change set to build a record from: what the unit of work still has, filled in
      * from the snapshot taken in onFlush for whatever it lost.
      *
@@ -3648,8 +3607,14 @@ final class AuditSubscriber
      */
     private function identifierOf(EntityManagerInterface $em, object $entity): int|string|null
     {
-        $values = $em->getClassMetadata($entity::class)->getIdentifierValues($entity);
+        return $this->identifierFrom($em, $em->getClassMetadata($entity::class)->getIdentifierValues($entity));
+    }
 
+    /**
+     * @param array<string, mixed> $values an identifier's fields and their values
+     */
+    private function identifierFrom(EntityManagerInterface $em, array $values): int|string|null
+    {
         if ($values === []) {
             return null;
         }

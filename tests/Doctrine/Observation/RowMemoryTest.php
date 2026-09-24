@@ -9,6 +9,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Ledger;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\LedgerLine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Rack;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\RackNote;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
@@ -280,6 +282,26 @@ final class RowMemoryTest extends DoctrineTestCase
 
         self::assertArrayNotHasKey(Vehicle::class, $this->memory->rows());
         self::assertSame([], $this->facts());
+    }
+
+    public function testARowWhoseIdIsKnownBeforeItsInsertIsNotRememberedUntilItIsThere(): void
+    {
+        // An id the application gives -- or one a sequence hands out at persist(), which is
+        // PostgreSQL under DBAL 3 -- is there before the row is. A refused flush computes its
+        // change sets before it is refused, and that gives a new entity Doctrine's memory of
+        // the row it means to insert: remembered at the next preFlush as a row that exists, it
+        // made an emptying count one row more than it took, and its own INSERT read as a row
+        // that was already there, so it never arrived.
+        $this->em->persist($ledger = new Ledger('L-1'));
+        $this->em->flush();
+        $this->memory->settle($this->em);
+
+        $ledger->add($line = new LedgerLine('LL-1', 'first'));
+        $this->em->persist($line);
+        $this->refused();
+        $this->em->flush();
+
+        self::assertSame([sprintf('ledger %d lines.LL-1: null -> "first"', $ledger->id)], $this->facts());
     }
 
     public function testAnElementIsWatchedWhateverCollectionItsOwnerDeclaresFirst(): void

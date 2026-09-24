@@ -1336,12 +1336,17 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         );
     }
 
-    public function testAnOuterWriteAfterASuccessfulInnerWriteWinsInTheOwnersHistory(): void
+    public function testAnInnerWriteAndTheOuterOneAfterItAreTwoFactsInTheOrderTheyRan(): void
     {
         // The same shape with the inner flush living. It really writes 9, and then the
         // outer flush really writes 3 -- afterwards, although its number is lower, because
         // a number says when a flush BEGAN. Ordered by number the inner flush's earlier
         // value won, and the owner's history ended at a value the column no longer held.
+        //
+        // One record for the operation used to say 1 -> 3. Each flush's statements are its
+        // own facts now: 1 -> 9, then 9 -> 3, in the order they ran, and the history still
+        // ends where the column does. Folding them into one is what a frame is for
+        // (DoctrineCoalescingTest).
         [, $item] = $this->aCrateWithOneLine();
         $this->em->flush();
 
@@ -1364,7 +1369,7 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         self::assertSame([9], $seen, 'the premise: the inner flush wrote its own value first');
         self::assertSame(3, $this->quantityInTheDatabase($item), 'the premise: the outer flush wrote after it');
         self::assertSame(
-            [['items.1.quantity' => ['old' => 1, 'new' => 3]]],
+            [['items.1.quantity' => ['old' => 1, 'new' => 9]], ['items.1.quantity' => ['old' => 9, 'new' => 3]]],
             $this->linesRecordedFor('crate'),
             'the owner\'s history ends at the value the inner flush wrote rather than the one the column holds',
         );
@@ -1504,19 +1509,20 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         self::assertSame(2, $this->quantityInTheDatabase($first), 'the premise: the outer flush wrote its line');
         self::assertSame(7, $this->quantityInTheDatabase($second), 'the premise: the inner flush wrote the other one');
 
-        $lines = $this->linesRecordedFor('crate');
-
-        self::assertCount(1, $lines, 'the crate got more than one record for one operation');
-
-        ksort($lines[0]);
+        // In one record or two is who ran the outer line's UPDATE: ORM 3 starts the inner
+        // flush in the trigger's preUpdate with that line still scheduled, and the inner
+        // flush runs it; ORM 2 has run it before. Either way both reach the history, each
+        // with the flush whose statement it is.
+        $said = array_replace([], ...$this->linesRecordedFor('crate'));
+        ksort($said);
 
         self::assertSame(
             [
                 'items.'.$first->id.'.quantity' => ['old' => 1, 'new' => 2],
                 'items.'.$second->id.'.quantity' => ['old' => 1, 'new' => 7],
             ],
-            $lines[0],
-            'one of the two flushes\' news about the collection did not reach the record',
+            $said,
+            'one of the two flushes\' news about the collection did not reach the history',
         );
     }
 
@@ -1654,13 +1660,17 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         );
     }
 
-    public function testReturningToTheOriginalValueSuppressesAnEarlierInnerChange(): void
+    public function testReturningToTheOriginalValueIsTwoFactsAndNotOneLeftOver(): void
     {
         // The inner flush really writes 9, and then the outer one puts the line back where
-        // it started and writes 1. The column never moved, so there is nothing to record --
-        // and "nothing" has no key to carry a stamp on, so the inner flush's earlier answer
-        // won the merge by default and the owner's history claimed a change that did not
-        // happen.
+        // it started and writes 1. Read as one answer for the operation, "nothing" had no key
+        // to carry a stamp on, so the inner flush's earlier answer won the merge by default
+        // and the owner's history claimed a change that did not happen -- 1 -> 9, and the
+        // column holding 1.
+        //
+        // Both statements are facts now, the way back included: 1 -> 9 and 9 -> 1, and the
+        // history ends where the column is. The operation as one net answer, nothing at all,
+        // is a frame's (DoctrineCoalescingTest).
         [, $item] = $this->aCrateWithOneLine();
         $this->em->flush();
 
@@ -1683,7 +1693,11 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         self::assertSame([9], $seen, 'the premise: the inner flush wrote its own value first');
         self::assertSame(1, $this->quantityInTheDatabase($item), 'the premise: the outer flush put it back');
 
-        self::assertSame([], $this->linesRecordedFor('crate'), 'the history records a change the column never kept');
+        self::assertSame(
+            [['items.1.quantity' => ['old' => 1, 'new' => 9]], ['items.1.quantity' => ['old' => 9, 'new' => 1]]],
+            $this->linesRecordedFor('crate'),
+            'the history ends at a value the column does not hold',
+        );
     }
 
     public function testAnOrmFilterCannotProveThatAnAbortedCollectionDeletionRan(): void
@@ -1873,6 +1887,10 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         // corrected in preUpdate. Reading the line again is the last word about the fields
         // that update is ABOUT, and about no others -- read as the last word about the
         // line, it took the quantity the first flush had really written with it.
+        //
+        // Two flushes, two records now: the quantity is the first nested flush's and the
+        // corrected sku the second's -- what its statement wrote, SKU-C, and not the SKU-B it
+        // was planned with.
         $crate = new Crate('C-1');
         $crate->add($item = new CrateItem('SKU-A'));
         $this->em->persist($crate);
@@ -1909,10 +1927,10 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         );
 
         self::assertSame(
-            [[
-                'items.'.$item->id.'.quantity' => ['old' => 1, 'new' => 9],
-                'items.'.$item->id.'.sku' => ['old' => 'SKU-A', 'new' => 'SKU-C'],
-            ]],
+            [
+                ['items.'.$item->id.'.quantity' => ['old' => 1, 'new' => 9]],
+                ['items.'.$item->id.'.sku' => ['old' => 'SKU-A', 'new' => 'SKU-C']],
+            ],
             $this->linesRecordedFor('crate'),
             'correcting one field of a line took another field\'s committed change with it',
         );

@@ -252,6 +252,14 @@ final class RowMemory
             return;
         }
 
+        // Not a row yet, whatever it knows about itself. An id the application assigns, or
+        // one a sequence hands out at persist() -- PostgreSQL under DBAL 3 -- is there before
+        // the INSERT, and a refused flush fills in Doctrine's memory of the row it meant to
+        // write: remembered, it was a row the table did not have. Its INSERT says what it holds.
+        if ($em->getUnitOfWork()->isScheduledForInsert($entity)) {
+            return;
+        }
+
         $key = self::keyColumns($em, $entity);
 
         if ($key === null) {

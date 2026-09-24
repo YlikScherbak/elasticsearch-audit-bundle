@@ -69,7 +69,10 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
     {
         parent::setUp();
 
-        $this->log = $this->watchTheConnection(FailurePolicy::Throw);
+        // Without savepoints on DBAL 3 (nested_flush_provenance: outer), where a nested
+        // flush cannot be told apart on the wire: what is held to the truth here is the
+        // facts, and they are the same either way -- who signed them is WhoWroteItTest's.
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, savepoints: false);
     }
 
     public function testAChangeTheOuterFlushWroteAndTheNestedOneChangedAgainIsTwoFacts(): void
@@ -87,10 +90,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $y->quantity = 2;
         $this->em->flush();
 
-        $this->assertTheRowsAndTheHistory(
-            [1 => 5, 2 => 2],
-            ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'],
-        );
+        $this->assertTheRowsAndTheHistory([1 => 5, 2 => 2], self::theOuterFlushsYAndTheNestedFlushsSecondX());
     }
 
     public function testALineTheNestedFlushWroteForTheOuterOneHasTheValueItWrote(): void
@@ -130,10 +130,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $y->quantity = 2;
         $this->em->flush();
 
-        $this->assertTheRowsAndTheHistory(
-            [1 => 5, 2 => 2],
-            ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'],
-        );
+        $this->assertTheRowsAndTheHistory([1 => 5, 2 => 2], self::theOuterFlushsYAndTheNestedFlushsSecondX());
     }
 
     public function testANestedFlushRefusedAheadOfThisListenerDoesNotLendItsChangeSet(): void
@@ -196,7 +193,9 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items: ["SKU-X","SKU-Y"] -> []'],
-            today: ['crate C-1 items: ["SKU-X","SKU-Y"] -> []'],
+            // Both facts, in the wrong order: what changed inside the line is read from the
+            // log now and the emptying is not yet, so the emptying's record is built first.
+            today: ['crate C-1 items: ["SKU-X","SKU-Y"] -> []', 'crate C-1 items.1.quantity: 1 -> 2'],
         );
     }
 
@@ -218,7 +217,9 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [1 => 2],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2: "SKU-Y" -> null'],
-            today: ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2.quantity: 1 -> 2', 'crate C-1 items.2: "SKU-Y" -> null'],
+            // The phantom 1 -> 2 is gone -- the UPDATE after the DELETE reached nothing, and the
+            // log says so -- and the departure, still collected the old way, comes first.
+            today: ['crate C-1 items.2: "SKU-Y" -> null', 'crate C-1 items.1.quantity: 1 -> 2'],
         );
     }
 
@@ -256,6 +257,111 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
 
         $x->quantity = 2;
         $this->theOuterFlushAfterANestedOneDied();
+    }
+
+    public function testALineChangedAndThenRemovedByTheSameFlushIsBothFacts(): void
+    {
+        // Not nested. Doctrine never plans an UPDATE and a DELETE of one entity in one
+        // flush -- scheduling a removal takes it off the updates -- but a listener that
+        // removes it after its UPDATE ran gets both: executeDeletions() reads the live list.
+        // Two statements reached the row, so two facts, in the order they ran.
+        [, $x] = $this->aCrateWithTwoLines();
+
+        $this->inThePostUpdateOf($x, function () use ($x): void {
+            $this->em->remove($x);
+        });
+
+        $x->quantity = 2;
+        $this->em->flush();
+
+        $this->assertTheRowsAndTheHistory(
+            [2 => 1],
+            ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1: "SKU-X" -> null'],
+            // The departure is still collected the old way, in onFlush, and a removal
+            // scheduled after it is never offered to it: step 3 reads it from the log.
+            today: ['crate C-1 items.1.quantity: 1 -> 2'],
+        );
+    }
+
+    public function testAFlushInsideTheApplicationsTransactionKeepsItsHistory(): void
+    {
+        // Not nested in another flush, nested in the application's transaction. Without
+        // savepoints (DBAL 3, nested_flush_provenance: outer) the flush's own beginTransaction()
+        // opens nothing on the wire, so there is no frame for it to claim: its statements are
+        // still its own, because they ran while it did.
+        [, $x] = $this->aCrateWithTwoLines();
+        $connection = $this->em->getConnection();
+
+        $connection->beginTransaction();
+        $x->quantity = 2;
+        $this->em->flush();
+        $connection->commit();
+
+        $this->assertTheRowsAndTheHistory([1 => 2, 2 => 1], ['crate C-1 items.1.quantity: 1 -> 2']);
+    }
+
+    public function testWhatAFlushWritesAfterANestedOneIsNotFiledBackBeforeIt(): void
+    {
+        // The crate's own change is the outer flush's first statement and its first record.
+        // X's preUpdate then starts a nested flush, which carries out X and Y as they stand,
+        // and then sets X again, which the outer flush writes -- its own statement, after the
+        // nested one's. Filed back into the outer flush's first record, the history would list
+        // it before the statements that ran first. (A nested flush carries out everything the
+        // outer one had left, so a later statement of the outer flush's own has to be a change
+        // made after it.) With savepoints: without them the nested flush's are the outer one's.
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, savepoints: true);
+        [$crate, $x, $y] = $this->aCrateWithTwoLines();
+
+        $this->em->getEventManager()->addEventListener([Events::preUpdate], new class($this->em, $x, $y) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly object $x, private readonly CrateItem $y)
+            {
+            }
+
+            public function preUpdate(\Doctrine\ORM\Event\PreUpdateEventArgs $args): void
+            {
+                if ($this->ran || $args->getObject() !== $this->x) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->y->quantity = 7;
+                $this->em->flush();
+                $this->x->quantity = 3;
+            }
+        });
+
+        $crate->status = 'checked';
+        $x->quantity = 2;
+        $this->em->flush();
+
+        $this->assertTheRowsAndTheHistory(
+            [1 => 3, 2 => 7],
+            ['crate C-1 status: "packed" -> "checked"', 'crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2.quantity: 1 -> 7', 'crate C-1 items.1.quantity: 2 -> 3'],
+        );
+    }
+
+    public function testALineChangedAndRemovedByAFlushThatDiesIsNeither(): void
+    {
+        // The same two statements, and the flush dies after both: neither happened.
+        [, $x] = $this->aCrateWithTwoLines();
+
+        $this->inThePostUpdateOf($x, function () use ($x): void {
+            $this->em->remove($x);
+        });
+        $this->em->getEventManager()->addEventListener([Events::postRemove], new class {
+            public function postRemove(): void
+            {
+                throw new \DomainException('the flush dies after its DELETE');
+            }
+        });
+
+        $x->quantity = 2;
+        $this->failing(fn () => $this->em->flush());
+        $this->andTheApplicationGoesOn();
+
+        $this->assertTheRowsAndTheHistory([1 => 1, 2 => 1], []);
     }
 
     public function testAnOuterFlushThatDiesLeavesNothing(): void
@@ -407,15 +513,21 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
     }
 
     /**
-     * @return array{Crate, CrateItem, CrateItem}
+     * @return array{Crate, CrateItem, CrateItem, CrateItem|null}
      */
-    private function aCrateWithTwoLines(): array
+    private function aCrateWithTwoLines(bool $andAThird = false): array
     {
         $this->attachListener(FailurePolicy::Throw);
 
         $this->em->persist($crate = new Crate('C-1'));
         $crate->add($x = new CrateItem('SKU-X'));
         $crate->add($y = new CrateItem('SKU-Y'));
+        $z = null;
+
+        if ($andAThird) {
+            $crate->add($z = new CrateItem('SKU-Z'));
+        }
+
         $this->em->flush();
 
         $this->gateway->documents = [];
@@ -460,7 +572,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
             }
         });
 
-        return [$crate, $x, $y];
+        return [$crate, $x, $y, $z];
     }
 
     /**
@@ -521,7 +633,13 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
     }
 
     /**
-     * Every change in every document, in order, as "<type> <id> <field>: <old> -> <new>".
+     * Every change in every document, the documents in the order they were written, as
+     * "<type> <id> <field>: <old> -> <new>".
+     *
+     * Inside one document the changes are sorted: a record is a map of fields, and in what
+     * order its keys were filled in is nothing the history promises -- ORM 2 and 3 run a
+     * nested flush's statements in different orders. Which record comes first is kept as
+     * written, and so is every transition of one field, which are separate records.
      *
      * A field whose two sides are the same is left out: that is an always-recorded field
      * carried for context, not something that happened.
@@ -533,12 +651,14 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $facts = [];
 
         foreach ($this->documents() as $document) {
+            $said = [];
+
             foreach ($document['changes'] ?? [] as $field => $change) {
                 if (($change['old'] ?? null) === ($change['new'] ?? null)) {
                     continue;
                 }
 
-                $facts[] = sprintf(
+                $said[] = sprintf(
                     '%s %s %s: %s -> %s',
                     (string) ($document['objectType'] ?? '?'),
                     (string) ($document['objectId'] ?? '?'),
@@ -547,6 +667,9 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
                     json_encode($change['new'] ?? null),
                 );
             }
+
+            sort($said);
+            $facts = [...$facts, ...$said];
         }
 
         return $facts;
@@ -727,6 +850,24 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         } finally {
             $this->em->getEventManager()->removeEventListener([Events::onFlush], $veto);
         }
+    }
+
+    /**
+     * S1a's history, record by record -- which follows the order the statements ran in.
+     *
+     * Without savepoints, as here, all three are the outer flush's, and a record holds a
+     * field once: the second write of X starts a new one. On ORM 3 the nested flush writes X
+     * 2 -> 5 before Y, so X 1 -> 2 is alone and the second record holds X 2 -> 5 and Y; on
+     * ORM 2 it writes Y first, so the first record holds X 1 -> 2 and Y, and X 2 -> 5 opens
+     * the second. Measured, not reasoned: the same three facts, grouped as they ran.
+     *
+     * @return list<string>
+     */
+    private static function theOuterFlushsYAndTheNestedFlushsSecondX(): array
+    {
+        return method_exists(\Doctrine\ORM\Event\OnClearEventArgs::class, 'clearsAllEntities')
+            ? ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5']
+            : ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'];
     }
 
     /**

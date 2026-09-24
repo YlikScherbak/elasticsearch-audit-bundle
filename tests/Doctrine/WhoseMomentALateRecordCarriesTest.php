@@ -505,14 +505,12 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         );
     }
 
-    public function testAnOwnerBothFlushesTouchedBelongsToTheOneThatStarted(): void
+    public function testEachFlushThatMovedSomethingInsideAnOwnerSignsItsOwnRecord(): void
     {
-        // One owner, one record, two flushes that moved something inside it. The record
-        // goes with the flush that first saw the owner rather than the last: it is the
-        // operation that started touching it, and it is the one whose commit the whole
-        // history hangs off. The test beside this one is the other case — an owner only
-        // the inner flush saw keeps the inner moment — and together they say which of
-        // the two sightings counts.
+        // One owner, two flushes that moved something inside it. It used to be one record,
+        // signed by the flush that first saw the owner. Each flush's statements are its own
+        // facts now, so each is its own record with its own moment and actor: alice's line
+        // by alice, the line the nested flush wrote by bob.
         $crate = new Crate('C-1');
         $crate->add($first = new CrateItem('SKU-1'));
         $crate->add($second = new CrateItem('SKU-2'));
@@ -554,8 +552,12 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
 
         $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
 
-        self::assertCount(1, $crates, 'the premise: one owner, one record, whatever moved inside it');
-        self::assertSame('alice', $crates[0]['source'], 'the owner went with the flush that touched it last rather than the one that started');
+        self::assertSame(
+            [['alice', 'items.'.$first->id.'.quantity'], ['bob', 'items.'.$second->id.'.quantity']],
+            array_map(static fn (array $d): array => [$d['source'], (string) array_key_first($d['changes'])], $crates),
+            'each flush signs what its own statements wrote, in the order they ran',
+        );
+        self::assertSame(self::BOB, $crates[1]['loggedAt'], 'and at its own moment');
     }
 
     public function testAnOwnerTheInnerFlushOnlyEmptiedIsThatFlushesToo(): void
@@ -610,11 +612,15 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         self::assertSame(self::BOB, $crates[0]['loggedAt']);
     }
 
-    public function testAnOwnerIsStillTheFirstFlushesWhenTheSecondEmptiesItsCollection(): void
+    public function testAnEmptyingByTheInnerFlushDoesNotTakeWhatTheOuterOneWrote(): void
     {
         // The same rule on the other road into that map: an owner is remembered when a
         // collection of its is emptied, and the inner flush emptying one must not take
         // an owner the outer flush had already touched.
+        //
+        // Two records now, each signed by the flush that did it: the quantity alice's flush
+        // wrote, and the emptying bob's. In which order they are listed is the emptying's
+        // road to settle, still read the old way; what is pinned here is who signs what.
         $crate = new Crate('C-1');
         $crate->add($first = new CrateItem('SKU-1'));
         $crate->add(new CrateItem('SKU-2'));
@@ -651,13 +657,22 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
             }
         });
 
+        $firstId = $first->id; // the emptying takes the row, and Doctrine the generated id with it
         $first->quantity = 7;
         $this->em->flush();
 
         $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
 
-        self::assertNotSame([], $crates, 'the premise: the crate got a record');
-        self::assertSame('alice', $crates[0]['source'], 'emptying a collection in the inner flush took an owner the outer one had already touched');
+        $signed = [];
+
+        foreach ($crates as $document) {
+            foreach (array_keys($document['changes']) as $field) {
+                $signed[$field] = $document['source'];
+            }
+        }
+
+        self::assertSame('alice', $signed['items.'.$firstId.'.quantity'] ?? null, 'emptying a collection in the inner flush took what the outer one had already written');
+        self::assertSame('bob', $signed['items.'.$firstId] ?? null, 'and the line it took went with the inner flush: '.json_encode($crates));
     }
 
     public function testARemovalAskedForBeforeTheFlushStillBelongsToIt(): void

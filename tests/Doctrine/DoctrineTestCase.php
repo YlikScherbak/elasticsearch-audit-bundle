@@ -98,7 +98,10 @@ abstract class DoctrineTestCase extends TestCase
         $this->ormConfig = $config;
         $this->gateway = new InMemoryGateway();
 
-        $this->connectWatched(savepoints: false, letsGo: false);
+        // With savepoints, which is what the bundle boots on under its default
+        // nested_flush_provenance: strict -- DBAL 4 always has them, and on DBAL 3 an
+        // application without them is refused. The tests that pin the other mode ask for it.
+        $this->connectWatched(savepoints: true, letsGo: false);
         $this->attachListener(FailurePolicy::Log);
     }
 
@@ -118,7 +121,7 @@ abstract class DoctrineTestCase extends TestCase
      * A fresh connection and manager, watched as setUp() watches them, with a listener told
      * about the log attached -- for a test that wants savepoints, or a log that lets go.
      */
-    protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log, bool $savepoints = false, bool $letsGo = false): StatementLog
+    protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log, bool $savepoints = true, bool $letsGo = false): StatementLog
     {
         $this->connectWatched($savepoints, $letsGo);
         $this->attachListener($policy);
@@ -137,7 +140,7 @@ abstract class DoctrineTestCase extends TestCase
         $this->statements = new StatementLog($letsGo);
 
         $middlewares = $this->ormConfig->getMiddlewares();
-        $this->ormConfig->setMiddlewares([...$middlewares, new ObservingMiddleware($this->statements)]);
+        $this->ormConfig->setMiddlewares([...$middlewares, ...$this->middlewaresOfTheTest(), new ObservingMiddleware($this->statements)]);
 
         $this->connection = DriverManager::getConnection(TestConnection::params(), $this->ormConfig);
         $this->ormConfig->setMiddlewares($middlewares);
@@ -149,6 +152,18 @@ abstract class DoctrineTestCase extends TestCase
 
         $this->em = new EntityManager($this->connection, $this->ormConfig);
         (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
+    }
+
+    /**
+     * What a test puts on the connection of its own, beside the observer -- a reading of the
+     * rows at every statement, say, which has to be on the same connection to see what a
+     * transaction has not committed yet.
+     *
+     * @return list<\Doctrine\DBAL\Driver\Middleware>
+     */
+    protected function middlewaresOfTheTest(): array
+    {
+        return [];
     }
 
     /**
