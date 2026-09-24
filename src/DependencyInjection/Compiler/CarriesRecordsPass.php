@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\DependencyInjection\Compiler;
 
 use Borsche\ElasticsearchAuditBundle\DependencyInjection\ElasticsearchAuditExtension;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
 use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Symfony\Component\DependencyInjection\Argument\IteratorArgument;
 use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
@@ -32,15 +33,76 @@ use Symfony\Component\DependencyInjection\Reference;
  * Both are the failure this bundle exists to refuse: a boot that looks like auditing is
  * on. They are checked here, where the answers exist.
  *
+ * And one that is not a lost record but a wrong name on one: whether the audited
+ * connection tells a nested flush apart from the flush around it (see
+ * {@see self::assertNestedFlushesAreToldApart()}).
+ *
  * @internal
  */
 final class CarriesRecordsPass implements CompilerPassInterface
 {
+    /**
+     * @param bool|null $dbal3 which DBAL the container is for; null asks the installed one.
+     *                         Given only by the tests, which pin both answers whatever is in vendor.
+     */
+    public function __construct(private readonly ?bool $dbal3 = null)
+    {
+    }
+
     public function process(ContainerBuilder $container): void
     {
         $this->assertTheListenerHearsFlushes($container);
+        $this->assertNestedFlushesAreToldApart($container);
         $this->assertTheBusCarriesHandlers($container);
         $this->assertTheOutboxSharesTheConnection($container);
+    }
+
+    /**
+     * Whether a flush nested inside another can be signed with its own name.
+     *
+     * A fact of the history rests on a statement, and the statement belongs to the flush
+     * that opened the frame it ran in. DBAL 4 opens a savepoint for every nested
+     * transaction; DBAL 3 opens one only when setNestTransactionsWithSavepoints(true) was
+     * called, which is what DoctrineBundle's use_savepoints does and does not do by default.
+     * Without it a nested flush's statements are the enclosing flush's, and so is the name
+     * on its changes: the moment, the actor and the context of a flush that did not make them.
+     *
+     * Refused under "strict", the default, and nowhere else: "outer" is the deployment
+     * saying it knows. Nothing here turns savepoints on -- that changes what a nested
+     * rollBack() does to the application, which is not the bundle's to change.
+     *
+     * Read fail-open, like the checks beside it: a connection this pass cannot find is one
+     * DoctrineBundle did not build, and an argument that is a placeholder says nothing until
+     * it is resolved. audit:check asks the connection itself.
+     */
+    private function assertNestedFlushesAreToldApart(ContainerBuilder $container): void
+    {
+        if (!$container->hasDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER)
+            || !$container->hasParameter(ElasticsearchAuditExtension::PARAMETER_NESTED_FLUSH_PROVENANCE)
+            || $container->getParameter(ElasticsearchAuditExtension::PARAMETER_NESTED_FLUSH_PROVENANCE) !== 'strict'
+            || !($this->dbal3 ?? ObservingMiddleware::onDbal3())) {
+            return;
+        }
+
+        $connection = $container->getParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_CONNECTION);
+
+        if (!\is_string($connection) || !$container->hasDefinition($id = sprintf('doctrine.dbal.%s_connection', $connection))) {
+            return;
+        }
+
+        $asked = null;
+
+        foreach ($container->getDefinition($id)->getMethodCalls() as [$method, $arguments]) {
+            if (strcasecmp($method, 'setNestTransactionsWithSavepoints') === 0) {
+                $asked = $arguments[0] ?? null; // the last call is the one that holds
+            }
+        }
+
+        if ($asked === true || ($asked !== null && !\is_bool($asked))) {
+            return;
+        }
+
+        throw new NotConfiguredException(sprintf('The Doctrine connection "%s" nests transactions without savepoints, which is what DBAL 3 does unless use_savepoints is set - and there a flush run inside another flush cannot be told apart from it, so its changes would be recorded with the moment, actor and context of the flush around it. Either set doctrine.dbal.connections.%s.use_savepoints: true (with savepoints a nested rollBack() rolls back to its savepoint instead of the whole transaction, so decide it for the application and not only for the audit), or set borsche_elasticsearch_audit.doctrine.nested_flush_provenance: outer to accept the outer flush\'s name on those changes; the values recorded are right either way. DBAL 4 always uses savepoints.', $connection, $connection));
     }
 
     /**

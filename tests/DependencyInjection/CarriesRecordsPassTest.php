@@ -210,6 +210,82 @@ final class CarriesRecordsPassTest extends TestCase
         return $container;
     }
 
+    public function testDbal3WithoutSavepointsIsRefusedUnderStrict(): void
+    {
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessage('use_savepoints: true');
+
+        (new CarriesRecordsPass(dbal3: true))->process(self::watchedConnection('strict'));
+    }
+
+    public function testTheRefusalSaysWhatTurningSavepointsOnDoesToTheApplication(): void
+    {
+        try {
+            (new CarriesRecordsPass(dbal3: true))->process(self::watchedConnection('strict'));
+            self::fail('the premise: refused');
+        } catch (NotConfiguredException $e) {
+            self::assertStringContainsString('a nested rollBack() rolls back to its savepoint instead of the whole transaction', $e->getMessage());
+            self::assertStringContainsString('nested_flush_provenance: outer', $e->getMessage(), 'and names the other way out');
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, bool, list<array{string, list<mixed>}>, bool}>
+     */
+    public static function nestedFlushes(): iterable
+    {
+        yield 'savepoints asked for' => ['strict', true, [['setNestTransactionsWithSavepoints', [true]]], false];
+        yield 'asked for, then taken back' => ['strict', true, [['setNestTransactionsWithSavepoints', [true]], ['setNestTransactionsWithSavepoints', [false]]], true];
+        yield 'turned off in so many words' => ['strict', true, [['setNestTransactionsWithSavepoints', [false]]], true];
+        yield 'a placeholder, unreadable until resolved' => ['strict', true, [['setNestTransactionsWithSavepoints', ['%env(bool:SAVEPOINTS)%']]], false];
+        yield 'the outer name accepted' => ['outer', true, [], false];
+        yield 'DBAL 4, which always has them' => ['strict', false, [], false];
+    }
+
+    /**
+     * @param list<array{string, list<mixed>}> $calls
+     */
+    #[DataProvider('nestedFlushes')]
+    public function testWhatDecidesTheRefusal(string $provenance, bool $dbal3, array $calls, bool $refused): void
+    {
+        try {
+            (new CarriesRecordsPass(dbal3: $dbal3))->process(self::watchedConnection($provenance, $calls));
+            self::assertFalse($refused, 'expected a refusal');
+        } catch (NotConfiguredException $e) {
+            self::assertTrue($refused, $e->getMessage());
+        }
+    }
+
+    public function testAConnectionDoctrineBundleDidNotBuildIsNotGuessedAt(): void
+    {
+        $container = self::watchedConnection('strict');
+        $container->removeDefinition('doctrine.dbal.default_connection');
+
+        (new CarriesRecordsPass(dbal3: true))->process($container);
+
+        $this->addToAssertionCount(1);
+    }
+
+    /**
+     * @param list<array{string, list<mixed>}> $calls
+     */
+    private static function watchedConnection(string $provenance, array $calls = []): ContainerBuilder
+    {
+        $container = self::containerWithoutAnEntityManager(promised: false);
+        $container->setParameter(ElasticsearchAuditExtension::PARAMETER_DOCTRINE_CONNECTION, 'default');
+        $container->setParameter(ElasticsearchAuditExtension::PARAMETER_NESTED_FLUSH_PROVENANCE, $provenance);
+
+        $connection = new Definition(\stdClass::class);
+
+        foreach ($calls as [$method, $arguments]) {
+            $connection->addMethodCall($method, $arguments);
+        }
+
+        $container->setDefinition('doctrine.dbal.default_connection', $connection);
+
+        return $container;
+    }
+
     private static function containerWithoutAnEntityManager(bool $promised): ContainerBuilder
     {
         $container = new ContainerBuilder();

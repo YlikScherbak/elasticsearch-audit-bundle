@@ -13,6 +13,8 @@ use Borsche\ElasticsearchAuditBundle\Transport\Outbox\OutboxTransport;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Handler\HandlersLocatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
+use Borsche\ElasticsearchAuditBundle\Exception\NotConfiguredException;
 use Borsche\ElasticsearchAuditBundle\ElasticsearchAuditBundle;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordHandler;
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandler;
@@ -110,6 +112,48 @@ final class FullKernelBootTest extends TestCase
         self::assertGreaterThan($before, $log->position(), 'and what the entity manager\'s connection runs reaches it');
 
         $kernel->shutdown();
+    }
+
+    public function testDbal3WithoutSavepointsDoesNotBootUnderTheDefault(): void
+    {
+        self::needsDbal3();
+
+        // Read off the connection DoctrineBundle built, which is where use_savepoints
+        // ends up: a method call on doctrine.dbal.default_connection, or none.
+        $kernel = new FullKernel($this->cacheDir, withoutSavepoints: true);
+
+        try {
+            $kernel->boot();
+            self::fail('a nested flush\'s changes would be signed by the flush around it');
+        } catch (NotConfiguredException $e) {
+            self::assertStringContainsString('"default" nests transactions without savepoints', $e->getMessage());
+        }
+    }
+
+    public function testDbal3WithSavepointsOrTheOuterNameBoots(): void
+    {
+        self::needsDbal3();
+
+        foreach ([new FullKernel($this->cacheDir), new FullKernel($this->cacheDir, withoutSavepoints: true, provenance: 'outer')] as $kernel) {
+            $kernel->boot();
+
+            /** @var \Doctrine\ORM\EntityManagerInterface $em */
+            $em = $kernel->getContainer()->get('doctrine.orm.default_entity_manager');
+            self::assertSame($kernel->getEnvironment() === 'test', $em->getConnection()->getNestTransactionsWithSavepoints(), 'the bundle turns nothing on by itself');
+
+            $kernel->shutdown();
+        }
+    }
+
+    private static function needsDbal3(): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
+        if (!ObservingMiddleware::onDbal3()) {
+            self::markTestSkipped('DBAL 4 always nests with savepoints.');
+        }
     }
 
     public function testMessengerActuallyRoutesBothMessagesToTheirHandlers(): void
@@ -477,8 +521,13 @@ final class FullKernel extends Kernel
         private readonly bool $sendOnly = false,
         private readonly bool $outbox = false,
         private readonly bool $queueElsewhere = false,
+        // The kernel sets use_savepoints on DBAL 3, as an application running this
+        // bundle there under the default "strict" has to; this leaves it at DoctrineBundle's
+        // default instead.
+        private readonly bool $withoutSavepoints = false,
+        private readonly ?string $provenance = null,
     ) {
-        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : '').($twoBuses ? 't' : '').($sendOnly ? 's' : '').($this->outbox ? 'x' : '').($this->queueElsewhere ? 'q' : ''), true);
+        parent::__construct('test'.($messenger ? 'm' : '').($reportingConnection ? 'r' : '').($ownBus ? 'o' : '').($dbalOnly ? 'd' : '').($insistOnDoctrine ? 'i' : '').($withoutDoctrine ? 'n' : '').($busWithoutDelivery ? 'b' : '').($namedEntityManager ? 'e' : '').($twoBuses ? 't' : '').($sendOnly ? 's' : '').($this->outbox ? 'x' : '').($this->queueElsewhere ? 'q' : '').($withoutSavepoints ? 'p' : '').($provenance ?? ''), true);
     }
 
     /**
@@ -546,8 +595,12 @@ final class FullKernel extends Kernel
         $sendOnly = $this->sendOnly;
         $outbox = $this->outbox;
         $elsewhere = $this->queueElsewhere;
+        // Only on DBAL 3: DBAL 4 always nests with savepoints, and DoctrineBundle 3 does
+        // not know the key at all.
+        $sqlite = ['driver' => 'pdo_sqlite', 'memory' => true] + (!$this->withoutSavepoints && ObservingMiddleware::onDbal3() ? ['use_savepoints' => true] : []);
+        $provenance = $this->provenance === null ? [] : ['nested_flush_provenance' => $this->provenance];
 
-        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager, $twoBuses, $sendOnly, $outbox, $elsewhere): void {
+        $loader->load(static function (ContainerBuilder $container) use ($messenger, $reporting, $ownBus, $dbalOnly, $insist, $noDoctrine, $undelivered, $namedManager, $twoBuses, $sendOnly, $outbox, $elsewhere, $sqlite, $provenance): void {
             $container->loadFromExtension('framework', [
                 'test' => true,
                 'http_method_override' => false,
@@ -591,16 +644,16 @@ final class FullKernel extends Kernel
                 // No orm section at all, so DoctrineBundle registers no entity manager —
                 // the shape an application that uses DBAL alone has, and one where
                 // nothing about entity auditing was ever asked for.
-                'dbal' => ['driver' => 'pdo_sqlite', 'memory' => true],
+                'dbal' => $sqlite,
             ] : [
                 // A second connection with no entity manager on it — the DBAL-only
                 // setup Symfony documents, and the one an audit listener cannot hear.
                 'dbal' => ($reporting || $namedManager || $elsewhere)
                     ? ['default_connection' => 'default', 'connections' => [
-                        'default' => ['driver' => 'pdo_sqlite', 'memory' => true],
-                        'reporting' => ['driver' => 'pdo_sqlite', 'memory' => true],
+                        'default' => $sqlite,
+                        'reporting' => $sqlite,
                     ]]
-                    : ['driver' => 'pdo_sqlite', 'memory' => true],
+                    : $sqlite,
                 'orm' => [
                     // No auto_generate_proxy_classes: DoctrineBundle 3 removed it with
                     // proxies themselves (PHP 8.4 lazy objects), and in 2.x it defaults
@@ -631,7 +684,7 @@ final class FullKernel extends Kernel
             $container->loadFromExtension(Configuration::ROOT, [
                 'client' => ['hosts' => ['http://localhost:9200']],
                 'transport' => $outbox ? 'outbox' : ($messenger ? 'messenger' : 'sync'),
-                'doctrine' => (($reporting || $namedManager) ? ['connection' => 'reporting'] : []) + ($insist ? ['enabled' => true] : []),
+                'doctrine' => (($reporting || $namedManager) ? ['connection' => 'reporting'] : []) + ($insist ? ['enabled' => true] : []) + $provenance,
             ] + ($outbox ? ['outbox' => ['transport' => 'audit_outbox']] : []) + ($ownBus ? ['message_bus' => 'app.bus'] : []) + ($undelivered ? ['message_bus' => 'audit.bus'] : []));
 
             // What a test needs to look at: private by default, and the point of the

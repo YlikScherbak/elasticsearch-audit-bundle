@@ -46,14 +46,25 @@ final class ObservingMiddleware implements Middleware
             ): DriverConnection {
                 $connection = parent::connect($params);
 
-                // Asked of the interface rather than of an installed version: it is the
-                // signature the adapter has to match that differs.
-                if ((string) (new \ReflectionMethod(DriverConnection::class, 'commit'))->getReturnType() !== 'void') {
+                if (ObservingMiddleware::onDbal3()) {
                     return new Dbal3\ObservedConnection($connection, $this->log);
                 }
 
                 return new Dbal4\ObservedConnection($connection, $this->log);
             }
         };
+    }
+
+    /**
+     * Whether the installed DBAL is the one that nests a transaction without a savepoint
+     * unless told to.
+     *
+     * Asked of the driver interface rather than of an installed version: it is the
+     * signature the adapter has to match that differs, and the same answer decides whether
+     * a nested flush can be told apart on the wire.
+     */
+    public static function onDbal3(): bool
+    {
+        return (string) (new \ReflectionMethod(DriverConnection::class, 'commit'))->getReturnType() !== 'void';
     }
 }
