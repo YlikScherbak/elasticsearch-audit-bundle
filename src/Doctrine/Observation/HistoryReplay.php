@@ -34,13 +34,25 @@ use Doctrine\ORM\Mapping\ClassMetadata;
  */
 final class HistoryReplay
 {
+    /** A fact about a field of an element. */
+    public const FIELD = 'field';
+
+    /** A fact about an element come to a collection or gone from it. */
+    public const MEMBER = 'member';
+
+    /** A fact about a collection emptied: what it held, and nothing. */
+    public const EMPTIED = 'emptied';
+
     /** @var array<string, array<string, array<string, mixed>>> root class => key => column => database value */
     private array $rows;
 
     /** @var array<string, array<string, true>> rows a DELETE that stayed done took */
     private array $gone = [];
 
-    /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string}|null}> */
+    /** @var array<string, array<string, int|null>> the flush whose DELETE took each of them */
+    private array $goneIn = [];
+
+    /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool}> */
     private array $facts = [];
 
     /** @var list<string> */
@@ -78,6 +90,15 @@ final class HistoryReplay
 
     /** @var list<\Throwable> what the application's representers threw while this was reading */
     private array $failures = [];
+
+    /** @var list<array{at: int, failure: \Throwable}> the same, with where each was */
+    private array $failuresAt = [];
+
+    /** Whether the last representer this called threw: the fact it was for is marked, never guessed. */
+    private bool $representFailed = false;
+
+    /** @var list<array{at: int, class: string|null}> where each doubt was, and about which class: no value it held */
+    private array $doubtsAt = [];
 
     /**
      * @param array<string, array<string, array<string, mixed>>> $rows    what the rows held, by root class and key
@@ -130,13 +151,30 @@ final class HistoryReplay
             }
 
             if ($shape === null || $binding === null) {
-                $this->doubts[] = 'not read: '.$statement['sql'];
+                // A statement that writes and could not be read is doubt; one that does not
+                // write -- the schema's DDL, say -- is nothing a row history holds. Nor is one
+                // that writes a table of the application's own, read or not: the same rule as
+                // for a statement read and not bound, below, by the table it names.
+                if (preg_match('~^\s*(?:INSERT\s+(?:INTO\s+)?|UPDATE\s+|DELETE\s+(?:FROM\s+)?)([`"\[]?[\w.]+[`"\]]?)?~i', $statement['sql'], $writes) === 1) {
+                    $table = isset($writes[1]) ? trim($writes[1], '`"[]') : null;
+                    $watched = $table === null ? null : $this->watchedClassOf($table);
+
+                    if ($table === null || $watched !== null || !$this->isAMappedTable($table)) {
+                        $this->doubt('not read: '.$statement['sql'], $watched);
+                    }
+                }
 
                 continue;
             }
 
             if ($binding->kind === RowBinding::UNBOUND) {
-                $this->doubts[] = 'not bound: '.$statement['sql'].' -- '.$binding->reason;
+                $watched = $this->watchedClassOf($shape->table);
+
+                // Doubt only about rows history is written about: a statement the application
+                // ran on a table of its own is neither a fact nor a doubt.
+                if ($watched !== null) {
+                    $this->doubt('not bound: '.$statement['sql'].' -- '.$binding->reason, $watched);
+                }
 
                 continue;
             }
@@ -147,8 +185,12 @@ final class HistoryReplay
                 continue;
             }
 
+            if ($binding->kind === RowBinding::JOIN_ROW || $binding->kind === RowBinding::JOIN_ROWS_OF_OWNER) {
+                continue; // an owning collection's rows: recorded from its owner's change set
+            }
+
             if ($binding->kind !== RowBinding::ROW || $binding->class === null) {
-                $this->doubts[] = 'not replayed: '.$binding->kind.' '.$statement['sql'];
+                $this->doubt('not replayed: '.$binding->kind.' '.$statement['sql'], $binding->class);
 
                 continue;
             }
@@ -198,7 +240,7 @@ final class HistoryReplay
     }
 
     /**
-     * @return list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string}|null}>
+     * @return list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool}>
      */
     public function facts(): array
     {
@@ -221,6 +263,17 @@ final class HistoryReplay
     public function failures(): array
     {
         return $this->failures;
+    }
+
+    /**
+     * What the representers threw for the statements after a position, for a writer to report
+     * each once.
+     *
+     * @return list<\Throwable>
+     */
+    public function failuresAfter(int $at): array
+    {
+        return array_values(array_map(static fn (array $failure): \Throwable => $failure['failure'], array_filter($this->failuresAt, static fn (array $failure): bool => $failure['at'] > $at)));
     }
 
     private function em(): EntityManagerInterface
@@ -247,6 +300,16 @@ final class HistoryReplay
     }
 
     /**
+     * The rows a DELETE that stayed done took, by root class.
+     *
+     * @return array<string, list<string>>
+     */
+    public function goneRows(): array
+    {
+        return array_map(static fn (array $keys): array => array_map('strval', array_keys($keys)), $this->gone);
+    }
+
+    /**
      * The key a row is known by: its identifier columns' values, in the mapping's order.
      *
      * @param ClassMetadata<object> $metadata
@@ -265,13 +328,54 @@ final class HistoryReplay
     }
 
     /**
-     * @param array{owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string}|null $element
-     *        for a change inside an element: which owner and collection, which row and which field -- what a writer needs to
-     *        name it, where the strings above only describe it
+     * @param array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null $element
+     *        for a fact about a collection: what kind (a field of an element, an element come or gone, the collection
+     *        emptied), which owner and collection, which row and which field -- what a writer needs to name it, where the
+     *        strings above only describe it
      */
-    private function said(string $type, string $id, string $field, mixed $old, mixed $new, ?array $element = null): void
+    private function said(string $type, string $id, string $field, mixed $old, mixed $new, ?array $element = null, bool $failed = false): void
     {
-        $this->facts[] = ['type' => $type, 'id' => $id, 'field' => $field, 'old' => $old, 'new' => $new, 'flush' => $this->log?->ownerOf($this->at), 'at' => $this->at, 'element' => $element];
+        $this->facts[] = ['type' => $type, 'id' => $id, 'field' => $field, 'old' => $old, 'new' => $new, 'flush' => $this->log?->ownerOf($this->at), 'at' => $this->at, 'element' => $element, 'failed' => $failed];
+    }
+
+    /**
+     * An element come or gone, said with its representation -- marked when the representer threw.
+     *
+     * @param ClassMetadata<object> $metadata
+     * @param array{type: string, id: string, key: mixed, column: string, collection: string, metadata: ClassMetadata<object>} $owner
+     * @param array<string, mixed> $row
+     * @param array<string, mixed> $key
+     */
+    private function member(ClassMetadata $metadata, array $owner, string $id, array $key, array $row, bool $arrived): void
+    {
+        $shown = $this->represent($metadata, $row, $owner['metadata'], $owner['collection']);
+
+        $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id, $arrived ? null : $shown, $arrived ? $shown : null, [
+            'kind' => self::MEMBER,
+            'owner' => $owner['metadata']->name,
+            'ownerKey' => $owner['key'],
+            'collection' => $owner['collection'],
+            'class' => $metadata->rootEntityName,
+            'key' => $key,
+            'field' => null,
+        ], $this->representFailed);
+    }
+
+    private function doubt(string $text, ?string $class): void
+    {
+        $this->doubts[] = $text;
+        $this->doubtsAt[] = ['at' => $this->at, 'class' => $class];
+    }
+
+    /**
+     * The doubts of the statements after a position: where, and about which class, and nothing a
+     * statement carried -- for a writer to say what the history may be missing.
+     *
+     * @return list<array{at: int, class: string|null}>
+     */
+    public function doubtsAfter(int $at): array
+    {
+        return array_values(array_filter($this->doubtsAt, static fn (array $doubt): bool => $doubt['at'] > $at));
     }
 
     private function forgetWhatWasTakenAfter(string $root, string $id, int $at): void
@@ -297,7 +401,7 @@ final class HistoryReplay
 
         if ($key === null) {
             if ($persisted === null || $persisted === []) {
-                $this->doubts[] = 'an INSERT into '.$shape->table.' with no postPersist to take its key from';
+                $this->doubt('an INSERT into '.$shape->table.' with no postPersist to take its key from', $metadata->rootEntityName);
 
                 return;
             }
@@ -320,7 +424,7 @@ final class HistoryReplay
         unset($this->gone[$root][$id]);
 
         foreach ($there === [] ? $this->ownersOf($metadata, $this->rows[$root][$id]) : [] as $owner) {
-            $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id, null, $this->represent($metadata, $this->rows[$root][$id], $owner['metadata'], $owner['collection']));
+            $this->member($metadata, $owner, $id, self::keyColumnsOf($metadata, $this->rows[$root][$id]), $this->rows[$root][$id], arrived: true);
         }
     }
 
@@ -339,7 +443,7 @@ final class HistoryReplay
         }
 
         if (!isset($this->rows[$root][$id])) {
-            $this->doubts[] = 'an UPDATE of '.$root.' '.$id.', a row nothing said was there';
+            $this->doubt('an UPDATE of '.$root.' '.$id.', a row nothing said was there', $root);
 
             return;
         }
@@ -371,11 +475,11 @@ final class HistoryReplay
             }
 
             if ($was !== null) {
-                $this->said($was['type'], $was['id'], $was['collection'].'.'.$id, $this->represent($metadata, $before, $was['metadata'], $was['collection']), null);
+                $this->member($metadata, $was, $id, $key, $before, arrived: false);
             }
 
             if ($is !== null) {
-                $this->said($is['type'], $is['id'], $is['collection'].'.'.$id, null, $this->represent($metadata, $after, $is['metadata'], $is['collection']));
+                $this->member($metadata, $is, $id, $key, $after, arrived: true);
             }
         }
 
@@ -402,6 +506,7 @@ final class HistoryReplay
             // which is as much nobody's history as any later change to it.
             foreach ($ownersAfter as $owner) {
                 $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id.'.'.$field, $was, $is, [
+                    'kind' => self::FIELD,
                     'owner' => $owner['metadata']->name,
                     'ownerKey' => $owner['key'],
                     'collection' => $owner['collection'],
@@ -448,16 +553,26 @@ final class HistoryReplay
         $id = self::keyOf($metadata, $key);
 
         if (!isset($this->rows[$root][$id])) {
-            $this->doubts[] = 'a DELETE of '.$root.' '.$id.', a row nothing said was there';
+            $this->doubt('a DELETE of '.$root.' '.$id.', a row nothing said was there', $root);
 
             return;
         }
 
         foreach ($this->ownersOf($metadata, $this->rows[$root][$id]) as $owner) {
-            $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id, $this->represent($metadata, $this->rows[$root][$id], $owner['metadata'], $owner['collection']), null);
+            $this->member($metadata, $owner, $id, $key, $this->rows[$root][$id], arrived: false);
         }
 
         $this->gone[$root][$id] = true;
+        $this->goneIn[$root][$id] = $this->log?->ownerOf($this->at);
+    }
+
+    /**
+     * Whether a DELETE of this flush took the row: what an owner's collection went through in
+     * the flush that removed the owner is its remove, not a second event.
+     */
+    public function removedIn(string $root, string $id, int $flush): bool
+    {
+        return isset($this->gone[$root][$id]) && ($this->goneIn[$root][$id] ?? null) === $flush;
     }
 
     private function emptied(StatementShape $shape, RowBinding $binding, int|string|null $affected): void
@@ -471,7 +586,7 @@ final class HistoryReplay
         }
 
         if ($elements === null || $binding->association === null || $binding->class === null) {
-            $this->doubts[] = 'an emptying of '.$shape->table.' this cannot follow';
+            $this->doubt('an emptying of '.$shape->table.' this cannot follow', null);
 
             return;
         }
@@ -500,7 +615,7 @@ final class HistoryReplay
         // What the rows held is what went -- if the count says so. A difference is the rows
         // having changed in a way this did not follow.
         if (\count($held) !== (int) $affected) {
-            $this->doubts[] = sprintf('an emptying of %s took %s rows where %d were known', $shape->table, self::scalar($affected), \count($held));
+            $this->doubt(sprintf('an emptying of %s took %s rows where %d were known', $shape->table, self::scalar($affected), \count($held)), $root);
 
             return;
         }
@@ -508,17 +623,27 @@ final class HistoryReplay
         $collection = $this->collectionOf($owner, $elements, $binding->association);
         ksort($held);
         $shown = [];
+        $failed = false;
 
         foreach ($held as $id => $row) {
             if ($collection !== null) {
                 $shown[] = $this->represent($elements, $row, $owner, $collection['field']);
+                $failed = $failed || $this->representFailed;
             }
 
             $this->gone[$root][$id] = true;
         }
 
         if ($collection !== null && $held !== []) {
-            $this->said($collection['type'], self::scalar($value), $collection['field'], $shown, []);
+            $this->said($collection['type'], self::scalar($value), $collection['field'], $shown, [], [
+                'kind' => self::EMPTIED,
+                'owner' => $owner->name,
+                'ownerKey' => $value,
+                'collection' => $collection['field'],
+                'class' => $root,
+                'key' => [],
+                'field' => null,
+            ], $failed);
         }
     }
 
@@ -603,6 +728,7 @@ final class HistoryReplay
      */
     private function represent(ClassMetadata $metadata, array $row, ClassMetadata $owner, string $collection): mixed
     {
+        $this->representFailed = false;
         $copy = $metadata->newInstance();
 
         foreach ($metadata->getFieldNames() as $field) {
@@ -621,10 +747,59 @@ final class HistoryReplay
             return $represent($copy);
         } catch (\Throwable $e) {
             $this->failures[] = $e;
+            $this->failuresAt[] = ['at' => $this->at, 'failure' => $e];
+            $this->representFailed = true;
             $this->doubts[] = sprintf('the representer of %s.%s threw %s', $owner->getName(), $collection, $e::class);
 
             return null;
         }
+    }
+
+    /**
+     * A row's key columns, as a binding names them.
+     *
+     * @param ClassMetadata<object> $metadata
+     * @param array<string, mixed>  $row
+     *
+     * @return array<string, mixed>
+     */
+    private static function keyColumnsOf(ClassMetadata $metadata, array $row): array
+    {
+        $key = [];
+
+        foreach ($metadata->getIdentifierColumnNames() as $column) {
+            $key[$column] = $row[$column] ?? null;
+        }
+
+        return $key;
+    }
+
+    /**
+     * Whether a table belongs to a mapped class. One that does and is not watched is the
+     * application's own; one that does not may be a watched collection's join table, and a
+     * write to it that could not be read stays doubt.
+     */
+    private function isAMappedTable(string $table): bool
+    {
+        foreach ($this->em()->getMetadataFactory()->getAllMetadata() as $candidate) {
+            if ($candidate instanceof ClassMetadata && $candidate->getTableName() === $table) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** The watched class a table holds the rows of, if any. */
+    private function watchedClassOf(string $table): ?string
+    {
+        foreach ($this->em()->getMetadataFactory()->getAllMetadata() as $candidate) {
+            if ($candidate instanceof ClassMetadata && $candidate->getTableName() === $table && $this->watched->areWatched($this->em(), $candidate)) {
+                return $candidate->rootEntityName;
+            }
+        }
+
+        return null;
     }
 
     /**

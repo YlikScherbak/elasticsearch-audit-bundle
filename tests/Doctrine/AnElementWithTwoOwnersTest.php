@@ -67,6 +67,54 @@ final class AnElementWithTwoOwnersTest extends DoctrineTestCase
         self::assertSame(['old' => 10, 'new' => 25], $weight, 'the depot records what changed inside the case it still holds');
     }
 
+    public function testACaseThatMovesBothOwnersAndChangesTellsEachNewOwnerInOneRecord(): void
+    {
+        // One UPDATE moves the case to another pallet and another depot and changes its
+        // weight. Each owner it left hears it left, as it was; each owner it came to hears it
+        // came, as it is, and -- the depot, which tracks the weight -- what changed, in the
+        // same record: the change belongs to the owners the row has after the statement.
+        $fromPallet = new Pallet('P-1');
+        $toPallet = new Pallet('P-2');
+        $fromDepot = new Depot('north');
+        $toDepot = new Depot('south');
+
+        $case = new PackingCase('crate-1', 10);
+        $fromPallet->add($case);
+        $fromDepot->add($case);
+
+        foreach ([$fromPallet, $toPallet, $fromDepot, $toDepot] as $owner) {
+            $this->em->persist($owner);
+        }
+
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $case->pallet = $toPallet;
+        $toPallet->cases->add($case);
+        $fromPallet->cases->removeElement($case);
+        $case->depot = $toDepot;
+        $toDepot->cases->add($case);
+        $fromDepot->cases->removeElement($case);
+        $case->weight = 25;
+        $this->em->flush();
+
+        $id = $case->id;
+        $said = [];
+
+        foreach ($this->documents() as $document) {
+            $said[$document['objectType'].' '.$document['objectId']][] = array_filter($document['changes'], static fn (string $k): bool => str_starts_with($k, 'cases.'), \ARRAY_FILTER_USE_KEY);
+        }
+
+        ksort($said);
+
+        self::assertSame([
+            'depot '.$fromDepot->id => [['cases.'.$id => ['old' => 'crate-1', 'new' => null]]],
+            'depot '.$toDepot->id => [['cases.'.$id => ['old' => null, 'new' => 'crate-1'], 'cases.'.$id.'.weight' => ['old' => 10, 'new' => 25]]],
+            'pallet '.$fromPallet->id => [['cases.'.$id => ['old' => 'crate-1', 'new' => null]]],
+            'pallet '.$toPallet->id => [['cases.'.$id => ['old' => null, 'new' => 'crate-1']]],
+        ], $said);
+    }
+
     public function testACaseThatIsDeletedTellsBothOwnersItIsGone(): void
     {
         // A deletion answers to the owner the database row had, and it has two of them.

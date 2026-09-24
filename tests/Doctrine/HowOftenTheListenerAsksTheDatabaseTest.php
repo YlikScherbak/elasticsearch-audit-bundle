@@ -77,13 +77,13 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         self::assertStringContainsString('route_stop', $read[0], 'it reads the membership back');
     }
 
-    public function testRemovingManyLinesTheMakerWayAsksTheRowsOnce(): void
+    public function testRemovingManyLinesTheMakerWayAsksTheDatabaseNothing(): void
     {
         // Maker's removeItem() nulls the back-reference and lets orphanRemoval delete the
-        // row, which makes the two readers of whose row is going contradict each other for
-        // every line -- and a contradiction is what the row is asked about. Asked line by
-        // line, a hundred removals were a hundred SELECTs. The rows are asked once per class
-        // now, before the deletions are walked.
+        // row, which made the two readers of whose row is going contradict each other for
+        // every line -- and a contradiction was what the row was asked about: a hundred
+        // SELECTs, then one per class. Whose row each DELETE took is what the connection's
+        // log says, from the rows the listener remembers, and nothing is asked at all.
         $this->attachListener(FailurePolicy::Log);
 
         $this->em->persist($crate = new Crate('C-1'));
@@ -103,7 +103,7 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
 
         $this->em->flush();
 
-        self::assertCount(1, self::selects($this->queries), 'one question for a hundred lines');
+        self::assertCount(0, self::selects($this->queries), 'no question for a hundred lines');
         self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'and every one of them went');
     }
 

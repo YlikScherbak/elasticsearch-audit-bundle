@@ -351,16 +351,14 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
         self::assertSame([], $this->documents(), 'a change inside a line no crate owns belongs to no crate');
     }
 
-    public function testALineThatArrivedAndLeftInsideOneOperationIsNotHistory(): void
+    public function testALineThatArrivedAndLeftInsideOneOperationIsBothFacts(): void
     {
         // The same operation, read for what it says about the line that came and went.
-        // Its row was in the table between two statements nobody outside the operation
-        // could see, and the record is about the operation: nothing happened to it.
-        //
-        // The sweep that drops such statements used to run once, where the emptying is
-        // collected — and a flush nested inside another writes its arrival afterwards, so
-        // the order decided whether the sweep saw anything. It is kept as a set now and
-        // asked whenever something new is about to be written down.
+        // It used to say nothing -- the record was about the operation, and over the
+        // operation nothing happened to the line -- which took a sweep across flushes that
+        // five rounds kept finding holes in. Decision A: the history says what each flush
+        // did, and the line's row was inserted by one statement and taken by another. Both
+        // are said, once. The operation as one answer is what a frame is for.
         [$crate] = $this->twoCratesAndALine();
         $this->em->persist($article = new Article('One'));
         $this->em->flush();
@@ -374,14 +372,149 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
 
         $said = $this->everyStatement();
 
-        self::assertNotContains('C-1 items gained SKU-NEW', $said, 'it never settled anywhere');
-        self::assertNotContains('C-1 items lost SKU-NEW', $said, 'so it left nowhere either');
+        self::assertSame(1, \count(array_keys($said, 'C-1 items gained SKU-NEW', true)), 'it arrived, once');
+        self::assertSame(1, \count(array_keys($said, 'C-1 items lost SKU-NEW', true)), 'and left, once');
     }
 
     /**
      * A flush with another one started from inside it, which is what puts two flushes of
      * one operation in front of the same schedule.
      */
+    public function testACollectionNothingLoadedIsEmptiedLineByLineWithoutLoadingIt(): void
+    {
+        // The emptying is one DELETE of every row the crate holds, and what it took is only
+        // as known as those rows are: the application never loaded them. So they are read
+        // once, before the DELETE -- as rows, through the connection. Loading the collection
+        // would have put two entities into the application's identity map and run its
+        // postLoad listeners on them: the application's code, on the bundle's account.
+        $this->em->persist($crate = new Crate('C-9'));
+        $crate->add(new CrateItem('SKU-A'));
+        $crate->add(new CrateItem('SKU-B'));
+        $this->em->flush();
+        $this->em->clear();
+
+        $loaded = new \ArrayObject();
+        $this->em->getEventManager()->addEventListener([Events::postLoad], new class($loaded) {
+            public function __construct(private readonly \ArrayObject $loaded)
+            {
+            }
+
+            public function postLoad(\Doctrine\ORM\Event\PostLoadEventArgs $args): void
+            {
+                if ($args->getObject() instanceof CrateItem) {
+                    $this->loaded[] = $args->getObject()->sku;
+                }
+            }
+        });
+
+        $crate = $this->em->find(Crate::class, 'C-9');
+        self::assertNotNull($crate);
+        self::assertInstanceOf(\Doctrine\ORM\PersistentCollection::class, $crate->items);
+        self::assertFalse($crate->items->isInitialized(), 'the premise: nothing loaded the lines');
+
+        $this->gateway->documents = [];
+        $this->queries = [];
+
+        $crate->items = new ArrayCollection();
+        $this->em->flush();
+        // Doctrine itself touches the replaced collection once more after its DELETE -- the
+        // update of the crate reads an offset of the change it was handed -- and finds nothing:
+        // that SELECT is Doctrine's, with or without the bundle. What the bundle asks is asked
+        // before the DELETE.
+        $ran = \array_slice($this->queries, 0, (int) array_search('DELETE FROM CrateItem WHERE crate_id = ?', $this->queries, true));
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem WHERE crate_id = ?', ['C-9']), 'the premise: the rows went');
+        self::assertSame([['items' => ['old' => ['SKU-A', 'SKU-B'], 'new' => []]]], $this->theCollectionsChanges());
+        self::assertSame([], $loaded->getArrayCopy(), 'no line was loaded to say so');
+        self::assertCount(1, array_filter($ran, static fn (string $sql): bool => str_starts_with($sql, 'SELECT')), 'the rows were read once before they went, and nothing else was asked');
+        self::assertSame(['SELECT id, sku, quantity, crate_id FROM CrateItem WHERE crate_id = ?'], $ran, 'as rows, not as entities');
+    }
+
+    public function testAnEmptyingReadAfterAStatementOfTheOuterFlushNamesWhatThatStatementWrote(): void
+    {
+        // The outer flush renames X; X's postUpdate starts a nested flush that empties the
+        // crate, whose other line nothing loaded. The rows read for the emptying are read after
+        // the rename, and they are an account of what came after it only: the rename is still
+        // 'SKU-X' -> 'SKU-X2', and the emptying names X as it was when it went.
+        [$crate, $x] = $this->aCrateWithALoadedAndAnUnloadedLine();
+        $xId = $x->id;
+
+        $this->inThePostUpdateOf($x, function () use ($crate): void {
+            $crate->items = new ArrayCollection();
+            $this->em->flush();
+        });
+
+        $x->sku = 'SKU-X2';
+        $this->em->flush();
+
+        self::assertSame(
+            [['items.'.$xId.'.sku' => ['old' => 'SKU-X', 'new' => 'SKU-X2']], ['items' => ['old' => ['SKU-X2', 'SKU-Y'], 'new' => []]]],
+            $this->theCollectionsChanges(),
+        );
+    }
+
+    public function testAnEmptyingTheApplicationRolledBackLeavesTheRenameAlone(): void
+    {
+        // The same, and what the nested flush did is rolled back by the application: it ran
+        // the nested flush inside a transaction of its own and took that back. The rename
+        // stays; the emptying never happened, and the rows read for it describe nothing that
+        // is left. (A nested flush that dies instead closes the manager on its way out, and
+        // what a clear does to the outer flush is step 4's.)
+        $this->watchTheConnection(FailurePolicy::Log, savepoints: true);
+        [$crate, $x] = $this->aCrateWithALoadedAndAnUnloadedLine();
+        $xId = $x->id;
+
+        $this->inThePostUpdateOf($x, function () use ($crate): void {
+            $connection = $this->em->getConnection();
+            $connection->beginTransaction();
+            $crate->items = new ArrayCollection();
+            $this->em->flush();
+            $connection->rollBack();
+        });
+
+        $x->sku = 'SKU-X2';
+        $this->em->flush();
+
+        self::assertSame(2, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem WHERE crate_id = ?', ['C-1']), 'the premise: the emptying was rolled back');
+        self::assertSame('SKU-X2', $this->em->getConnection()->fetchOne('SELECT sku FROM CrateItem WHERE id = ?', [$xId]), 'the premise: the rename stayed');
+        self::assertSame([['items.'.$xId.'.sku' => ['old' => 'SKU-X', 'new' => 'SKU-X2']]], $this->theCollectionsChanges());
+    }
+
+    /**
+     * What each document says about the crate's lines, and nothing else it carries.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function theCollectionsChanges(): array
+    {
+        return array_values(array_filter(array_map(
+            static fn (array $d): array => array_filter($d['changes'] ?? [], static fn (string $k): bool => str_starts_with($k, 'items'), \ARRAY_FILTER_USE_KEY),
+            $this->documents(),
+        )));
+    }
+
+    /**
+     * @return array{0: Crate, 1: CrateItem}
+     */
+    private function aCrateWithALoadedAndAnUnloadedLine(): array
+    {
+        $this->em->persist($crate = new Crate('C-1'));
+        $crate->add(new CrateItem('SKU-X'));
+        $crate->add(new CrateItem('SKU-Y'));
+        $this->em->flush();
+        $this->em->clear();
+
+        $x = $this->em->getRepository(CrateItem::class)->findOneBy(['sku' => 'SKU-X']);
+        $crate = $this->em->find(Crate::class, 'C-1');
+        self::assertNotNull($x);
+        self::assertNotNull($crate);
+        self::assertInstanceOf(\Doctrine\ORM\PersistentCollection::class, $crate->items);
+        self::assertFalse($crate->items->isInitialized(), 'the premise: the collection was never loaded');
+        $this->gateway->documents = [];
+
+        return [$crate, $x];
+    }
+
     private function flushWithOneNestedInside(Article $article): void
     {
         $inner = new class($this->em, $article) {
@@ -416,13 +549,13 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
         self::assertTrue($inner->ran, 'the premise: a flush really did start inside this one');
     }
 
-    public function testALineAnInnerFlushInsertedAndAnOuterDeletionTookNeverLeftAnything(): void
+    public function testALineAnInnerFlushInsertedAndAnOuterDeletionTookArrivedAndLeft(): void
     {
         // Written out from a generated sequence rather than composed, because every
-        // arrangement composed in a readable order was covered by the sweep instead. The
-        // order is what matters: the emptying that names this line is collected AFTER the
-        // sweep has already dropped its arrival, by a later flush that reads the rows and
-        // finds the line still in them.
+        // arrangement composed in a readable order was covered by the old sweep instead:
+        // the emptying that names this line was collected AFTER the sweep had dropped its
+        // arrival. Under decision A the line's arrival and its departure are both facts,
+        // each once, whatever order the flushes that wrote them came in.
         [$crate, $other, $first] = $this->twoCratesAndALine();
         $this->em->persist($article = new Article('One'));
         $this->em->flush();
@@ -450,8 +583,8 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
 
         $said = $this->everyStatement();
 
-        self::assertNotContains('C-1 items lost SKU-NEW', $said, 'a line that never settled did not leave');
-        self::assertNotContains('C-1 items gained SKU-NEW', $said, 'nor arrive');
+        self::assertSame(1, \count(array_keys($said, 'C-1 items gained SKU-NEW', true)), 'it arrived, once');
+        self::assertSame(1, \count(array_keys($said, 'C-1 items lost SKU-NEW', true)), 'and left, once');
     }
 
     public function testWhatIsShownOfADeletedLineCanStillReadItsOwnAssociations(): void

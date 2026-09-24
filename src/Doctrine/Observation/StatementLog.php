@@ -295,6 +295,22 @@ final class StatementLog
     }
 
     /**
+     * Whether a statement this flush owns stayed done: what tells a flush that wrote something
+     * from one refused before it could, whatever events it raised -- one that only emptied a
+     * collection raises none.
+     */
+    public function hasDoneAnythingFor(int $flush): bool
+    {
+        foreach (array_keys($this->statements) as $statement) {
+            if ($this->ownerOf($statement) === $flush && $this->fate($statement) !== self::VOID) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * A flush owns what ran while it did and no frame says whose it is.
      *
      * A frame is how a flush is told apart, and a flush that opens none has nothing to claim:

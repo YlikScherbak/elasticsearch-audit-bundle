@@ -110,6 +110,61 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         self::assertSame([['items.'.$x->id.'.quantity' => ['old' => 5, 'new' => 2]]], array_map(static fn (array $d): array => array_filter($d['changes'], static fn (string $k): bool => str_starts_with($k, 'items.'), \ARRAY_FILTER_USE_KEY), $this->documents()));
     }
 
+    public function testAStatementTheLogCannotFollowIsDoubtSaidOnceAndByClassAlone(): void
+    {
+        // An UPDATE of a watched table that names no row: the log cannot say which rows it
+        // moved, so the history may be missing what it did, and the listener says that -- in
+        // its log, once, at the reading that moves past it, by class and count and never by
+        // what the statement carried. What does not write a watched row is not doubt: the
+        // application's own tables, and the schema's DDL.
+        $this->unownedStatementsAreExpected = true;
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
+        $x = $this->aLine();
+        $this->em->persist($vehicle = new Vehicle());
+        $this->em->flush();
+
+        $connection = $this->em->getConnection();
+        $connection->executeStatement("UPDATE CrateItem SET quantity = quantity + 1 WHERE sku LIKE 'SKU-SECRET%'");
+        $connection->executeStatement("UPDATE Vehicle SET plate = 'SECRET-PLATE'");
+        $connection->executeStatement("UPDATE Vehicle SET plate = 'SECRET-PLATE' WHERE plate LIKE 'SECRET%'");
+        $connection->executeStatement('CREATE TABLE Scratch (id INT)');
+        $connection->executeStatement('DROP TABLE Scratch');
+
+        $doubts = fn (): array => array_values(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did')));
+
+        $x->sku = 'SKU-X2';
+        $this->em->flush();
+
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of '.CrateItem::class.' since the history was last written, so the history may be missing what they did.'], $doubts());
+
+        $x->sku = 'SKU-X3';
+        $this->em->flush();
+
+        self::assertCount(1, $doubts(), 'and not again at the next reading');
+    }
+
+    public function testDoubtInsideTheApplicationsTransactionIsSaidOnceToo(): void
+    {
+        // The same, with every flush inside a transaction of the application's own: nothing
+        // is settled there, so every reading replays the log from the same start and meets
+        // the statement again. Said once all the same -- at the reading that moves past it.
+        $this->unownedStatementsAreExpected = true;
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
+        $x = $this->aLine();
+
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+        $connection->executeStatement("UPDATE CrateItem SET quantity = quantity + 1 WHERE sku LIKE 'SKU-SECRET%'");
+
+        $x->sku = 'SKU-X2';
+        $this->em->flush();
+        $x->sku = 'SKU-X3';
+        $this->em->flush();
+        $connection->commit();
+
+        self::assertCount(1, array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did')), 'once, not at every reading');
+    }
+
     public function testAFlushOfNothingAuditedRemembersNothing(): void
     {
         $this->log = $this->watchTheConnection(FailurePolicy::Log, letsGo: true);

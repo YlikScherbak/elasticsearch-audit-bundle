@@ -121,8 +121,8 @@ abstract class DoctrineTestCase extends TestCase
         if (!$this->unownedStatementsAreExpected) {
             self::assertSame([], array_values(array_filter(
                 $this->logs,
-                static fn (string $line): bool => str_contains($line, 'so it is not in the history'),
-            )), 'a statement of a watched row went unclaimed');
+                static fn (string $line): bool => str_contains($line, 'so it is not in the history') || str_contains($line, 'may be missing what they did'),
+            )), 'a statement of a watched row went unclaimed, or could not be followed');
         }
 
         parent::tearDown();
@@ -242,6 +242,7 @@ abstract class DoctrineTestCase extends TestCase
                     '{field}' => (string) ($context['field'] ?? ''),
                     '{class}' => (string) ($context['class'] ?? ''),
                     '{key}' => (string) ($context['key'] ?? ''),
+                    '{classes}' => (string) ($context['classes'] ?? ''),
                 ]);
             }
         };

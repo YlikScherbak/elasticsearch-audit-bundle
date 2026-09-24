@@ -47,6 +47,17 @@ final class RowMemory
     /** @var array<string, array<string, \WeakReference<object>>> the object each row was taken from */
     private array $objects = [];
 
+    /**
+     * Rows a DELETE took, held by the object that was left behind: Doctrine keeps an entity
+     * whose row an emptying took -- replacing a collection with orphanRemoval deletes the
+     * rows with one statement and leaves the objects managed -- and its memory of that row,
+     * taken again at the next preFlush, would be a row the table does not have. Kept while
+     * that object is; a row loaded again, or inserted again under its key, is another matter.
+     *
+     * @var array<string, array<string, \WeakReference<object>>>
+     */
+    private array $departed = [];
+
     /** Where the log stood when these rows were last settled; what came after is replayed over them. */
     private int $settledAt = 0;
 
@@ -84,6 +95,9 @@ final class RowMemory
     public function __construct(private readonly StatementLog $log, private readonly AuditMetadataFactory $audited = new AuditMetadataFactory(), ?WatchedRows $watched = null)
     {
         $this->watched = $watched ?? new WatchedRows($audited);
+
+        // From where the log stands: the rows before it are nothing this remembered.
+        $this->settledAt = $log->position();
     }
 
     /**
@@ -109,6 +123,95 @@ final class RowMemory
     {
         if ($whileAFlushRuns) {
             $this->remember($em, $entity);
+        }
+    }
+
+    /**
+     * The rows of an inverse collection that is about to be emptied and was never loaded:
+     * read as rows, not as entities.
+     *
+     * The emptying is one DELETE of every row the owner holds, and what it took is only as
+     * known as the rows are. Elements the application never loaded were remembered nowhere,
+     * so the rows are read once, before the DELETE -- through the connection, by the mapping's
+     * columns, and not through the collection: loading it would put entities the application
+     * never touched into its identity map and run their postLoad callbacks and listeners,
+     * which is the application's code on the bundle's account. A row already remembered is
+     * kept as it is, and a row read here is an account of the statements after this point
+     * only: the rows have moved since the log began, and this is what they hold now.
+     */
+    public function rememberTheRowsOf(EntityManagerInterface $em, object $owner, string $association): void
+    {
+        $ownerMetadata = $em->getClassMetadata($owner::class);
+
+        if (!$ownerMetadata->isAssociationInverseSide($association)) {
+            return;
+        }
+
+        $elements = $em->getClassMetadata($ownerMetadata->getAssociationTargetClass($association));
+        $root = $elements->rootEntityName;
+        $mappedBy = $ownerMetadata->getAssociationMappedByTargetField($association);
+
+        if (!$this->watched->areWatched($em, $elements) || !$elements->hasAssociation($mappedBy)) {
+            return;
+        }
+
+        $joinColumns = CollectionRowsQuery::entry($elements->getAssociationMapping($mappedBy), 'joinColumns');
+        $join = \is_array($joinColumns) && \count($joinColumns) === 1 ? reset($joinColumns) : null;
+        $column = CollectionRowsQuery::entry($join, 'name');
+        $referenced = CollectionRowsQuery::entry($join, 'referencedColumnName');
+
+        if (!\is_string($column) || !\is_string($referenced)) {
+            return;
+        }
+
+        $ownerField = $ownerMetadata->getFieldForColumn($referenced);
+        $ownerKey = $ownerMetadata->hasAssociation($ownerField)
+            ? self::keyOfTarget($em, $ownerMetadata->getFieldValue($owner, $ownerField))
+            : self::databaseValue($em, $ownerMetadata, $ownerField, $ownerMetadata->getFieldValue($owner, $ownerField));
+
+        $platform = $em->getConnection()->getDatabasePlatform();
+        $quotes = $em->getConfiguration()->getQuoteStrategy();
+        $names = [];
+        $selected = [];
+
+        foreach ($elements->getFieldNames() as $field) {
+            $names[] = $elements->getColumnName($field);
+            $selected[] = $quotes->getColumnName($field, $elements, $platform);
+        }
+
+        foreach ($elements->getAssociationNames() as $other) {
+            if (!$elements->isSingleValuedAssociation($other) || $elements->isAssociationInverseSide($other)) {
+                continue;
+            }
+
+            foreach ((array) CollectionRowsQuery::entry($elements->getAssociationMapping($other), 'joinColumns') as $joinColumn) {
+                $name = CollectionRowsQuery::entry($joinColumn, 'name');
+
+                if (\is_string($name)) {
+                    $names[] = $name;
+                    $selected[] = CollectionRowsQuery::entry($joinColumn, 'quoted') !== null ? $platform->quoteIdentifier($name) : $name;
+                }
+            }
+        }
+
+        // Read by position: a database that folds unquoted names would hand the keys back in
+        // a case of its own.
+        $rows = $em->getConnection()->fetchAllNumeric(
+            sprintf('SELECT %s FROM %s WHERE %s = ?', implode(', ', $selected), $quotes->getTableName($elements, $platform), CollectionRowsQuery::entry($join, 'quoted') !== null ? $platform->quoteIdentifier($column) : $column),
+            [$ownerKey],
+        );
+
+        foreach ($rows as $values) {
+            $row = array_combine($names, $values);
+            $id = HistoryReplay::keyOf($elements, $row);
+
+            if (isset($this->rows[$root][$id])) {
+                continue; // known: the account it has is the earlier one
+            }
+
+            $this->rows[$root][$id] = $row;
+            $this->takenAt[$root][$id] = $this->log->position();
+            $this->current?->learn($root, $id, $row, $this->takenAt[$root][$id]);
         }
     }
 
@@ -220,7 +323,24 @@ final class RowMemory
         }
 
         $upTo = $this->log->position();
-        $this->rows = $this->replayed($em, $upTo)->rows();
+        $replay = $this->replayed($em, $upTo);
+        $this->rows = $replay->rows();
+
+        foreach ($replay->goneRows() as $root => $ids) {
+            foreach ($ids as $id) {
+                if (($this->objects[$root][$id] ?? null)?->get() !== null) {
+                    $this->departed[$root][$id] = $this->objects[$root][$id];
+                }
+            }
+        }
+
+        foreach ($this->departed as $root => $ids) {
+            foreach ($ids as $id => $object) {
+                if ($object->get() === null || isset($this->rows[$root][$id])) {
+                    unset($this->departed[$root][$id]); // let go, or a row again
+                }
+            }
+        }
         $this->settledAt = $upTo;
         $this->takenAt = [];
         $this->current = null;
@@ -277,6 +397,12 @@ final class RowMemory
         }
 
         $id = HistoryReplay::keyOf($metadata, $key);
+
+        // The object a DELETE left behind: what Doctrine remembers of its row is a row that
+        // went.
+        if (($this->departed[$root][$id] ?? null)?->get() === $entity) {
+            return;
+        }
 
         if (isset($this->rows[$root][$id])) {
             // Known: kept as it is. A new object for it -- the row loaded again after a clear --

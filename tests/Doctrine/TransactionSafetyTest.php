@@ -204,8 +204,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->attachListener(FailurePolicy::Throw);
 
         $ledger = new Ledger('Payables');
-        $line = new LedgerLine('jan', 'January');
-        $line->unreadable = true;
+        $line = new LedgerLine('jan', LedgerLine::UNREADABLE);
         $ledger->add($line);
 
         try {
@@ -222,6 +221,67 @@ final class TransactionSafetyTest extends DoctrineTestCase
             (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM Ledger'),
             'the flush committed: a representer that fails is a problem for the history, not for the application',
         );
+    }
+
+    public function testARepresenterThatFailedIsReportedOnceAndTheLineGoesOnFromItsRow(): void
+    {
+        // The history is read from the connection's log, and the log is read again from its
+        // start whenever a flush publishes: a failure the representer raised at one statement
+        // is met again at every reading after it. It is the caller's once -- at the flush
+        // that ran the statement -- and the fact it was for is left out. The row it was about
+        // is not: the line has a caption again and leaves by the one it has then.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist($ledger = new Ledger('Payables'));
+        $ledger->add($line = new LedgerLine('jan', LedgerLine::UNREADABLE));
+
+        try {
+            $this->em->flush();
+            self::fail('the representer failure reaches the caller of the flush it happened in');
+        } catch (WriteFailedException) {
+        }
+
+        self::assertSame([], array_values(array_filter(array_keys($this->documents()[0]['changes'] ?? []), static fn (string $k): bool => str_starts_with($k, 'lines'))), 'the arrival it could not name is left out');
+
+        $this->gateway->documents = [];
+        $ledger->name = 'Receivables';
+        $this->em->flush(); // raises if the failure is reported again
+
+        self::assertSame([['name' => ['old' => 'Payables', 'new' => 'Receivables']]], array_map(static fn (array $d): array => $d['changes'], $this->documents()));
+
+        $this->gateway->documents = [];
+        $line->caption = 'January';
+        $this->em->flush();
+        $ledger->lines->removeElement($line);
+        $this->em->remove($line);
+        $this->em->flush();
+
+        self::assertSame([['lines.jan' => ['old' => 'January', 'new' => null]]], array_map(static fn (array $d): array => $d['changes'], $this->documents()), 'named by the row it left as');
+    }
+
+    public function testARepresenterThatFailedInsideTheApplicationsTransactionIsReportedOnceToo(): void
+    {
+        // Nothing is settled inside a transaction of the application's own, so every flush
+        // there replays the log from the same start and meets the failure again: it is the
+        // caller's at the flush that ran the statement, and not at the ones after it.
+        $this->attachListener(FailurePolicy::Throw);
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+
+        $this->em->persist($ledger = new Ledger('Payables'));
+        $ledger->add(new LedgerLine('jan', LedgerLine::UNREADABLE));
+
+        try {
+            $this->em->flush();
+            self::fail('the representer failure reaches the caller of the flush it happened in');
+        } catch (WriteFailedException) {
+        }
+
+        $ledger->name = 'Receivables';
+        $this->em->flush(); // raises if the failure is reported again
+        $connection->commit();
+
+        self::assertSame(1, (int) $connection->fetchOne('SELECT COUNT(*) FROM LedgerLine'), 'the premise: the line committed');
     }
 
     public function testAnElementThatBroughtItsOwnIdIsStillNamedByItsRepresenter(): void

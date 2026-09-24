@@ -233,7 +233,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [],
             ['crate C-1 items.3: null -> "SKU-N"', 'crate C-1 items: ["SKU-X","SKU-Y","SKU-N"] -> []'],
-            today: ['crate C-1 items: ["SKU-X","SKU-Y"] -> []'],
         );
     }
 
@@ -461,7 +460,9 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $y->quantity = 2;
         $this->em->flush();
 
-        $this->assertTheRowsAndTheHistory([1 => 2], ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2: "SKU-Y" -> null'], today: []);
+        // The departure is read from the log now; X's change is still lost to the clear,
+        // which forgets the flush's state and moves the log's cursor past it -- step 4's.
+        $this->assertTheRowsAndTheHistory([1 => 2], ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2: "SKU-Y" -> null'], today: ['crate C-1 items.2: "SKU-Y" -> null']);
     }
 
     public function testAnOnClearListenerThatClearsAgainDoesNotMakeADeathLookLikeAClear(): void
