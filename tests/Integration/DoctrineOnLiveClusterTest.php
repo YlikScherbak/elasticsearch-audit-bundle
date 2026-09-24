@@ -44,6 +44,8 @@ use PHPUnit\Framework\Attributes\Group;
 #[Group('integration')]
 final class DoctrineOnLiveClusterTest extends ElasticsearchTestCase
 {
+    private \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog $statements;
+
     private EntityManagerInterface $em;
     private ElasticsearchGateway $gateway;
     private AuditReader $reader;
@@ -72,6 +74,8 @@ final class DoctrineOnLiveClusterTest extends ElasticsearchTestCase
             $config->enableNativeLazyObjects(true);
         }
 
+        // Watched, as the bundle watches the connection it audits.
+        $config->setMiddlewares([new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware($this->statements = new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog())]);
         $this->em = new EntityManager(DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config), $config);
         (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
 
@@ -81,7 +85,7 @@ final class DoctrineOnLiveClusterTest extends ElasticsearchTestCase
         $writer = new AuditWriter($transport, $transport, $resolver, new ChainActorResolver([], 'live-test'), new SystemClock(), [], FailurePolicy::Throw, null, null, $buffer);
 
         $this->frame = new AuditFrame($buffer, $writer);
-        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory()));
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory(), $this->statements));
         $this->reader = new AuditReader($this->gateway, $resolver);
     }
 

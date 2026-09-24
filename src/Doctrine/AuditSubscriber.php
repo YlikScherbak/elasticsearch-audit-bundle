@@ -506,35 +506,28 @@ final class AuditSubscriber
     private array $flushes = [];
 
     /*
-     * $statements: what the connection did, when something is watching it.
-     *
-     * Told only which flush is about to begin its transaction, so that the frame the
-     * connection opens next carries this flush's number -- and nothing is read back from
-     * it yet: the listener's rules are what they were, and the log is compared against
-     * them in the tests before anything is decided from it. Null wherever the connection
-     * is not watched, which today is everywhere outside those tests.
+     * $statements: what the audited connection did, written by the driver middleware the
+     * bundle registers on it. Required: what a flush did is read from there, and a listener
+     * without it would have a history with nothing to be read from -- not a smaller one.
      */
     public function __construct(
         private readonly AuditWriter $writer,
         private readonly AuditMetadataFactory $metadataFactory,
+        private readonly StatementLog $statements,
         private readonly bool $skipEmptyUpdates = true,
         private readonly ValueComparatorInterface $comparator = new ValueComparator(),
         ?LoggerInterface $logger = null,
-        private readonly ?StatementLog $statements = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
-        $this->rows = $statements === null ? null : new RowMemory($statements);
+        $this->rows = new RowMemory($statements);
     }
 
     /**
-     * What each watched row held, when the connection is watched: remembered at preFlush and
-     * at a load inside a flush, and settled once a flush's history has been published.
-     *
-     * Nothing is read back from it yet -- the listener's rules are what they were -- and it is
-     * null wherever the connection is not watched.
+     * What each watched row held: remembered at preFlush and at a load inside a flush, and
+     * settled once a flush's history has been published.
      */
-    private readonly ?RowMemory $rows;
+    private readonly RowMemory $rows;
 
     /**
      * Before computeChangeSets(): the one moment Doctrine still remembers each row as it was
@@ -544,7 +537,7 @@ final class AuditSubscriber
     {
         $em = self::entityManagerOf($args->getObjectManager());
 
-        if ($this->rows !== null && $em !== null) {
+        if ($em !== null) {
             $this->rows->rememberWhatIsManaged($em);
         }
     }
@@ -556,10 +549,6 @@ final class AuditSubscriber
      */
     public function postLoad(PostLoadEventArgs $args): void
     {
-        if ($this->rows === null) {
-            return;
-        }
-
         $em = self::entityManagerOf($args->getObjectManager());
 
         if ($em !== null) {
@@ -599,9 +588,7 @@ final class AuditSubscriber
         // whatever opens next: a listener behind this one may open a transaction of its own
         // first, and a flush refused before it began must not lend its number to the next
         // transaction the application opens.
-        if ($this->statements !== null) {
-            $this->statementMarks[$flush] = $this->statements->mark();
-        }
+        $this->statementMarks[$flush] = $this->statements->mark();
 
         $this->beginFlush($em, $flush);
 
@@ -881,7 +868,7 @@ final class AuditSubscriber
         $manager = self::entityManagerOf($args->getObjectManager());
 
         if ($manager !== null) {
-            $this->rows?->rememberPersisted($manager, $args->getObject());
+            $this->rows->rememberPersisted($manager, $args->getObject());
         }
 
         $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
@@ -1078,7 +1065,7 @@ final class AuditSubscriber
             // Whatever became of the publishing: what the rows hold is a fact about the
             // database, and it is folded in once no transaction can still roll it back. The log
             // lets go of what the rows now hold, and not before.
-            if ($em !== null && $this->rows !== null && $this->statements !== null && $this->rows->settle($em)) {
+            if ($em !== null && $this->rows->settle($em)) {
                 $this->statements->forgetUpTo($this->statements->position());
             }
         }
@@ -2041,11 +2028,11 @@ final class AuditSubscriber
     }
 
     /**
-     * Tells the statement log, when there is one, which frame this flush's statements ran in.
+     * Tells the statement log which frame this flush's statements ran in.
      */
     private function claimTheFrameOf(int $flush): void
     {
-        if ($this->statements !== null && isset($this->statementMarks[$flush])) {
+        if (isset($this->statementMarks[$flush])) {
             $this->statements->claim($this->statementMarks[$flush], $flush);
         }
     }

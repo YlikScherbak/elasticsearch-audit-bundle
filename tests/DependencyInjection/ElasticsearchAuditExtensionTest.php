@@ -178,7 +178,7 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertEquals(new \Symfony\Component\DependencyInjection\Reference(ElasticsearchAuditExtension::SERVICE_STATEMENT_LOG), $middleware->getArgument(0));
         self::assertEquals(
             new \Symfony\Component\DependencyInjection\Reference(ElasticsearchAuditExtension::SERVICE_STATEMENT_LOG),
-            $container->getDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER)->getArgument(5),
+            $container->getDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER)->getArgument(2),
             'the listener reads the log the connection is watched into',
         );
         self::assertSame('strict', $container->getParameter(ElasticsearchAuditExtension::PARAMETER_NESTED_FLUSH_PROVENANCE));

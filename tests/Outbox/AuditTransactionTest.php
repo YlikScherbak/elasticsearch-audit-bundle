@@ -65,6 +65,8 @@ use Symfony\Component\Messenger\Bridge\Doctrine\Transport\Connection as QueueCon
  */
 final class AuditTransactionTest extends TestCase
 {
+    private \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog $statements;
+
     private Connection $connection;
     private EntityManagerInterface $em;
     private OutboxContext $context;
@@ -89,6 +91,8 @@ final class AuditTransactionTest extends TestCase
             $config->enableNativeLazyObjects(true);
         }
 
+        // Watched, as the bundle watches the connection it audits.
+        $config->setMiddlewares([new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware($this->statements = new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog())]);
         $this->connection = DriverManager::getConnection(TestConnection::params(), $config);
         TestConnection::reset($this->connection);
         $this->em = new EntityManager($this->connection, $config);
@@ -107,7 +111,7 @@ final class AuditTransactionTest extends TestCase
         $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, null, $buffer, null, 500, null, $this->context);
 
         $this->frame = new AuditFrame($buffer, $this->writer, null, $this->context);
-        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory()));
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory(), $this->statements));
 
         $this->transaction = new AuditTransaction($this->connection, $this->frame, $this->context);
     }
@@ -820,7 +824,7 @@ final class AuditTransactionTest extends TestCase
             $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, $previous);
         }
 
-        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory()));
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory(), $this->statements));
         $this->frame = new AuditFrame($buffer, $this->writer, null, $this->context);
         $this->transaction = new AuditTransaction($this->connection, $this->frame, $this->context);
     }

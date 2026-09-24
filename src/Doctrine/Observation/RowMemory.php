@@ -64,9 +64,21 @@ final class RowMemory
     /** Statements read by replays made and let go before the current one, for the tests of what reading costs. */
     private int $readBefore = 0;
 
-    private ?EntityManagerInterface $currentManager = null;
+    /**
+     * Weakly, like the replay's own: a manager the application replaced must be free to go.
+     *
+     * @var \WeakReference<EntityManagerInterface>|null
+     */
+    private ?\WeakReference $currentManager = null;
 
-    /** @var array<string, list<object>> every entity postPersist announced since the rows were settled, by root class */
+    /**
+     * The key of every row postPersist announced since the rows were settled, by root class and
+     * in order. The key and not the entity: an entity's collections hold its manager, and a
+     * flush whose postFlush never reached this listener leaves the list unsettled -- holding a
+     * manager the application has replaced, and everything it managed.
+     *
+     * @var array<string, list<array<string, mixed>>>
+     */
     private array $persisted = [];
 
     public function __construct(private readonly StatementLog $log, private readonly AuditMetadataFactory $audited = new AuditMetadataFactory(), ?WatchedRows $watched = null)
@@ -135,14 +147,14 @@ final class RowMemory
         $upTo ??= $this->log->position();
 
         if ($this->current === null
-            || $this->currentManager !== $em
+            || $this->currentManager?->get() !== $em
             || $this->currentVoided !== $this->log->voided()
             || $this->current->readTo() > $upTo
         ) {
             $this->readBefore += $this->current?->read() ?? 0;
             $this->current = new HistoryReplay($em, $this->rows, $this->takenAt, $this->audited, $this->watched);
             $this->currentVoided = $this->log->voided();
-            $this->currentManager = $em;
+            $this->currentManager = \WeakReference::create($em);
         }
 
         $this->current->replay($this->log, $this->settledAt, $upTo, $this->persisted);
@@ -156,7 +168,32 @@ final class RowMemory
      */
     public function rememberPersisted(EntityManagerInterface $em, object $entity): void
     {
-        $this->persisted[$em->getClassMetadata($entity::class)->rootEntityName][] = $entity;
+        // Every one, whatever its key: the order has to line up with every INSERT without one.
+        $this->persisted[$em->getClassMetadata($entity::class)->rootEntityName][] = self::keyColumns($em, $entity) ?? [];
+    }
+
+    /**
+     * A row's key as the statements carry it -- column => database value -- or null for an
+     * entity not inserted yet.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function keyColumns(EntityManagerInterface $em, object $entity): ?array
+    {
+        $metadata = $em->getClassMetadata($entity::class);
+        $key = [];
+
+        foreach ($metadata->getIdentifierValues($entity) as $field => $value) {
+            if ($value === null) {
+                return null;
+            }
+
+            $key[$metadata->getColumnName($field)] = $metadata->hasAssociation($field)
+                ? self::keyOfTarget($em, $value)
+                : self::databaseValue($em, $metadata, $field, $value);
+        }
+
+        return $key;
     }
 
     /**
@@ -215,14 +252,10 @@ final class RowMemory
             return;
         }
 
-        $key = [];
+        $key = self::keyColumns($em, $entity);
 
-        foreach ($metadata->getIdentifierValues($entity) as $field => $value) {
-            if ($value === null) {
-                return; // not inserted yet: there is no row, and its INSERT will say what it holds
-            }
-
-            $key[$metadata->getColumnName($field)] = \is_object($value) ? $this->keyOfTarget($em, $value) : $value;
+        if ($key === null) {
+            return; // not inserted yet: there is no row, and its INSERT will say what it holds
         }
 
         $id = HistoryReplay::keyOf($metadata, $key);
@@ -296,17 +329,46 @@ final class RowMemory
                 }
 
                 $targetMetadata = $em->getClassMetadata($target::class);
-                $row[$name] = $targetMetadata->getFieldValue($target, $targetMetadata->getFieldForColumn($referenced));
+                $targetField = $targetMetadata->getFieldForColumn($referenced);
+                $value = $targetMetadata->getFieldValue($target, $targetField);
+                $row[$name] = $targetMetadata->hasAssociation($targetField) ? self::keyOfTarget($em, $value) : self::databaseValue($em, $targetMetadata, $targetField, $value);
             }
         }
 
         return $row;
     }
 
-    private function keyOfTarget(EntityManagerInterface $em, object $target): mixed
+    /**
+     * The key a foreign key holds: the target's identifier as the database has it -- which,
+     * for an identifier of a type of its own, is not the object the entity carries.
+     */
+    private static function keyOfTarget(EntityManagerInterface $em, mixed $target): mixed
     {
-        $values = $em->getClassMetadata($target::class)->getIdentifierValues($target);
+        if (!\is_object($target)) {
+            return $target;
+        }
 
-        return \count($values) === 1 ? reset($values) : null;
+        $metadata = $em->getClassMetadata($target::class);
+        $values = $metadata->getIdentifierValues($target);
+
+        if (\count($values) !== 1) {
+            return null;
+        }
+
+        $field = (string) array_key_first($values);
+
+        return $metadata->hasAssociation($field) ? self::keyOfTarget($em, reset($values)) : self::databaseValue($em, $metadata, $field, reset($values));
+    }
+
+    /**
+     * A field's value as the statements carry it: through its type, the way DBAL binds it.
+     *
+     * @param ClassMetadata<object> $metadata
+     */
+    private static function databaseValue(EntityManagerInterface $em, ClassMetadata $metadata, string $field, mixed $value): mixed
+    {
+        $type = $metadata->getTypeOfField($field);
+
+        return $value === null || !\is_string($type) ? $value : Type::getType($type)->convertToDatabaseValue($value, $em->getConnection()->getDatabasePlatform());
     }
 }

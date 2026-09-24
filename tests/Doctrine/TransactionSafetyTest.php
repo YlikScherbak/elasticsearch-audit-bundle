@@ -805,7 +805,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
 
     private function detachedListener(): AuditSubscriber
     {
-        return new AuditSubscriber($this->writer(FailurePolicy::Log), new AuditMetadataFactory(), skipEmptyUpdates: true);
+        return new AuditSubscriber($this->writer(FailurePolicy::Log), new AuditMetadataFactory(), $this->statements, skipEmptyUpdates: true);
     }
 
     private function persisted(Article $article): Article

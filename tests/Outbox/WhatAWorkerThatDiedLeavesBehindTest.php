@@ -67,6 +67,8 @@ use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
  */
 final class WhatAWorkerThatDiedLeavesBehindTest extends TestCase
 {
+    private \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog $statements;
+
     private const VISIBILITY_WINDOW = 60;
 
     private Connection $connection;
@@ -93,6 +95,8 @@ final class WhatAWorkerThatDiedLeavesBehindTest extends TestCase
             $config->enableNativeLazyObjects(true);
         }
 
+        // Watched, as the bundle watches the connection it audits.
+        $config->setMiddlewares([new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware($this->statements = new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog())]);
         $this->connection = DriverManager::getConnection(TestConnection::params(), $config);
         TestConnection::reset($this->connection);
         $this->em = new EntityManager($this->connection, $config);
@@ -116,7 +120,7 @@ final class WhatAWorkerThatDiedLeavesBehindTest extends TestCase
         $this->writer = new AuditWriter($transport, $immediate, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), new FrozenClock(), [], FailurePolicy::Log, null, null, $buffer, null, 500, null, $this->context);
 
         $frame = new AuditFrame($buffer, $this->writer, null, $this->context);
-        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory()));
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($this->writer, new AuditMetadataFactory(), $this->statements));
 
         $this->transaction = new AuditTransaction($this->connection, $frame, $this->context, null, $this->queue);
     }

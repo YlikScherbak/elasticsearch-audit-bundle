@@ -45,6 +45,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class ExamplesTest extends TestCase
 {
+    private \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog $statements;
+
     private InMemoryGateway $gateway;
     private AuditWriter $writer;
     private EntityManagerInterface $em;
@@ -254,6 +256,8 @@ final class ExamplesTest extends TestCase
             $config->enableNativeLazyObjects(true);
         }
 
+        // Watched, as the bundle watches the connection it audits.
+        $config->setMiddlewares([new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware($this->statements = new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog())]);
         $this->em = new EntityManager(DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config), $config);
         (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
 
@@ -272,7 +276,7 @@ final class ExamplesTest extends TestCase
             $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, $previous);
         }
 
-        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory()));
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory(), $this->statements));
 
         return $writer;
     }

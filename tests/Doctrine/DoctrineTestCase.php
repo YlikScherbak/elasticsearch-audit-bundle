@@ -95,16 +95,10 @@ abstract class DoctrineTestCase extends TestCase
             }
         })]);
 
-        $connection = DriverManager::getConnection(TestConnection::params(), $config);
-        TestConnection::reset($connection);
         $this->ormConfig = $config;
-        $this->connection = $connection;
-
-        $this->em = new EntityManager($connection, $config);
         $this->gateway = new InMemoryGateway();
 
-        (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
-
+        $this->connectWatched(savepoints: false, letsGo: false);
         $this->attachListener(FailurePolicy::Log);
     }
 
@@ -117,17 +111,26 @@ abstract class DoctrineTestCase extends TestCase
         $this->em = new EntityManager($this->connection, $this->ormConfig, $this->em->getEventManager());
     }
 
-    /** What the connection did, once {@see watchTheConnection()} has been asked for. */
-    protected ?StatementLog $statements = null;
+    /** What the connection did: every connection here is watched, as every audited one is. */
+    protected StatementLog $statements;
 
     /**
-     * The same connection and manager as setUp() makes, with the connection watched, and a
-     * listener told about the log attached.
-     *
-     * The observer goes outside the statement logger, so a statement it ran of its own
-     * would be in $queries -- it runs none, and a test says so.
+     * A fresh connection and manager, watched as setUp() watches them, with a listener told
+     * about the log attached -- for a test that wants savepoints, or a log that lets go.
      */
     protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log, bool $savepoints = false, bool $letsGo = false): StatementLog
+    {
+        $this->connectWatched($savepoints, $letsGo);
+        $this->attachListener($policy);
+
+        return $this->statements;
+    }
+
+    /**
+     * The observer goes outside the statement logger, so a statement it ran of its own would
+     * be in $queries -- it runs none, and a test says so.
+     */
+    private function connectWatched(bool $savepoints, bool $letsGo): void
     {
         // Kept whole unless asked: the listener lets go of what it has read, and the tests read
         // the log a second time, on their own, to hold it to the truth.
@@ -146,9 +149,6 @@ abstract class DoctrineTestCase extends TestCase
 
         $this->em = new EntityManager($this->connection, $this->ormConfig);
         (new SchemaTool($this->em))->createSchema($this->em->getMetadataFactory()->getAllMetadata());
-        $this->attachListener($policy);
-
-        return $this->statements;
     }
 
     /**
@@ -171,8 +171,8 @@ abstract class DoctrineTestCase extends TestCase
         }
 
         $listener = $comparator === null
-            ? new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, logger: $this->logger(), statements: $this->statements)
-            : new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), skipEmptyUpdates: true, comparator: $comparator, logger: $this->logger(), statements: $this->statements);
+            ? new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), $this->statements, skipEmptyUpdates: true, logger: $this->logger())
+            : new AuditSubscriber($this->writer($policy, $enrichers), new AuditMetadataFactory(), $this->statements, skipEmptyUpdates: true, comparator: $comparator, logger: $this->logger());
         $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, $listener);
     }
 
@@ -237,7 +237,7 @@ abstract class DoctrineTestCase extends TestCase
             $this->em->getEventManager()->removeEventListener(AuditSubscriber::EVENTS, $previous);
         }
 
-        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory(), logger: $this->logger()));
+        $this->em->getEventManager()->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory(), $this->statements, logger: $this->logger()));
 
         return $writer;
     }

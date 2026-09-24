@@ -67,12 +67,26 @@ final class HistoryReplay
     private readonly WatchedRows $watched;
 
     /**
+     * Held weakly: a replay is kept from one flush to the next, and a manager the application
+     * replaced -- what ManagerRegistry::resetManager() does after a failed flush -- has to be
+     * free to go, with everything it manages. Kept alive here, it also told the listener that
+     * a flush nothing could vouch for still had its manager.
+     *
+     * @var \WeakReference<EntityManagerInterface>
+     */
+    private readonly \WeakReference $em;
+
+    /** @var list<\Throwable> what the application's representers threw while this was reading */
+    private array $failures = [];
+
+    /**
      * @param array<string, array<string, array<string, mixed>>> $rows    what the rows held, by root class and key
      * @param array<string, array<string, int>>                 $takenAt where the log stood when each was taken: a row
      *                                                                   taken after a statement ran is no account of it
      */
-    public function __construct(private readonly EntityManagerInterface $em, array $rows, array $takenAt = [], ?AuditMetadataFactory $audited = null, ?WatchedRows $watched = null)
+    public function __construct(EntityManagerInterface $em, array $rows, array $takenAt = [], ?AuditMetadataFactory $audited = null, ?WatchedRows $watched = null)
     {
+        $this->em = \WeakReference::create($em);
         $this->rows = $rows;
         $this->takenAt = $takenAt;
         $this->audited = $audited ?? new AuditMetadataFactory();
@@ -82,7 +96,7 @@ final class HistoryReplay
     /**
      * Replays the log after a position, up to a position.
      *
-     * @param array<string, list<object>> $persisted every entity postPersist announced, by root class and in order: a row
+     * @param array<string, list<array<string, mixed>>> $persisted the key of every row postPersist announced, by root class and in order: a row
      *                                               whose key the database handed out is bound to its INSERT by that order
      */
     public function replay(StatementLog $log, int $from, ?int $upTo = null, array $persisted = []): void
@@ -101,7 +115,7 @@ final class HistoryReplay
             }
 
             $shape = StatementShape::read($statement['sql']);
-            $binding = $shape === null ? null : RowBinding::of($this->em, $shape, $statement['params']);
+            $binding = $shape === null ? null : RowBinding::of($this->em(), $shape, $statement['params']);
 
             // Counted whatever became of it: postPersist is announced for an INSERT the
             // transaction later rolls back, and the order has to line up with every one.
@@ -141,7 +155,7 @@ final class HistoryReplay
 
             $table = $this->mappingOfTable($binding->class, $shape->table);
 
-            if (!$this->watched->areWatched($this->em, $table)) {
+            if (!$this->watched->areWatched($this->em(), $table)) {
                 continue; // a row no history is written about: neither a fact nor a doubt
             }
 
@@ -198,6 +212,23 @@ final class HistoryReplay
     }
 
     /**
+     * What the application's representers threw. Each is a doubt as well: the fact it was
+     * for carries no value, and whoever writes the history reports these through its failure
+     * policy -- a replay only reads, and has no policy of its own to follow.
+     *
+     * @return list<\Throwable>
+     */
+    public function failures(): array
+    {
+        return $this->failures;
+    }
+
+    private function em(): EntityManagerInterface
+    {
+        return $this->em->get() ?? throw new \LogicException('The entity manager this replay reads the mappings of is gone.');
+    }
+
+    /**
      * The rows as the replayed statements left them, the ones a DELETE took gone.
      *
      * @return array<string, array<string, array<string, mixed>>>
@@ -249,8 +280,9 @@ final class HistoryReplay
      * @param ClassMetadata<object>     $metadata
      * @param array<array-key, mixed>   $params
      * @param array<string, mixed>|null $key
+     * @param array<string, mixed>|null $persisted the key postPersist announced for this INSERT
      */
-    private function inserted(ClassMetadata $metadata, StatementShape $shape, array $params, ?array $key, ?object $persisted): void
+    private function inserted(ClassMetadata $metadata, StatementShape $shape, array $params, ?array $key, ?array $persisted): void
     {
         $row = [];
 
@@ -259,14 +291,14 @@ final class HistoryReplay
         }
 
         if ($key === null) {
-            if ($persisted === null) {
+            if ($persisted === null || $persisted === []) {
                 $this->doubts[] = 'an INSERT into '.$shape->table.' with no postPersist to take its key from';
 
                 return;
             }
 
-            foreach ($metadata->getIdentifierValues($persisted) as $field => $value) {
-                $row[$metadata->getColumnName($field)] = $value;
+            foreach ($persisted as $column => $value) {
+                $row[$column] = $value;
             }
 
             $this->forgetWhatWasTakenAfter($metadata->rootEntityName, self::keyOf($metadata, $row), $this->at);
@@ -382,7 +414,7 @@ final class HistoryReplay
     {
         $elements = null;
 
-        foreach ($this->em->getMetadataFactory()->getAllMetadata() as $candidate) {
+        foreach ($this->em()->getMetadataFactory()->getAllMetadata() as $candidate) {
             if ($candidate instanceof ClassMetadata && $candidate->getTableName() === $shape->table) {
                 $elements = $candidate;
             }
@@ -394,7 +426,7 @@ final class HistoryReplay
             return;
         }
 
-        $owner = $this->em->getClassMetadata($binding->class);
+        $owner = $this->em()->getClassMetadata($binding->class);
         $column = (string) array_key_first($shape->where);
         $value = array_values($binding->key ?? [])[0] ?? null;
         $root = $elements->rootEntityName;
@@ -458,7 +490,7 @@ final class HistoryReplay
                 continue;
             }
 
-            $owner = $this->em->getClassMetadata($metadata->getAssociationTargetClass($association));
+            $owner = $this->em()->getClassMetadata($metadata->getAssociationTargetClass($association));
             $collection = $this->collectionOf($owner, $metadata, $association);
 
             if ($collection !== null) {
@@ -484,7 +516,10 @@ final class HistoryReplay
         }
 
         foreach ($owner->getAssociationNames() as $field) {
+            // Only the inverse side names the field it is mapped by; an owning ManyToMany of
+            // the same class is another association, and asking it throws.
             if ($owner->isCollectionValuedAssociation($field)
+                && $owner->isAssociationInverseSide($field)
                 && $owner->getAssociationMappedByTargetField($field) === $association
                 && $owner->getAssociationTargetClass($field) === $elements->rootEntityName
                 && \array_key_exists($field, $audited->fields)
@@ -514,7 +549,20 @@ final class HistoryReplay
 
         $represent = $this->audited->for($owner->newInstance())?->fields[$collection] ?? null;
 
-        return $represent === null ? null : $represent($copy);
+        if ($represent === null) {
+            return null;
+        }
+
+        // The application's code, run while the listener settles the rows in postFlush: what
+        // it throws is not this replay's to raise.
+        try {
+            return $represent($copy);
+        } catch (\Throwable $e) {
+            $this->failures[] = $e;
+            $this->doubts[] = sprintf('the representer of %s.%s threw %s', $owner->getName(), $collection, $e::class);
+
+            return null;
+        }
     }
 
     /**
@@ -525,13 +573,13 @@ final class HistoryReplay
      */
     private function mappingOfTable(string $root, string $table): ClassMetadata
     {
-        $metadata = $this->em->getClassMetadata($root);
+        $metadata = $this->em()->getClassMetadata($root);
 
         if ($metadata->getTableName() === $table) {
             return $metadata;
         }
 
-        foreach ($this->em->getMetadataFactory()->getAllMetadata() as $candidate) {
+        foreach ($this->em()->getMetadataFactory()->getAllMetadata() as $candidate) {
             if ($candidate instanceof ClassMetadata && $candidate->rootEntityName === $root && $candidate->getTableName() === $table) {
                 return $candidate;
             }
@@ -551,7 +599,7 @@ final class HistoryReplay
 
         $type = $metadata->getTypeOfField($field);
 
-        return \is_string($type) ? Type::getType($type)->convertToPHPValue($value, $this->em->getConnection()->getDatabasePlatform()) : $value;
+        return \is_string($type) ? Type::getType($type)->convertToPHPValue($value, $this->em()->getConnection()->getDatabasePlatform()) : $value;
     }
 
     /**

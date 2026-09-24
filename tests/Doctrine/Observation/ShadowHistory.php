@@ -79,7 +79,10 @@ final class ShadowHistory
     public function replay(StatementLog $log, int $from, array $persisted): array
     {
         $replay = new HistoryReplay($this->em, $this->rows, $this->takenAt);
-        $replay->replay($log, $from, null, $persisted);
+        $replay->replay($log, $from, null, array_map(
+            fn (array $entities): array => array_map(fn (object $entity): array => \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory::keyColumns($this->em, $entity) ?? [], $entities),
+            $persisted,
+        ));
 
         $facts = [];
         $owners = [];

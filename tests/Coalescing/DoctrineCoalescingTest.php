@@ -43,7 +43,7 @@ final class DoctrineCoalescingTest extends DoctrineTestCase
                 }
             }
         }
-        $manager->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory()));
+        $manager->addEventListener(AuditSubscriber::EVENTS, new AuditSubscriber($writer, new AuditMetadataFactory(), $this->statements));
     }
 
     public function testTwoFlushesInsideAFrameAreOneRecord(): void

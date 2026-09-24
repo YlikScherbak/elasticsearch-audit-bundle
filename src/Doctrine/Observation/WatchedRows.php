@@ -53,8 +53,12 @@ final class WatchedRows
                 $audited = $this->audited->for($owner->newInstance());
 
                 foreach ($audited === null ? [] : array_keys($audited->fields) as $field) {
+                    // Only the inverse side names the field it is mapped by, and asking an
+                    // owning ManyToMany threw -- caught below as "not watched", so a class was
+                    // left unwatched by whichever of its owner's collections came first.
                     if ($owner->hasAssociation($field)
                         && $owner->isCollectionValuedAssociation($field)
+                        && $owner->isAssociationInverseSide($field)
                         && $owner->getAssociationMappedByTargetField($field) === $association
                     ) {
                         return true;

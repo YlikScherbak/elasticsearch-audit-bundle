@@ -9,6 +9,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Rack;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\RackNote;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
 use Doctrine\ORM\Event\PostLoadEventArgs;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
@@ -278,6 +280,49 @@ final class RowMemoryTest extends DoctrineTestCase
 
         self::assertArrayNotHasKey(Vehicle::class, $this->memory->rows());
         self::assertSame([], $this->facts());
+    }
+
+    public function testAnElementIsWatchedWhateverCollectionItsOwnerDeclaresFirst(): void
+    {
+        // Rack declares an owning ManyToMany before the inverse collection of notes. Asking the
+        // owning side what it is mapped by throws, and the decision about RackNote was that
+        // exception caught as "not watched": its rows were never remembered, and nothing that
+        // changed inside a note could be read.
+        $this->em->persist($rack = new Rack('R-1'));
+        $rack->note($note = new RackNote('first'));
+        $this->em->flush();
+        $this->memory->settle($this->em);
+
+        $note->text = 'second';
+        $this->em->flush();
+
+        self::assertArrayHasKey(RackNote::class, $this->memory->replayed($this->em)->rows());
+        self::assertSame([sprintf('rack %d notes.%d.text: "first" -> "second"', $rack->id, $note->id)], $this->facts());
+    }
+
+    public function testAReplayKeptInsideATransactionDoesNotKeepItsManagerAlive(): void
+    {
+        // Nothing is settled while the application's transaction is open, so the replay is
+        // kept from one read to the next -- and a manager the application replaces meanwhile,
+        // as ManagerRegistry::resetManager() does, has to be free to go with all it manages.
+        $this->em->persist(new Vehicle());
+        $this->em->flush();
+
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+        $this->em->persist(new Crate('C-2'));
+        $this->em->flush();
+        $this->memory->replayed($this->em);
+        self::assertFalse($this->memory->settle($this->em), 'the premise: the replay is kept');
+
+        $gone = \WeakReference::create($this->em);
+        $this->em->clear();
+        $this->reopen();
+        gc_collect_cycles();
+
+        self::assertNull($gone->get(), 'the replaced manager is not held by what the rows remember');
+
+        $connection->rollBack();
     }
 
     public function testARowLoadedOutsideAFlushIsRememberedAtTheNextOne(): void
