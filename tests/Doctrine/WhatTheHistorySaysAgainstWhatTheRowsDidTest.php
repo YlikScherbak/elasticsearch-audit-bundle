@@ -277,14 +277,27 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private array $skus = [];
 
     /**
-     * There was a list here of sequences this did not describe correctly yet, each excused for
-     * the one disagreement it was listed for -- 225 of three thousand at its longest. They were
-     * all the listener's rule that a line which came and went across the flushes of one
-     * operation had no history, and a sweep for rows being taken that reached changes another
-     * flush had written. Both went with the move to reading the connection's log (steps 2 and
-     * 3), and the list was measured empty on the corpus it was made from before it was taken
-     * away. A sequence that disagrees now is a defect.
+     * Sequences this does not yet describe correctly, and exactly how.
+     *
+     * Listed rather than silently skipped, and the list checks itself both ways. A listed
+     * seed that starts passing fails this test until it is taken off, so the list cannot
+     * quietly become a record of things that were fixed. And a listed seed is excused only
+     * for the ONE disagreement it is listed for: `says` is matched exactly, so a defect
+     * replaced under the same number by a different one is not covered by its entry.
+     *
+     * Empty, and the emptiness is the claim: no disagreement is known, and one that appears
+     * fails this until it is either mended or written here with its reason. It held 225 of
+     * three thousand at its longest -- all of them the listener's rule that a line which came
+     * and went across the flushes of one operation had no history, and a sweep for rows being
+     * taken that reached changes another flush had written. Both went with the move to
+     * reading the connection's log (steps 2 and 3); the list was measured empty on the corpus
+     * it was made from, with no doubt logged and no oracle change (OracleChanges.md) to
+     * account for it. Widening the vocabulary makes every seed a different sequence, so an
+     * entry made after that is about the new sequences.
+     *
+     * @var array<int, array{says: string, because: string}>
      */
+    private const KNOWN = [];
 
     /** The tables this reads, and the column that names each row in a statement. */
     private const TABLES = [
@@ -319,19 +332,33 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         $seeds = (int) ($_SERVER['AUDIT_MODEL_SEEDS'] ?? 60);
         $wrong = [];
 
+        $mended = [];
+
         for ($seed = 1; $seed <= $seeds; ++$seed) {
             $said = $this->whatOneSequenceSaid($seed);
+            $known = self::known($seed);
 
-            if ($said !== null) {
+            // Excused for the ONE way it is listed as being wrong, and in no other.
+            if ($said !== null && $said['says'] !== ($known['says'] ?? null)) {
                 $wrong[] = $said['story'];
 
                 if (\count($wrong) >= 3) {
                     break; // three is enough to read; the rest would be the same story
                 }
             }
+
+            if ($said === null && $known !== null) {
+                $mended[] = sprintf('%d (%s)', $seed, $known['because']);
+            }
         }
 
         self::assertSame([], $wrong, sprintf("%d of %d sequences:\n\n%s", \count($wrong), $seeds, implode("\n\n", $wrong)));
+
+        self::assertSame(
+            [],
+            $mended,
+            'these sequences are listed as known to be wrong and are not any more; take them off the list: '.implode(', ', $mended),
+        );
 
         // And none of them left the listener unable to follow what the connection ran: an
         // empty list of disagreements bought with doubt would say nothing, since doubt is
@@ -456,6 +483,20 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
 
         self::assertSame([], $wrong, implode("\n\n", $wrong));
+    }
+
+    /**
+     * A seed's entry in KNOWN, if it has one -- read through here so that an empty list is
+     * still a list to the analyser.
+     *
+     * @return array{says: string, because: string}|null
+     */
+    private static function known(int $seed): ?array
+    {
+        /** @var array<int, array{says: string, because: string}> $known */
+        $known = self::KNOWN;
+
+        return $known[$seed] ?? null;
     }
 
     public function testTheOracleItselfCountsRepeatsRatherThanSets(): void

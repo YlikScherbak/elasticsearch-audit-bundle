@@ -154,12 +154,13 @@ final class HistoryReplay
                 // A statement that writes and could not be read is doubt; one that does not
                 // write -- the schema's DDL, say -- is nothing a row history holds. Nor is one
                 // that writes a table of the application's own, read or not: the same rule as
-                // for a statement read and not bound, below, by the table it names.
+                // for a statement read and not bound, below, by the table it names. A table it
+                // cannot name is doubt: it may be any of them.
                 if (preg_match('~^\s*(?:INSERT\s+(?:INTO\s+)?|UPDATE\s+|DELETE\s+(?:FROM\s+)?)([`"\[]?[\w.]+[`"\]]?)?~i', $statement['sql'], $writes) === 1) {
                     $table = isset($writes[1]) ? trim($writes[1], '`"[]') : null;
                     $watched = $table === null ? null : $this->watchedClassOf($table);
 
-                    if ($table === null || $watched !== null || !$this->isAMappedTable($table)) {
+                    if ($table === null || $watched !== null) {
                         $this->doubt('not read: '.$statement['sql'], $watched);
                     }
                 }
@@ -775,27 +776,27 @@ final class HistoryReplay
     }
 
     /**
-     * Whether a table belongs to a mapped class. One that does and is not watched is the
-     * application's own; one that does not may be a watched collection's join table, and a
-     * write to it that could not be read stays doubt.
+     * The watched class a table holds the rows of, if any: its own table, or the join table of
+     * one of its collections. Any other table -- an unwatched class's, or one no mapping names
+     * -- is the application's own.
      */
-    private function isAMappedTable(string $table): bool
-    {
-        foreach ($this->em()->getMetadataFactory()->getAllMetadata() as $candidate) {
-            if ($candidate instanceof ClassMetadata && $candidate->getTableName() === $table) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /** The watched class a table holds the rows of, if any. */
     private function watchedClassOf(string $table): ?string
     {
         foreach ($this->em()->getMetadataFactory()->getAllMetadata() as $candidate) {
-            if ($candidate instanceof ClassMetadata && $candidate->getTableName() === $table && $this->watched->areWatched($this->em(), $candidate)) {
+            if (!$candidate instanceof ClassMetadata || !$this->watched->areWatched($this->em(), $candidate)) {
+                continue;
+            }
+
+            if ($candidate->getTableName() === $table) {
                 return $candidate->rootEntityName;
+            }
+
+            foreach ($candidate->getAssociationNames() as $association) {
+                $joinTable = CollectionRowsQuery::entry($candidate->getAssociationMapping($association), 'joinTable');
+
+                if ($joinTable !== null && CollectionRowsQuery::entry($joinTable, 'name') === $table) {
+                    return $candidate->rootEntityName;
+                }
             }
         }
 

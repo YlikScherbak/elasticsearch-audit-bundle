@@ -77,13 +77,15 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         self::assertStringContainsString('route_stop', $read[0], 'it reads the membership back');
     }
 
-    public function testRemovingManyLinesTheMakerWayAsksTheDatabaseNothing(): void
+    public function testRemovingManyLinesTheMakerWayAddsNoSelect(): void
     {
         // Maker's removeItem() nulls the back-reference and lets orphanRemoval delete the
         // row, which made the two readers of whose row is going contradict each other for
         // every line -- and a contradiction was what the row was asked about: a hundred
         // SELECTs, then one per class. Whose row each DELETE took is what the connection's
-        // log says, from the rows the listener remembers, and nothing is asked at all.
+        // log says, from the rows the listener remembers, and the bundle asks nothing. What is
+        // counted is exactly that: the SELECTs added to the flush. The hundred DELETEs are
+        // the application's, with or without the bundle.
         $this->attachListener(FailurePolicy::Log);
 
         $this->em->persist($crate = new Crate('C-1'));
@@ -103,7 +105,8 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
 
         $this->em->flush();
 
-        self::assertCount(0, self::selects($this->queries), 'no question for a hundred lines');
+        self::assertCount(0, self::selects($this->queries), 'no SELECT added for a hundred lines');
+        self::assertCount(100, array_filter($this->queries, static fn (string $sql): bool => str_starts_with($sql, 'DELETE')), 'the premise: the DELETEs ran, one a line');
         self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'and every one of them went');
     }
 

@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
@@ -112,11 +113,12 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
 
     public function testAStatementTheLogCannotFollowIsDoubtSaidOnceAndByClassAlone(): void
     {
-        // An UPDATE of a watched table that names no row: the log cannot say which rows it
-        // moved, so the history may be missing what it did, and the listener says that -- in
-        // its log, once, at the reading that moves past it, by class and count and never by
-        // what the statement carried. What does not write a watched row is not doubt: the
-        // application's own tables, and the schema's DDL.
+        // An UPDATE of a watched table that names no row, read or not: the log cannot say
+        // which rows it moved, so the history may be missing what it did, and the listener
+        // says that -- in its log, once, at the reading that moves past it, by class and count
+        // and never by what the statement carried. A watched collection's join table is the
+        // same. What does not write a watched row is not doubt: the tables of the
+        // application's own, mapped or not, read or not, and the schema's DDL.
         $this->unownedStatementsAreExpected = true;
         $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
         $x = $this->aLine();
@@ -125,9 +127,13 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
 
         $connection = $this->em->getConnection();
         $connection->executeStatement("UPDATE CrateItem SET quantity = quantity + 1 WHERE sku LIKE 'SKU-SECRET%'");
+        $connection->executeStatement('UPDATE CrateItem SET quantity = 0');
+        $connection->executeStatement("DELETE FROM article_tag WHERE tag_id IN (SELECT id FROM Tag WHERE label = 'SECRET')");
         $connection->executeStatement("UPDATE Vehicle SET plate = 'SECRET-PLATE'");
         $connection->executeStatement("UPDATE Vehicle SET plate = 'SECRET-PLATE' WHERE plate LIKE 'SECRET%'");
         $connection->executeStatement('CREATE TABLE Scratch (id INT)');
+        $connection->executeStatement('UPDATE Scratch SET id = 1');
+        $connection->executeStatement("UPDATE Scratch SET id = 2 WHERE id IN (SELECT 1)");
         $connection->executeStatement('DROP TABLE Scratch');
 
         $doubts = fn (): array => array_values(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did')));
@@ -135,7 +141,8 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         $x->sku = 'SKU-X2';
         $this->em->flush();
 
-        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of '.CrateItem::class.' since the history was last written, so the history may be missing what they did.'], $doubts());
+        self::assertSame(['What the connection ran could not be followed for 3 statement(s) of '.CrateItem::class.', '.Article::class.' since the history was last written, so the history may be missing what they did.'], $doubts());
+        self::assertSame([], array_values(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'SECRET'))), 'nothing a statement carried');
 
         $x->sku = 'SKU-X3';
         $this->em->flush();

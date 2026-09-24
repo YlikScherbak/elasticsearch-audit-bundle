@@ -241,7 +241,24 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
     {
         // 6 / A. The nested flush writes Y 1 -> 7 and dies; Doctrine rolls back to its
         // savepoint, the application catches it, and the outer flush commits X 1 -> 2.
+        //
+        // The history has X's change today and loses it: the death goes through close(),
+        // whose clear() raises onClear, and the listener forgets the outer flush there --
+        // step 4's. Not the same as the application rolling back a nested flush itself,
+        // which raises no onClear and keeps it; hence the premise below, that this one did.
         [, $x, $y] = $this->aCrateWithTwoLines();
+
+        $clearedWhileOpen = new \ArrayObject();
+        $this->em->getEventManager()->addEventListener([Events::onClear], new class($clearedWhileOpen) {
+            public function __construct(private readonly \ArrayObject $cleared)
+            {
+            }
+
+            public function onClear(\Doctrine\ORM\Event\OnClearEventArgs $args): void
+            {
+                $this->cleared[] = $args->getObjectManager()->isOpen();
+            }
+        });
 
         $this->inThePostUpdateOf($x, function () use ($y): void {
             $y->quantity = 7;
@@ -250,6 +267,8 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
 
         $x->quantity = 2;
         $this->theOuterFlushAfterANestedOneDied();
+
+        self::assertContains(true, $clearedWhileOpen->getArrayCopy(), 'the premise: the death cleared the manager while it was still open');
     }
 
     public function testALineChangedAndThenRemovedByTheSameFlushIsBothFacts(): void
