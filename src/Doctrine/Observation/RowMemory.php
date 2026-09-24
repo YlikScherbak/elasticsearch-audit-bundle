@@ -52,6 +52,23 @@ final class RowMemory
 
     private readonly WatchedRows $watched;
 
+    /**
+     * The replay of what came after the rows were settled, kept and carried on: reading what
+     * the rows hold now reads only what is new. Made again only when a rollback has reached
+     * back into what it had read, or a different manager asks.
+     */
+    private ?HistoryReplay $current = null;
+
+    private int $currentVoided = 0;
+
+    /** Statements read by replays made and let go before the current one, for the tests of what reading costs. */
+    private int $readBefore = 0;
+
+    private ?EntityManagerInterface $currentManager = null;
+
+    /** @var array<string, list<object>> every entity postPersist announced since the rows were settled, by root class */
+    private array $persisted = [];
+
     public function __construct(private readonly StatementLog $log, private readonly AuditMetadataFactory $audited = new AuditMetadataFactory(), ?WatchedRows $watched = null)
     {
         $this->watched = $watched ?? new WatchedRows($audited);
@@ -115,10 +132,31 @@ final class RowMemory
      */
     public function replayed(EntityManagerInterface $em, ?int $upTo = null): HistoryReplay
     {
-        $replay = new HistoryReplay($em, $this->rows, $this->takenAt, $this->audited, $this->watched);
-        $replay->replay($this->log, $this->settledAt, $upTo);
+        $upTo ??= $this->log->position();
 
-        return $replay;
+        if ($this->current === null
+            || $this->currentManager !== $em
+            || $this->currentVoided !== $this->log->voided()
+            || $this->current->readTo() > $upTo
+        ) {
+            $this->readBefore += $this->current?->read() ?? 0;
+            $this->current = new HistoryReplay($em, $this->rows, $this->takenAt, $this->audited, $this->watched);
+            $this->currentVoided = $this->log->voided();
+            $this->currentManager = $em;
+        }
+
+        $this->current->replay($this->log, $this->settledAt, $upTo, $this->persisted);
+
+        return $this->current;
+    }
+
+    /**
+     * At postPersist: a row whose key the database handed out is bound to its INSERT by the
+     * order these were announced in.
+     */
+    public function rememberPersisted(EntityManagerInterface $em, object $entity): void
+    {
+        $this->persisted[$em->getClassMetadata($entity::class)->rootEntityName][] = $entity;
     }
 
     /**
@@ -138,6 +176,8 @@ final class RowMemory
         $this->rows = $this->replayed($em, $upTo)->rows();
         $this->settledAt = $upTo;
         $this->takenAt = [];
+        $this->current = null;
+        $this->persisted = [];
 
         foreach ($this->rows as $root => $keys) {
             foreach (array_keys($keys) as $id) {
@@ -152,6 +192,12 @@ final class RowMemory
         }
 
         return true;
+    }
+
+    /** How many statements every read of what the rows hold has read, together. */
+    public function statementsRead(): int
+    {
+        return $this->readBefore + ($this->current?->read() ?? 0);
     }
 
     /** How many rows are held, for the tests that pin what it costs. */
@@ -200,6 +246,7 @@ final class RowMemory
         $this->rows[$root][$id] = $key + $this->columnsOf($em, $metadata, $original);
         $this->takenAt[$root][$id] = $this->log->position();
         $this->objects[$root][$id] = \WeakReference::create($entity);
+        $this->current?->learn($root, $id, $this->rows[$root][$id], $this->takenAt[$root][$id]);
     }
 
     /**

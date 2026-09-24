@@ -127,9 +127,11 @@ abstract class DoctrineTestCase extends TestCase
      * The observer goes outside the statement logger, so a statement it ran of its own
      * would be in $queries -- it runs none, and a test says so.
      */
-    protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log, bool $savepoints = false): StatementLog
+    protected function watchTheConnection(FailurePolicy $policy = FailurePolicy::Log, bool $savepoints = false, bool $letsGo = false): StatementLog
     {
-        $this->statements = new StatementLog();
+        // Kept whole unless asked: the listener lets go of what it has read, and the tests read
+        // the log a second time, on their own, to hold it to the truth.
+        $this->statements = new StatementLog($letsGo);
 
         $middlewares = $this->ormConfig->getMiddlewares();
         $this->ormConfig->setMiddlewares([...$middlewares, new ObservingMiddleware($this->statements)]);

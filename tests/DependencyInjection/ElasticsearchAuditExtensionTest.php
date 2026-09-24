@@ -164,7 +164,7 @@ final class ElasticsearchAuditExtensionTest extends TestCase
 
         $events = array_column($definition->getTag('doctrine.event_listener'), 'event');
 
-        self::assertSame(['onFlush', 'postPersist', 'postUpdate', 'preRemove', 'postRemove', 'postFlush', 'onClear'], $events);
+        self::assertSame(['preFlush', 'onFlush', 'postPersist', 'postUpdate', 'preRemove', 'postRemove', 'postFlush', 'onClear', 'postLoad'], $events);
         self::assertSame('audit', $definition->getTag('doctrine.event_listener')[0]['connection']);
     }
 

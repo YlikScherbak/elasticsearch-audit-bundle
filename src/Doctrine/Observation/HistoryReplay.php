@@ -53,6 +53,15 @@ final class HistoryReplay
 
     private int $at = 0;
 
+    /** How far it has read, so that it can carry on from there. */
+    private int $readTo = 0;
+
+    /** How many statements it has read, for the tests that pin what reading costs. */
+    private int $read = 0;
+
+    /** @var array<string, int> by root class: how many INSERTs without a key it has read */
+    private array $insertsWithoutKey = [];
+
     private readonly AuditMetadataFactory $audited;
 
     private readonly WatchedRows $watched;
@@ -79,10 +88,12 @@ final class HistoryReplay
     public function replay(StatementLog $log, int $from, ?int $upTo = null, array $persisted = []): void
     {
         $this->log = $log;
-        $insertsWithoutKey = [];
+        $upTo ??= $log->position();
 
-        for ($at = $from + 1; $at <= ($upTo ?? $log->position()); ++$at) {
+        for ($at = max($from, $this->readTo) + 1; $at <= $upTo; ++$at) {
             $this->at = $at;
+            $this->readTo = $at;
+            ++$this->read;
             $statement = $log->statement($at);
 
             if ($statement === null) {
@@ -97,7 +108,7 @@ final class HistoryReplay
             $nth = null;
 
             if ($shape !== null && $binding !== null && $shape->kind === StatementShape::INSERT && $binding->kind === RowBinding::ROW && $binding->key === null && $binding->class !== null) {
-                $nth = $insertsWithoutKey[$binding->class] = ($insertsWithoutKey[$binding->class] ?? -1) + 1;
+                $nth = $this->insertsWithoutKey[$binding->class] = ($this->insertsWithoutKey[$binding->class] ?? -1) + 1;
             }
 
             if ($log->fate($at) === StatementLog::VOID) {
@@ -143,6 +154,32 @@ final class HistoryReplay
                 StatementShape::UPDATE => $this->updated($table, $shape, $statement['params'], $binding->key ?? []),
                 default => $this->deleted($table, $binding->key ?? [], $statement['affected']),
             };
+        }
+    }
+
+    /** How far it has read. */
+    public function readTo(): int
+    {
+        return $this->readTo;
+    }
+
+    /** How many statements it has read, since it was made. */
+    public function read(): int
+    {
+        return $this->read;
+    }
+
+    /**
+     * A row first remembered after reading began: known from now on, and an account only of
+     * the statements after the point it was taken at.
+     *
+     * @param array<string, mixed> $row
+     */
+    public function learn(string $root, string $id, array $row, int $takenAt): void
+    {
+        if (!isset($this->rows[$root][$id]) && !isset($this->gone[$root][$id])) {
+            $this->rows[$root][$id] = $row;
+            $this->takenAt[$root][$id] = $takenAt;
         }
     }
 

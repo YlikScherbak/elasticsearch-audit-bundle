@@ -189,6 +189,84 @@ final class RowMemoryTest extends DoctrineTestCase
         self::assertSame(0, $this->memory->size(), 'settled, and nothing holds it: forgotten');
     }
 
+    public function testReadingWhatTheRowsHoldInALongTransactionReadsEachStatementOnce(): void
+    {
+        // A batch import in one transaction is hundreds of flushes before anything settles,
+        // and what the rows hold is asked after each. Replaying everything since the last
+        // settling every time is quadratic; the replay carries on from where it stopped.
+        $x = $this->aLine();
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+        $before = $this->memory->statementsRead();
+
+        for ($i = 2; $i <= 101; ++$i) {
+            $x->quantity = $i;
+            $this->em->flush();
+            self::assertSame($i, $this->now($x));
+        }
+
+        $connection->commit();
+
+        $replay = $this->memory->replayed($this->em);
+        self::assertSame($this->log->position() - $this->memory->settledAt(), $this->memory->statementsRead() - $before, 'every statement read once, however often it was asked');
+        self::assertCount(100, $replay->facts());
+    }
+
+    public function testARowFirstRememberedAfterTheReplayWasKeptIsKnownToIt(): void
+    {
+        // In one transaction: the rows are asked about, which keeps the replay; then a line
+        // loaded since is remembered at the next preFlush and written. The kept replay has to
+        // learn of it, or the line's UPDATE is a row nothing said was there.
+        $x = $this->aLine();
+        $crate = $x->crate;
+        self::assertNotNull($crate);
+        $crate->add($z = new CrateItem('SKU-Z'));
+        $this->em->flush();
+        $this->memory->settle($this->em);
+        $id = $z->id;
+        $this->em->clear();
+        gc_collect_cycles();
+        $this->memory->settle($this->em);
+
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+        $x = $this->em->find(CrateItem::class, $x->id);
+        self::assertInstanceOf(CrateItem::class, $x);
+        $x->quantity = 2;
+        $this->em->flush();
+        self::assertSame(2, $this->now($x), 'the replay is kept from here');
+
+        $z = $this->em->find(CrateItem::class, $id);
+        self::assertInstanceOf(CrateItem::class, $z);
+        $z->quantity = 6;
+        $this->em->flush();
+        $connection->commit();
+
+        self::assertSame(6, $this->now($z));
+        self::assertSame(['crate C-1 items.'.$x->id.'.quantity: 1 -> 2', 'crate C-1 items.'.$id.'.quantity: 1 -> 6'], $this->facts());
+    }
+
+    public function testAnOldObjectStillHeldAfterAClearDoesNotHoldTheRowBack(): void
+    {
+        $old = $this->aLine();
+        $id = $old->id;
+
+        $old->quantity = 2;
+        $this->em->flush();
+        self::assertTrue($this->memory->settle($this->em));
+
+        $this->em->clear();
+        $new = $this->em->find(CrateItem::class, $id);
+        self::assertInstanceOf(CrateItem::class, $new);
+        self::assertNotSame($old, $new, 'the premise: the application still holds the old object, and Doctrine gave a new one');
+
+        $new->quantity = 3;
+        $this->em->flush();
+
+        self::assertSame(['crate C-1 items.'.$id.'.quantity: 2 -> 3'], $this->facts());
+        self::assertSame(1, $old->quantity === 2 ? 1 : 0, 'and the old object is as the application left it');
+    }
+
     public function testWhatIsNotAuditedIsNotRemembered(): void
     {
         $this->em->persist($vehicle = new Vehicle());

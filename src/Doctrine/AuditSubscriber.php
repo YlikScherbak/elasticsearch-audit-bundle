@@ -11,6 +11,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\TracksCollectionElementsInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
@@ -24,9 +25,11 @@ use Doctrine\ORM\PersistentCollection;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\OnFlushEventArgs;
 use Doctrine\ORM\Event\PostFlushEventArgs;
+use Doctrine\ORM\Event\PostLoadEventArgs;
 use Doctrine\ORM\Event\PostPersistEventArgs;
 use Doctrine\ORM\Event\PostRemoveEventArgs;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
+use Doctrine\ORM\Event\PreFlushEventArgs;
 use Doctrine\ORM\Event\PreRemoveEventArgs;
 use Doctrine\ORM\Events;
 use Psr\Log\LoggerInterface;
@@ -56,7 +59,7 @@ use Doctrine\Persistence\ObjectManager;
  */
 final class AuditSubscriber
 {
-    public const EVENTS = [Events::onFlush, Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear];
+    public const EVENTS = [Events::preFlush, Events::onFlush, Events::postPersist, Events::postUpdate, Events::preRemove, Events::postRemove, Events::postFlush, Events::onClear, Events::postLoad];
 
     /**
      * The number that means "no flush is collecting".
@@ -521,6 +524,47 @@ final class AuditSubscriber
     ) {
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
+        $this->rows = $statements === null ? null : new RowMemory($statements);
+    }
+
+    /**
+     * What each watched row held, when the connection is watched: remembered at preFlush and
+     * at a load inside a flush, and settled once a flush's history has been published.
+     *
+     * Nothing is read back from it yet -- the listener's rules are what they were -- and it is
+     * null wherever the connection is not watched.
+     */
+    private readonly ?RowMemory $rows;
+
+    /**
+     * Before computeChangeSets(): the one moment Doctrine still remembers each row as it was
+     * last written, and not as the flush means to write it.
+     */
+    public function preFlush(PreFlushEventArgs $args): void
+    {
+        $em = self::entityManagerOf($args->getObjectManager());
+
+        if ($this->rows !== null && $em !== null) {
+            $this->rows->rememberWhatIsManaged($em);
+        }
+    }
+
+    /**
+     * A row loaded while a flush runs -- found again after a clear(), from inside a listener --
+     * is remembered as it loads. One loaded outside a flush waits for the next preFlush, and a
+     * find() does not pay for the audit.
+     */
+    public function postLoad(PostLoadEventArgs $args): void
+    {
+        if ($this->rows === null) {
+            return;
+        }
+
+        $em = self::entityManagerOf($args->getObjectManager());
+
+        if ($em !== null) {
+            $this->rows->rememberLoaded($em, $args->getObject(), $this->flushes !== []);
+        }
     }
 
     private readonly LoggerInterface $logger;
@@ -835,6 +879,11 @@ final class AuditSubscriber
     {
         $record = $this->recordFor($args, AuditEvent::CREATE);
         $manager = self::entityManagerOf($args->getObjectManager());
+
+        if ($manager !== null) {
+            $this->rows?->rememberPersisted($manager, $args->getObject());
+        }
+
         $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
         $this->theRowNowMatchesTheObject($args->getObject());
 
@@ -1025,6 +1074,13 @@ final class AuditSubscriber
             $this->publish($args->getObjectManager(), $em);
         } finally {
             $this->forgetThisFlush();
+
+            // Whatever became of the publishing: what the rows hold is a fact about the
+            // database, and it is folded in once no transaction can still roll it back. The log
+            // lets go of what the rows now hold, and not before.
+            if ($em !== null && $this->rows !== null && $this->statements !== null && $this->rows->settle($em)) {
+                $this->statements->forgetUpTo($this->statements->position());
+            }
         }
     }
 

@@ -68,6 +68,20 @@ final class StatementLog
 
     private int $nextFrame = 0;
 
+    /** How many statements a rollback has voided, ever: what a reader that keeps its place asks whether it can. */
+    private int $voided = 0;
+
+    /**
+     * @param bool $letsGo whether what its reader has read is let go. The listener is the one
+     *                     reader, and a log that kept everything would grow with every
+     *                     statement a process ever ran; a second reader replaying the log on
+     *                     its own -- as the tests do, to hold the listener to the truth -- needs
+     *                     it all kept
+     */
+    public function __construct(private readonly bool $letsGo = true)
+    {
+    }
+
     /**
      * Where the log stands: the last frame opened so far, and the frame open now.
      *
@@ -198,6 +212,18 @@ final class StatementLog
         return $this->open !== [];
     }
 
+    /**
+     * How many statements a rollback has voided since the log began.
+     *
+     * A reader that replays the log and keeps its place -- so that reading what the rows hold
+     * now does not replay everything again -- is right to carry on from there only while this
+     * has not moved: a rollback reaches back into what it has already read.
+     */
+    public function voided(): int
+    {
+        return $this->voided;
+    }
+
     /** Where the log has got to, for a caller that wants to know what ran after this point. */
     public function position(): int
     {
@@ -272,6 +298,10 @@ final class StatementLog
      */
     public function forgetUpTo(int $statement): void
     {
+        if (!$this->letsGo) {
+            return;
+        }
+
         foreach (array_keys($this->statements) as $sequence) {
             if ($sequence > $statement) {
                 break;
@@ -376,8 +406,9 @@ final class StatementLog
     private function voidFrom(int $frame, int $after): void
     {
         foreach ($this->statements as $sequence => $entry) {
-            if ($sequence > $after && $this->isInside($entry['frame'], $frame)) {
+            if ($sequence > $after && !$entry['void'] && $this->isInside($entry['frame'], $frame)) {
                 $this->statements[$sequence]['void'] = true;
+                ++$this->voided;
             }
         }
     }
