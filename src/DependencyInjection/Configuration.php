@@ -328,6 +328,21 @@ final class Configuration implements ConfigurationInterface
                 ->ifTrue(static fn (mixed $v) => !\is_string($v) || $v === '')
                 ->thenInvalid('doctrine.connection must be a connection name, not %s.')
             ->end();
+
+        // The one guarantee of the history that depends on the connection's own setting.
+        // A fact is signed by the flush whose statement it rests on, and a flush nested inside
+        // another is told apart on the wire by the savepoint it opens. DBAL 4 always opens
+        // one; DBAL 3 does only with use_savepoints, and without it a nested flush's statements
+        // are the enclosing flush's -- the facts are right, and signed with the outer flush's
+        // moment, actor and context. "strict" refuses to boot on such a connection rather than
+        // sign a change with a name that did not make it; "outer" is asking for that on
+        // purpose. Turning savepoints on is the application's decision and not the bundle's:
+        // with them a nested rollBack() rolls back to its savepoint instead of the whole
+        // transaction.
+        $children->enumNode('nested_flush_provenance')
+            ->info('"strict" (default): refuse to boot on DBAL 3 without use_savepoints, where a flush nested inside another cannot be told apart and its changes would be signed by the outer flush. "outer": accept that -- the facts stay right, and a nested flush\'s changes carry the moment, actor and context of the flush around it. DBAL 4 always tells them apart, and this changes nothing there.')
+            ->values(['strict', 'outer'])
+            ->defaultValue('strict');
     }
 
     /**

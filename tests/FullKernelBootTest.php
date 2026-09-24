@@ -78,6 +78,40 @@ final class FullKernelBootTest extends TestCase
         $kernel->shutdown();
     }
 
+    public function testTheConnectionTheListenerAuditsIsWatchedIntoTheLogTheListenerReads(): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed to boot a Doctrine connection.');
+        }
+
+        // DoctrineBundle builds a child of a tagged middleware for each connection it is
+        // tagged for, with the same arguments -- which is what makes the log the observer
+        // writes and the log the listener reads one object. Asked of a real kernel, because
+        // both halves of that are DoctrineBundle's.
+        $kernel = new FullKernel($this->cacheDir);
+        $kernel->boot();
+
+        /** @var \Doctrine\ORM\EntityManagerInterface $em */
+        $em = $kernel->getContainer()->get('doctrine.orm.default_entity_manager');
+        $log = null;
+
+        foreach ($em->getEventManager()->getListeners(Events::onFlush) as $listener) {
+            if ($listener instanceof AuditSubscriber) {
+                $log = (new \ReflectionProperty(AuditSubscriber::class, 'statements'))->getValue($listener);
+            }
+        }
+
+        self::assertInstanceOf(\Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog::class, $log, 'the listener is given the log');
+
+        $before = $log->position();
+        $em->getConnection()->executeStatement('CREATE TABLE watched (id INTEGER)');
+        $em->getConnection()->executeStatement('INSERT INTO watched (id) VALUES (?)', [1]);
+
+        self::assertGreaterThan($before, $log->position(), 'and what the entity manager\'s connection runs reaches it');
+
+        $kernel->shutdown();
+    }
+
     public function testMessengerActuallyRoutesBothMessagesToTheirHandlers(): void
     {
         // Without DoctrineBundle: this is a question about the bus, and tying it to a

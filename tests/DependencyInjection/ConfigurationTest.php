@@ -25,7 +25,7 @@ final class ConfigurationTest extends TestCase
         self::assertSame('system', $config['actor']['fallback']);
         self::assertTrue($config['client']['ssl_verification']);
         self::assertSame('auto', $config['client']['include_source_on_error'], 'the cluster decides, unless a deployment says otherwise');
-        self::assertSame(['enabled' => 'auto', 'skip_empty_updates' => true, 'connection' => 'default'], $config['doctrine']);
+        self::assertSame(['enabled' => 'auto', 'skip_empty_updates' => true, 'connection' => 'default', 'nested_flush_provenance' => 'strict'], $config['doctrine'], 'strict: a nested flush\'s change is not signed by a flush that did not make it');
         self::assertSame(['enabled' => true, 'object_types' => [], 'numeric_fields' => [], 'max_held' => 10000, 'on_overflow' => 'release'], $config['coalescing']);
         self::assertSame(500, $config['batch_size']);
         self::assertSame(['max_limit' => 1000, 'max_result_window' => 10000, 'point_in_time_keep_alive' => '1m'], $config['reader']);

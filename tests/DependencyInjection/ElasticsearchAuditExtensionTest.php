@@ -168,6 +168,22 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertSame('audit', $definition->getTag('doctrine.event_listener')[0]['connection']);
     }
 
+    public function testTheAuditedConnectionIsTheOneWatchedAndTheListenerReadsWhatItSees(): void
+    {
+        $container = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['connection' => 'audit']]);
+
+        $middleware = $container->getDefinition(ElasticsearchAuditExtension::SERVICE_OBSERVING_MIDDLEWARE);
+
+        self::assertSame([['connection' => 'audit']], $middleware->getTag('doctrine.middleware'), 'the connection the listener is attached to, and no other');
+        self::assertEquals(new \Symfony\Component\DependencyInjection\Reference(ElasticsearchAuditExtension::SERVICE_STATEMENT_LOG), $middleware->getArgument(0));
+        self::assertEquals(
+            new \Symfony\Component\DependencyInjection\Reference(ElasticsearchAuditExtension::SERVICE_STATEMENT_LOG),
+            $container->getDefinition(ElasticsearchAuditExtension::SERVICE_DOCTRINE_LISTENER)->getArgument(5),
+            'the listener reads the log the connection is watched into',
+        );
+        self::assertSame('strict', $container->getParameter(ElasticsearchAuditExtension::PARAMETER_NESTED_FLUSH_PROVENANCE));
+    }
+
     public function testDoctrineAuditingCanBeSwitchedOff(): void
     {
         $container = $this->load(['client' => ['hosts' => ['http://localhost:9200']], 'doctrine' => ['enabled' => false]]);

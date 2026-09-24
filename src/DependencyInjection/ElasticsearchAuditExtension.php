@@ -22,6 +22,8 @@ use Borsche\ElasticsearchAuditBundle\Contract\RecordDecoratorInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClientFactory;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ElasticsearchGateway;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
@@ -87,6 +89,8 @@ final class ElasticsearchAuditExtension extends Extension
     public const SERVICE_WRITER = 'borsche_elasticsearch_audit.writer';
     public const SERVICE_METADATA_FACTORY = 'borsche_elasticsearch_audit.doctrine.metadata_factory';
     public const SERVICE_DOCTRINE_LISTENER = 'borsche_elasticsearch_audit.doctrine.listener';
+    public const SERVICE_STATEMENT_LOG = 'borsche_elasticsearch_audit.doctrine.statement_log';
+    public const SERVICE_OBSERVING_MIDDLEWARE = 'borsche_elasticsearch_audit.doctrine.observing_middleware';
 
     /**
      * Where the entity listener sits among the application's own.
@@ -99,6 +103,12 @@ final class ElasticsearchAuditExtension extends Extension
 
     /** Whether doctrine.enabled was an explicit true — a promise — rather than "auto". */
     public const PARAMETER_DOCTRINE_PROMISED = 'borsche_elasticsearch_audit.doctrine.promised';
+
+    /** doctrine.connection, for the compiler to find the connection it has to ask about savepoints. */
+    public const PARAMETER_DOCTRINE_CONNECTION = 'borsche_elasticsearch_audit.doctrine.connection';
+
+    /** doctrine.nested_flush_provenance: "strict" or "outer". */
+    public const PARAMETER_NESTED_FLUSH_PROVENANCE = 'borsche_elasticsearch_audit.doctrine.nested_flush_provenance';
 
     /**
      * The queue the outbox writes into and the connection it has to share, left where
@@ -230,7 +240,7 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{enabled: bool|'auto', skip_empty_updates: bool, connection: string} $doctrine
+     * @param array{enabled: bool|'auto', skip_empty_updates: bool, connection: string, nested_flush_provenance: 'strict'|'outer'} $doctrine
      */
     private function registerDoctrine(array $doctrine, ContainerBuilder $container): void
     {
@@ -254,6 +264,18 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setDefinition(self::SERVICE_METADATA_FACTORY, new Definition(AuditMetadataFactory::class));
         $container->setAlias(AuditMetadataFactory::class, self::SERVICE_METADATA_FACTORY);
 
+        // What the connection does, watched by a driver middleware on the audited connection.
+        // One log, shared: DoctrineBundle makes a child of the middleware for the connection it
+        // is tagged for, with the same arguments, so the listener and the connection's observer
+        // hold the same instance. No priority: the observer sits closest to the driver, where
+        // a statement is what the database was sent.
+        $container->setDefinition(self::SERVICE_STATEMENT_LOG, new Definition(StatementLog::class));
+        $container->setDefinition(
+            self::SERVICE_OBSERVING_MIDDLEWARE,
+            (new Definition(ObservingMiddleware::class, [new Reference(self::SERVICE_STATEMENT_LOG)]))
+                ->addTag('doctrine.middleware', ['connection' => $doctrine['connection']]),
+        );
+
         $listener = new Definition(AuditSubscriber::class, [
             new Reference(self::SERVICE_WRITER),
             new Reference(self::SERVICE_METADATA_FACTORY),
@@ -263,6 +285,7 @@ final class ElasticsearchAuditExtension extends Extension
             // raises when a nested flush emptied the change sets goes nowhere — which
             // is precisely the silence this release is about.
             new Reference(LoggerInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            new Reference(self::SERVICE_STATEMENT_LOG),
         ]);
 
         foreach (AuditSubscriber::EVENTS as $event) {
@@ -285,6 +308,8 @@ final class ElasticsearchAuditExtension extends Extension
         // auditing can be answered — and where the difference between "you promised
         // this works" and "attach it if you can" decides between a refusal and silence.
         $container->setParameter(self::PARAMETER_DOCTRINE_PROMISED, $doctrine['enabled'] === true);
+        $container->setParameter(self::PARAMETER_DOCTRINE_CONNECTION, $doctrine['connection']);
+        $container->setParameter(self::PARAMETER_NESTED_FLUSH_PROVENANCE, $doctrine['nested_flush_provenance']);
     }
 
     /**
