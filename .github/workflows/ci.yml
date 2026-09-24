@@ -90,6 +90,10 @@ jobs:
           coverage: none
           tools: composer:v2
 
+      # This resolves to DBAL 3, where a nested flush is told apart only with use_savepoints,
+      # and nested_flush_provenance: strict refuses to boot without it. The test kernel sets
+      # use_savepoints on DBAL 3 on purpose, as an application there has to; the kernel tests
+      # that leave it off are the ones that pin the refusal and "outer".
       - name: Install the oldest versions composer.json allows
         run: composer update --prefer-lowest --prefer-stable --prefer-dist --no-progress --no-interaction
 

@@ -9,6 +9,34 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 
 ---
 
+## To 1.3.0
+
+**On DBAL 4, nothing is required.** On **DBAL 3**, an application whose audited connection does
+not have `use_savepoints: true` no longer boots, and the message says why: there a flush run
+inside another flush cannot be told apart from it, and its changes would be recorded under the
+outer flush's moment, actor and context. Choose one:
+
+- `use_savepoints: true` on the connection, if a nested `rollBack()` rolling back to its
+  savepoint — rather than the whole transaction — is what your application wants anyway:
+
+  ```yaml
+  doctrine:
+    dbal:
+      use_savepoints: true
+  ```
+
+- or accept the outer flush's name on those changes; the values are recorded correctly either
+  way:
+
+  ```yaml
+  borsche_elasticsearch_audit:
+    doctrine:
+      nested_flush_provenance: outer
+  ```
+
+Run `audit:check` afterwards: it asks the connection itself, which is where a setting that comes
+from an environment variable is finally readable, and it says whether the connection is watched.
+
 ## To 1.2.0
 
 **Nothing is required.** Both changes below are additive, and an application that changes nothing

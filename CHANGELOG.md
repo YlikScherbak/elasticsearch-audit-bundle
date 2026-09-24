@@ -93,6 +93,23 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   to a document that arrives already holding one, since by then it is a re-index of something
   read back rather than somebody's value.
 
+### Changed
+- **The audited connection is watched, and on DBAL 3 it has to tell a nested flush apart.** The
+  bundle registers a DBAL driver middleware on `doctrine.connection` that records what the
+  connection runs and changes nothing about it: no statement of its own, no option set, every
+  result and exception passed through. What a flush did is read from there instead of being
+  inferred from Doctrine's events — which is what the history of a flush run inside another
+  flush needs, since those events describe the outer flush's leftovers.
+  <br>A nested flush is told apart by the savepoint its transaction opens. DBAL 4 always opens
+  one; DBAL 3 only with `use_savepoints: true`, which DoctrineBundle 2 leaves off. There the new
+  `doctrine.nested_flush_provenance` decides: **`strict`, the default, refuses to boot** on DBAL
+  3 without savepoints, naming both ways out, and `audit:check` fails on such a connection when
+  the boot could not read the setting; **`outer`** accepts it — the values recorded are right,
+  and a nested flush's changes carry the moment, actor and context of the flush around it, which
+  `audit:check` says. The bundle never turns savepoints on: with them a nested `rollBack()` rolls
+  back to its savepoint instead of the whole transaction, and that is the application's call.
+  <br>`audit:check` also fails when the audited connection was built without the middleware.
+
 ### Fixed
 - **What an emptied collection says about its lines now comes from the rows, and nineteen things it
   used to say are gone.** Emptying an audited collection is the operation Doctrine reports by

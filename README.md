@@ -92,6 +92,10 @@ skips both the frame and the queue, for the one record that must be visible befo
   event
 - With the version 9 client, a PSR-18 HTTP client — it no longer ships one:
   `composer require guzzlehttp/guzzle`
+- For entity auditing, doctrine/orm with DoctrineBundle 2.13+ or 3: the listener and the
+  connection's observer are both attached through it. On DBAL 3 the audited connection needs
+  `use_savepoints: true`, or an explicit `nested_flush_provenance: outer` — see
+  [Auditing Doctrine entities](#auditing-doctrine-entities)
 
 ## Installation
 
@@ -342,6 +346,35 @@ borsche_elasticsearch_audit:
                                # requires doctrine/orm and fails the boot without it (since 0.11)
     skip_empty_updates: true
     connection: default        # the Doctrine connection the listener attaches to
+    nested_flush_provenance: strict   # or "outer"; matters on DBAL 3 only (since 1.3)
+```
+
+The bundle reads what a flush did from the statements its connection ran, through a DBAL
+driver middleware it registers on that connection (**since 1.3**); DoctrineBundle is what
+applies it, so entity auditing needs DoctrineBundle. `audit:check` says whether the audited
+connection is watched.
+
+**A flush run inside another flush** — from a listener, a lifecycle callback, a subscriber —
+is its own flush, with its own moment, actor and context, and it can only be told apart from
+the flush around it by the savepoint its transaction opens. DBAL 4 always opens one. DBAL 3
+opens one only with `use_savepoints: true` on the connection, which DoctrineBundle 2 leaves off,
+and there the nested flush's statements are indistinguishable from the outer flush's:
+
+- `nested_flush_provenance: strict` (the default) refuses to boot on DBAL 3 without
+  `use_savepoints`, and `audit:check` fails on such a connection when the setting could not be
+  read at boot (an environment variable, a call made later);
+- `nested_flush_provenance: outer` accepts it: the values recorded are still right, and the
+  changes a nested flush made carry the moment, actor and context of the flush around it.
+  `audit:check` says so.
+
+The bundle does not turn savepoints on for you. With them, a nested `rollBack()` rolls back to
+its savepoint instead of taking the whole transaction with it — a change in how your
+application's own transactions behave, and yours to decide:
+
+```yaml
+doctrine:
+  dbal:
+    use_savepoints: true       # DBAL 3 only; DBAL 4 always uses savepoints
 ```
 
 Records are built during `flush()`, while Doctrine still knows the change sets, and **written
