@@ -936,8 +936,14 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private function holdsAPhantom(Crate $crate): bool
     {
+        // A line waiting for its INSERT is not one: its row does not exist YET. Asked of
+        // the unit of work rather than of the id, which a sequence hands out at persist()
+        // -- on PostgreSQL under DBAL 3 a line added before a refused flush has an id and no
+        // row, was read as a phantom, and every step that empties the crate was skipped
+        // there and nowhere else, so the one configuration drew different sequences from
+        // the same seeds.
         foreach ($crate->items as $line) {
-            if ($line instanceof CrateItem && $line->id !== null && !$this->stillARow($line)) {
+            if ($line instanceof CrateItem && $line->id !== null && !$this->em->getUnitOfWork()->isScheduledForInsert($line) && !$this->stillARow($line)) {
                 return true;
             }
         }
