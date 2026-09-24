@@ -130,6 +130,8 @@ final class ShadowHistoryTest extends DoctrineTestCase
      */
     private function replayed(StatementLog $log, array $persisted = []): array
     {
-        return ShadowHistory::fromWhatWasRemembered($this->em, self::ROWS)->replay($log, 0, $persisted);
+        $replayed = ShadowHistory::fromWhatWasRemembered($this->em, self::ROWS)->replay($log, 0, $persisted);
+
+        return ['facts' => $replayed['facts'], 'unsure' => $replayed['unsure']]; // no flush labels these logs
     }
 }

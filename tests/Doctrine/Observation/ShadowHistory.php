@@ -51,6 +51,11 @@ final class ShadowHistory
     /** @var list<string> */
     private array $facts = [];
 
+    /** @var list<int|null> the flush each fact's statement belongs to, beside it */
+    private array $owners = [];
+
+    private ?StatementLog $log = null;
+
     /** @var list<string> */
     private array $unsure = [];
 
@@ -110,10 +115,11 @@ final class ShadowHistory
      *                                                     the database handed out is bound to
      *                                                     its INSERT by that order
      *
-     * @return array{facts: list<string>, unsure: list<string>}
+     * @return array{facts: list<string>, unsure: list<string>, owners: list<int|null>}
      */
     public function replay(StatementLog $log, int $from, array $persisted): array
     {
+        $this->log = $log;
         $insertsWithoutKey = [];
 
         for ($at = $from + 1; $at <= $log->position(); ++$at) {
@@ -181,7 +187,14 @@ final class ShadowHistory
             };
         }
 
-        return ['facts' => $this->facts, 'unsure' => $this->unsure];
+        return ['facts' => $this->facts, 'unsure' => $this->unsure, 'owners' => $this->owners];
+    }
+
+    /** A fact, and the flush the statement that is its evidence belongs to. */
+    private function said(string $fact): void
+    {
+        $this->facts[] = $fact;
+        $this->owners[] = $this->log?->ownerOf($this->at);
     }
 
     private function forgetWhatWasTakenAfter(string $root, string $id, int $at): void
@@ -231,7 +244,7 @@ final class ShadowHistory
         [$owner, $collection] = $this->ownerOf($metadata, $this->rows[$root][$id]);
 
         if ($owner !== null && $collection !== null && $there === []) {
-            $this->facts[] = sprintf('%s %s %s.%s: null -> %s', $owner[0], $owner[1], $collection, $id, json_encode($this->represent($metadata, $this->rows[$root][$id], $owner[2], $collection)));
+            $this->said(sprintf('%s %s %s.%s: null -> %s', $owner[0], $owner[1], $collection, $id, json_encode($this->represent($metadata, $this->rows[$root][$id], $owner[2], $collection))));
         }
     }
 
@@ -276,7 +289,7 @@ final class ShadowHistory
             }
 
             if ($owner !== null && $collection !== null && $metadata->hasField($field)) {
-                $this->facts[] = sprintf(
+                $this->said(sprintf(
                     '%s %s %s.%s.%s: %s -> %s',
                     $owner[0],
                     $owner[1],
@@ -285,7 +298,7 @@ final class ShadowHistory
                     $field,
                     json_encode($this->php($metadata, $field, $old)),
                     json_encode($this->php($metadata, $field, $new)),
-                );
+                ));
 
                 continue;
             }
@@ -293,7 +306,7 @@ final class ShadowHistory
             $audited = (new AuditMetadataFactory())->for($metadata->newInstance());
 
             if ($audited !== null && \array_key_exists($field, $audited->fields) && $metadata->hasField($field)) {
-                $this->facts[] = sprintf('%s %s %s: %s -> %s', $audited->objectType, $id, $field, json_encode($this->php($metadata, $field, $old)), json_encode($this->php($metadata, $field, $new)));
+                $this->said(sprintf('%s %s %s: %s -> %s', $audited->objectType, $id, $field, json_encode($this->php($metadata, $field, $old)), json_encode($this->php($metadata, $field, $new))));
 
                 continue;
             }
@@ -329,7 +342,7 @@ final class ShadowHistory
         [$owner, $collection] = $this->ownerOf($metadata, $this->rows[$root][$id]);
 
         if ($owner !== null && $collection !== null) {
-            $this->facts[] = sprintf('%s %s %s.%s: %s -> null', $owner[0], $owner[1], $collection, $id, json_encode($this->represent($metadata, $this->rows[$root][$id], $owner[2], $collection)));
+            $this->said(sprintf('%s %s %s.%s: %s -> null', $owner[0], $owner[1], $collection, $id, json_encode($this->represent($metadata, $this->rows[$root][$id], $owner[2], $collection))));
         }
 
         $this->gone[$root][$id] = true;
@@ -389,7 +402,7 @@ final class ShadowHistory
             $this->gone[$root][$id] = true;
         }
 
-        $this->facts[] = sprintf('%s %s %s: %s -> []', $ownerType, $ownerId, $collection, json_encode($shown));
+        $this->said(sprintf('%s %s %s: %s -> []', $ownerType, $ownerId, $collection, json_encode($shown)));
     }
 
     /**
