@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
+use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Observation\ShadowHistory;
+use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Observation\WhatDoctrineRemembered;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -48,6 +51,27 @@ use PHPUnit\Framework\Attributes\DataProvider;
  */
 final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
 {
+    /** What the connection did; the shadow history is built from it. */
+    private StatementLog $log;
+
+    /** Where the scenario begins in it, once its fixture is written. */
+    private int $from = 0;
+
+    /** @var array<class-string, array<string, array<string, mixed>>> the rows, read when the scenario began */
+    private array $before = [];
+
+    private WhatDoctrineRemembered $remembered;
+
+    /** @var array<class-string, list<object>> every entity postPersist announced, in order */
+    private array $persisted = [];
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw);
+    }
+
     public function testAChangeTheOuterFlushWroteAndTheNestedOneChangedAgainIsTwoFacts(): void
     {
         // S1a. The outer flush wrote X 1 -> 2; the nested one wrote X 2 -> 5, and Y, which
@@ -136,6 +160,25 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
             ['crate C-1 items.1.quantity: 1 -> 2'],
             today: ['crate C-1 items.1.quantity: 1 -> 5'],
         );
+    }
+
+    public function testAChangeAfterARefusedFlushNamesWhatTheRowHeld(): void
+    {
+        // Not nested: the case that tells the two sources of the shadow history's starting
+        // rows apart. A flush refused in onFlush leaves Doctrine remembering X as 5, a value
+        // the row never took; the next flush writes 2. The row went 1 -> 2. What Doctrine
+        // remembers at that flush's preFlush is 5 -- which is why the copy that counts is the
+        // first one taken, before the refusal, and why a listener that took its old sides from
+        // Doctrine's memory afresh at every operation would get this wrong.
+        [, $x] = $this->aCrateWithTwoLines();
+
+        $x->quantity = 5;
+        $this->refused(fn () => $this->em->flush());
+
+        $x->quantity = 2;
+        $this->em->flush();
+
+        $this->assertTheRowsAndTheHistory([1 => 2, 2 => 1], ['crate C-1 items.1.quantity: 1 -> 2']);
     }
 
     public function testAnEmptyingAfterTheOuterFlushWroteALineKeepsWhatItWrote(): void
@@ -382,6 +425,26 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->gateway->documents = [];
         $this->gateway->ids = [];
 
+        // The scenario begins here, and so does what the shadow history replays: the rows as
+        // they are now, and a copy of what Doctrine remembers at every preFlush and postLoad
+        // from here on.
+        $this->from = $this->log->position();
+        $this->before = (new \ReflectionProperty(ShadowHistory::class, 'rows'))->getValue(ShadowHistory::fromTheRows($this->em, [Crate::class, CrateItem::class]));
+        $this->remembered = new WhatDoctrineRemembered([Crate::class, CrateItem::class], $this->log);
+        $this->em->getEventManager()->addEventListener([Events::preFlush, Events::postLoad], $this->remembered);
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($this->persisted) {
+            /** @param array<class-string, list<object>> $persisted */
+            public function __construct(private array &$persisted)
+            {
+            }
+
+            public function postPersist(PostPersistEventArgs $args): void
+            {
+                $entity = $args->getObject();
+                $this->persisted[$args->getObjectManager()->getClassMetadata($entity::class)->rootEntityName][] = $entity;
+            }
+        });
+
         return [$crate, $x, $y];
     }
 
@@ -400,6 +463,8 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
 
         self::assertSame($rows, $inTheTable, 'the premise: what the rows hold');
 
+        $this->assertTheShadowHistorySays($facts);
+
         $said = $this->everyFact();
 
         if ($today === null) {
@@ -410,6 +475,34 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
 
         self::assertNotSame($facts, $said, 'this is described correctly now; take its entry for today off');
         self::assertSame($today, $said, 'what the listener says instead has changed; the entry no longer describes it');
+    }
+
+    /**
+     * What the connection's log gives, from each of the two places the rows it starts from can
+     * come from, against the truth -- and nothing it was unsure of.
+     *
+     * Compared without order: in what order the history lists the facts of a flush is the
+     * grouping's, which this does not decide, and ORM 2 and 3 run a nested flush's statements
+     * in different orders.
+     *
+     * @param list<string> $facts
+     */
+    private function assertTheShadowHistorySays(array $facts): void
+    {
+        $expected = $facts;
+        sort($expected);
+
+        foreach ([
+            'from the rows read before the scenario' => [$this->before, []],
+            'from what Doctrine remembered at preFlush and postLoad' => [$this->remembered->rows, $this->remembered->copiedAt],
+        ] as $source => [$rows, $copiedAt]) {
+            $shadow = ShadowHistory::fromWhatWasRemembered($this->em, $rows, $copiedAt)->replay($this->log, $this->from, $this->persisted);
+            $said = $shadow['facts'];
+            sort($said);
+
+            self::assertSame([], $shadow['unsure'], 'the shadow history, '.$source.', was unsure; it started from '.json_encode($rows));
+            self::assertSame($expected, $said, 'the shadow history, '.$source);
+        }
     }
 
     /**
