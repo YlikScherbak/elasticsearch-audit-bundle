@@ -234,6 +234,15 @@ final class AuditSubscriber
     /** @var array<int, int> by flush: the last statement it has claimed what ran up to */
     private array $claimedThrough = [];
 
+    /**
+     * Where each operation this listener saw began and ended in the log, the last one open
+     * while it runs: what tells a statement nobody owns that ran during a flush -- a hole in
+     * how flushes claim what they run -- from the application's own SQL between them.
+     *
+     * @var list<array{0: int, 1: int|null}>
+     */
+    private array $windows = [];
+
     /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
     private array $pendingIndexByEntity = [];
 
@@ -2311,6 +2320,15 @@ final class AuditSubscriber
         // ending, or dropped with the one that was found abandoned -- and in both cases not
         // the business of the next flush, which would otherwise write it as its own.
         $this->factsReadThrough = max($this->factsReadThrough, $this->statements->position());
+
+        $last = array_key_last($this->windows);
+
+        if ($last !== null && $this->windows[$last][1] === null) {
+            $this->windows[$last][1] = $this->factsReadThrough; // the operation is over
+        }
+
+        // Only what the next reading can still meet.
+        $this->windows = array_values(array_filter($this->windows, fn (array $window): bool => ($window[1] ?? \PHP_INT_MAX) > $this->factsReadThrough));
     }
 
     /**
@@ -2419,6 +2437,11 @@ final class AuditSubscriber
         }
 
         $this->flushingManager = \WeakReference::create($em);
+
+        if ($this->flushes === []) {
+            $this->windows[] = [$this->statements->position(), null]; // an operation begins
+        }
+
         $this->flushes[] = ['level' => $level, 'flush' => $flush, 'ran' => false];
     }
 
@@ -3410,7 +3433,15 @@ final class AuditSubscriber
      */
     private function elementFieldRuns(EntityManagerInterface $em, bool $consume = false): array
     {
-        return $this->elementRuns->of($em, $this->rows->replayed($em), $this->factsReadThrough, $consume);
+        return $this->elementRuns->of($em, $this->rows->replayed($em), $this->factsReadThrough, $consume, function (int $at): bool {
+            foreach ($this->windows as [$from, $to]) {
+                if ($at > $from && ($to === null || $at <= $to)) {
+                    return true;
+                }
+            }
+
+            return false;
+        });
     }
 
     /**

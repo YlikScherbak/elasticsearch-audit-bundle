@@ -106,6 +106,29 @@ abstract class DoctrineTestCase extends TestCase
     }
 
     /**
+     * Set by a test that runs SQL of its own against a watched row, where the listener's
+     * warning that it is not in the history is what the test is about.
+     */
+    protected bool $unownedStatementsAreExpected = false;
+
+    /**
+     * No statement a flush ran goes unclaimed. The listener says so in its log rather than
+     * raising it -- the application's own SQL has the persister's shape too -- and a test of an
+     * ordinary flush that finds the warning has found a flush that did not claim what it ran.
+     */
+    protected function tearDown(): void
+    {
+        if (!$this->unownedStatementsAreExpected) {
+            self::assertSame([], array_values(array_filter(
+                $this->logs,
+                static fn (string $line): bool => str_contains($line, 'so it is not in the history'),
+            )), 'a statement of a watched row went unclaimed');
+        }
+
+        parent::tearDown();
+    }
+
+    /**
      * What ManagerRegistry::resetManager() does after a failed flush closed the manager:
      * a fresh EntityManager on the same connection, with the same listeners.
      */
@@ -214,6 +237,11 @@ abstract class DoctrineTestCase extends TestCase
                     // on — "two arrived late" and "two were dropped" are different sizes
                     // of problem — so it is interpolated like the rest.
                     '{count}' => (string) ($context['count'] ?? ''),
+                    // What names a row the history does not have -- so that a test can hold
+                    // the line to naming it by its shape and not by what it held.
+                    '{field}' => (string) ($context['field'] ?? ''),
+                    '{class}' => (string) ($context['class'] ?? ''),
+                    '{key}' => (string) ($context['key'] ?? ''),
                 ]);
             }
         };

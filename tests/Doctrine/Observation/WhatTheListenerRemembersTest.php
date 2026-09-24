@@ -86,6 +86,30 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         self::assertSame(1, $this->remembered($x), 'and what was rolled back never was');
     }
 
+    public function testSqlTheApplicationRunsItselfIsOutsideTheHistoryAndSaidToBeWithoutWhatItHeld(): void
+    {
+        // $connection->update() writes the persister's own shape, so the log binds it to the
+        // row. No flush ran it, and the bundle audits flushes: it is not in the history, and
+        // the listener says so -- in its log, since it is nobody's failure -- by class, field
+        // and the key's columns, and never by a value. The row moved all the same, and the
+        // next flush's change starts where the application left it, not where Doctrine
+        // remembers.
+        $this->unownedStatementsAreExpected = true;
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
+        $x = $this->aLine();
+
+        $this->em->getConnection()->update('CrateItem', ['quantity' => 5], ['id' => $x->id]);
+        $this->gateway->documents = [];
+
+        $x->quantity = 2;
+        $this->em->flush();
+
+        $said = array_values(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'so it is not in the history')));
+
+        self::assertSame(['A statement changed quantity of a '.CrateItem::class.' row, keyed by id, outside every flush, so it is not in the history: SQL the application ran itself, which the bundle does not audit.'], $said);
+        self::assertSame([['items.'.$x->id.'.quantity' => ['old' => 5, 'new' => 2]]], array_map(static fn (array $d): array => array_filter($d['changes'], static fn (string $k): bool => str_starts_with($k, 'items.'), \ARRAY_FILTER_USE_KEY), $this->documents()));
+    }
+
     public function testAFlushOfNothingAuditedRemembersNothing(): void
     {
         $this->log = $this->watchTheConnection(FailurePolicy::Log, letsGo: true);

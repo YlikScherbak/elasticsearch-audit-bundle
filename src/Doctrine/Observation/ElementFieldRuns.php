@@ -61,9 +61,11 @@ final class ElementFieldRuns
      *                      up by reference when the identity map does not hold it, and says
      *                      what it cannot write. Counting, for a warning, does neither.
      *
+     * @param (\Closure(int): bool)|null $duringAFlush whether the statement at a position ran while a flush of the listener's did
+     *
      * @return list<array{owner: object|null, flush: int, changes: array<string, Change>}>
      */
-    public function of(EntityManagerInterface $em, HistoryReplay $replay, int $readThrough, bool $consume = false): array
+    public function of(EntityManagerInterface $em, HistoryReplay $replay, int $readThrough, bool $consume = false, ?\Closure $duringAFlush = null): array
     {
         $builder = new ChangeSetBuilder($em, $this->comparator);
         $runs = [];
@@ -78,11 +80,19 @@ final class ElementFieldRuns
             }
 
             if ($fact['flush'] === null) {
-                if ($consume) {
-                    $this->logger->warning('A statement changed {field} of the {class} row {key} outside every flush this listener saw, so it is not in the history: SQL the application ran itself, or a flush that did not claim what it ran.', [
+                // Named by class, field and the columns of the key, and nothing a statement
+                // carried: a value would be one more road out for what redaction keeps in.
+                if ($consume && $duringAFlush !== null && $duringAFlush($fact['at'])) {
+                    $this->logger->warning('A statement changed {field} of a {class} row, keyed by {key}, while a flush was running, and no flush claimed it, so it is not in the history. That is a hole in how the audit listener marks what a flush runs, and worth reporting.', [
                         'field' => $element['field'],
                         'class' => $element['class'],
-                        'key' => json_encode($element['key']),
+                        'key' => implode(', ', array_keys($element['key'])),
+                    ]);
+                } elseif ($consume) {
+                    $this->logger->warning('A statement changed {field} of a {class} row, keyed by {key}, outside every flush, so it is not in the history: SQL the application ran itself, which the bundle does not audit.', [
+                        'field' => $element['field'],
+                        'class' => $element['class'],
+                        'key' => implode(', ', array_keys($element['key'])),
                     ]);
                 }
 

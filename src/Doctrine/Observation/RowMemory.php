@@ -169,7 +169,17 @@ final class RowMemory
     public function rememberPersisted(EntityManagerInterface $em, object $entity): void
     {
         // Every one, whatever its key: the order has to line up with every INSERT without one.
-        $this->persisted[$em->getClassMetadata($entity::class)->rootEntityName][] = self::keyColumns($em, $entity) ?? [];
+        $metadata = $em->getClassMetadata($entity::class);
+        $key = self::keyColumns($em, $entity);
+        $this->persisted[$metadata->rootEntityName][] = $key ?? [];
+
+        // And the row its INSERT makes is held by this object from now on, as a remembered row
+        // is by the one it was taken from. Without that, settling let go of every row a flush
+        // had just inserted, and the next preFlush took it again from Doctrine's memory -- after
+        // whatever the application had written to it meanwhile, which Doctrine does not know.
+        if ($key !== null && $key !== [] && $this->watched->areWatched($em, $metadata)) {
+            $this->objects[$metadata->rootEntityName][HistoryReplay::keyOf($metadata, $key)] = \WeakReference::create($entity);
+        }
     }
 
     /**
