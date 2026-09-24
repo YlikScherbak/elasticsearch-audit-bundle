@@ -111,6 +111,11 @@ final class FullKernelBootTest extends TestCase
 
         self::assertGreaterThan($before, $log->position(), 'and what the entity manager\'s connection runs reaches it');
 
+        // And audit:check asks the same log whether the connection it was handed is watched.
+        $check = $kernel->getContainer()->get('test.service_container')->get(\Borsche\ElasticsearchAuditBundle\Command\CheckCommand::class);
+        self::assertSame($log, (new \ReflectionProperty($check, 'statements'))->getValue($check), 'audit:check reads the log the observer writes');
+        self::assertTrue($log->isWatching(), 'which knows its driver was wrapped');
+
         $kernel->shutdown();
     }
 

@@ -71,6 +71,9 @@ final class StatementLog
     /** How many statements a rollback has voided, ever: what a reader that keeps its place asks whether it can. */
     private int $voided = 0;
 
+    /** Whether an observer was put in front of a driver: what audit:check asks of the audited connection. */
+    private bool $watching = false;
+
     /**
      * @param bool $letsGo whether what its reader has read is let go. The listener is the one
      *                     reader, and a log that kept everything would grow with every
@@ -80,6 +83,23 @@ final class StatementLog
      */
     public function __construct(private readonly bool $letsGo = true)
     {
+    }
+
+    /**
+     * An observer was put in front of the driver of a connection this log hears.
+     *
+     * Told when DBAL builds the connection, which is before anything is run on it: a
+     * connection the middleware never wrapped is one whose statements this log will never
+     * see, and the history then has nothing to be read from.
+     */
+    public function watchesADriver(): void
+    {
+        $this->watching = true;
+    }
+
+    public function isWatching(): bool
+    {
+        return $this->watching;
     }
 
     /**

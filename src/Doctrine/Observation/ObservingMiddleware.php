@@ -34,6 +34,8 @@ final class ObservingMiddleware implements Middleware
 
     public function wrap(Driver $driver): Driver
     {
+        $this->log->watchesADriver();
+
         return new class($driver, $this->log) extends AbstractDriverMiddleware {
             public function __construct(Driver $driver, private readonly StatementLog $log)
             {

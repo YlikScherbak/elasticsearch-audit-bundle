@@ -8,12 +8,16 @@ use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
 use Borsche\ElasticsearchAuditBundle\Command\CreateIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Command\SyncIndexCommand;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
+use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\DriverManager;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
@@ -68,6 +72,89 @@ final class CommandsTest extends TestCase
 
         self::assertSame(Command::FAILURE, $tester->execute([]));
         self::assertStringContainsString('refused', $tester->getDisplay());
+    }
+
+    public function testAConnectionTheObserverNeverWrappedFailsTheCheck(): void
+    {
+        $tester = $this->checkOfTheConnection(new StatementLog(), self::connection());
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('driver middleware was not applied', $tester->getDisplay());
+    }
+
+    public function testAWatchedConnectionThatTellsNestedFlushesApartIsSaidToBe(): void
+    {
+        $tester = $this->checkOfTheConnection(self::watching(), self::connection(savepoints: true));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+        self::assertStringContainsString('Doctrine connection default: watched, and a nested flush is told apart by its savepoint', $tester->getDisplay());
+    }
+
+    public function testDbal3WithoutSavepointsFailsTheCheckUnderStrict(): void
+    {
+        // What the boot could not read -- a use_savepoints from an environment variable,
+        // or a call made once the container was built -- asked of the connection itself.
+        self::needsDbal3();
+
+        $tester = $this->checkOfTheConnection(self::watching(), self::connection(savepoints: false));
+
+        self::assertSame(Command::FAILURE, $tester->execute([]));
+        self::assertStringContainsString('nests transactions without savepoints', $tester->getDisplay());
+    }
+
+    public function testDbal3WithoutSavepointsUnderOuterIsALimitSaidOutLoud(): void
+    {
+        self::needsDbal3();
+
+        $tester = $this->checkOfTheConnection(self::watching(), self::connection(savepoints: false), 'outer');
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]), 'a choice made on purpose is not a failed check');
+        self::assertStringContainsString('recorded with the moment, actor and context of the flush around it', $tester->getDisplay());
+    }
+
+    public function testWithoutAnAuditedConnectionNothingIsSaidAboutOne(): void
+    {
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        $tester = new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition()));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+        self::assertStringNotContainsString('Doctrine connection', $tester->getDisplay());
+    }
+
+    private function checkOfTheConnection(StatementLog $log, Connection $connection, string $provenance = 'strict'): CommandTester
+    {
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->toArray();
+
+        return new CommandTester(new CheckCommand($this->gateway, $this->resolver, new IndexDefinition(), [], AuditQuery::DEFAULT_MAX_WINDOW, null, null, '', null, FailureDetails::Cause, 'sync', $log, $connection, 'default', $provenance));
+    }
+
+    private static function watching(): StatementLog
+    {
+        $log = new StatementLog();
+        $log->watchesADriver();
+
+        return $log;
+    }
+
+    private static function connection(bool $savepoints = false): Connection
+    {
+        $connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true]);
+
+        if ($savepoints && ObservingMiddleware::onDbal3()) {
+            $connection->setNestTransactionsWithSavepoints(true);
+        }
+
+        return $connection;
+    }
+
+    private static function needsDbal3(): void
+    {
+        if (!ObservingMiddleware::onDbal3()) {
+            self::markTestSkipped('DBAL 4 always nests with savepoints.');
+        }
     }
 
     public function testAnOldClusterIsSaidToBeOldWithoutFailingTheCheck(): void

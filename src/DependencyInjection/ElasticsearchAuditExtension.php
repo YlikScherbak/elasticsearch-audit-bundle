@@ -161,7 +161,7 @@ final class ElasticsearchAuditExtension extends Extension
         $this->registerWriter($config['on_failure'], $config['batch_size'], $config['redact'], $container);
         $this->registerReader($config['reader'], $container);
         $this->registerDoctrine($config['doctrine'], $container);
-        $this->registerCommands($container, $config['reader']['max_result_window'], $config['transport'] === 'outbox' ? ($config['outbox']['transport'] ?? null) : null, $config['doctrine']['connection'], self::failureDetails($config['redact']), $config['transport']);
+        $this->registerCommands($container, $config['reader']['max_result_window'], $config['transport'] === 'outbox' ? ($config['outbox']['transport'] ?? null) : null, $config['doctrine']['connection'], self::failureDetails($config['redact']), $config['transport'], $config['doctrine']['nested_flush_provenance']);
     }
 
     /**
@@ -578,7 +578,7 @@ final class ElasticsearchAuditExtension extends Extension
         $container->setAlias(AuditWriter::class, self::SERVICE_WRITER)->setPublic(true);
     }
 
-    private function registerCommands(ContainerBuilder $container, int $maxResultWindow, ?string $queue, string $connection, FailureDetails $failureDetails, string $transport = 'sync'): void
+    private function registerCommands(ContainerBuilder $container, int $maxResultWindow, ?string $queue, string $connection, FailureDetails $failureDetails, string $transport = 'sync', string $provenance = 'strict'): void
     {
         if (!class_exists(Command::class)) {
             return;
@@ -623,6 +623,13 @@ final class ElasticsearchAuditExtension extends Extension
             // And which transport, so the check can refuse to call an installation
             // healthy when nothing is being written to the indices it just approved.
             $transport,
+            // And whether the audited connection is watched and tells a nested flush
+            // apart. The log exists only when the listener does; without DoctrineBundle
+            // there is no connection to ask.
+            new Reference(self::SERVICE_STATEMENT_LOG, ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            new Reference(sprintf('doctrine.dbal.%s_connection', $connection), ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            $connection,
+            $provenance,
         ]))->addTag('console.command'));
     }
 }

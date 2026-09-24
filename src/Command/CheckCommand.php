@@ -9,6 +9,8 @@ use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClusterVersion;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Schema\Schema;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
@@ -62,6 +64,12 @@ final class CheckCommand extends Command
         // Which road records take. Only one of them is worth a line here, and it is the
         // one that makes every other line of this command misleading.
         private readonly string $transport = 'sync',
+        // The connection whose flushes are audited, and the log its observer writes to:
+        // both null when the listener is not registered, and then there is nothing to ask.
+        private readonly ?StatementLog $statements = null,
+        private readonly ?Connection $doctrineConnection = null,
+        private readonly string $doctrineConnectionName = 'default',
+        private readonly string $nestedFlushProvenance = 'strict',
     ) {
         parent::__construct();
     }
@@ -132,8 +140,47 @@ final class CheckCommand extends Command
         }
 
         $healthy = $this->checkTheOutbox($io) && $healthy;
+        $healthy = $this->checkTheWatchedConnection($io) && $healthy;
 
         return $healthy ? self::SUCCESS : self::FAILURE;
+    }
+
+    /**
+     * Whether the connection the audited entities are on is watched, and tells a nested
+     * flush apart from the flush around it.
+     *
+     * The boot refuses a DBAL 3 connection without savepoints when it can read the
+     * connection's definition; this asks the connection itself, which is where a setting
+     * made from an environment variable, or made after the container was built, finally
+     * answers.
+     */
+    private function checkTheWatchedConnection(SymfonyStyle $io): bool
+    {
+        if ($this->statements === null || $this->doctrineConnection === null) {
+            return true; // no entity is audited
+        }
+
+        if (!$this->statements->isWatching()) {
+            $io->text(sprintf('<error>Doctrine connection %s</error>: the bundle\'s driver middleware was not applied to it, so the statements it runs are never seen and the history of its flushes has nothing to be read from. DoctrineBundle applies a middleware tagged doctrine.middleware to the connection it names; something replaced or rebuilt this connection without it.', $this->doctrineConnectionName));
+
+            return false;
+        }
+
+        if (ObservingMiddleware::onDbal3() && !$this->doctrineConnection->getNestTransactionsWithSavepoints()) {
+            if ($this->nestedFlushProvenance === 'strict') {
+                $io->text(sprintf('<error>Doctrine connection %s</error> nests transactions without savepoints, so a flush run inside another flush cannot be told apart from it and its changes are recorded with the moment, actor and context of the flush around it. Set use_savepoints: true on the connection (a nested rollBack() then rolls back to its savepoint instead of the whole transaction), or set doctrine.nested_flush_provenance: outer to accept it.', $this->doctrineConnectionName));
+
+                return false;
+            }
+
+            $io->text(sprintf('<comment>Doctrine connection %s</comment>: without savepoints, and nested_flush_provenance is "outer" - the changes of a flush run inside another flush are recorded with the moment, actor and context of the flush around it. The values are right; the name on them is the outer one.', $this->doctrineConnectionName));
+
+            return true;
+        }
+
+        $io->text(sprintf('Doctrine connection <info>%s</info>: watched, and a nested flush is told apart by its savepoint', $this->doctrineConnectionName));
+
+        return true;
     }
 
     /**
