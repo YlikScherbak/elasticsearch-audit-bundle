@@ -1330,6 +1330,14 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
                 if (($is['crate_id'] ?? null) !== null) {
                     $said[] = sprintf('crate %s gained %s', $is['crate_id'], $sku);
+
+                    // Moved and changed by one statement -- the readings are taken before every
+                    // one -- and what changed belongs to the crate it arrived at: the old side
+                    // is the line's, not a state of that crate's. Leaving for nowhere, the change
+                    // is nobody's.
+                    if ($was !== null && $was['quantity'] !== $is['quantity']) {
+                        $said[] = sprintf('crate %s line %s quantity %s -> %s', $is['crate_id'], $sku, json_encode($was['quantity']), json_encode($is['quantity']));
+                    }
                 }
             } elseif ($was !== null && $is !== null && $was['quantity'] !== $is['quantity']) {
                 $said[] = sprintf('crate %s line %s quantity %s -> %s', $is['crate_id'], $sku, json_encode($was['quantity']), json_encode($is['quantity']));

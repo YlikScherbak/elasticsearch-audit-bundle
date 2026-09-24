@@ -345,72 +345,92 @@ final class HistoryReplay
         }
 
         $before = $this->rows[$root][$id];
-        $owners = $this->ownersOf($metadata, $before);
+        $after = $before;
+
+        foreach ($shape->assigned as $column => $parameter) {
+            // An expression -- a version's -- is not followed: the column is not known after it.
+            $after[$column] = $parameter === null ? null : $params[$parameter] ?? null;
+        }
+
+        $this->rows[$root][$id] = $after;
+
+        $ownersBefore = self::byColumn($this->ownersOf($metadata, $before));
+        $ownersAfter = self::byColumn($this->ownersOf($metadata, $after));
         $audited = $this->audited->for($metadata->newInstance());
 
-        // An element this statement moves to another owner tells neither of them what else
-        // changed in it: the one it left never held the new value and the one it joined never
-        // held the old. Only through that association -- an owner it stays with on another is
-        // told, which is what that collection is tracked for.
-        $staying = [];
+        // A row this statement points at another owner left the one it had, as it was, and
+        // arrived at the new one, as it is: the representer is given the row on each side of
+        // the statement. Through that association only -- an owner the row keeps on another
+        // hears nothing of a move.
+        foreach (array_keys($ownersBefore + $ownersAfter) as $column) {
+            $was = $ownersBefore[$column] ?? null;
+            $is = $ownersAfter[$column] ?? null;
 
-        foreach ($owners as $owner) {
-            if (!\array_key_exists($owner['column'], $shape->assigned)) {
-                $staying[] = $owner; // the statement does not touch this foreign key
-
-                continue;
+            if ($was !== null && $is !== null && $was['id'] === $is['id']) {
+                continue; // the owner it already had
             }
 
-            $parameter = $shape->assigned[$owner['column']];
+            if ($was !== null) {
+                $this->said($was['type'], $was['id'], $was['collection'].'.'.$id, $this->represent($metadata, $before, $was['metadata'], $was['collection']), null);
+            }
 
-            if ($parameter !== null && self::scalar($params[$parameter] ?? null) === self::scalar($before[$owner['column']] ?? null)) {
-                $staying[] = $owner; // written, with the owner it already had
+            if ($is !== null) {
+                $this->said($is['type'], $is['id'], $is['collection'].'.'.$id, null, $this->represent($metadata, $after, $is['metadata'], $is['collection']));
             }
         }
 
         foreach ($shape->assigned as $column => $parameter) {
-            if ($parameter === null) {
-                $this->rows[$root][$id][$column] = null; // an expression, as a version's; not followed
+            $field = $metadata->getFieldForColumn($column);
 
+            // A foreign key is the move above, or an association of the element's own, which
+            // is not something an element's history holds: a representer for it has nowhere
+            // to be declared. An expression is not followed.
+            if ($parameter === null || !$metadata->hasField($field)) {
                 continue;
             }
 
-            $new = $params[$parameter] ?? null;
-            $old = $before[$column] ?? null;
-            $this->rows[$root][$id][$column] = $new;
-
-            $field = $metadata->getFieldForColumn($column);
-
-            if (!$metadata->hasField($field)) {
-                if ($owners !== []) {
-                    $this->doubts[] = 'an UPDATE of '.$root.'.'.$column.' this does not describe';
-                }
-
-                continue; // a foreign key of nothing tracked
-            }
-
-            $was = $this->php($metadata, $field, $old);
-            $is = $this->php($metadata, $field, $new);
+            $was = $this->php($metadata, $field, $before[$column] ?? null);
+            $is = $this->php($metadata, $field, $after[$column] ?? null);
 
             if (self::same($was, $is)) {
                 continue;
             }
 
-            if ($owners !== []) {
-                foreach ($staying as $owner) {
-                    $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id.'.'.$field, $was, $is, [
-                        'owner' => $owner['metadata']->name,
-                        'ownerKey' => $owner['key'],
-                        'collection' => $owner['collection'],
-                        'class' => $metadata->rootEntityName,
-                        'key' => $key,
-                        'field' => $field,
-                    ]);
-                }
-            } elseif ($audited !== null && \array_key_exists($field, $audited->fields)) {
+            // Told to the owners the row has once the statement ran: the one it arrived at
+            // with its arrival -- the old side is the row's value, not a state of that owner's
+            // -- and none, for a row the statement took out of every tracked collection,
+            // which is as much nobody's history as any later change to it.
+            foreach ($ownersAfter as $owner) {
+                $this->said($owner['type'], $owner['id'], $owner['collection'].'.'.$id.'.'.$field, $was, $is, [
+                    'owner' => $owner['metadata']->name,
+                    'ownerKey' => $owner['key'],
+                    'collection' => $owner['collection'],
+                    'class' => $metadata->rootEntityName,
+                    'key' => $key,
+                    'field' => $field,
+                ]);
+            }
+
+            if ($ownersBefore === [] && $ownersAfter === [] && $audited !== null && \array_key_exists($field, $audited->fields)) {
                 $this->said($audited->objectType, $id, $field, $was, $is);
             }
         }
+    }
+
+    /**
+     * @param list<array{type: string, id: string, key: mixed, column: string, collection: string, metadata: ClassMetadata<object>}> $owners
+     *
+     * @return array<string, array{type: string, id: string, key: mixed, column: string, collection: string, metadata: ClassMetadata<object>}>
+     */
+    private static function byColumn(array $owners): array
+    {
+        $byColumn = [];
+
+        foreach ($owners as $owner) {
+            $byColumn[$owner['column']] = $owner;
+        }
+
+        return $byColumn;
     }
 
     /**

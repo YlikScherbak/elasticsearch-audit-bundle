@@ -22,6 +22,14 @@ final class ShadowHistoryTest extends DoctrineTestCase
         'Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem' => [
             '1' => ['id' => 1, 'sku' => 'SKU-X', 'quantity' => 1, 'crate_id' => 'C-1'],
             '2' => ['id' => 2, 'sku' => 'SKU-Y', 'quantity' => 1, 'crate_id' => 'C-1'],
+            '9' => ['id' => 9, 'sku' => 'SKU-LOOSE', 'quantity' => 1, 'crate_id' => null],
+        ],
+    ];
+
+    /** Hopper shows a chute by its size, the field that changes. */
+    private const CHUTES = [
+        'Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Chute' => [
+            '1' => ['id' => 1, 'size' => 3, 'hopper_id' => 1, 'inspector_id' => null],
         ],
     ];
 
@@ -115,6 +123,77 @@ final class ShadowHistoryTest extends DoctrineTestCase
         ]], $this->replayed($log));
     }
 
+    public function testAMoveIsADepartureAsTheRowWasAndAnArrivalAsItIsWithTheChangeBesideIt(): void
+    {
+        // One UPDATE moved the line and changed it. The owner it left sees it go as it was,
+        // the owner it joined sees it come as it is, and what changed is the arrival's: the old
+        // side is the line's value, not a state of C-2's.
+        $log = $this->begun();
+        $log->executed('UPDATE CrateItem SET quantity = ?, crate_id = ? WHERE id = ?', [1 => 5, 2 => 'C-2', 3 => 1], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => [
+            'crate C-1 items.1: "SKU-X" -> null',
+            'crate C-2 items.1: null -> "SKU-X"',
+            'crate C-2 items.1.quantity: 1 -> 5',
+        ], 'unsure' => []], $this->replayed($log));
+    }
+
+    public function testARepresenterIsShownTheRowOnEachSideOfTheMove(): void
+    {
+        $log = $this->begun();
+        $log->executed('UPDATE Chute SET size = ?, hopper_id = ? WHERE id = ?', [1 => 4, 2 => 2, 3 => 1], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => [
+            'hopper 1 chutes.1: "3" -> null',
+            'hopper 2 chutes.1: null -> "4"',
+            'hopper 2 chutes.1.size: 3 -> 4',
+        ], 'unsure' => []], $this->replayed($log, rows: self::CHUTES));
+    }
+
+    public function testALineTakenOutOfEveryCollectionLeavesAndIsNobodysAfterwards(): void
+    {
+        $log = $this->begun();
+        $log->executed('UPDATE CrateItem SET quantity = ?, crate_id = ? WHERE id = ?', [1 => 5, 2 => null, 3 => 1], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => ['crate C-1 items.1: "SKU-X" -> null'], 'unsure' => []], $this->replayed($log));
+    }
+
+    public function testALineThatBelongedNowhereArrivesWithWhatChanged(): void
+    {
+        $log = $this->begun();
+        $log->executed('UPDATE CrateItem SET quantity = ?, crate_id = ? WHERE id = ?', [1 => 5, 2 => 'C-1', 3 => 9], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => [
+            'crate C-1 items.9: null -> "SKU-LOOSE"',
+            'crate C-1 items.9.quantity: 1 -> 5',
+        ], 'unsure' => []], $this->replayed($log));
+    }
+
+    public function testAForeignKeyWrittenWithTheOwnerItAlreadyHadIsNoMove(): void
+    {
+        $log = $this->begun();
+        $log->executed('UPDATE CrateItem SET quantity = ?, crate_id = ? WHERE id = ?', [1 => 5, 2 => 'C-1', 3 => 1], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => ['crate C-1 items.1.quantity: 1 -> 5'], 'unsure' => []], $this->replayed($log));
+    }
+
+    public function testAnAssociationOfTheElementsOwnIsNeitherAFactNorADoubt(): void
+    {
+        // A chute's inspector is an association of the element: its history has nowhere to
+        // declare a representer for it, so it is not something the element's history holds --
+        // which is a rule of what is recorded, not something the replay could not follow.
+        $log = $this->begun();
+        $log->executed('UPDATE Chute SET inspector_id = ? WHERE id = ?', [1 => 7, 2 => 1], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => [], 'unsure' => []], $this->replayed($log, rows: self::CHUTES));
+    }
+
     private function begun(): StatementLog
     {
         $log = new StatementLog();
@@ -124,13 +203,14 @@ final class ShadowHistoryTest extends DoctrineTestCase
     }
 
     /**
-     * @param array<class-string, list<object>> $persisted
+     * @param array<class-string, list<object>>                           $persisted
+     * @param array<string, array<string, array<string, mixed>>> $rows
      *
      * @return array{facts: list<string>, unsure: list<string>}
      */
-    private function replayed(StatementLog $log, array $persisted = []): array
+    private function replayed(StatementLog $log, array $persisted = [], array $rows = self::ROWS): array
     {
-        $replayed = ShadowHistory::fromWhatWasRemembered($this->em, self::ROWS)->replay($log, 0, $persisted);
+        $replayed = ShadowHistory::fromWhatWasRemembered($this->em, $rows)->replay($log, 0, $persisted);
 
         return ['facts' => $replayed['facts'], 'unsure' => $replayed['unsure']]; // no flush labels these logs
     }
