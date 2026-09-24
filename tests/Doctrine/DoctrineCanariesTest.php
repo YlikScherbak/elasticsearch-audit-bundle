@@ -126,6 +126,60 @@ final class DoctrineCanariesTest extends TestCase
     }
 
     /**
+     * Backs taking what a row held from Doctrine's memory at preFlush and never later.
+     *
+     * preFlush is dispatched before `computeChangeSets()`, so Doctrine still remembers the
+     * row as it was last written -- while the object already holds the application's new
+     * value. By onFlush `computeChangeSet()` has written the new value over that memory,
+     * and a copy taken there starts a change from where it ends: S1a would read 2 -> 2 and
+     * say nothing changed. And a flush refused in onFlush leaves the memory rewritten for
+     * the next one: its preFlush remembers a value the row never took, which is why the
+     * first copy of a row is the one kept.
+     */
+    public function testDoctrineRemembersTheRowAtPreFlushAndThePlanAtOnFlush(): void
+    {
+        $basket = new Basket('first');
+        $this->em->persist($basket);
+        $this->em->flush();
+
+        $remembered = [];
+        $this->em->getEventManager()->addEventListener([Events::preFlush, Events::onFlush], new class($remembered, $basket) {
+            /** @param list<string> $remembered */
+            public function __construct(private array &$remembered, private readonly Basket $basket)
+            {
+            }
+
+            public function preFlush(\Doctrine\ORM\Event\PreFlushEventArgs $args): void
+            {
+                $this->remembered[] = 'preFlush '.var_export($args->getObjectManager()->getUnitOfWork()->getOriginalEntityData($this->basket)['label'] ?? null, true);
+            }
+
+            public function onFlush(OnFlushEventArgs $args): void
+            {
+                $this->remembered[] = 'onFlush '.var_export($args->getObjectManager()->getUnitOfWork()->getOriginalEntityData($this->basket)['label'] ?? null, true);
+
+                throw new \DomainException('refused');
+            }
+        });
+
+        $basket->label = 'second';
+
+        foreach ([1, 2] as $attempt) {
+            try {
+                $this->em->flush();
+            } catch (\DomainException) {
+            }
+        }
+
+        self::assertSame(
+            ["preFlush 'first'", "onFlush 'second'", "preFlush 'second'", "onFlush 'second'"],
+            $remembered,
+            'what Doctrine remembers at preFlush and at onFlush has changed -- the row memory takes its first copy of a row at preFlush on the strength of this',
+        );
+        self::assertSame('first', $this->connection->fetchOne('SELECT label FROM Basket WHERE id = ?', [$basket->id]), 'and the row never took the value remembered on the second attempt');
+    }
+
+    /**
      * Backs the snapshot the listener takes in onFlush for emptied collections.
      *
      * `clear()` on an **owning** collection schedules it for deletion and then takes a
