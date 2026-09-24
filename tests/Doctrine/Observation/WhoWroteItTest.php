@@ -170,7 +170,7 @@ class WhoWroteItTest extends DoctrineTestCase
         $crate->add($y = new CrateItem('SKU-Y'));
         $this->em->flush();
 
-        $before = (new \ReflectionProperty(ShadowHistory::class, 'rows'))->getValue(ShadowHistory::fromTheRows($this->em, [Crate::class, CrateItem::class]));
+        $before = ShadowHistory::theRows($this->em, [Crate::class, CrateItem::class]);
 
         return [$this->log->position(), $before, $x, $y];
     }

@@ -189,6 +189,15 @@ final class StatementLog
         return preg_match('/^\s*(SELECT|SHOW|PRAGMA|EXPLAIN)\b/i', $sql) === 1;
     }
 
+    /**
+     * Whether a transaction is open: until it is not, what ran in it may still be rolled back,
+     * and nothing in it is final.
+     */
+    public function inTransaction(): bool
+    {
+        return $this->open !== [];
+    }
+
     /** Where the log has got to, for a caller that wants to know what ran after this point. */
     public function position(): int
     {

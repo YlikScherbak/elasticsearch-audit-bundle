@@ -6,7 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Observation\ShadowHistory;
-use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Observation\WhatDoctrineRemembered;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -60,7 +60,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
     /** @var array<class-string, array<string, array<string, mixed>>> the rows, read when the scenario began */
     private array $before = [];
 
-    private WhatDoctrineRemembered $remembered;
+    private RowMemory $remembered;
 
     /** @var array<class-string, list<object>> every entity postPersist announced, in order */
     private array $persisted = [];
@@ -429,9 +429,28 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         // they are now, and a copy of what Doctrine remembers at every preFlush and postLoad
         // from here on.
         $this->from = $this->log->position();
-        $this->before = (new \ReflectionProperty(ShadowHistory::class, 'rows'))->getValue(ShadowHistory::fromTheRows($this->em, [Crate::class, CrateItem::class]));
-        $this->remembered = new WhatDoctrineRemembered([Crate::class, CrateItem::class], $this->log);
-        $this->em->getEventManager()->addEventListener([Events::preFlush, Events::postLoad], $this->remembered);
+        $this->before = ShadowHistory::theRows($this->em, [Crate::class, CrateItem::class]);
+        $this->remembered = new RowMemory($this->log);
+        $this->em->getEventManager()->addEventListener([Events::preFlush, Events::postLoad], new class($this->remembered) {
+            public function __construct(private readonly RowMemory $memory)
+            {
+            }
+
+            public function preFlush(\Doctrine\ORM\Event\PreFlushEventArgs $args): void
+            {
+                $this->memory->rememberWhatIsManaged($args->getObjectManager());
+            }
+
+            public function postLoad(\Doctrine\ORM\Event\PostLoadEventArgs $args): void
+            {
+                $em = $args->getObjectManager();
+
+                if ($em instanceof \Doctrine\ORM\EntityManagerInterface) {
+                    // What the listener will know from its stack; the tests ask the connection.
+                    $this->memory->rememberLoaded($em, $args->getObject(), $em->getConnection()->isTransactionActive());
+                }
+            }
+        });
         $this->em->getEventManager()->addEventListener([Events::postPersist], new class($this->persisted) {
             /** @param array<class-string, list<object>> $persisted */
             public function __construct(private array &$persisted)
@@ -494,7 +513,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
 
         foreach ([
             'from the rows read before the scenario' => [$this->before, []],
-            'from what Doctrine remembered at preFlush and postLoad' => [$this->remembered->rows, $this->remembered->copiedAt],
+            'from the row memory the listener will read' => [$this->remembered->rows(), $this->remembered->takenAt()],
         ] as $source => [$rows, $copiedAt]) {
             $shadow = ShadowHistory::fromWhatWasRemembered($this->em, $rows, $copiedAt)->replay($this->log, $this->from, $this->persisted);
             $said = $shadow['facts'];
