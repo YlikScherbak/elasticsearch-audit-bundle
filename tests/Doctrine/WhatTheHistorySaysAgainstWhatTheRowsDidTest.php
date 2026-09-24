@@ -599,6 +599,20 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * @var array<string, list<array{0: int, 1: bool, 2: list<string>, 3?: string}>>
      */
     private const TELLS_APART = [
+        // A line moved and changed by one statement tells the crate it arrived at what
+        // changed (UPGRADE 1.3, and OracleChanges.md) -- the eight the long run found when
+        // the rule changed.
+        'a line moved and changed by one statement tells the crate it arrived at' => [
+            [1, true, ['edit the article', 'flush, publishing swallowed', 'change a line', 'move a line', 'flush, refused', 'change a line', 'flush', 'flush']], // drawn by seed 149
+            [6, false, ['change a line', 'flush', 'replace the crate', 'flush', 'move a line back', 'change a line', 'flush, publishing swallowed', 'flush']], // drawn by seed 638
+            [3, false, ['change a line', 'move a line back', 'move a line', 'flush']], // drawn by seed 706
+            [7, false, ['change a line', 'move a line', 'move a line', 'flush']], // drawn by seed 998
+            [2, false, ['remove a line', 'flush', 'change a line', 'move a line', 'flush, publishing swallowed', 'flush']], // drawn by seed 1052
+            [0, false, ['change a line', 'move a line', 'flush', 'flush']], // drawn by seed 1269
+            [7, false, ['change a line', 'move a line', 'flush', 'add a namesake', 'replace the crate', 'flush']], // drawn by seed 1722
+            [6, true, ['change a line', 'move a line', 'flush', 'flush']], // drawn by seed 2710
+        ],
+
         // theseRowsAreGoing()'s set of rows an emptying took, asked whenever something new is
         // about to be written -- because a nested flush writes its part after the sweep.
         'the rows an emptying took stay taken for the rest of the operation' => [
