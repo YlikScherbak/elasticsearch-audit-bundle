@@ -90,7 +90,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [1 => 5, 2 => 2],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'],
-            today: ['crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'],
         );
     }
 
@@ -112,7 +111,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [1 => 2, 2 => 7],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2.quantity: 1 -> 7'],
-            today: ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2.quantity: 1 -> 2'],
         );
     }
 
@@ -135,7 +133,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [1 => 5, 2 => 2],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'],
-            today: ['crate C-1 items.2.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 1 -> 2'],
         );
     }
 
@@ -158,7 +155,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [1 => 2, 2 => 1],
             ['crate C-1 items.1.quantity: 1 -> 2'],
-            today: ['crate C-1 items.1.quantity: 1 -> 5'],
         );
     }
 
