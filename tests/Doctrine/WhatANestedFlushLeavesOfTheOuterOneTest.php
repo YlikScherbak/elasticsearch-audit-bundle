@@ -193,9 +193,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items: ["SKU-X","SKU-Y"] -> []'],
-            // Both facts, in the wrong order: what changed inside the line is read from the
-            // log now and the emptying is not yet, so the emptying's record is built first.
-            today: ['crate C-1 items: ["SKU-X","SKU-Y"] -> []', 'crate C-1 items.1.quantity: 1 -> 2'],
         );
     }
 
@@ -217,9 +214,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [1 => 2],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2: "SKU-Y" -> null'],
-            // The phantom 1 -> 2 is gone -- the UPDATE after the DELETE reached nothing, and the
-            // log says so -- and the departure, still collected the old way, comes first.
-            today: ['crate C-1 items.2: "SKU-Y" -> null', 'crate C-1 items.1.quantity: 1 -> 2'],
         );
     }
 
@@ -277,9 +271,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->assertTheRowsAndTheHistory(
             [2 => 1],
             ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1: "SKU-X" -> null'],
-            // The departure is still collected the old way, in onFlush, and a removal
-            // scheduled after it is never offered to it: step 3 reads it from the log.
-            today: ['crate C-1 items.1.quantity: 1 -> 2'],
         );
     }
 

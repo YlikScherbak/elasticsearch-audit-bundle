@@ -22,6 +22,8 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesRepresented;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Doctrine\ORM\Events;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Chute;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Hopper;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
 
@@ -48,10 +50,14 @@ final class ElementOwnershipTest extends DoctrineTestCase
         self::assertSame(['old' => null, 'new' => 'widget'], $changes[(string) $b->id]['lines.'.$lineId], 'the shipment it joined');
     }
 
-    public function testAMoveThatAlsoChangedTheLineDoesNotBackdateTheChange(): void
+    public function testAMoveThatAlsoChangedTheLineTellsTheOwnerItArrivedAtWhatChanged(): void
     {
-        // The new owner never held the old quantity, so recording "1 → 5" against it
-        // would describe a state that shipment was never in.
+        // One UPDATE moved the line and changed its quantity. It used to go into no record at
+        // all -- the new owner never held 1, the old one never held 5 -- and with a
+        // representer that shows the product and not the quantity, the change was then in no
+        // record anywhere. It is the arrival's now, in the same record: the line arrived,
+        // and its quantity went from 1 to 5 as it did. "1" is the line's, not a state of B's.
+        // The shipment it left sees it go as it was.
         [$a, $b] = $this->twoShipments();
         $line = $a->lines->first();
         $lineId = $line->id;
@@ -62,9 +68,110 @@ final class ElementOwnershipTest extends DoctrineTestCase
 
         $changes = $this->changesByObjectId();
 
-        self::assertSame(['lines.'.$lineId], array_keys($changes[(string) $b->id]));
-        self::assertArrayNotHasKey('lines.'.$lineId.'.quantity', $changes[(string) $b->id]);
-        self::assertArrayNotHasKey('lines.'.$lineId.'.quantity', $changes[(string) $a->id]);
+        self::assertSame(['lines.'.$lineId => ['old' => 'widget', 'new' => null]], self::onlyTheLines($changes[(string) $a->id]), 'the shipment it left');
+        self::assertSame(
+            ['lines.'.$lineId => ['old' => null, 'new' => 'widget'], 'lines.'.$lineId.'.quantity' => ['old' => 1, 'new' => 5]],
+            self::onlyTheLines($changes[(string) $b->id]),
+            'the shipment it joined, in one record',
+        );
+        self::assertCount(2, $this->documents(), 'one record each');
+    }
+
+    public function testAMoveOfAnElementWhoseRepresenterShowsTheChangeShowsBothSides(): void
+    {
+        // Hopper shows a chute by its size: the one it left sees the size it went with, the
+        // one it joined the size it came with, and the change beside the arrival.
+        $from = new Hopper('H-1');
+        $from->add($chute = new Chute(3));
+        $this->em->persist($from);
+        $this->em->persist($to = new Hopper('H-2'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $chute->size = 4;
+        $chute->hopper = $to;
+        $from->chutes->removeElement($chute);
+        $to->chutes->add($chute);
+        $this->em->flush();
+
+        $changes = $this->changesByObjectId();
+
+        self::assertSame(['chutes.'.$chute->id => ['old' => '3', 'new' => null]], self::onlyTheLines($changes[(string) $from->id]));
+        self::assertSame(
+            ['chutes.'.$chute->id => ['old' => null, 'new' => '4'], 'chutes.'.$chute->id.'.size' => ['old' => 3, 'new' => 4]],
+            self::onlyTheLines($changes[(string) $to->id]),
+        );
+    }
+
+    public function testAMoveAndAChangeAFlushRolledBackAreNeither(): void
+    {
+        [$a, $b] = $this->twoShipments();
+        $line = $a->lines->first();
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class {
+            public function postUpdate(): void
+            {
+                throw new \DomainException('the flush dies after the UPDATE');
+            }
+        });
+
+        $line->quantity = 5;
+        $this->move($line, $a, $b);
+
+        try {
+            $this->em->flush();
+            self::fail('the premise: the flush died');
+        } catch (\DomainException) {
+        }
+
+        self::assertSame([], $this->documents());
+    }
+
+    public function testALineDetachedAndChangedLeavesItsOwnerAndNothingElse(): void
+    {
+        // A -> nobody. The line goes from the shipment as it was; what else the same UPDATE
+        // did to it belongs to a row no tracked collection holds any more -- the same as any
+        // later change of that row, which is nobody's history either.
+        [$a] = $this->twoShipments();
+        $line = $a->lines->first();
+        $lineId = $line->id;
+
+        $line->quantity = 5;
+        $line->shipment = null;
+        $a->lines->removeElement($line);
+        $this->em->flush();
+
+        self::assertSame(['lines.'.$lineId => ['old' => 'widget', 'new' => null]], self::onlyTheLines($this->changesByObjectId()[(string) $a->id]));
+        self::assertCount(1, $this->documents());
+    }
+
+    public function testALineAttachedAndChangedArrivesWithWhatChanged(): void
+    {
+        // Nobody -> B: the arrival and the change, together.
+        [, $b] = $this->twoShipments();
+        $this->em->persist($loose = new ShipmentLine('gadget', 1));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $loose->quantity = 5;
+        $loose->shipment = $b;
+        $b->lines->add($loose);
+        $this->em->flush();
+
+        self::assertSame(
+            ['lines.'.$loose->id => ['old' => null, 'new' => 'gadget'], 'lines.'.$loose->id.'.quantity' => ['old' => 1, 'new' => 5]],
+            self::onlyTheLines($this->changesByObjectId()[(string) $b->id]),
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $changes
+     *
+     * @return array<string, mixed>
+     */
+    private static function onlyTheLines(array $changes): array
+    {
+        return array_filter($changes, static fn (string $key): bool => str_contains($key, '.'), \ARRAY_FILTER_USE_KEY);
     }
 
     public function testALineDetachedFromItsShipmentIsRecordedAsGone(): void
