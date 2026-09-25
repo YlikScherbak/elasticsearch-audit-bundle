@@ -683,6 +683,41 @@ final class DoctrineCanariesTest extends TestCase
         self::assertSame(9, $line->quantity, 'and Doctrine has the new value on an object with no row');
     }
 
+    /**
+     * Backs `TransactionSafetyTest::testARemovalTheApplicationTookBackInsideAFlushIsNotRecorded()`
+     * and every guard that places something between two DELETEs: how many of a flush's rows
+     * are already gone when each postRemove is announced.
+     */
+    public function testHowManyRowsAreGoneWhenEachRemovalIsAnnounced(): void
+    {
+        $this->em->persist($first = new Article('First'));
+        $this->em->persist($second = new Article('Second'));
+        $this->em->persist(new Article('Third'));
+        $this->em->flush();
+
+        $gone = new \ArrayObject();
+        $this->em->getEventManager()->addEventListener([Events::postRemove], new class($this->connection, $gone) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly \ArrayObject $gone)
+            {
+            }
+
+            public function postRemove(): void
+            {
+                $this->gone[] = 3 - (int) $this->connection->fetchOne('SELECT COUNT(*) FROM Article');
+            }
+        });
+
+        $this->em->remove($first);
+        $this->em->remove($second);
+        $this->em->flush();
+
+        // Measured on ORM 2.19, 2.20 and 3.7: every DELETE of the flush has run before the
+        // first removal is announced, on both majors -- so nothing can be placed between two
+        // DELETEs from a postRemove, and a guard that needs a DELETE inside a savepoint opens it
+        // before the deletions start (a postUpdate: Doctrine writes updates first).
+        self::assertSame([2, 2], $gone->getArrayCopy(), 'the ORM now announces a removal before it has run the others');
+    }
+
     public function testWhetherAPartialClearCanStillBeAskedAbout(): void
     {
         $args = new OnClearEventArgs($this->em);
@@ -691,7 +726,7 @@ final class DoctrineCanariesTest extends TestCase
         self::assertSame(
             $major < 3,
             method_exists($args, 'clearsAllEntities'),
-            'the ORM changed its mind about partial clears; AuditSubscriber decides by whether this method exists',
+            'the ORM changed its mind about partial clears; the partial-clear tests of TransactionSafetyTest run by whether this method exists',
         );
     }
 }

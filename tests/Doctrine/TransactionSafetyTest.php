@@ -370,6 +370,154 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
     }
 
+    public function testEachRecordOfOneRowIsTiedToItsOwnExecutionWhateverTheOrderOfTheListeners(): void
+    {
+        // The outer flush writes the article 'One' -> 'Two'. A listener ahead of this one, in
+        // its postUpdate, opens a savepoint of the application's and runs a nested flush that
+        // writes the same row 'Two' -> 'Five' and succeeds; this listener takes the nested
+        // record, then -- the outer announcement going on -- the outer one. A listener behind
+        // this one then rolls the application's savepoint back: the nested execution is taken
+        // back, the outer one stands.
+        //
+        // When the outer record is taken both statements are alive and the nested one is the
+        // later. The record's own is the earlier: Doctrine announces a statement right after
+        // it runs, so whatever lies between the outer UPDATE and this listener is somebody
+        // else's -- and the nested record has taken its own already. So: each record tied to
+        // its own position, and the history is exactly the outer change.
+        $article = $this->persisted(new Article('One'));
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+        $bound = $this->theExecutionsTheRecordsAreTiedTo();
+
+        $ahead = new class($this->em, $article, $connection) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Article $article, private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->article || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->connection->beginTransaction();
+                $this->article->title = 'Five';
+                $this->em->flush();
+            }
+        };
+        $this->aheadOfTheAuditListener(Events::postUpdate, $ahead);
+
+        $behind = new class($article, $connection) {
+            private int $seen = 0;
+
+            public function __construct(private readonly Article $article, private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                // The nested announcement comes first, then the outer one: roll back after the
+                // outer, which is the second this listener sees.
+                if ($args->getObject() === $this->article && ++$this->seen === 2) {
+                    $this->connection->rollBack();
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $behind);
+
+        $article->title = 'Two';
+        $this->em->flush();
+
+        self::assertSame('Two', $connection->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), 'the premise: the outer flush committed and the nested execution was taken back');
+
+        // Two records were taken, each tied to a statement of its own, and never one statement
+        // for both: the positions, not how many documents stand, say whether two records leaned
+        // on one execution.
+        $positions = array_map(static fn (array $b): mixed => $b['statement'][0] ?? null, $bound->getArrayCopy());
+        sort($positions);
+        self::assertSame(['Five', 'Two'], $positions, 'each record is tied to an execution of its own');
+        self::assertCount(1, $this->documents(), 'and only the outer one stood');
+    }
+
+    public function testARecordIsTiedToItsOwnRowAndNotToAnEarlierOneOfItsTableNobodyRecorded(): void
+    {
+        // One flush updates two articles. The first changes only a field nobody audits, so no
+        // record is taken for it and nothing ties its statement to anything; the application
+        // opens a savepoint in its preUpdate and rolls back to it in its postUpdate. The
+        // second article's statement is later, and the earliest statement of the table nobody
+        // has taken is the first article's, void. The second record is its own row's.
+        $first = $this->persisted(new Article('First'));
+        $second = $this->persisted(new Article('Second'));
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+
+        $this->aheadOfTheAuditListener(Events::preUpdate, new class($first, $connection) {
+            public function __construct(private readonly Article $first, private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function preUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->first) {
+                    $this->connection->beginTransaction();
+                }
+            }
+        });
+        $this->aheadOfTheAuditListener(Events::postUpdate, new class($first, $connection) {
+            public function __construct(private readonly Article $first, private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->first) {
+                    $this->connection->rollBack();
+                }
+            }
+        });
+
+        $first->views = 7; // not audited
+        $second->title = 'Second, edited';
+        $this->em->flush();
+
+        self::assertSame([0, 'Second, edited'], [(int) $connection->fetchOne('SELECT views FROM Article WHERE id = ?', [$first->id]), $connection->fetchOne('SELECT title FROM Article WHERE id = ?', [$second->id])], 'the premise: the first was taken back and the second written');
+        self::assertSame(['Second, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+    }
+
+    public function testARecordIsTiedToItsOwnTableAndNotToAnEarlierRowOfAnotherWithTheSameKey(): void
+    {
+        // In the article's preUpdate the application writes a row of another table with the
+        // same key, inside a savepoint it rolls back at once. That statement is earlier than
+        // the article's and bound to a row keyed like it; it is not the article's row.
+        $article = $this->persisted(new Article('First'));
+        $this->em->persist($vehicle = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle());
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+        self::assertSame($article->id, $vehicle->id, 'the premise: the two rows share a key');
+
+        $this->aheadOfTheAuditListener(Events::preUpdate, new class($connection, $vehicle->id) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly mixed $id)
+            {
+            }
+
+            public function preUpdate(LifecycleEventArgs $args): void
+            {
+                $this->connection->beginTransaction();
+                $this->connection->executeStatement('UPDATE Vehicle SET plate = ? WHERE id = ?', ['taken back', $this->id]);
+                $this->connection->rollBack();
+            }
+        });
+
+        $article->title = 'First, edited';
+        $this->em->flush();
+
+        self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+    }
+
     public function testTwoUpdatesOfOneRowAreTwoExecutionsAndOnlyTheOneTakenBackGoes(): void
     {
         // The outer flush writes the article 'One' -> 'Two'; a listener ahead of this one, in
@@ -1309,6 +1457,44 @@ final class TransactionSafetyTest extends DoctrineTestCase
         foreach ($there as $one) {
             $events->addEventListener([$event], $one);
         }
+    }
+
+    /**
+     * The parameters of the statement each pending record is tied to, in the order of the
+     * records, read just before the audit listener publishes them -- by a postFlush listener
+     * ahead of it. What a record is tied to is otherwise gone by the time a test can look:
+     * how many documents stand does not say whether two records leaned on one statement.
+     *
+     * @return \ArrayObject<int, array{record: array<string, mixed>, statement: list<mixed>|null}>
+     */
+    private function theExecutionsTheRecordsAreTiedTo(): \ArrayObject
+    {
+        $bound = new \ArrayObject();
+        $audit = $this->listeners()[0];
+        $statements = $this->statements;
+
+        $this->beforeTheAuditListener(new class($bound, $audit, $statements) {
+            public function __construct(private readonly \ArrayObject $bound, private readonly AuditSubscriber $audit, private readonly \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog $statements)
+            {
+            }
+
+            public function postFlush(): void
+            {
+                $pendingAt = (new \ReflectionProperty(AuditSubscriber::class, 'pendingAt'))->getValue($this->audit);
+                $pending = (new \ReflectionProperty(AuditSubscriber::class, 'pending'))->getValue($this->audit);
+                $this->bound->exchangeArray([]); // the outermost postFlush is the last, and the one that publishes
+
+                foreach ($pendingAt as $index => $at) {
+                    $statement = $at[0] ?? null; // the first table's -- an article has one
+                    $this->bound[] = [
+                        'record' => array_map(static fn (\Borsche\ElasticsearchAuditBundle\Model\Change $change): mixed => $change->new, $pending[$index]->changes),
+                        'statement' => $statement === null ? null : array_values($this->statements->statement($statement)['params'] ?? []),
+                    ];
+                }
+            }
+        });
+
+        return $bound;
     }
 
     private function detachedListener(): AuditSubscriber
