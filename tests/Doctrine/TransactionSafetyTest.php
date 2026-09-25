@@ -613,6 +613,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame([['update Machine']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the change, and not the DELETE after it');
+        self::assertSame([['name' => 'Two']], array_map(static fn (array $b): array => $b['record'], $bound->getArrayCopy()), 'and what it says is the change');
     }
 
     public function testAJoinedEntityChangedByTwoNestedFlushesWithoutSavepointsIsEachChangeOnce(): void
