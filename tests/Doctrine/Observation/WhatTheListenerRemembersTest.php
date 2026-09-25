@@ -150,6 +150,33 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         self::assertCount(1, $doubts(), 'and not again at the next reading');
     }
 
+    public function testWhatAStatementCarriedReachesNoChannelTheListenerSpeaksOn(): void
+    {
+        // The log holds the parameters of every statement in memory now, which is a new place
+        // for a secret to be. A value in the SET of the application's own SQL -- one the log
+        // cannot bind to a row, which is doubt, and one it can, outside every flush, which is
+        // not in the history -- is in neither what the listener logs nor what it writes. The
+        // sweep of the writer's channels (EveryChannelSweepTest) has no connection to run
+        // this on; this is the same question on the seam the log opened.
+        $this->unownedStatementsAreExpected = true;
+        $this->log = $this->watchTheConnection(FailurePolicy::Log, letsGo: true);
+        $x = $this->aLine();
+        $marker = 'SECRET-'.bin2hex(random_bytes(4));
+
+        $connection = $this->em->getConnection();
+        $connection->executeStatement("UPDATE CrateItem SET sku = ? WHERE sku LIKE 'SKU-%'", [$marker]);
+        $connection->update('CrateItem', ['sku' => $marker.'-bound'], ['id' => $x->id]);
+
+        $this->em->refresh($x);
+        $x->quantity = 2;
+        $this->em->flush();
+
+        self::assertNotSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did')), 'the premise: the unbound one was doubt');
+        self::assertNotSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'so it is not in the history')), 'the premise: the bound one was said to be outside the history');
+        self::assertSame([], array_values(array_filter($this->logs, static fn (string $line): bool => str_contains($line, $marker))), 'nothing a statement carried is in what the listener logged');
+        self::assertStringNotContainsString($marker, (string) json_encode(array_map(static fn (array $d): array => array_diff_key($d, ['changes' => true]), $this->documents())), 'nor anywhere in a document but the change that is the history');
+    }
+
     public function testDoubtInsideTheApplicationsTransactionIsSaidOnceToo(): void
     {
         // The same, with every flush inside a transaction of the application's own: nothing

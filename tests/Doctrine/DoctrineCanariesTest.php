@@ -718,6 +718,43 @@ final class DoctrineCanariesTest extends TestCase
         self::assertSame([2, 2], $gone->getArrayCopy(), 'the ORM now announces a removal before it has run the others');
     }
 
+    /**
+     * What a reference is worth on a manager that is closed -- which is what publishing a
+     * nested flush's outer records works with, after the nested one died. Step 5 represents
+     * an association from the key the log holds, through a reference; this is whether the
+     * reference can be had, and whether reading it loads the row.
+     */
+    public function testWhatAReferenceGivesOnAClosedManager(): void
+    {
+        $this->em->persist($author = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author('Ada'));
+        $this->em->flush();
+        $id = $author->id;
+        $this->em->clear();
+        $this->em->close();
+
+        $outcome = [];
+
+        try {
+            $reference = $this->em->getReference(\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author::class, $id);
+            $outcome['reference'] = $reference === null ? 'null' : 'given';
+
+            try {
+                $outcome['name'] = $reference?->getName();
+            } catch (\Throwable $e) {
+                $outcome['name'] = $e::class;
+            }
+        } catch (\Throwable $e) {
+            $outcome['reference'] = $e::class;
+        }
+
+        // Measured on ORM 2.19, 2.20 and 3.7: a closed manager still hands out a reference,
+        // and reading it loads the row -- the manager's closing stops a flush, not a read.
+        // So an association of a record published after a nested flush died can be
+        // represented from its key; if a version stops allowing it, that is a failure for the
+        // policy there, not a crash in publish().
+        self::assertSame(['reference' => 'given', 'name' => 'Ada'], $outcome, 'a closed manager no longer gives a reference that loads');
+    }
+
     public function testWhetherAPartialClearCanStillBeAskedAbout(): void
     {
         $args = new OnClearEventArgs($this->em);
