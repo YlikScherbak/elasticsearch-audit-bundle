@@ -117,6 +117,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private int $from = 0;
 
     /**
+     * How many of the sequences run so far removed a line from a listener after its UPDATE
+     * ran, and saw the row go: a step of the vocabulary that could be drawn and never do
+     * what it is named for would widen nothing, and the search would say so only by
+     * staying green. By where the DELETE ran -- the flush of the UPDATE, or one nested in it --
+     * since each is a road of its own. Across sequences, so not reset by setUp().
+     *
+     * @var array{flush: int, nested: int}
+     */
+    private array $removedAfterTheirStatement = ['flush' => 0, 'nested' => 0];
+
+    /**
      * How many lines this sequence has made, which is what a new line is named by.
      *
      * They were named by the crate's object id and by how many statements had run, and
@@ -354,6 +365,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         self::assertSame([], $wrong, sprintf("%d of %d sequences:\n\n%s", \count($wrong), $seeds, implode("\n\n", $wrong)));
 
+        foreach ($this->removedAfterTheirStatement as $where => $reached) {
+            self::assertGreaterThan(0, $reached, sprintf('none of %d sequences removed a line after its UPDATE ran (%s): the step is drawn and reaches nothing', $seeds, $where));
+        }
+
         self::assertSame(
             [],
             $mended,
@@ -464,6 +479,21 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             [4, false, ['empty the crate', 'replace the crate with a new line', 'flush, publishing swallowed', 'move a line', 'flush', 'empty the crate', 'flush']],
         ],
 
+        // An UPDATE, and then a DELETE of the same row a listener made after it -- in that
+        // flush or in one nested there: two statements reached the row, so two facts, and
+        // neither cancels the other (2026-09-24, both reviewers). Drawn by the vocabulary of
+        // 3.3 (2026-09-25) and measured against the two rules decided against, each put into
+        // the reader and the three thousand run: that a line whose row went has no changes to
+        // tell (seeds 2 and 164), and that it never arrived where an UPDATE had moved it
+        // (seed 194).
+        'an UPDATE and the DELETE a listener made after it are both facts' => [
+            // drawn by seed 2
+            [3, true, ['add a line', 'flush, and after the statement a listener removes the line', 'change a line', 'flush, and after the statement a listener removes the line', 'flush']],
+            // drawn by seed 164
+            [6, false, ['change a line', 'flush, and after the statement a nested one removes the line', 'flush']],
+            // drawn by seed 194
+            [7, false, ['move a line', 'flush, and after the statement a nested one removes the line', 'edit the article', 'replace the crate', 'flush', 'flush']],
+        ],
     ];
 
     public function testTheSequencesThatTellARuleApartStillDescribeWhatTheRowsDid(): void
@@ -688,13 +718,15 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
 
             // How the flush that carries it out ends.
-            $steps[] = match ($this->next(11)) {
+            $steps[] = match ($this->next(13)) {
                 0 => 'flush, refused',
                 1 => 'flush, publishing swallowed',
                 2 => 'flush, with one nested inside',
                 3 => 'flush, and after the statement a nested one edits the article',
                 4 => 'flush, and after the statement a nested one empties the crate',
                 5 => 'flush, and after the statement a nested one empties the crate and is refused',
+                6 => 'flush, and after the statement a listener removes the line',
+                7 => 'flush, and after the statement a nested one removes the line',
                 default => 'flush',
             };
         }
@@ -817,6 +849,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                     $crate->items = new ArrayCollection();
                 }
             }, refused: true),
+            'flush, and after the statement a listener removes the line' => $this->flushRemovingALineAfterItsStatement(nested: false),
+            'flush, and after the statement a nested one removes the line' => $this->flushRemovingALineAfterItsStatement(nested: true),
             default => throw new \LogicException('no such step: '.$step),
         };
     }
@@ -1049,6 +1083,66 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             // Whatever the application could not complete is not this test's subject.
         } finally {
             $this->em->getEventManager()->removeEventListener([Events::postUpdate], $inner);
+        }
+    }
+
+    /**
+     * A flush whose UPDATE of a line has run when a listener removes that line.
+     *
+     * Doctrine never plans an UPDATE and a DELETE of one entity in one flush -- scheduling a
+     * removal takes it off the updates -- so the only road to both is a listener, after the
+     * UPDATE: postUpdate of the line, behind this bundle's own. Left to the flush it is in,
+     * the DELETE runs there, because executeDeletions() reads the live list; carried out by
+     * a flush nested there, it runs inside it. Either way two statements reached the row,
+     * and the history owes both.
+     *
+     * Counted when it reached what it is for -- the row there before, gone after -- so that
+     * the search can say it has been down this road at all ({@see self::$removedAfterTheirStatement}).
+     */
+    private function flushRemovingALineAfterItsStatement(bool $nested): void
+    {
+        $this->aReplacementIsWaiting = false;
+
+        $remover = new class($this->em, $nested, $this->aroundTheNestedFlush(...)) {
+            /** @var int|string|null the removed line's id, read before Doctrine clears it */
+            public int|string|null $removed = null;
+
+            public function __construct(
+                private readonly \Doctrine\ORM\EntityManagerInterface $em,
+                private readonly bool $nested,
+                private readonly \Closure $around,
+            ) {
+            }
+
+            public function postUpdate(\Doctrine\ORM\Event\PostUpdateEventArgs $args): void
+            {
+                $line = $args->getObject();
+
+                if ($this->removed !== null || !$line instanceof CrateItem || $line->id === null) {
+                    return;
+                }
+
+                $this->removed = $line->id;
+                $this->em->remove($line);
+
+                if ($this->nested) {
+                    ($this->around)(fn () => $this->em->flush());
+                }
+            }
+        };
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $remover);
+
+        try {
+            $this->em->flush();
+        } catch (\Throwable) {
+            // Whatever the application could not complete is not this test's subject.
+        } finally {
+            $this->em->getEventManager()->removeEventListener([Events::postUpdate], $remover);
+        }
+
+        if ($remover->removed !== null && $this->em->getConnection()->fetchOne('SELECT 1 FROM CrateItem WHERE id = ?', [$remover->removed]) === false) {
+            ++$this->removedAfterTheirStatement[$nested ? 'nested' : 'flush'];
         }
     }
 
