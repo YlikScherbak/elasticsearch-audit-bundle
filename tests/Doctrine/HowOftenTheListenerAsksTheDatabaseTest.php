@@ -15,6 +15,12 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
 /**
  * What auditing costs the database.
  *
+ * Counted from after the test's own preparation, always: the schema its fixtures need, the
+ * rows it writes to start from, are the test's statements and not the listener's. A fixture
+ * added for another test adds its tables to every setUp -- two more statements per test
+ * when an audited JOINED pair came in -- and that is not a cost of auditing to be optimised
+ * away; nothing here counts it.
+ *
  * A listener on every flush is a listener on every request, and the cost it adds is
  * paid by an application that asked for a history and not for a slower one. Two facts
  * about that cost are worth holding still, and neither is visible in a document: they

@@ -444,12 +444,28 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         self::assertSame([], $wrong, sprintf("%d of %d sequences:\n\n%s", \count($wrong), $seeds, implode("\n\n", $wrong)));
 
-        // At the default and above: a handful of sequences run by hand is not the search.
+        // Two levels, because they fail for different reasons. At the default sixty a word
+        // that did nothing is most likely a word the seeds stopped drawing -- the next word
+        // added redraws every one of them -- and the answer is to look at the draw. In the
+        // long run a word that acts far less than it did is a word that died: at 3000 the
+        // rarest acted 169 times when step 4 widened the vocabulary, and a thirtieth of the
+        // sequences run is what it must not fall under.
+        $words = [...self::theVocabulary()[0], ...self::theVocabulary()[1], 'flush'];
+
         if ($seeds >= 60) {
             self::assertSame([], array_values(array_filter(
-                [...self::theVocabulary()[0], ...self::theVocabulary()[1], 'flush'],
+                $words,
                 fn (string $word): bool => ($this->acted[$word] ?? 0) === 0,
-            )), sprintf('these words of the vocabulary did nothing in %d sequences: the search has narrowed to a world without them', $seeds));
+            )), sprintf('these words of the vocabulary did nothing in %d sequences -- most likely the seeds stopped drawing them; look at the draw before the listener', $seeds));
+        }
+
+        if ($seeds >= 3000) {
+            $floor = intdiv($seeds, 30);
+
+            self::assertSame([], array_values(array_filter(
+                $words,
+                fn (string $word): bool => ($this->acted[$word] ?? 0) < $floor,
+            )), sprintf('these words acted fewer than %d times in %d sequences: a word of the search has died', $floor, $seeds));
         }
 
         self::assertSame(
