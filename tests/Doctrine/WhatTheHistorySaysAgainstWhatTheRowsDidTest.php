@@ -117,15 +117,18 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private int $from = 0;
 
     /**
-     * How many of the sequences run so far removed a line from a listener after its UPDATE
-     * ran, and saw the row go: a step of the vocabulary that could be drawn and never do
-     * what it is named for would widen nothing, and the search would say so only by
-     * staying green. By where the DELETE ran -- the flush of the UPDATE, or one nested in it --
-     * since each is a road of its own. Across sequences, so not reset by setUp().
+     * How many times each word of the vocabulary did what it is named for, across the
+     * sequences run so far -- not how often it was drawn. A word drawn when there is nothing
+     * for it to act on does nothing, and a change to the generator can make a word do
+     * nothing every time: three thousand sequences would then stay green about a world
+     * without that shape in it. So every word has to have acted at least once
+     * ({@see self::testEverySequenceIsDescribedByExactlyWhatTheRowsDid()}), which is the
+     * generator's side of what counting doubt is on the listener's. Across sequences, so not
+     * reset by setUp().
      *
-     * @var array{flush: int, nested: int}
+     * @var array<string, int>
      */
-    private array $removedAfterTheirStatement = ['flush' => 0, 'nested' => 0];
+    private array $acted = [];
 
     /**
      * How many lines this sequence has made, which is what a new line is named by.
@@ -310,6 +313,32 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private const KNOWN = [];
 
+    /** What a sequence does between its flushes. */
+    private const VOCABULARY = [
+        'edit the article',
+        'change a line',
+        'move a line',
+        'move a line back',
+        'add a line',
+        'add a namesake',
+        'remove a line',
+        'empty the crate',
+        'replace the crate',
+        'replace the crate with a new line',
+    ];
+
+    /** How a flush of a sequence may end, besides the ordinary way. */
+    private const ENDINGS = [
+        'flush, refused',
+        'flush, publishing swallowed',
+        'flush, with one nested inside',
+        'flush, and after the statement a nested one edits the article',
+        'flush, and after the statement a nested one empties the crate',
+        'flush, and after the statement a nested one empties the crate and is refused',
+        'flush, and after the statement a listener removes the line',
+        'flush, and after the statement a nested one removes the line',
+    ];
+
     /** The tables this reads, and the column that names each row in a statement. */
     private const TABLES = [
         'Article' => 'id',
@@ -365,8 +394,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         self::assertSame([], $wrong, sprintf("%d of %d sequences:\n\n%s", \count($wrong), $seeds, implode("\n\n", $wrong)));
 
-        foreach ($this->removedAfterTheirStatement as $where => $reached) {
-            self::assertGreaterThan(0, $reached, sprintf('none of %d sequences removed a line after its UPDATE ran (%s): the step is drawn and reaches nothing', $seeds, $where));
+        // At the default and above: a handful of sequences run by hand is not the search.
+        if ($seeds >= 60) {
+            self::assertSame([], array_values(array_filter(
+                [...self::VOCABULARY, ...self::ENDINGS, 'flush'],
+                fn (string $word): bool => ($this->acted[$word] ?? 0) === 0,
+            )), sprintf('these words of the vocabulary did nothing in %d sequences: the search has narrowed to a world without them', $seeds));
         }
 
         self::assertSame(
@@ -690,23 +723,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private function aSequence(): array
     {
-        $vocabulary = [
-            'edit the article',
-            'change a line',
-            'move a line',
-            'move a line back',
-            'add a line',
-            'add a namesake',
-            'remove a line',
-            'empty the crate',
-            'replace the crate',
-            'replace the crate with a new line',
-        ];
-
         $steps = [];
 
         for ($i = 0, $n = 1 + $this->next(4); $i < $n; ++$i) {
-            $steps[] = $vocabulary[$this->next(\count($vocabulary))];
+            $steps[] = self::VOCABULARY[$this->next(\count(self::VOCABULARY))];
 
             // Sometimes nothing, so that two or three things reach one flush together.
             // Every action used to be followed at once by an attempt to flush, and the
@@ -717,18 +737,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 continue;
             }
 
-            // How the flush that carries it out ends.
-            $steps[] = match ($this->next(13)) {
-                0 => 'flush, refused',
-                1 => 'flush, publishing swallowed',
-                2 => 'flush, with one nested inside',
-                3 => 'flush, and after the statement a nested one edits the article',
-                4 => 'flush, and after the statement a nested one empties the crate',
-                5 => 'flush, and after the statement a nested one empties the crate and is refused',
-                6 => 'flush, and after the statement a listener removes the line',
-                7 => 'flush, and after the statement a nested one removes the line',
-                default => 'flush',
-            };
+            // How the flush that carries it out ends: one of the endings, or an ordinary flush
+            // for the draws past them.
+            $steps[] = self::ENDINGS[$this->next(13)] ?? 'flush';
         }
 
         // Whatever a refusal left behind is carried out by one last ordinary flush, so the
@@ -820,39 +831,66 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             static fn (CrateItem $line): bool => $line->crate !== $crate,
         ));
 
-        match ($step) {
-            'edit the article' => $world['article']->title = 'title '.\count($this->documents()),
-            'change a line' => $lines === [] ? null : $lines[0]->quantity = ($lines[0]->quantity ?? 0) + 1,
-            'move a line' => $lines === [] ? null : $lines[0]->crate = $world['other'],
-            'move a line back' => $elsewhere === [] || $this->aReplacementIsWaiting ? null : $elsewhere[0]->crate = $crate,
-            'add a line' => $crate->add($this->lines[] = new CrateItem('SKU-added-'.++$this->made)),
-            'add a namesake' => $lines === [] ? null : $crate->add($this->lines[] = new CrateItem($lines[0]->sku)),
-            'remove a line' => $lines === [] ? null : $this->em->remove($lines[0]),
-            'empty the crate' => $this->holdsAPhantom($crate) ? null : $this->empty($crate),
-            'replace the crate' => $this->holdsAPhantom($crate) ? null : $this->replace($crate, []),
-            'replace the crate keeping one' => $this->holdsAPhantom($crate) ? null : $this->replace($crate, $lines === [] ? [] : [$lines[0]]),
-            'replace the crate with a new line' => $this->holdsAPhantom($crate) ? null : $this->replaceWithANewLine($crate),
-            'flush' => $this->flush(),
-            'flush, refused' => $this->flushRefused(),
-            'flush, publishing swallowed' => $this->flushWithTheirPostFlushThrowing(),
+        // Each says whether it did what it is named for: {@see self::$acted}.
+        $acted = match ($step) {
+            'edit the article' => (bool) ($world['article']->title = 'title '.\count($this->documents())),
+            'change a line' => $lines !== [] && (bool) ($lines[0]->quantity = ($lines[0]->quantity ?? 0) + 1),
+            'move a line' => $lines !== [] && (bool) ($lines[0]->crate = $world['other']),
+            'move a line back' => $elsewhere !== [] && !$this->aReplacementIsWaiting && (bool) ($elsewhere[0]->crate = $crate),
+            'add a line' => $this->did(fn () => $crate->add($this->lines[] = new CrateItem('SKU-added-'.++$this->made))),
+            'add a namesake' => $lines !== [] && $this->did(fn () => $crate->add($this->lines[] = new CrateItem($lines[0]->sku))),
+            'remove a line' => $lines !== [] && $this->did(fn () => $this->em->remove($lines[0])),
+            'empty the crate' => !$this->holdsAPhantom($crate) && $this->did(fn () => $this->empty($crate)),
+            'replace the crate' => !$this->holdsAPhantom($crate) && $this->did(fn () => $this->replace($crate, [])),
+            'replace the crate keeping one' => !$this->holdsAPhantom($crate) && $this->did(fn () => $this->replace($crate, $lines === [] ? [] : [$lines[0]])),
+            'replace the crate with a new line' => !$this->holdsAPhantom($crate) && $this->did(fn () => $this->replaceWithANewLine($crate)),
+            'flush' => $this->did(fn () => $this->flush()),
+            'flush, refused' => $this->did(fn () => $this->flushRefused()),
+            'flush, publishing swallowed' => $this->did(fn () => $this->flushWithTheirPostFlushThrowing()),
             'flush, with one nested inside' => $this->flushWithOneNestedInside($world['article']),
-            'flush, and after the statement a nested one edits the article' => $this->flushWithOneNestedAfter(static function () use ($world): void {
+            'flush, and after the statement a nested one edits the article' => $this->flushWithOneNestedAfter(static function () use ($world): bool {
                 $world['article']->title = 'from after';
+
+                return true;
             }, refused: false),
-            'flush, and after the statement a nested one empties the crate' => $this->flushWithOneNestedAfter(function () use ($crate): void {
-                if (!$this->holdsAPhantom($crate)) {
-                    $crate->items = new ArrayCollection();
+            'flush, and after the statement a nested one empties the crate' => $this->flushWithOneNestedAfter(function () use ($crate): bool {
+                if ($this->holdsAPhantom($crate)) {
+                    return false;
                 }
+
+                $crate->items = new ArrayCollection();
+
+                return true;
             }, refused: false),
-            'flush, and after the statement a nested one empties the crate and is refused' => $this->flushWithOneNestedAfter(function () use ($crate): void {
-                if (!$this->holdsAPhantom($crate)) {
-                    $crate->items = new ArrayCollection();
+            'flush, and after the statement a nested one empties the crate and is refused' => $this->flushWithOneNestedAfter(function () use ($crate): bool {
+                if ($this->holdsAPhantom($crate)) {
+                    return false;
                 }
+
+                $crate->items = new ArrayCollection();
+
+                return true;
             }, refused: true),
             'flush, and after the statement a listener removes the line' => $this->flushRemovingALineAfterItsStatement(nested: false),
             'flush, and after the statement a nested one removes the line' => $this->flushRemovingALineAfterItsStatement(nested: true),
             default => throw new \LogicException('no such step: '.$step),
         };
+
+        if ($acted) {
+            $this->acted[$step] = ($this->acted[$step] ?? 0) + 1;
+        }
+    }
+
+    /**
+     * Runs a step that always does what it says once it is reached.
+     *
+     * @param \Closure(): mixed $step
+     */
+    private function did(\Closure $step): bool
+    {
+        $step();
+
+        return true;
     }
 
     /**
@@ -959,12 +997,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * Once per flush, from the first preUpdate it sees: recursing would be testing
      * Doctrine's patience rather than this bundle's history.
      */
-    private function flushWithOneNestedInside(Article $article): void
+    private function flushWithOneNestedInside(Article $article): bool
     {
         $this->aReplacementIsWaiting = false;
 
         $inner = new class($this->em, $article, $this->aroundTheNestedFlush(...)) {
-            private bool $ran = false;
+            public bool $ran = false;
 
             public function __construct(
                 private readonly \Doctrine\ORM\EntityManagerInterface $em,
@@ -994,6 +1032,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         } finally {
             $this->em->getEventManager()->removeEventListener([Events::preUpdate], $inner);
         }
+
+        return $inner->ran;
     }
 
     /**
@@ -1028,12 +1068,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * Refused, on request, by a listener behind this one: the shape a dying nested flush
      * takes, whose sweep of the outer flush's buckets has to be put back.
      */
-    private function flushWithOneNestedAfter(\Closure $what, bool $refused): void
+    /**
+     * @param \Closure(): bool $what whether it did its part
+     */
+    private function flushWithOneNestedAfter(\Closure $what, bool $refused): bool
     {
         $this->aReplacementIsWaiting = false;
 
         $inner = new class($this->em, $what, $refused, $this->aroundTheNestedFlush(...)) {
             private bool $ran = false;
+
+            public bool $acted = false;
 
             public function __construct(
                 private readonly \Doctrine\ORM\EntityManagerInterface $em,
@@ -1050,7 +1095,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 }
 
                 $this->ran = true;
-                ($this->what)();
+                $this->acted = ($this->what)();
 
                 $veto = $this->refused ? new class {
                     public function onFlush(): void
@@ -1084,6 +1129,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         } finally {
             $this->em->getEventManager()->removeEventListener([Events::postUpdate], $inner);
         }
+
+        return $inner->acted;
     }
 
     /**
@@ -1096,10 +1143,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * a flush nested there, it runs inside it. Either way two statements reached the row,
      * and the history owes both.
      *
-     * Counted when it reached what it is for -- the row there before, gone after -- so that
-     * the search can say it has been down this road at all ({@see self::$removedAfterTheirStatement}).
+     * Acted when it reached what it is for -- the row there before, gone after
+     * ({@see self::$acted}).
      */
-    private function flushRemovingALineAfterItsStatement(bool $nested): void
+    private function flushRemovingALineAfterItsStatement(bool $nested): bool
     {
         $this->aReplacementIsWaiting = false;
 
@@ -1141,9 +1188,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->em->getEventManager()->removeEventListener([Events::postUpdate], $remover);
         }
 
-        if ($remover->removed !== null && $this->em->getConnection()->fetchOne('SELECT 1 FROM CrateItem WHERE id = ?', [$remover->removed]) === false) {
-            ++$this->removedAfterTheirStatement[$nested ? 'nested' : 'flush'];
-        }
+        return $remover->removed !== null && $this->em->getConnection()->fetchOne('SELECT 1 FROM CrateItem WHERE id = ?', [$remover->removed]) === false;
     }
 
     private function flushWithTheirPostFlushThrowing(): void

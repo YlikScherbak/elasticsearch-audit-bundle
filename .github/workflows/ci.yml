@@ -200,8 +200,11 @@ jobs:
           MYSQL_ROOT_PASSWORD: audit
           MYSQL_DATABASE: audit
         ports: ['3306:3306']
+        # Over TCP, as the tests connect: while the image initialises it runs a server of
+        # its own on the socket only, which answers a ping through the socket and then goes
+        # away -- healthy, and the first connection refused.
         options: >-
-          --health-cmd="mysqladmin ping -paudit"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -paudit"
           --health-interval=5s --health-timeout=5s --health-retries=20
       postgres:
         image: postgres:16
@@ -209,8 +212,9 @@ jobs:
           POSTGRES_PASSWORD: audit
           POSTGRES_DB: audit
         ports: ['5432:5432']
+        # Over TCP, for the same reason: the initialising server listens on the socket only.
         options: >-
-          --health-cmd=pg_isready
+          --health-cmd="pg_isready -h 127.0.0.1"
           --health-interval=5s --health-timeout=5s --health-retries=20
 
     steps:
