@@ -518,6 +518,124 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
     }
 
+    public function testAJoinedEntitysRecordIsTiedToEveryStatementOfItsChange(): void
+    {
+        // The ordinary case of the same hierarchy: a creation is an INSERT per table, and a
+        // change of a column in each table an UPDATE per table -- one execution each time,
+        // written back to back, and the record tied to all of it.
+        $bound = $this->theExecutionsTheRecordsAreTiedTo();
+
+        $press = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('One');
+        $this->em->persist($press);
+        $this->em->flush();
+
+        self::assertSame([['insert Machine', 'insert Press']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the creation');
+
+        $press->name = 'Two';
+        $press->tonnage = 5;
+        $this->em->flush();
+
+        $tied = array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy());
+        self::assertCount(1, $tied);
+        sort($tied[0]);
+        self::assertSame(['update Machine', 'update Press'], $tied[0], 'the change of both tables');
+    }
+
+    public function testAJoinedEntitysRecordIsTiedToTheStatementsOfItsOwnChangeAndNoOther(): void
+    {
+        // A JOINED hierarchy writes an entity's change as one statement per table it touches.
+        // The outer flush changes only the root's column; a listener ahead of this one runs a
+        // nested flush that changes only the subclass's column, and dies. Each table has one
+        // statement of this row nobody has taken -- and only one of them is the outer change:
+        // the subclass table's is the dead nested flush's. The outer record is tied to the root
+        // table's statement alone, and stands.
+        $press = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('One');
+        $this->em->persist($press);
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $bound = $this->theExecutionsTheRecordsAreTiedTo();
+
+        $ahead = new class($this->em, $press) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly object $press)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->press) {
+                    return;
+                }
+
+                if ($this->ran) {
+                    throw new \DomainException('the nested flush dies after its statement');
+                }
+
+                $this->ran = true;
+                $this->press->tonnage = 9; // @phpstan-ignore property.notFound
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does about a nested flush that failed
+                }
+            }
+        };
+        $this->aheadOfTheAuditListener(Events::postUpdate, $ahead);
+
+        $press->name = 'Two';
+        $this->em->flush();
+
+        $connection = $this->em->getConnection();
+        self::assertSame(['Two', 1], [$connection->fetchOne('SELECT name FROM Machine WHERE id = ?', [$press->id]), (int) $connection->fetchOne('SELECT tonnage FROM Press WHERE id = ?', [$press->id])], 'the premise: the outer change committed and the nested one was taken back');
+        self::assertSame([['update Machine']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the outer record is tied to its own statement and not the nested one\'s');
+        self::assertCount(1, $this->documents(), 'and it stood');
+    }
+
+    public function testARemovalIsTiedToItsDeleteAndNotToAnEarlierUpdateOfItsRow(): void
+    {
+        // In one flush the article's UPDATE runs -- of a field nobody audits, so no record is
+        // taken for it -- inside a savepoint of the application's that is rolled back at once,
+        // and a listener then removes the article, whose DELETE runs in the same flush. The
+        // earliest statement of that row nobody has taken is the UPDATE, void; the removal's
+        // own is the DELETE. A record is tied to a statement of its own kind.
+        $article = $this->persisted(new Article('Doomed'));
+        $id = $article->id;
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+        $bound = $this->theExecutionsTheRecordsAreTiedTo();
+
+        $this->aheadOfTheAuditListener(Events::preUpdate, new class($connection) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function preUpdate(LifecycleEventArgs $args): void
+            {
+                $this->connection->beginTransaction();
+            }
+        });
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $connection) {
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                $this->connection->rollBack();
+                $this->em->remove($args->getObject());
+            }
+        });
+
+        $article->views = 7; // not audited
+        $this->em->flush();
+
+        self::assertSame(0, (int) $connection->fetchOne('SELECT COUNT(*) FROM Article WHERE id = ?', [$id]), 'the premise: the DELETE committed');
+        self::assertSame([['delete Article']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()));
+        self::assertSame(['remove'], array_map(static fn (array $d): string => $d['event'], $this->documents()));
+    }
+
     public function testTwoUpdatesOfOneRowAreTwoExecutionsAndOnlyTheOneTakenBackGoes(): void
     {
         // The outer flush writes the article 'One' -> 'Two'; a listener ahead of this one, in
@@ -1465,7 +1583,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
      * ahead of it. What a record is tied to is otherwise gone by the time a test can look:
      * how many documents stand does not say whether two records leaned on one statement.
      *
-     * @return \ArrayObject<int, array{record: array<string, mixed>, statement: list<mixed>|null}>
+     * @return \ArrayObject<int, array{record: array<string, mixed>, statement: list<mixed>|null, tied: list<string>}>
      */
     private function theExecutionsTheRecordsAreTiedTo(): \ArrayObject
     {
@@ -1489,6 +1607,11 @@ final class TransactionSafetyTest extends DoctrineTestCase
                     $this->bound[] = [
                         'record' => array_map(static fn (\Borsche\ElasticsearchAuditBundle\Model\Change $change): mixed => $change->new, $pending[$index]->changes),
                         'statement' => $statement === null ? null : array_values($this->statements->statement($statement)['params'] ?? []),
+                        'tied' => array_map(function (int $at): string {
+                            $shape = \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape::read($this->statements->statement($at)['sql'] ?? '');
+
+                            return $shape === null ? '?' : $shape->kind.' '.$shape->table;
+                        }, $at ?? []),
                     ];
                 }
             }

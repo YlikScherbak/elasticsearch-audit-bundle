@@ -831,7 +831,7 @@ final class AuditSubscriber
         if ($record !== null) {
             $this->pending[] = $record;
             $this->pendingFlush[] = $collecting;
-            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting);
+            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting, StatementShape::INSERT);
             // Registered like an update's: an owner created with its lines has one
             // record, and what the lines did belongs in it. Without this the membership
             // found no record to join and invented a second, phantom update.
@@ -871,7 +871,7 @@ final class AuditSubscriber
         // The execution this announcement is about: the earliest of the row's statements in
         // this flush that no record has been tied to. None left means there is no new one --
         // which is what tells a second announcement of the same UPDATE from a second UPDATE.
-        $execution = $manager === null ? null : $this->statementBehind($manager, $entity, $collecting);
+        $execution = $manager === null ? null : $this->statementBehind($manager, $entity, $collecting, StatementShape::UPDATE);
 
         if ($already !== null
             && ($this->pending[$already] ?? null)?->event === AuditEvent::UPDATE
@@ -968,7 +968,7 @@ final class AuditSubscriber
             // had. postRemove is inside the flush that did the deleting, which is the
             // flush the record belongs to.
             $this->pendingFlush[] = $collecting;
-            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting, $rowKey);
+            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting, StatementShape::DELETE, $rowKey);
         }
     }
 
@@ -1791,46 +1791,90 @@ final class AuditSubscriber
      * neither does which one is alive when the record is taken, nor which is last: all three
      * depend on the order of the listeners.
      *
-     * Doctrine does. It announces a statement right after running it, so the record's own
-     * execution is the EARLIEST one of its row, since its flush began, that no record has been
-     * tied to yet: whatever lies between it and this listener is somebody else's, and a nested
-     * flush whose announcement came first has already taken its own. Where no key binds a
-     * statement -- an INSERT whose key the database handed out -- it is the earliest of the
-     * row's table nobody has taken. One per table of the class, for a hierarchy that writes
-     * its rows in several.
+     * Doctrine announces a change after running its statements, and not necessarily to this
+     * listener at once: a flush nested in an earlier listener fits in between. What holds is
+     * the bookkeeping. The record's own execution is the EARLIEST statement of its kind and
+     * row, since its flush began, that no record has been tied to yet: whatever lies after it
+     * is somebody else's, and a nested flush announced first has already taken its own. Where
+     * no key binds a statement -- an INSERT whose key the database handed out -- it is the
+     * earliest of the kind and table nobody has taken.
+     *
+     * A class of a JOINED hierarchy writes one change as a statement per table it touches, and
+     * the persister runs them back to back: so the execution is that first statement and the
+     * ones right after it, of the same kind and row, in other tables of the hierarchy and the
+     * same frame. Not one per table wherever each is: a change of the root alone, followed by a
+     * nested flush's change of the subclass alone, is two executions, and the nested one ran in
+     * a savepoint of its own.
      *
      * Ownership is not asked. It answers whose moment and context a record carries, and a
      * frame nobody lived to claim is lent to the one around it -- right for that question,
      * and wrong for this one.
      *
+     * @param string                    $kind the statement a record of this event is about: an
+     *                                        INSERT, UPDATE or DELETE ({@see StatementShape})
      * @param array<string, mixed>|null $key the row's key as the statements carry it, when the
      *                                        entity no longer has it -- a removal's, taken before
      *                                        the DELETE cleared a generated identifier
      *
      * @return list<int>
      */
-    private function statementBehind(EntityManagerInterface $em, object $entity, int $flush, ?array $key = null): array
+    private function statementBehind(EntityManagerInterface $em, object $entity, int $flush, string $kind, ?array $key = null): array
     {
         $metadata = $em->getClassMetadata($entity::class);
         $key ??= RowMemory::keyColumns($em, $entity);
         $row = $key === null ? null : self::rowOf($key);
         $index = $this->executionsOf($em, $flush);
-        $tied = [];
+        $tables = [];
 
         foreach ([$metadata->name, ...array_values($metadata->parentClasses)] as $name) {
-            $table = $em->getClassMetadata($name)->getTableName();
-            $statement = null;
+            $tables[$em->getClassMetadata($name)->getTableName()] = true;
+        }
 
-            if ($row !== null) {
-                $statement = $this->firstUnclaimed($index['rows'][$table.'|'.$row] ?? []);
+        // The first statement of the execution: the earliest of its kind and row, in any of
+        // the hierarchy's tables, that nobody has taken.
+        $first = null;
+
+        foreach (array_keys($tables) as $table) {
+            $candidate = $row === null ? null : $this->firstUnclaimed($index['rows'][$kind.'|'.$table.'|'.$row] ?? []);
+            $candidate ??= $this->firstUnclaimed($index['tables'][$kind.'|'.$table] ?? []);
+
+            if ($candidate !== null && ($first === null || $candidate < $first)) {
+                $first = $candidate;
+            }
+        }
+
+        if ($first === null) {
+            return [];
+        }
+
+        // And the ones the persister ran right after it for the same change.
+        $tied = [$first];
+        $frame = $this->statements->frameOf($first);
+        $used = [StatementShape::read($this->statements->statement($first)['sql'] ?? '')?->table => true];
+
+        for ($statement = $first + 1, $to = $this->statements->position(); $statement <= $to; ++$statement) {
+            $entry = $this->statements->statement($statement);
+            $shape = $entry === null ? null : StatementShape::read($entry['sql']);
+
+            if ($entry === null || $shape === null || $shape->kind !== $kind || !isset($tables[$shape->table]) || isset($used[$shape->table])
+                || $this->statements->frameOf($statement) !== $frame || isset($this->claimedExecutions[$statement])
+            ) {
+                break;
             }
 
-            $statement ??= $this->firstUnclaimed($index['tables'][$table] ?? []);
+            $binding = RowBinding::of($em, $shape, $entry['params']);
+            $keyed = $binding->kind === RowBinding::ROW && $binding->key !== null;
 
-            if ($statement !== null) {
-                $this->claimedExecutions[$statement] = true;
-                $tied[] = $statement;
+            if ($keyed && ($row === null || self::rowOf($binding->key) !== $row)) {
+                break;
             }
+
+            $tied[] = $statement;
+            $used[$shape->table] = true;
+        }
+
+        foreach ($tied as $statement) {
+            $this->claimedExecutions[$statement] = true;
         }
 
         return $tied;
@@ -1856,9 +1900,9 @@ final class AuditSubscriber
             $binding = RowBinding::of($em, $shape, $entry['params']);
 
             if ($binding->kind === RowBinding::ROW && $binding->key !== null) {
-                $index['rows'][$shape->table.'|'.self::rowOf($binding->key)][] = $statement;
+                $index['rows'][$shape->kind.'|'.$shape->table.'|'.self::rowOf($binding->key)][] = $statement;
             } else {
-                $index['tables'][$shape->table][] = $statement;
+                $index['tables'][$shape->kind.'|'.$shape->table][] = $statement;
             }
         }
 

@@ -338,6 +338,16 @@ final class StatementLog
     }
 
     /**
+     * The frame a statement ran in -- -1 outside every transaction -- or null for one the log
+     * has let go of: what tells the statements of one change of an entity from a flush nested
+     * right after them, which runs in a savepoint of its own.
+     */
+    public function frameOf(int $statement): ?int
+    {
+        return $this->statements[$statement]['frame'] ?? null;
+    }
+
+    /**
      * @return array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool}|null
      */
     public function statement(int $statement): ?array
