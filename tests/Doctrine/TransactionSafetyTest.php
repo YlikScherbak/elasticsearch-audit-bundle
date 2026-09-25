@@ -541,6 +541,132 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame(['update Machine', 'update Press'], $tied[0], 'the change of both tables');
     }
 
+    public function testAJoinedChangesBlockDoesNotTakeTheApplicationsStatementOfAnotherRowAfterIt(): void
+    {
+        // The press's change touches only the root's table. A listener ahead of this one, in its
+        // postUpdate, updates ANOTHER press's row of the subclass table itself -- same kind, a
+        // table of the hierarchy, the same frame, right after the change, announced by nobody.
+        // It is not part of the change: the block ends where the row does.
+        //
+        // Today that shows only in the positions: the application's statement shares the
+        // change's fate and the values come from Doctrine's change set. From step 5 the values
+        // come from the block, and a block that took it would put the other row's SET in this
+        // record.
+        $this->unownedStatementsAreExpected = true;
+        $press = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('One');
+        $other = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('Other');
+        $this->em->persist($press);
+        $this->em->persist($other);
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $bound = $this->theExecutionsTheRecordsAreTiedTo();
+
+        $this->aheadOfTheAuditListener(Events::postUpdate, new class($this->em->getConnection(), $press, $other->id) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly object $press, private readonly mixed $other)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->press) {
+                    $this->connection->update('Press', ['tonnage' => 7], ['id' => $this->other]);
+                }
+            }
+        });
+
+        $press->name = 'Two';
+        $this->em->flush();
+
+        self::assertSame(7, (int) $this->em->getConnection()->fetchOne('SELECT tonnage FROM Press WHERE id = ?', [$other->id]), 'the premise: the application\'s statement ran');
+        self::assertSame([['update Machine']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the change, and not the other row after it');
+        self::assertSame([['name' => 'Two']], array_map(static fn (array $b): array => $b['record'], $bound->getArrayCopy()));
+    }
+
+    public function testAChangesBlockDoesNotTakeADeleteOfItsRowRightAfterIt(): void
+    {
+        // The press's change touches only the root's table; a listener ahead of this one, in
+        // its postUpdate, deletes the same row of the subclass table itself -- the same row, a
+        // table of the hierarchy, the same frame, right after the change: a DELETE, not part of
+        // an UPDATE. From step 5 a block that took it would give the change the fate and the
+        // position of a removal.
+        $this->unownedStatementsAreExpected = true;
+        $press = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('One');
+        $this->em->persist($press);
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $bound = $this->theExecutionsTheRecordsAreTiedTo();
+
+        $this->aheadOfTheAuditListener(Events::postUpdate, new class($this->em->getConnection(), $press) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly object $press)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->press) {
+                    $this->connection->delete('Press', ['id' => $this->press->id]); // @phpstan-ignore property.notFound
+                }
+            }
+        });
+
+        $press->name = 'Two';
+        $this->em->flush();
+
+        self::assertSame([['update Machine']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the change, and not the DELETE after it');
+    }
+
+    public function testAJoinedEntityChangedByTwoNestedFlushesWithoutSavepointsIsEachChangeOnce(): void
+    {
+        // Without savepoints -- DBAL 3, nested_flush_provenance: outer -- a nested flush opens no
+        // frame of its own, so nothing about frames tells its statements from the outer
+        // flush's. The outer flush changes the root's column; a listener ahead of this one runs
+        // two nested flushes one after the other, the first changing the subclass's column and
+        // the second the root's again, and both succeed. Three changes, three records, each
+        // tied to its own statement and no statement to two -- what keeps them apart there is
+        // that each nested record has taken its own before the outer one is taken.
+        $this->watchTheConnection(FailurePolicy::Log, savepoints: false);
+        $press = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('One');
+        $this->em->persist($press);
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $bound = $this->theExecutionsTheRecordsAreTiedTo();
+
+        $this->aheadOfTheAuditListener(Events::postUpdate, new class($this->em, $press) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly object $press)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->press || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->press->tonnage = 5; // @phpstan-ignore property.notFound
+                $this->em->flush();
+                $this->press->name = 'Three'; // @phpstan-ignore property.notFound
+                $this->em->flush();
+            }
+        });
+
+        $press->name = 'Two';
+        $this->em->flush();
+
+        $connection = $this->em->getConnection();
+        self::assertSame(['Three', 5], [$connection->fetchOne('SELECT name FROM Machine WHERE id = ?', [$press->id]), (int) $connection->fetchOne('SELECT tonnage FROM Press WHERE id = ?', [$press->id])], 'the premise: all three changes committed');
+
+        $tied = array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy());
+        $positions = array_merge(...array_map(static fn (array $b): array => $b['positions'], $bound->getArrayCopy()));
+        sort($tied);
+
+        self::assertSame([['update Machine'], ['update Machine'], ['update Press']], $tied, 'three changes, each tied to its own statement');
+        self::assertSame($positions, array_values(array_unique($positions)), 'and no statement tied to two of them');
+        self::assertCount(3, $this->documents(), 'each once');
+    }
+
     public function testAJoinedEntitysRecordIsTiedToTheStatementsOfItsOwnChangeAndNoOther(): void
     {
         // A JOINED hierarchy writes an entity's change as one statement per table it touches.
@@ -1583,7 +1709,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
      * ahead of it. What a record is tied to is otherwise gone by the time a test can look:
      * how many documents stand does not say whether two records leaned on one statement.
      *
-     * @return \ArrayObject<int, array{record: array<string, mixed>, statement: list<mixed>|null, tied: list<string>}>
+     * @return \ArrayObject<int, array{record: array<string, mixed>, statement: list<mixed>|null, positions: list<int>, tied: list<string>}>
      */
     private function theExecutionsTheRecordsAreTiedTo(): \ArrayObject
     {
@@ -1607,6 +1733,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
                     $this->bound[] = [
                         'record' => array_map(static fn (\Borsche\ElasticsearchAuditBundle\Model\Change $change): mixed => $change->new, $pending[$index]->changes),
                         'statement' => $statement === null ? null : array_values($this->statements->statement($statement)['params'] ?? []),
+                        'positions' => $at ?? [],
                         'tied' => array_map(function (int $at): string {
                             $shape = \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape::read($this->statements->statement($at)['sql'] ?? '');
 
