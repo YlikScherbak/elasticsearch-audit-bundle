@@ -264,6 +264,23 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $this->theNextOperationWritesItselfAndNothingElse();
     }
 
+    #[DataProvider('bothOrders')]
+    public function testANestedFlushThatDiesAfterWritingTheOuterFlushsOwnRowLeavesTheOuterChange(bool $ahead): void
+    {
+        // 6 / A on one row: the outer flush writes X 1 -> 2, the nested flush started from
+        // X's postUpdate writes X 2 -> 5 and dies. Two executions of the same row; the
+        // savepoint takes the second back and the outer flush commits the first.
+        [, $x] = $this->aCrateWithTwoLines();
+
+        $this->inThePostUpdateOf($x, function () use ($x): void {
+            $x->quantity = 5;
+            $this->dying(fn () => $this->em->flush(), $x);
+        }, aheadOfThisListener: $ahead);
+
+        $x->quantity = 2;
+        $this->theOuterFlushAfterANestedOneDied();
+    }
+
     public function testAStatementTheApplicationTookBackInsideAFlushIsNotAFactAndTheFlushsOthersAre(): void
     {
         // One flush, two statements, and a savepoint of the application's between them: it

@@ -103,13 +103,14 @@ final class AuditSubscriber
      * Where the connection's log stood when each pending record was taken, and the class of
      * the row it is about, by the same index.
      *
-     * A record is taken in the event that follows its statement, so the statement is at or
-     * before that position -- and whether the record stands is that statement's fate, not
-     * its flush's: an application may roll back to a savepoint of its own inside a flush
-     * that goes on to commit, and a flush that dies inside one that commits leaves the
-     * other's statements where they were. A clear decides neither.
+     * Whether a record stands is the fate of the execution it describes, not its flush's: an
+     * application may roll back to a savepoint of its own inside a flush that goes on to
+     * commit, and a flush that dies inside one that commits leaves the other's statements
+     * where they were. A clear decides neither. So each record is tied, when it is taken, to
+     * the position of its statement in the log ({@see self::statementBehind()}), or marked as
+     * describing one already taken back.
      *
-     * @var list<array{at: int, class: class-string, key: array<string, mixed>|null}|null>
+     * @var list<array{statement: int|null, takenBack: bool}|null>
      */
     private array $pendingAt = [];
 
@@ -808,7 +809,7 @@ final class AuditSubscriber
         if ($record !== null) {
             $this->pending[] = $record;
             $this->pendingFlush[] = $collecting;
-            $this->pendingAt[] = $this->statementBehind($manager, $args->getObject());
+            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting);
             // Registered like an update's: an owner created with its lines has one
             // record, and what the lines did belongs in it. Without this the membership
             // found no record to join and invented a second, phantom update.
@@ -889,14 +890,14 @@ final class AuditSubscriber
             // things starts.
             array_splice($this->pending, $already, 1, [$record]);
             array_splice($this->pendingFlush, $already, 1, [$collecting]);
-            array_splice($this->pendingAt, $already, 1, [$this->statementBehind($manager, $entity)]);
+            array_splice($this->pendingAt, $already, 1, [$this->statementBehind($manager, $entity, $collecting)]);
 
             return;
         }
 
         $this->pending[] = $record;
         $this->pendingFlush[] = $collecting;
-        $this->pendingAt[] = $this->statementBehind($manager, $entity);
+        $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $entity, $collecting);
         $this->pendingIndexByEntity[spl_object_id($entity)] = array_key_last($this->pending);
     }
 
@@ -932,7 +933,7 @@ final class AuditSubscriber
             // had. postRemove is inside the flush that did the deleting, which is the
             // flush the record belongs to.
             $this->pendingFlush[] = $collecting;
-            $this->pendingAt[] = ['at' => $this->statements->position(), 'class' => $args->getObject()::class, 'key' => $rowKey];
+            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting, $rowKey);
         }
     }
 
@@ -1745,27 +1746,110 @@ final class AuditSubscriber
     }
 
     /**
-     * Where the log stands, and whose row the record about to be taken is, for {@see self::$pendingAt}.
+     * The execution a record about to be taken describes: its position in the log, or that
+     * it was taken back already.
      *
-     * @return array{at: int, class: class-string, key: array<string, mixed>|null}
+     * A record is about one execution, and a row is written more than once: a listener ahead
+     * of this one in the same event can run a flush nested there that writes the same row --
+     * same table, same key, the same values even -- and dies before claiming what it ran, so
+     * its statements are even the outer flush's by ownership. Neither the row nor the owner
+     * tells the two apart. The moment does: by the time this listener takes the record, that
+     * nested flush's savepoint has been rolled back, and its statement is void. So the
+     * record's statement is, since its flush began, the last the log binds to its row by key
+     * that is not void yet -- and where no key binds one, an INSERT whose key the database
+     * handed out, the last of the row's table. If every one there is void already, the
+     * execution the record describes was taken back before this listener ran -- a savepoint
+     * of the application's, rolled back by a listener ahead of this one -- and so is the
+     * record.
+     *
+     * Ownership is not asked. It answers whose moment and context a record carries, and a
+     * frame nobody lived to claim is lent to the one around it -- right for that question,
+     * and wrong for this one.
+     *
+     * @param array<string, mixed>|null $key the row's key as the statements carry it, when the
+     *                                        entity no longer has it -- a removal's, taken before
+     *                                        the DELETE cleared a generated identifier
+     *
+     * @return array{statement: int|null, takenBack: bool}
      */
-    private function statementBehind(?EntityManagerInterface $em, object $entity): array
+    private function statementBehind(EntityManagerInterface $em, object $entity, int $flush, ?array $key = null): array
     {
-        return ['at' => $this->statements->position(), 'class' => $entity::class, 'key' => $em === null ? null : RowMemory::keyColumns($em, $entity)];
+        $metadata = $em->getClassMetadata($entity::class);
+        $key ??= RowMemory::keyColumns($em, $entity);
+        $row = $key === null ? null : HistoryReplay::keyOf($metadata, $key);
+        $tables = [];
+
+        foreach ([$metadata->name, ...array_values($metadata->parentClasses)] as $name) {
+            $tables[$em->getClassMetadata($name)->getTableName()] = true;
+        }
+
+        $sawTakenBack = false;
+        $unbound = null;
+
+        for ($statement = $this->statements->position(), $from = $this->statementMarks[$flush][2] ?? 0; $statement > $from; --$statement) {
+            $entry = $this->statements->statement($statement);
+
+            if ($entry === null) {
+                break; // let go of: folded in, so done
+            }
+
+            $shape = StatementShape::read($entry['sql']);
+
+            if ($shape === null || !isset($tables[$shape->table])) {
+                continue;
+            }
+
+            $binding = RowBinding::of($em, $shape, $entry['params']);
+            $keyed = $binding->kind === RowBinding::ROW && $binding->key !== null;
+
+            if ($keyed && ($row === null || HistoryReplay::keyOf($metadata, $binding->key) !== $row)) {
+                continue; // another row of the same table
+            }
+
+            if ($this->statements->fate($statement) === StatementLog::VOID) {
+                $sawTakenBack = true;
+
+                continue;
+            }
+
+            if ($keyed) {
+                return ['statement' => $statement, 'takenBack' => false];
+            }
+
+            $unbound ??= $statement;
+        }
+
+        return ['statement' => $unbound, 'takenBack' => $unbound === null && $sawTakenBack];
     }
 
     /**
      * Takes out every pending record whose statement the log says was taken back.
      *
-     * The statement is the last one at or before the record's position that the log binds
-     * to the record's row, by its key: a listener ahead of this one in the same event can run
-     * statements of its own in between -- a flush nested there, writing the same table, and
-     * dying before it could claim what it ran -- and those are not what the record is about.
-     * Where no key binds it -- an INSERT whose key the database handed out -- it is the last
-     * statement of the row's table, the record's own flush's before any other's. A record
-     * whose statement the log no longer holds stays: the log lets go only of what was folded
-     * in once no transaction could still roll it back.
+     * By the execution each was tied to when it was taken ({@see self::statementBehind()}): a
+     * record whose execution was taken back already, or whose statement the log has voided
+     * since. A record whose statement the log no longer holds stays: the log lets go only of
+     * what was folded in once no transaction could still roll it back.
      */
+    /**
+     * @param array{statement: int|null, takenBack: bool}|null $execution
+     */
+    private function theLogTookBack(?array $execution): bool
+    {
+        if ($execution === null) {
+            return false; // taken without a manager to find its statement with
+        }
+
+        if ($execution['takenBack']) {
+            return true;
+        }
+
+        $statement = $execution['statement'];
+
+        return $statement !== null
+            && $this->statements->statement($statement) !== null
+            && $this->statements->fate($statement) === StatementLog::VOID;
+    }
+
     private function dropWhatTheLogTookBack(?EntityManagerInterface $em): void
     {
         if ($em === null || $this->pending === []) {
@@ -1775,9 +1859,7 @@ final class AuditSubscriber
         $kept = [];
 
         foreach (array_keys($this->pending) as $index) {
-            $at = $this->pendingAt[$index] ?? null;
-
-            if ($at === null || !$this->theLogTookBack($em, $at['at'], $at['class'], $at['key'], $this->pendingFlush[$index] ?? self::NO_FLUSH)) {
+            if (!$this->theLogTookBack($this->pendingAt[$index] ?? null)) {
                 $kept[] = $index;
             }
         }
@@ -1794,58 +1876,6 @@ final class AuditSubscriber
             static fn (int $index): ?int => $renumbered[$index] ?? null,
             $this->pendingIndexByEntity,
         ), static fn (?int $index): bool => $index !== null);
-    }
-
-    /**
-     * @param class-string              $class
-     * @param array<string, mixed>|null $key the row's key as the statements carry it
-     */
-    private function theLogTookBack(EntityManagerInterface $em, int $at, string $class, ?array $key, int $flush): bool
-    {
-        $metadata = $em->getClassMetadata($class);
-        $tables = [];
-
-        foreach ([$class, ...array_values($metadata->parentClasses)] as $name) {
-            $tables[$em->getClassMetadata($name)->getTableName()] = true;
-        }
-
-        $row = $key === null ? null : HistoryReplay::keyOf($metadata, $key);
-        $ownFlush = null;
-        $anyFlush = null;
-
-        for ($statement = $at; $statement > 0; --$statement) {
-            $entry = $this->statements->statement($statement);
-
-            if ($entry === null) {
-                break; // let go of: folded in, so done
-            }
-
-            $shape = StatementShape::read($entry['sql']);
-
-            if ($shape === null || !isset($tables[$shape->table])) {
-                continue;
-            }
-
-            $binding = RowBinding::of($em, $shape, $entry['params']);
-
-            if ($row !== null && $binding->kind === RowBinding::ROW && $binding->key !== null) {
-                if (HistoryReplay::keyOf($metadata, $binding->key) === $row) {
-                    return $this->statements->fate($statement) === StatementLog::VOID;
-                }
-
-                continue; // another row of the same table
-            }
-
-            if ($this->statements->ownerOf($statement) === $flush) {
-                $ownFlush ??= $statement;
-            } else {
-                $anyFlush ??= $statement;
-            }
-        }
-
-        $statement = $ownFlush ?? $anyFlush;
-
-        return $statement !== null && $this->statements->fate($statement) === StatementLog::VOID;
     }
 
     /**

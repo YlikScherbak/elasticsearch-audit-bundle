@@ -336,6 +336,109 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
     }
 
+    public function testAnUpdateTakenBackBeforeThisListenerSawItIsNotRecorded(): void
+    {
+        // The same savepoint of the application's, rolled back this time by a listener ahead
+        // of this one -- in the second article's postUpdate, before this listener takes its
+        // record. The execution the record would describe is void already when it is taken;
+        // the row's older statements, from before this flush, are not what it is about.
+        $first = $this->persisted(new Article('First'));
+        $second = $this->persisted(new Article('Second'));
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+
+        $this->aheadOfTheAuditListener(Events::postUpdate, new class($first, $second, $connection) {
+            public function __construct(private readonly Article $first, private readonly Article $second, private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                match ($args->getObject()) {
+                    $this->first => $this->connection->beginTransaction(),
+                    $this->second => $this->connection->rollBack(),
+                    default => null,
+                };
+            }
+        });
+
+        $first->title = 'First, edited';
+        $second->title = 'Second, edited';
+        $this->em->flush();
+
+        self::assertSame(['First, edited', 'Second'], array_map(fn (Article $a): mixed => $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$a->id]), [$first, $second]), 'the premise: the first was written and the second taken back');
+        self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+    }
+
+    public function testTwoUpdatesOfOneRowAreTwoExecutionsAndOnlyTheOneTakenBackGoes(): void
+    {
+        // The outer flush writes the article 'One' -> 'Two'; a listener ahead of this one, in
+        // its postUpdate, runs a nested flush that writes the SAME row 'Two' -> 'Five' and
+        // dies. Same table, same key -- the row does not tell the two apart, and neither
+        // does the owner, since a flush that dies before claiming what it ran leaves it to
+        // the frame around it. What does is where each ran: the outer flush's statement is in
+        // the transaction still open when this listener takes its record, the nested one's
+        // in a savepoint already rolled back. One record, tied to the outer flush's statement.
+        //
+        // And then the row really does go 'Two' -> 'Five', in a flush of its own that
+        // commits: the same transition as the one taken back, and a fact this time.
+        //
+        // What the record SAYS is another matter, and step 5's: an entity's fields are still
+        // read from Doctrine's change set, and the nested flush left 'Five' on the object, so
+        // the outer record says 'One' -> 'Five' where the row took 'Two'. Pinned as it is today
+        // -- the fate is this test's, and the value flips when the fields come from the log.
+        $article = $this->persisted(new Article('One'));
+        $this->gateway->documents = [];
+
+        $ahead = new class($this->em, $article) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Article $article)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->article) {
+                    return;
+                }
+
+                if ($this->ran) {
+                    throw new \DomainException('the nested flush dies after its statement');
+                }
+
+                $this->ran = true;
+                $this->article->title = 'Five';
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does about a nested flush that failed
+                }
+            }
+        };
+        $this->aheadOfTheAuditListener(Events::postUpdate, $ahead);
+
+        $article->title = 'Two';
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $ahead);
+
+        self::assertSame('Two', $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), 'the premise: the outer flush committed and the nested one was taken back');
+        self::assertCount(1, $this->documents(), 'one record: the outer flush\'s execution stood, the nested one\'s did not');
+
+        $this->reopen();
+        $again = $this->em->find(Article::class, $article->id);
+        self::assertInstanceOf(Article::class, $again);
+        $again->title = 'Five';
+        $this->em->flush();
+
+        $said = array_map(static fn (array $d): array => [$d['changes']['title']['old'] ?? null, $d['changes']['title']['new'] ?? null], $this->documents());
+
+        self::assertCount(2, $said, 'and the row\'s real move to Five is a record of its own, once');
+        self::assertNotSame([['One', 'Two'], ['Two', 'Five']], $said, 'this is described correctly now: step 5 is done here, take the pin off');
+        self::assertSame([['One', 'Five'], ['Two', 'Five']], $said, 'what the record says has changed; the pin no longer describes it');
+    }
+
     public function testARemovalStandsByItsOwnDeleteWhenANestedFlushAheadOfThisListenerDies(): void
     {
         // The same for a removal, whose row's key Doctrine has already cleared by postRemove:
@@ -389,11 +492,12 @@ final class TransactionSafetyTest extends DoctrineTestCase
 
     public function testARecordStandsByAStatementOfItsOwnTableAndNotByWhateverRanAfterIt(): void
     {
-        // A listener ahead of this one writes a row of another table inside a savepoint of
-        // its own, in the article's postUpdate, and takes it back -- a row with the same key
-        // as the article's, the way a persister writes it. That is the last statement of the
-        // flush when this listener takes the article's record; the record is about the
-        // article's row, which stayed written.
+        // A listener ahead of this one opens a savepoint in the article's postUpdate and writes
+        // a row of another table in it -- with the same key as the article's, the way a
+        // persister writes it -- and a listener behind this one takes it back. When this
+        // listener takes the article's record, that statement is the last one, bound to a row
+        // of the same key and not void yet; the record is about the article's row, which
+        // stayed written.
         $article = $this->persisted(new Article('First'));
         $this->em->persist($vehicle = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle());
         $this->em->flush();
@@ -410,6 +514,15 @@ final class TransactionSafetyTest extends DoctrineTestCase
             {
                 $this->connection->beginTransaction();
                 $this->connection->executeStatement('UPDATE Vehicle SET plate = ? WHERE id = ?', ['taken back', $this->id]);
+            }
+        });
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($connection) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
                 $this->connection->rollBack();
             }
         });
@@ -417,7 +530,46 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $article->title = 'First, edited';
         $this->em->flush();
 
+        self::assertSame(['First, edited', 'AA-1'], [$connection->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), $connection->fetchOne('SELECT plate FROM Vehicle WHERE id = ?', [$vehicle->id])], 'the premise: the article was written and the vehicle taken back');
         self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+    }
+
+    public function testARemovalTheApplicationTookBackInsideAFlushIsNotRecorded(): void
+    {
+        // One flush edits one article and removes another; Doctrine writes updates before
+        // deletions. The application opens a savepoint in the edited one's postUpdate, so the
+        // DELETE runs inside it, and rolls back to it in the removed one's postRemove, behind
+        // this listener: the DELETE is taken back after this listener tied the removal's
+        // record to it -- by the key the row had, since Doctrine cleared the generated
+        // identifier before postRemove.
+        $edited = $this->persisted(new Article('Edited'));
+        $removed = $this->persisted(new Article('Removed'));
+        $removedId = $removed->id;
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate, Events::postRemove], new class($connection) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                $this->connection->beginTransaction();
+            }
+
+            public function postRemove(LifecycleEventArgs $args): void
+            {
+                $this->connection->rollBack();
+            }
+        });
+
+        $edited->title = 'Edited, again';
+        $this->em->remove($removed);
+        $this->em->flush();
+
+        self::assertSame(1, (int) $connection->fetchOne('SELECT COUNT(*) FROM Article WHERE id = ?', [$removedId]), 'the premise: the DELETE was taken back');
+        self::assertSame([['update', (string) $edited->id]], array_map(static fn (array $d): array => [$d['event'], (string) $d['objectId']], $this->documents()));
     }
 
     public function testAnElementThatBroughtItsOwnIdIsStillNamedByItsRepresenter(): void

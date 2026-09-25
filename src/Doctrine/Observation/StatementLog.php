@@ -45,6 +45,15 @@ namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
  * nested flush on behalf of the outer one is the nested flush's, because that is the frame
  * it ran in.
  *
+ * **Two questions, and this answers them apart.** Ownership says whose moment and context a
+ * fact carries, and a frame nobody lived to claim -- a nested flush that died before any of
+ * its statements was announced -- is lent to the frame around it. That is right for whose it
+ * is and wrong for whether it stands: the lent statement is still void. Whether a record
+ * stands is the fate of the one execution it describes ({@see fate()}), found by the row it
+ * wrote and by not being void yet when the record was taken, and never by who owns it. Folding
+ * the two into one -- "the flush's statements" -- is how a record of a flush that committed
+ * was dropped for a statement its dead nested flush ran on the same row.
+ *
  * Nothing here parses SQL beyond recognising the three savepoint statements, and nothing here
  * knows about entities. It is an observer: it never runs a statement, and the only thing it
  * keeps longer than a statement's own frame is what its caller asks it to.
