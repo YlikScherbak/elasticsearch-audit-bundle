@@ -289,6 +289,137 @@ final class TransactionSafetyTest extends DoctrineTestCase
         self::assertSame(1, (int) $connection->fetchOne('SELECT COUNT(*) FROM LedgerLine'), 'the premise: the line committed');
     }
 
+    public function testARecordStandsByItsOwnStatementWhenANestedFlushAheadOfThisListenerDies(): void
+    {
+        // The first article's UPDATE runs; a listener ahead of this one, in its postUpdate,
+        // runs a nested flush that writes the second article -- the same table -- and dies.
+        // By the time this listener takes the first article's record the last statement of
+        // that table is the nested flush's, taken back. The record's statement is its own
+        // flush's, which stayed done.
+        $first = $this->persisted(new Article('First'));
+        $second = $this->persisted(new Article('Second'));
+        $this->gateway->documents = [];
+
+        $ahead = new class($this->em, $first, $second) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Article $first, private readonly Article $second)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->second && $this->ran) {
+                    throw new \DomainException('the nested flush dies after its statement');
+                }
+
+                if ($args->getObject() !== $this->first || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->second->title = 'Second, from inside';
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does about a nested flush that failed
+                }
+            }
+        };
+        $this->aheadOfTheAuditListener(Events::postUpdate, $ahead);
+
+        $first->title = 'First, edited';
+        $this->em->flush();
+
+        self::assertSame(['First, edited', 'Second'], array_map(fn (Article $a): mixed => $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$a->id]), [$first, $second]), 'the premise: the outer flush committed and the nested one was taken back');
+        self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+    }
+
+    public function testARemovalStandsByItsOwnDeleteWhenANestedFlushAheadOfThisListenerDies(): void
+    {
+        // The same for a removal, whose row's key Doctrine has already cleared by postRemove:
+        // the first article's DELETE runs, and a listener ahead of this one, in its
+        // postRemove, runs a nested flush that writes the second article and dies. The
+        // record's statement is found by the key the row had, taken before the DELETE.
+        $first = $this->persisted(new Article('First'));
+        $second = $this->persisted(new Article('Second'));
+        $firstId = $first->id;
+        $this->gateway->documents = [];
+
+        $ahead = new class($this->em, $second) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Article $second)
+            {
+            }
+
+            public function postRemove(LifecycleEventArgs $args): void
+            {
+                if ($this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->second->title = 'Second, from inside';
+                $this->em->getEventManager()->addEventListener([Events::postUpdate], $this);
+
+                try {
+                    $this->em->flush();
+                } catch (\DomainException) {
+                    // what an application does about a nested flush that failed
+                } finally {
+                    $this->em->getEventManager()->removeEventListener([Events::postUpdate], $this);
+                }
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                throw new \DomainException('the nested flush dies after its statement');
+            }
+        };
+        $this->aheadOfTheAuditListener(Events::postRemove, $ahead);
+
+        $this->em->remove($first);
+        $this->em->flush();
+
+        self::assertSame([0, 'Second'], [(int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM Article WHERE id = ?', [$firstId]), $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$second->id])], 'the premise: the DELETE committed and the nested flush was taken back');
+        self::assertSame(['remove'], array_map(static fn (array $d): string => $d['event'], $this->documents()));
+    }
+
+    public function testARecordStandsByAStatementOfItsOwnTableAndNotByWhateverRanAfterIt(): void
+    {
+        // A listener ahead of this one writes a row of another table inside a savepoint of
+        // its own, in the article's postUpdate, and takes it back -- a row with the same key
+        // as the article's, the way a persister writes it. That is the last statement of the
+        // flush when this listener takes the article's record; the record is about the
+        // article's row, which stayed written.
+        $article = $this->persisted(new Article('First'));
+        $this->em->persist($vehicle = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle());
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+        self::assertSame($article->id, $vehicle->id, 'the premise: the two rows share a key');
+
+        $this->aheadOfTheAuditListener(Events::postUpdate, new class($connection, $vehicle->id) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly mixed $id)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                $this->connection->beginTransaction();
+                $this->connection->executeStatement('UPDATE Vehicle SET plate = ? WHERE id = ?', ['taken back', $this->id]);
+                $this->connection->rollBack();
+            }
+        });
+
+        $article->title = 'First, edited';
+        $this->em->flush();
+
+        self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+    }
+
     public function testAnElementThatBroughtItsOwnIdIsStillNamedByItsRepresenter(): void
     {
         // The other side of the change above: waiting for postFlush must not cost the
@@ -1006,6 +1137,26 @@ final class TransactionSafetyTest extends DoctrineTestCase
         }
 
         return $fates;
+    }
+
+    /**
+     * Registers a listener ahead of the audit one for an event: what a lifecycle callback on
+     * the entity always is, and a listener with a higher priority.
+     */
+    private function aheadOfTheAuditListener(string $event, object $listener): void
+    {
+        $events = $this->em->getEventManager();
+        $there = $events->getListeners($event);
+
+        foreach ($there as $one) {
+            $events->removeEventListener([$event], $one);
+        }
+
+        $events->addEventListener([$event], $listener);
+
+        foreach ($there as $one) {
+            $events->addEventListener([$event], $one);
+        }
     }
 
     private function detachedListener(): AuditSubscriber

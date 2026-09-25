@@ -531,12 +531,14 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         ), sprintf("the warning counted a record that was never written; what was logged:\n%s", implode("\n", $this->logs)));
     }
 
-    public function testTheDroppedWarningCountsWhatIsReallyDropped(): void
+    public function testTheLateWarningCountsWhatIsReallyWritten(): void
     {
-        // The same sum on the other ending, where the records are not written at all.
-        // "Nothing can vouch for this flush" is already the worst news in the file; it
-        // has to come with the right number attached -- and a removal waiting for a flush
-        // that has not happened yet is not part of it.
+        // The flush committed and its publishing never ran; the manager is then replaced.
+        // That used to be the other ending -- "nothing can vouch for this flush", records
+        // dropped -- because the closed-or-gone manager was what was asked. The log is asked
+        // now, and it says the INSERT committed: the record is written late. And counted
+        // right: a removal called off and still waiting for a flush that has not happened is
+        // not part of it.
         $this->em->persist($article = new Article('To be deleted'));
         $this->em->flush();
 
@@ -547,10 +549,6 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         $this->em->persist($article); // called off, so its record stays where preRemove put it
         $this->em->flush();
 
-        // Let go of the entity before the manager is replaced. Measured, not assumed:
-        // with the variable still held the old manager survives the collection and the
-        // listener takes the other branch — the records are written late instead of
-        // dropped — so the test would be asking about the wrong warning.
         unset($article);
 
         $this->reopen();
@@ -560,6 +558,48 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         $this->em->persist(new Article('Unrelated'));
         $this->em->flush();
 
+        self::assertNotSame([], array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'so its 1 audit record(s) are being written now, late'),
+        ), sprintf("the warning counted a record nobody was writing; what was logged:\n%s", implode("\n", $this->logs)));
+    }
+
+    public function testTheDroppedWarningCountsWhatIsReallyDropped(): void
+    {
+        // The other ending, where the log says what the flush wrote was taken back: it died
+        // after its INSERT, and the transaction rolled back. Nothing is written, and the
+        // warning says how much -- without the removal called off and still waiting.
+        $this->em->persist($article = new Article('To be deleted'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $breaker = new class {
+            public function postPersist(): void
+            {
+                throw new \DomainException('the flush dies after its INSERT');
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postPersist], $breaker);
+
+        $this->em->persist(new Article('Collected'));
+        $this->em->remove($article);
+        $this->em->persist($article); // called off, so its record stays where preRemove put it
+
+        try {
+            $this->em->flush();
+            self::fail('the premise: the flush died');
+        } catch (\DomainException) {
+        } finally {
+            $this->em->getEventManager()->removeEventListener([Events::postPersist], $breaker);
+        }
+
+        unset($article);
+        $this->reopen();
+
+        $this->em->persist(new Article('Unrelated'));
+        $this->em->flush();
+
+        self::assertSame(['Unrelated'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
         self::assertNotSame([], array_filter(
             $this->logs,
             static fn (string $line): bool => str_contains($line, '1 audit record(s) it had collected are dropped'),
@@ -615,22 +655,20 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         );
     }
 
-    public function testAFlushWhoseManagerIsGoneHasItsRecordsDroppedAndSaysHowMany(): void
+    public function testAFlushWhoseManagerIsGoneIsStillWrittenLateBecauseTheLogSaysItCommitted(): void
     {
-        // The other ending. The records were collected, but the manager that would prove
-        // they reached the database is closed or replaced — so nothing here can be shown
-        // to have committed, and history that describes rows nobody has is worse than
-        // history that is missing. It still has to be said out loud.
+        // The records were collected, the transaction committed, and the manager that ran
+        // it has been replaced -- what ManagerRegistry::resetManager() does -- before
+        // anything published them. This used to drop them: a manager closed or gone was
+        // taken to mean nothing could vouch for the flush. The connection's log vouches for
+        // it: both INSERTs committed, the rows are in the table, and dropping their history
+        // is the one outcome the audit trail must not choose.
         $listener = $this->silenceOurPostFlush();
 
         $this->em->persist(new Article('Collected'));
         $this->em->persist(new Article('Also collected'));
         $this->em->flush();
 
-        // What ManagerRegistry::resetManager() does, and the reason the flush's manager
-        // is held by a weak reference at all: a fresh one takes over and the old one is
-        // collected. close() would not do here — it clears, onClear drops everything the
-        // flush collected, and there would be nothing left to warn about.
         $this->reopen();
         $this->restorePostFlush($listener);
         gc_collect_cycles();
@@ -638,15 +676,15 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         $this->em->persist(new Article('Unrelated'));
         $this->em->flush();
 
-        self::assertSame(['Unrelated'], array_map(
+        self::assertSame(2, (int) $this->em->getConnection()->fetchOne("SELECT COUNT(*) FROM Article WHERE title LIKE '%ollected'"), 'the premise: the rows committed');
+        self::assertSame(['Collected', 'Also collected', 'Unrelated'], array_map(
             static fn (array $d): mixed => $d['changes']['title']['new'],
             $this->documents(),
-        ), 'the records of a flush nothing can vouch for are not written under somebody else s operation');
-
+        ));
         self::assertNotSame([], array_filter(
             $this->logs,
-            static fn (string $line): bool => str_contains($line, '2 audit record(s) it had collected are dropped'),
-        ), sprintf("no warning said two records were dropped; what was logged:\n%s", implode("\n", $this->logs)));
+            static fn (string $line): bool => str_contains($line, 'so its 2 audit record(s) are being written now, late'),
+        ), sprintf("no warning said two records were written late; what was logged:\n%s", implode("\n", $this->logs)));
     }
 
     public function testAFlushThatWasDroppedIsNotDroppedTwice(): void

@@ -12,8 +12,11 @@ use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ElementFieldRuns;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\HistoryReplay;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowBinding;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -95,6 +98,29 @@ final class AuditSubscriber
 
     /** @var list<AuditRecord> records built during the current flush, written after its commit */
     private array $pending = [];
+
+    /**
+     * Where the connection's log stood when each pending record was taken, and the class of
+     * the row it is about, by the same index.
+     *
+     * A record is taken in the event that follows its statement, so the statement is at or
+     * before that position -- and whether the record stands is that statement's fate, not
+     * its flush's: an application may roll back to a savepoint of its own inside a flush
+     * that goes on to commit, and a flush that dies inside one that commits leaves the
+     * other's statements where they were. A clear decides neither.
+     *
+     * @var list<array{at: int, class: class-string, key: array<string, mixed>|null}|null>
+     */
+    private array $pendingAt = [];
+
+    /**
+     * The key of each row a removal drafted in preRemove is about, by the entity's object id:
+     * a generated identifier is cleared once the DELETE has run, before postRemove, and the
+     * record needs it to find its statement ({@see self::$pendingAt}).
+     *
+     * @var array<int, array<string, mixed>|null>
+     */
+    private array $pendingRemovalKeys = [];
 
     /**
      * Which flush collected each pending record, by the same index.
@@ -782,6 +808,7 @@ final class AuditSubscriber
         if ($record !== null) {
             $this->pending[] = $record;
             $this->pendingFlush[] = $collecting;
+            $this->pendingAt[] = $this->statementBehind($manager, $args->getObject());
             // Registered like an update's: an owner created with its lines has one
             // record, and what the lines did belongs in it. Without this the membership
             // found no record to join and invented a second, phantom update.
@@ -862,12 +889,14 @@ final class AuditSubscriber
             // things starts.
             array_splice($this->pending, $already, 1, [$record]);
             array_splice($this->pendingFlush, $already, 1, [$collecting]);
+            array_splice($this->pendingAt, $already, 1, [$this->statementBehind($manager, $entity)]);
 
             return;
         }
 
         $this->pending[] = $record;
         $this->pendingFlush[] = $collecting;
+        $this->pendingAt[] = $this->statementBehind($manager, $entity);
         $this->pendingIndexByEntity[spl_object_id($entity)] = array_key_last($this->pending);
     }
 
@@ -877,6 +906,8 @@ final class AuditSubscriber
 
         if ($record !== null) {
             $this->pendingRemovals[spl_object_id($args->getObject())] = $record;
+            $manager = self::entityManagerOf($args->getObjectManager());
+            $this->pendingRemovalKeys[spl_object_id($args->getObject())] = $manager === null ? null : RowMemory::keyColumns($manager, $args->getObject());
         }
     }
 
@@ -889,7 +920,8 @@ final class AuditSubscriber
 
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
-        unset($this->pendingRemovals[$key]);
+        $rowKey = $this->pendingRemovalKeys[$key] ?? null;
+        unset($this->pendingRemovals[$key], $this->pendingRemovalKeys[$key]);
 
         if ($record !== null) {
             $this->pending[] = $record;
@@ -900,6 +932,7 @@ final class AuditSubscriber
             // had. postRemove is inside the flush that did the deleting, which is the
             // flush the record belongs to.
             $this->pendingFlush[] = $collecting;
+            $this->pendingAt[] = ['at' => $this->statements->position(), 'class' => $args->getObject()::class, 'key' => $rowKey];
         }
     }
 
@@ -980,6 +1013,8 @@ final class AuditSubscriber
      */
     private function publish(ObjectManager $manager, ?EntityManagerInterface $em): void
     {
+        $this->dropWhatTheLogTookBack(self::entityManagerOf($manager) ?? $em);
+
         $records = $this->pending;
         $collected = $this->pendingFlush;
 
@@ -1656,6 +1691,8 @@ final class AuditSubscriber
 
         $this->pending = [];
         $this->pendingFlush = [];
+        $this->pendingAt = [];
+        $this->pendingRemovalKeys = array_intersect_key($this->pendingRemovalKeys, $drafts);
         $this->pendingRemovals = $drafts;
         $this->pendingIndexByEntity = [];
         $this->ownerFlush = [];
@@ -1693,45 +1730,122 @@ final class AuditSubscriber
     }
 
     /**
-     * The manager was cleared — after a failed flush, or by the application: whatever
-     * was collected belongs to a flush that will not commit.
+     * The manager was cleared: Doctrine forgot its objects. That decides nothing here.
      *
-     * ORM 2 can clear a single entity class while the flush that is running commits
-     * the rest, and dropping the records then would lose history that did happen. But
-     * a closed manager means the flush failed, and a partial clear does not change
-     * that: those records describe a state the database never reached, and inventing
-     * history is worse than missing it.
+     * Whether what a flush wrote stands is the connection's log's to say -- a savepoint
+     * rolled back, a transaction rolled back, a statement that failed -- and it is asked per
+     * record, of the statement the record was taken after. Whether a flush is over is the
+     * stack's, by nesting level. A clear is neither: close() clears on its way out of a
+     * flush that dies inside one that commits, an application clears in the middle of a
+     * flush that goes on, or between two operations, and in each of them what already ran
+     * is exactly as real as it was a moment before.
      */
     public function onClear(OnClearEventArgs $args): void
     {
-        if (self::isPartialClear($args) && self::entityManagerOf($args->getObjectManager())?->isOpen() === true) {
+    }
+
+    /**
+     * Where the log stands, and whose row the record about to be taken is, for {@see self::$pendingAt}.
+     *
+     * @return array{at: int, class: class-string, key: array<string, mixed>|null}
+     */
+    private function statementBehind(?EntityManagerInterface $em, object $entity): array
+    {
+        return ['at' => $this->statements->position(), 'class' => $entity::class, 'key' => $em === null ? null : RowMemory::keyColumns($em, $entity)];
+    }
+
+    /**
+     * Takes out every pending record whose statement the log says was taken back.
+     *
+     * The statement is the last one at or before the record's position that the log binds
+     * to the record's row, by its key: a listener ahead of this one in the same event can run
+     * statements of its own in between -- a flush nested there, writing the same table, and
+     * dying before it could claim what it ran -- and those are not what the record is about.
+     * Where no key binds it -- an INSERT whose key the database handed out -- it is the last
+     * statement of the row's table, the record's own flush's before any other's. A record
+     * whose statement the log no longer holds stays: the log lets go only of what was folded
+     * in once no transaction could still roll it back.
+     */
+    private function dropWhatTheLogTookBack(?EntityManagerInterface $em): void
+    {
+        if ($em === null || $this->pending === []) {
             return;
         }
 
-        // Everything a flush collected, not only the records: what onFlush saw about the
-        // elements of tracked collections describes INSERTs and UPDATEs that were rolled
-        // back with the rest, and would otherwise surface in the next flush as history.
-        //
-        // Through forgetThisFlush() rather than by listing the same fields again. This
-        // used to be a second copy of that method, written out by hand, and it fell
-        // behind: the fields added for the per-flush moment were not in it, so a clear
-        // after a swallowed publication emptied the records and left the numbers that
-        // went with them — and the next flush's first record, at position zero, was
-        // written with the moment of the flush whose records had just been thrown away.
-        // A new record dated and signed as somebody else's, which is worse than the loss
-        // the clear was already causing.
-        //
-        // Unconditionally, and the flush stack with it: onClear is not paired with
-        // anything, so popping one level would leave the stack describing a flush that no
-        // longer exists.
-        $this->forgetThisFlush();
+        $kept = [];
 
-        // And what the rows were believed to hold, which the clear has just made
-        // unanswerable: a cleared manager means either a flush that failed and rolled
-        // back, or an application throwing its objects away. Either way nothing here
-        // knows what the columns hold any more, and a correction is a claim about a
-        // column.
-        $this->neverWritten = new \WeakMap();
+        foreach (array_keys($this->pending) as $index) {
+            $at = $this->pendingAt[$index] ?? null;
+
+            if ($at === null || !$this->theLogTookBack($em, $at['at'], $at['class'], $at['key'], $this->pendingFlush[$index] ?? self::NO_FLUSH)) {
+                $kept[] = $index;
+            }
+        }
+
+        if (\count($kept) === \count($this->pending)) {
+            return;
+        }
+
+        $renumbered = array_flip($kept);
+        $this->pending = array_values(array_map(fn (int $index): AuditRecord => $this->pending[$index], $kept));
+        $this->pendingFlush = array_values(array_map(fn (int $index): int => $this->pendingFlush[$index], $kept));
+        $this->pendingAt = array_values(array_map(fn (int $index): ?array => $this->pendingAt[$index] ?? null, $kept));
+        $this->pendingIndexByEntity = array_filter(array_map(
+            static fn (int $index): ?int => $renumbered[$index] ?? null,
+            $this->pendingIndexByEntity,
+        ), static fn (?int $index): bool => $index !== null);
+    }
+
+    /**
+     * @param class-string              $class
+     * @param array<string, mixed>|null $key the row's key as the statements carry it
+     */
+    private function theLogTookBack(EntityManagerInterface $em, int $at, string $class, ?array $key, int $flush): bool
+    {
+        $metadata = $em->getClassMetadata($class);
+        $tables = [];
+
+        foreach ([$class, ...array_values($metadata->parentClasses)] as $name) {
+            $tables[$em->getClassMetadata($name)->getTableName()] = true;
+        }
+
+        $row = $key === null ? null : HistoryReplay::keyOf($metadata, $key);
+        $ownFlush = null;
+        $anyFlush = null;
+
+        for ($statement = $at; $statement > 0; --$statement) {
+            $entry = $this->statements->statement($statement);
+
+            if ($entry === null) {
+                break; // let go of: folded in, so done
+            }
+
+            $shape = StatementShape::read($entry['sql']);
+
+            if ($shape === null || !isset($tables[$shape->table])) {
+                continue;
+            }
+
+            $binding = RowBinding::of($em, $shape, $entry['params']);
+
+            if ($row !== null && $binding->kind === RowBinding::ROW && $binding->key !== null) {
+                if (HistoryReplay::keyOf($metadata, $binding->key) === $row) {
+                    return $this->statements->fate($statement) === StatementLog::VOID;
+                }
+
+                continue; // another row of the same table
+            }
+
+            if ($this->statements->ownerOf($statement) === $flush) {
+                $ownFlush ??= $statement;
+            } else {
+                $anyFlush ??= $statement;
+            }
+        }
+
+        $statement = $ownFlush ?? $anyFlush;
+
+        return $statement !== null && $this->statements->fate($statement) === StatementLog::VOID;
     }
 
     /**
@@ -1764,34 +1878,36 @@ final class AuditSubscriber
             $abandoned = $abandoned instanceof EntityManagerInterface ? $abandoned : null;
 
             // Whatever the flushes that unwound left: the ones that ran nothing have
-            // already taken their share away, so this counts what is really there.
+            // already taken their share away, and what the log says was taken back goes
+            // now -- a flush that died rolled its statements back, and that, not its manager
+            // being closed or cleared on the way out, is what says so. What is left is
+            // really there.
+            $before = $this->collectedSoFar($abandoned ?? $em);
+            $this->dropWhatTheLogTookBack($abandoned ?? $em);
             $collected = $this->collectedSoFar($abandoned ?? $em);
 
-            if ($abandoned !== null && $abandoned->isOpen() && $committed && $collected > 0) {
-                // Its manager is still open, so UnitOfWork::commit() did not fail — every
-                // failure inside its try closes the manager on the way out. The
-                // transaction committed and something else swallowed the rest of the
-                // event: a postFlush listener registered before this one threw, and this
-                // listener never ran. The rows are in the database; dropping the records
-                // would be the audit trail losing what actually happened, which is the
-                // one outcome it must not choose.
+            if ($committed && $collected > 0) {
+                // Its statements stayed done, and it did not come back through postFlush:
+                // something swallowed the rest of the event -- a postFlush listener
+                // registered before this one threw, and this listener never ran. The rows
+                // are in the database; dropping the records would be the audit trail
+                // losing what actually happened, which is the one outcome it must not
+                // choose.
                 $this->logger->warning('A flush committed without reaching this listener — a postFlush listener registered before it threw — so its {count} audit record(s) are being written now, late. Give the audit listener a higher priority than listeners that may fail, or handle the failure in that listener.', ['count' => $collected]);
 
                 try {
-                    $this->publish($abandoned, $abandoned);
+                    $this->publish($abandoned ?? $em, $abandoned ?? $em);
                 } catch (\Throwable $e) {
                     $this->writer->reportFailure($e, null);
                 } finally {
                     $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
                 }
             } else {
-                // Nothing was collected; or the flush never reached a statement,
-                // because a listener in onFlush threw before Doctrine wrote anything; or
-                // the manager is gone — closed by UnitOfWork::commit() after a failure,
-                // or replaced by the application afterwards. Any of the three means
-                // nothing here can be shown to have reached the database, and history
+                // Nothing was collected; or the flush never reached a statement, because a
+                // listener in onFlush threw before Doctrine wrote anything; or what it wrote
+                // was rolled back. Either way nothing here reached the database, and history
                 // that describes rows nobody has is worse than history that is missing.
-                $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => $collected]);
+                $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => $before]);
 
                 $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
             }
@@ -1804,25 +1920,6 @@ final class AuditSubscriber
         }
 
         $this->flushes[] = ['level' => $level, 'flush' => $flush, 'ran' => false];
-    }
-
-    /**
-     * Whether this clear names a single entity class rather than emptying the manager.
-     *
-     * Only ORM 2 can do that, and only ORM 2 has the method to ask, so the question is
-     * put through reflection: a static analyser sees one version at a time and would
-     * call any direct check redundant on ORM 2 and impossible on ORM 3. It is neither —
-     * it is what tells the two versions apart, and both are supported.
-     */
-    private static function isPartialClear(OnClearEventArgs $args): bool
-    {
-        $event = new \ReflectionClass($args);
-
-        if (!$event->hasMethod('clearsAllEntities')) {
-            return false; // ORM 3: a clear is always a full one
-        }
-
-        return $event->getMethod('clearsAllEntities')->invoke($args) === false;
     }
 
     /**
