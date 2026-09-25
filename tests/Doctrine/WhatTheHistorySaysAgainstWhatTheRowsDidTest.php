@@ -309,12 +309,62 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * account for it. Widening the vocabulary makes every seed a different sequence, so an
      * entry made after that is about the new sequences.
      *
+     * Step 4 widened the vocabulary (2026-09-25) and drew six, all one root: the article's old
+     * side after a savepoint of the application's took its UPDATE back. They are the record's
+     * value, not its fate -- the record of the taken-back UPDATE is dropped as it should be --
+     * and step 5, which reads an entity's fields from the log, is where they go.
+     *
      * @var array<int, array{says: string, because: string}>
      */
-    private const KNOWN = [];
+    private const KNOWN = [
+        594 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
+        732 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"from after\\""], invented ["article 1 title \\"title 0\\" -> \\"from after\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
+        841 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
+        1030 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
+        2480 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
+        2703 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 2\\""], invented ["article 1 title \\"title 0\\" -> \\"title 2\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
+    ];
 
-    /** What a sequence does between its flushes. */
+    /**
+     * What a sequence does between its flushes.
+     *
+     * Widened in step 4 (2026-09-25) by a clear of the manager between two operations; the
+     * vocabulary before it is {@see self::VOCABULARY_3_3}, kept so that the corpus it drew --
+     * three thousand sequences, green on DBAL 3 and 4 -- can still be run as it was:
+     * AUDIT_MODEL_VOCABULARY=3.3.
+     */
     private const VOCABULARY = [
+        ...self::VOCABULARY_3_3,
+        'clear the manager',
+    ];
+
+    /** How a flush of a sequence may end, besides the ordinary way. */
+    private const ENDINGS = [
+        ...self::ENDINGS_3_3,
+        // Step 4: a clear inside a flush, from a listener ahead of this one -- the shape the
+        // listener used to answer by forgetting the flush -- and the one that loads a line
+        // afresh after it and removes it in the same flush.
+        'flush, and after the statement a listener ahead of this one clears the manager',
+        'flush, and after the statement a listener clears the manager, loads a line and removes it',
+        // A savepoint of the application's around one statement of the flush, rolled back by a
+        // listener behind this one or ahead of it: the execution taken back after its record was
+        // taken, or before. The class a colleague's counterexample found and this did not.
+        'flush, and a savepoint of the application\'s around a statement is rolled back after this listener',
+        'flush, and a savepoint of the application\'s around a statement is rolled back before this listener',
+    ];
+
+    /** The endings that act on the UPDATE of a line in their flush, and need one there. */
+    private const ENDINGS_ON_A_LINES_UPDATE = [
+        'flush, and after the statement a listener removes the line',
+        'flush, and after the statement a nested one removes the line',
+        'flush, and after the statement a listener ahead of this one clears the manager',
+        'flush, and after the statement a listener clears the manager, loads a line and removes it',
+        'flush, and a savepoint of the application\'s around a statement is rolled back after this listener',
+        'flush, and a savepoint of the application\'s around a statement is rolled back before this listener',
+    ];
+
+    /** @see self::VOCABULARY */
+    private const VOCABULARY_3_3 = [
         'edit the article',
         'change a line',
         'move a line',
@@ -327,8 +377,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'replace the crate with a new line',
     ];
 
-    /** How a flush of a sequence may end, besides the ordinary way. */
-    private const ENDINGS = [
+    /** @see self::VOCABULARY */
+    private const ENDINGS_3_3 = [
         'flush, refused',
         'flush, publishing swallowed',
         'flush, with one nested inside',
@@ -397,7 +447,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         // At the default and above: a handful of sequences run by hand is not the search.
         if ($seeds >= 60) {
             self::assertSame([], array_values(array_filter(
-                [...self::VOCABULARY, ...self::ENDINGS, 'flush'],
+                [...self::theVocabulary()[0], ...self::theVocabulary()[1], 'flush'],
                 fn (string $word): bool => ($this->acted[$word] ?? 0) === 0,
             )), sprintf('these words of the vocabulary did nothing in %d sequences: the search has narrowed to a world without them', $seeds));
         }
@@ -559,6 +609,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private static function known(int $seed): ?array
     {
+        // A seed's entry is about the sequence today's vocabulary draws for it; the vocabulary
+        // of 3.3 draws another one under the same number, and was green without a list.
+        if (self::theVocabulary()[0] === self::VOCABULARY_3_3) {
+            return null;
+        }
+
         /** @var array<int, array{says: string, because: string}> $known */
         $known = self::KNOWN;
 
@@ -668,6 +724,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->open = [];
             $points = [$this->snapshot()];
             $this->apply($step, $world);
+            $world = $this->theWorldAfter($world);
             $points = [...$points, ...$this->checkpoints, $this->snapshot()];
 
             for ($i = 1, $n = \count($points); $i < $n; ++$i) {
@@ -721,12 +778,25 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     /**
      * @return list<string>
      */
+    /**
+     * The words a sequence is drawn from: today's, or those of 3.3 on request.
+     *
+     * @return array{0: list<string>, 1: list<string>}
+     */
+    private static function theVocabulary(): array
+    {
+        return ($_SERVER['AUDIT_MODEL_VOCABULARY'] ?? null) === '3.3'
+            ? [self::VOCABULARY_3_3, self::ENDINGS_3_3]
+            : [self::VOCABULARY, self::ENDINGS];
+    }
+
     private function aSequence(): array
     {
         $steps = [];
+        [$vocabulary, $endings] = self::theVocabulary();
 
         for ($i = 0, $n = 1 + $this->next(4); $i < $n; ++$i) {
-            $steps[] = self::VOCABULARY[$this->next(\count(self::VOCABULARY))];
+            $steps[] = $vocabulary[$this->next(\count($vocabulary))];
 
             // Sometimes nothing, so that two or three things reach one flush together.
             // Every action used to be followed at once by an attempt to flush, and the
@@ -738,8 +808,21 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
 
             // How the flush that carries it out ends: one of the endings, or an ordinary flush
-            // for the draws past them.
-            $steps[] = self::ENDINGS[$this->next(13)] ?? 'flush';
+            // for the draws past them -- five of them in 3.3's eight endings, three in step 4's
+            // twelve, so that each ending is drawn about as often as the ordinary flush is not.
+            $ordinary = $endings === self::ENDINGS_3_3 ? 5 : 3;
+            $ending = $endings[$this->next(\count($endings) + $ordinary)] ?? 'flush';
+
+            // An ending that acts on the UPDATE of a line needs one in its flush, and left to
+            // chance it had one in one flush of ten: a word drawn that often and acting that
+            // rarely is a word the default run never reaches. So it brings its own -- in the
+            // vocabulary of step 4 only, which draws every seed anew anyway; that of 3.3 is
+            // left exactly as it drew.
+            if ($endings !== self::ENDINGS_3_3 && \in_array($ending, self::ENDINGS_ON_A_LINES_UPDATE, true)) {
+                $steps[] = 'change a line';
+            }
+
+            $steps[] = $ending;
         }
 
         // Whatever a refusal left behind is carried out by one last ordinary flush, so the
@@ -873,6 +956,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }, refused: true),
             'flush, and after the statement a listener removes the line' => $this->flushRemovingALineAfterItsStatement(nested: false),
             'flush, and after the statement a nested one removes the line' => $this->flushRemovingALineAfterItsStatement(nested: true),
+            'clear the manager' => $this->did(fn () => $this->em->clear()),
+            'flush, and after the statement a listener ahead of this one clears the manager' => $this->flushClearingAfterTheStatement(thenRemovingALine: false),
+            'flush, and after the statement a listener clears the manager, loads a line and removes it' => $this->flushClearingAfterTheStatement(thenRemovingALine: true),
+            'flush, and a savepoint of the application\'s around a statement is rolled back after this listener' => $this->flushTakingAStatementBack(aheadOfThisListener: false),
+            'flush, and a savepoint of the application\'s around a statement is rolled back before this listener' => $this->flushTakingAStatementBack(aheadOfThisListener: true),
             default => throw new \LogicException('no such step: '.$step),
         };
 
@@ -1191,6 +1279,185 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         return $remover->removed !== null && $this->em->getConnection()->fetchOne('SELECT 1 FROM CrateItem WHERE id = ?', [$remover->removed]) === false;
     }
 
+    /**
+     * The world as the manager has it now: after a clear, every object the sequence held is
+     * detached, and a step on one of them is a step on nothing. Found again by identifier --
+     * under the application's filter put aside, since hiding lines is this world's filter --
+     * and a line whose row is gone, or that never got one, is let go.
+     *
+     * @param array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>} $world
+     *
+     * @return array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>}
+     */
+    private function theWorldAfter(array $world): array
+    {
+        if ($this->em->contains($world['crate']) || !$this->em->isOpen()) {
+            return $world;
+        }
+
+        $filters = $this->em->getFilters();
+        $suspended = array_keys($filters->getEnabledFilters());
+
+        foreach ($suspended as $name) {
+            $filters->suspend($name);
+        }
+
+        try {
+            $article = $this->em->find(Article::class, $world['article']->id);
+            $crate = $this->em->find(Crate::class, 'C-1');
+            $other = $this->em->find(Crate::class, 'C-2');
+            $lines = [];
+
+            foreach ($this->lines as $line) {
+                $again = $line->id === null ? null : $this->em->find(CrateItem::class, $line->id);
+
+                if ($again instanceof CrateItem) {
+                    $lines[] = $again;
+                }
+            }
+        } finally {
+            foreach ($suspended as $name) {
+                $filters->restore($name);
+            }
+        }
+
+        if (!$article instanceof Article || !$crate instanceof Crate || !$other instanceof Crate) {
+            throw new \LogicException('the world lost a row it never deletes');
+        }
+
+        $this->lines = $lines;
+        $this->aReplacementIsWaiting = false; // a clear takes a waiting replacement with it
+
+        return ['article' => $article, 'crate' => $crate, 'other' => $other, 'lines' => $lines];
+    }
+
+    /**
+     * A flush whose first UPDATE of a line is followed, in its postUpdate, by a clear of the
+     * manager -- from a listener ahead of this one -- and optionally by that line loaded
+     * afresh and removed, which the same flush then carries out. Acted when the clear ran.
+     */
+    private function flushClearingAfterTheStatement(bool $thenRemovingALine): bool
+    {
+        $this->aReplacementIsWaiting = false;
+
+        $clearing = new class($this->em, $thenRemovingALine) {
+            public bool $acted = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly bool $thenRemovingALine)
+            {
+            }
+
+            public function postUpdate(\Doctrine\ORM\Event\PostUpdateEventArgs $args): void
+            {
+                $line = $args->getObject();
+
+                if ($this->acted || !$line instanceof CrateItem || $line->id === null) {
+                    return;
+                }
+
+                $this->acted = true;
+                $id = $line->id;
+                $this->em->clear();
+
+                if ($this->thenRemovingALine) {
+                    $again = $this->em->find(CrateItem::class, $id);
+
+                    if ($again !== null) {
+                        $this->em->remove($again);
+                    }
+                }
+            }
+        };
+
+        $events = $this->em->getEventManager();
+        $there = $events->getListeners(Events::postUpdate);
+
+        foreach ($there as $one) {
+            $events->removeEventListener([Events::postUpdate], $one);
+        }
+
+        $events->addEventListener([Events::postUpdate], $clearing);
+
+        foreach ($there as $one) {
+            $events->addEventListener([Events::postUpdate], $one);
+        }
+
+        try {
+            $this->em->flush();
+        } catch (\Throwable) {
+            // Whatever the application could not complete is not this test's subject.
+        } finally {
+            $events->removeEventListener([Events::postUpdate], $clearing);
+        }
+
+        return $clearing->acted;
+    }
+
+    /**
+     * A flush one of whose UPDATEs the application wraps in a savepoint of its own -- opened in
+     * its preUpdate -- and rolls back in its postUpdate, from a listener behind this one or
+     * ahead of it. The flush goes on and commits the rest; Doctrine believes the row written.
+     * Acted when the rollback ran.
+     */
+    private function flushTakingAStatementBack(bool $aheadOfThisListener): bool
+    {
+        $this->aReplacementIsWaiting = false;
+
+        $taking = new class($this->em->getConnection()) {
+            public bool $acted = false;
+
+            private ?object $inside = null;
+
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function preUpdate(\Doctrine\ORM\Event\PreUpdateEventArgs $args): void
+            {
+                if ($this->acted || $this->inside !== null) {
+                    return;
+                }
+
+                $this->inside = $args->getObject();
+                $this->connection->beginTransaction();
+            }
+
+            public function postUpdate(\Doctrine\ORM\Event\PostUpdateEventArgs $args): void
+            {
+                if ($this->inside === null || $args->getObject() !== $this->inside) {
+                    return;
+                }
+
+                $this->inside = null;
+                $this->acted = true;
+                $this->connection->rollBack();
+            }
+        };
+
+        $events = $this->em->getEventManager();
+        $there = $aheadOfThisListener ? $events->getListeners(Events::postUpdate) : [];
+
+        foreach ($there as $one) {
+            $events->removeEventListener([Events::postUpdate], $one);
+        }
+
+        $events->addEventListener([Events::preUpdate, Events::postUpdate], $taking);
+
+        foreach ($there as $one) {
+            $events->addEventListener([Events::postUpdate], $one);
+        }
+
+        try {
+            $this->em->flush();
+        } catch (\Throwable) {
+            // Whatever the application could not complete is not this test's subject.
+        } finally {
+            $events->removeEventListener([Events::preUpdate, Events::postUpdate], $taking);
+        }
+
+        return $taking->acted;
+    }
+
     private function flushWithTheirPostFlushThrowing(): void
     {
         $this->aReplacementIsWaiting = false;
@@ -1306,7 +1573,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                         $said[] = sprintf('crate %s line %s quantity %s -> %s', $is['crate_id'], $sku, json_encode($was['quantity']), json_encode($is['quantity']));
                     }
                 }
-            } elseif ($was !== null && $is !== null && $was['quantity'] !== $is['quantity']) {
+            } elseif ($was !== null && $is !== null && $was['quantity'] !== $is['quantity'] && ($is['crate_id'] ?? null) !== null) {
+                // A line no crate owns has no history to be in: its change is nobody's, as
+                // testAChangeInsideALineWhoseRowHasNoOwnerBelongsToNoCrate holds it.
                 $said[] = sprintf('crate %s line %s quantity %s -> %s', $is['crate_id'], $sku, json_encode($was['quantity']), json_encode($is['quantity']));
             }
         }
