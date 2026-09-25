@@ -182,8 +182,18 @@ final class AuditSubscriber
      */
     private array $windows = [];
 
-    /** @var array<int, int> the pending lifecycle record of an entity — create or update — so what its elements did can be folded into it */
-    private array $pendingIndexByEntity = [];
+    /**
+     * The pending lifecycle record of an entity -- create or update -- by the entity, so what
+     * its elements did can be folded into it.
+     *
+     * Only an index: the record is in {@see self::$pending} and goes nowhere if the entity
+     * does. By the object, weakly, and not by its object id -- PHP hands a freed object's id to
+     * the next one, and after a clear the entity a record was taken for may be gone while the
+     * record waits, so an id could fold another owner's news into it.
+     *
+     * @var \WeakMap<object, int>
+     */
+    private \WeakMap $pendingIndexByEntity;
 
     /**
      * The first failure raised while this flush's records were being assembled.
@@ -454,6 +464,7 @@ final class AuditSubscriber
     ) {
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
+        $this->pendingIndexByEntity = new \WeakMap();
         $this->rows = new RowMemory($statements);
 
         // What ran before this listener existed is nobody's history it can account for: it
@@ -813,7 +824,7 @@ final class AuditSubscriber
             // Registered like an update's: an owner created with its lines has one
             // record, and what the lines did belongs in it. Without this the membership
             // found no record to join and invented a second, phantom update.
-            $this->pendingIndexByEntity[spl_object_id($args->getObject())] = array_key_last($this->pending);
+            $this->pendingIndexByEntity[$args->getObject()] = array_key_last($this->pending);
         }
     }
 
@@ -844,7 +855,7 @@ final class AuditSubscriber
             return;
         }
 
-        $already = $this->pendingIndexByEntity[spl_object_id($entity)] ?? null;
+        $already = $this->pendingIndexByEntity[$entity] ?? null;
 
         if ($already !== null
             && ($this->pending[$already] ?? null)?->event === AuditEvent::UPDATE
@@ -898,7 +909,7 @@ final class AuditSubscriber
         $this->pending[] = $record;
         $this->pendingFlush[] = $collecting;
         $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $entity, $collecting);
-        $this->pendingIndexByEntity[spl_object_id($entity)] = array_key_last($this->pending);
+        $this->pendingIndexByEntity[$entity] = array_key_last($this->pending);
     }
 
     public function preRemove(PreRemoveEventArgs $args): void
@@ -1033,11 +1044,11 @@ final class AuditSubscriber
         // it does not rewind the flush.
         // Which record each owner already has, so that what changed inside its elements in
         // the same flush joins it rather than standing beside it.
-        $recordOf = $this->pendingIndexByEntity;
+        $recordOf = clone $this->pendingIndexByEntity;
 
         foreach ($this->ownersWhoseCollectionWasEmptied() as $owner) {
             $changes = [];
-            $index = $this->pendingIndexByEntity[spl_object_id($owner)] ?? null;
+            $index = $this->pendingIndexByEntity[$owner] ?? null;
 
             try {
                 // The flush that saw this owner, which is not always the one publishing:
@@ -1057,7 +1068,7 @@ final class AuditSubscriber
                 if ($record !== null) {
                     $records[] = $record;
                     $collected[] = $flush;
-                    $recordOf[spl_object_id($owner)] = array_key_last($records);
+                    $recordOf[$owner] = array_key_last($records);
                 }
             } catch (\Throwable $e) {
                 $this->reportWhileBuilding($e, $index !== null ? ($records[$index] ?? null) : null);
@@ -1088,7 +1099,7 @@ final class AuditSubscriber
                 }
 
                 $key = spl_object_id($owner);
-                $index = $recordOf[$key] ?? null;
+                $index = $recordOf[$owner] ?? null;
 
                 try {
                     if (!isset($seen[$key]) && $index !== null && isset($records[$index]) && ($collected[$index] ?? self::NO_FLUSH) === $run['flush']) {
@@ -1203,17 +1214,15 @@ final class AuditSubscriber
     {
         $count = \count($this->pending);
 
-        $owners = array_keys($this->emptiedCollections);
-
         // The flush each owner's record so far belongs to, as publish() will build it.
         $recordFlush = [];
 
         foreach ($this->pendingIndexByEntity as $owner => $index) {
-            $recordFlush[$owner] = $this->pendingFlush[$index] ?? self::NO_FLUSH;
+            $recordFlush[spl_object_id($owner)] = $this->pendingFlush[$index] ?? self::NO_FLUSH;
         }
 
-        foreach ($owners as $owner) {
-            if (!isset($this->pendingIndexByEntity[$owner])) {
+        foreach ($this->emptiedCollections as $owner => [$object]) {
+            if (!isset($this->pendingIndexByEntity[$object])) {
                 ++$count;
                 $recordFlush[$owner] = $this->ownerFlush[$owner] ?? self::NO_FLUSH;
             }
@@ -1695,7 +1704,7 @@ final class AuditSubscriber
         $this->pendingAt = [];
         $this->pendingRemovalKeys = array_intersect_key($this->pendingRemovalKeys, $drafts);
         $this->pendingRemovals = $drafts;
-        $this->pendingIndexByEntity = [];
+        $this->pendingIndexByEntity = new \WeakMap();
         $this->ownerFlush = [];
         $this->flushes = [];
         $this->failureWhileBuilding = null;
@@ -1872,10 +1881,15 @@ final class AuditSubscriber
         $this->pending = array_values(array_map(fn (int $index): AuditRecord => $this->pending[$index], $kept));
         $this->pendingFlush = array_values(array_map(fn (int $index): int => $this->pendingFlush[$index], $kept));
         $this->pendingAt = array_values(array_map(fn (int $index): ?array => $this->pendingAt[$index] ?? null, $kept));
-        $this->pendingIndexByEntity = array_filter(array_map(
-            static fn (int $index): ?int => $renumbered[$index] ?? null,
-            $this->pendingIndexByEntity,
-        ), static fn (?int $index): bool => $index !== null);
+        $indexes = new \WeakMap();
+
+        foreach ($this->pendingIndexByEntity as $entity => $index) {
+            if (isset($renumbered[$index])) {
+                $indexes[$entity] = $renumbered[$index];
+            }
+        }
+
+        $this->pendingIndexByEntity = $indexes;
     }
 
     /**
