@@ -242,23 +242,14 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         // 6 / A. The nested flush writes Y 1 -> 7 and dies; Doctrine rolls back to its
         // savepoint, the application catches it, and the outer flush commits X 1 -> 2.
         //
-        // The history has X's change today and loses it: the death goes through close(),
-        // whose clear() raises onClear, and the listener forgets the outer flush there --
-        // step 4's. Not the same as the application rolling back a nested flush itself,
-        // which raises no onClear and keeps it; hence the premise below, that this one did.
+        // The death goes through close(), whose clear() raises onClear while the outer
+        // flush is alive: what the manager forgets there is Doctrine's, and what ran is the
+        // log's to say -- the savepoint took Y back, and X stays. Not the same as the
+        // application rolling back a nested flush itself, which raises no onClear; hence the
+        // premise below, that this one did. And after it the application goes on with a new
+        // manager: X is not written twice, and Y does not come back.
         [, $x, $y] = $this->aCrateWithTwoLines();
-
-        $clearedWhileOpen = new \ArrayObject();
-        $this->em->getEventManager()->addEventListener([Events::onClear], new class($clearedWhileOpen) {
-            public function __construct(private readonly \ArrayObject $cleared)
-            {
-            }
-
-            public function onClear(\Doctrine\ORM\Event\OnClearEventArgs $args): void
-            {
-                $this->cleared[] = $args->getObjectManager()->isOpen();
-            }
-        });
+        $cleared = $this->theClearsWhileOpen();
 
         $this->inThePostUpdateOf($x, function () use ($y): void {
             $y->quantity = 7;
@@ -268,7 +259,29 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $x->quantity = 2;
         $this->theOuterFlushAfterANestedOneDied();
 
-        self::assertContains(true, $clearedWhileOpen->getArrayCopy(), 'the premise: the death cleared the manager while it was still open');
+        self::assertContains(true, $cleared->getArrayCopy(), 'the premise: the death cleared the manager while it was still open');
+
+        $this->theNextOperationWritesItselfAndNothingElse();
+    }
+
+    public function testAStatementTheApplicationTookBackInsideAFlushIsNotAFactAndTheFlushsOthersAre(): void
+    {
+        // One flush, two statements, and a savepoint of the application's between them: it
+        // opens one in X's postUpdate and rolls back to it in Y's. The flush commits with X
+        // written and Y taken back -- so whether a record stands is decided by the statements
+        // it was built from, not by whether its flush ran anything at all.
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw);
+        [, $x, $y] = $this->aCrateWithTwoLines();
+        $connection = $this->em->getConnection();
+
+        $this->inThePostUpdateOf($x, static fn () => $connection->beginTransaction());
+        $this->inThePostUpdateOf($y, static fn () => $connection->rollBack());
+
+        $x->quantity = 2;
+        $y->quantity = 2;
+        $this->em->flush();
+
+        $this->assertTheRowsAndTheHistory([1 => 2, 2 => 1], ['crate C-1 items.1.quantity: 1 -> 2']);
     }
 
     public function testALineChangedAndThenRemovedByTheSameFlushIsBothFacts(): void
@@ -415,9 +428,15 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
             }
         });
 
+        $cleared = $this->theClearsWhileOpen();
         $x->quantity = 2;
         $y->quantity = 2;
         $this->failing(fn () => $this->em->flush());
+
+        // What takes both halves back is the transaction's ROLLBACK, in the log -- the
+        // clear on the way out forgets Doctrine's objects and decides nothing.
+        self::assertContains(true, $cleared->getArrayCopy(), 'the premise: the death cleared the manager while it was still open');
+
         $this->andTheApplicationGoesOn();
 
         $this->assertTheRowsAndTheHistory([1 => 1, 2 => 1], []);
@@ -439,7 +458,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $y->quantity = 2;
         $this->em->flush();
 
-        $this->assertTheRowsAndTheHistory([1 => 2, 2 => 1], ['crate C-1 items.1.quantity: 1 -> 2'], today: []);
+        $this->assertTheRowsAndTheHistory([1 => 2, 2 => 1], ['crate C-1 items.1.quantity: 1 -> 2']);
     }
 
     public function testAClearByTheApplicationThenANestedFlushThatDiesKeepsTheOuterFlushsHistory(): void
@@ -479,9 +498,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $y->quantity = 2;
         $this->em->flush();
 
-        // The departure is read from the log now; X's change is still lost to the clear,
-        // which forgets the flush's state and moves the log's cursor past it -- step 4's.
-        $this->assertTheRowsAndTheHistory([1 => 2], ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2: "SKU-Y" -> null'], today: ['crate C-1 items.2: "SKU-Y" -> null']);
+        $this->assertTheRowsAndTheHistory([1 => 2], ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2: "SKU-Y" -> null']);
     }
 
     public function testAnOnClearListenerThatClearsAgainDoesNotMakeADeathLookLikeAClear(): void
@@ -721,7 +738,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         }
 
         $this->em->flush();
-        $this->assertTheRowsAndTheHistory([1 => 2, 2 => 1], ['crate C-1 items.1.quantity: 1 -> 2'], today: []);
+        $this->assertTheRowsAndTheHistory([1 => 2, 2 => 1], ['crate C-1 items.1.quantity: 1 -> 2']);
     }
 
     /**
@@ -731,6 +748,52 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
      * with it -- nothing comes afterwards to publish it -- and the check that nothing was
      * written passes whatever the listener kept.
      */
+    /**
+     * Whether each clear the manager raised from here on found it open, in order.
+     *
+     * @return \ArrayObject<int, bool>
+     */
+    private function theClearsWhileOpen(): \ArrayObject
+    {
+        $cleared = new \ArrayObject();
+        $this->em->getEventManager()->addEventListener([Events::onClear], new class($cleared) {
+            public function __construct(private readonly \ArrayObject $cleared)
+            {
+            }
+
+            public function onClear(\Doctrine\ORM\Event\OnClearEventArgs $args): void
+            {
+                $this->cleared[] = $args->getObjectManager()->isOpen();
+            }
+        });
+
+        return $cleared;
+    }
+
+    /**
+     * A new manager and an operation of its own, after whatever the scenario left: every
+     * document already written stays as it was and is not written again, and the operation
+     * adds its own record and nothing else -- neither a rolled-back change coming back nor
+     * a published one twice. Nothing is taken out of the collector to make that so.
+     */
+    private function theNextOperationWritesItselfAndNothingElse(): void
+    {
+        $before = $this->gateway->documents['audit_log'] ?? [];
+
+        $this->reopen();
+        $this->em->persist(new Crate('C-3'));
+        $this->em->flush();
+
+        $after = $this->gateway->documents['audit_log'] ?? [];
+
+        self::assertSame($before, \array_slice($after, 0, \count($before)), 'what was written before stays as it was');
+        self::assertSame(
+            [['crate', 'C-3']],
+            array_map(static fn (array $d): array => [$d['objectType'] ?? null, $d['objectId'] ?? null], \array_slice($after, \count($before))),
+            'and the next operation writes itself, and nothing the scenario left',
+        );
+    }
+
     private function andTheApplicationGoesOn(): void
     {
         $this->reopen();

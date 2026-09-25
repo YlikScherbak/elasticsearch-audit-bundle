@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Siding;
@@ -48,6 +49,10 @@ final class TransactionSafetyTest extends DoctrineTestCase
         } catch (\RuntimeException) {
         }
 
+        // Why: the transaction's ROLLBACK voided the INSERT in the connection's log. Not that
+        // the manager is closed, nor that it was cleared on the way out -- neither decides
+        // what ran.
+        self::assertSame([StatementLog::VOID], $this->fatesOf('INSERT INTO Article'), 'the premise: the log says the INSERT was taken back');
         self::assertSame([], $this->documents(), 'the history must not describe a state the database never had');
     }
 
@@ -548,45 +553,165 @@ final class TransactionSafetyTest extends DoctrineTestCase
     }
 
     /**
-     * ORM 2 only: clearing one entity class while a flush is running leaves that flush
-     * to commit the rest, so its records are history and must survive the clear.
-     *
-     * Driven by hand, because the point is a clear arriving between the lifecycle events
-     * and postFlush — a window a normal flush does not expose.
+     * ORM 2 only: a clear of one class inside a flush that goes on to commit. What that
+     * flush wrote is history -- the clear forgets Doctrine's objects of that class, and
+     * decides nothing about the rows.
      */
-    public function testAPartialClearKeepsTheRecordsOfAFlushThatIsStillRunning(): void
+    public function testAPartialClearInsideAFlushThatCommitsKeepsItsRecords(): void
     {
         self::skipUnlessPartialClearsExist();
 
-        $article = $this->persisted(new Article('Hello'));
-        $this->gateway->documents = [];
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class {
+            public function postPersist(LifecycleEventArgs $args): void
+            {
+                $args->getObjectManager()->clear(Article::class); // @phpstan-ignore-line ORM 2 signature
+            }
+        });
 
-        $listener = $this->detachedListener();
-        $listener->postPersist(new PostPersistEventArgs($article, $this->em));
-        $listener->onClear(new OnClearEventArgs($this->em, Article::class)); // @phpstan-ignore-line ORM 2 signature
-        $listener->postFlush(new PostFlushEventArgs($this->em));
+        $this->em->persist(new Article('Hello'));
+        $this->em->flush();
 
-        self::assertCount(1, $this->documents(), 'the other classes in that flush still committed');
+        self::assertSame(1, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM Article'), 'the premise: the row committed');
+        self::assertSame(['Hello'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
     }
 
     /**
-     * ORM 2 only: a closed manager means the flush failed. A partial clear does not make
-     * its records true, and inventing history is worse than missing it.
+     * ORM 2 only: the same partial clear inside a flush that then dies. Nothing is written,
+     * and the reason is the ROLLBACK in the log -- not the manager being closed, which is
+     * what the listener used to look at.
      */
-    public function testAPartialClearOnAClosedManagerStillDropsThem(): void
+    public function testAPartialClearInsideAFlushThatDiesLeavesNothingBecauseTheLogTookItBack(): void
     {
         self::skipUnlessPartialClearsExist();
 
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class {
+            public function postPersist(LifecycleEventArgs $args): void
+            {
+                $args->getObjectManager()->clear(Article::class); // @phpstan-ignore-line ORM 2 signature
+
+                throw new \RuntimeException('something else in the flush broke');
+            }
+        });
+
+        try {
+            $this->em->persist(new Article('Hello'));
+            $this->em->flush();
+            self::fail('the premise: the flush died');
+        } catch (\RuntimeException) {
+        }
+
+        self::assertSame([StatementLog::VOID], $this->fatesOf('INSERT INTO Article'), 'the premise: the log says the INSERT was taken back');
+        self::assertSame([], $this->documents());
+    }
+
+    public function testARemovalIsRecordedThoughSomebodyClearedTheManagerAheadOfThisListener(): void
+    {
+        // The DELETE has run when postRemove is raised, and a listener ahead of this one
+        // clears the manager there. The record drafted in preRemove has not been taken up
+        // yet -- this listener's postRemove is next -- and the removal is real: the clear
+        // forgets Doctrine's objects, not what the connection did.
         $article = $this->persisted(new Article('Hello'));
+        $id = $article->id;
         $this->gateway->documents = [];
 
-        $listener = $this->detachedListener();
-        $listener->postPersist(new PostPersistEventArgs($article, $this->em));
-        $this->em->close();
-        $listener->onClear(new OnClearEventArgs($this->em, Article::class)); // @phpstan-ignore-line ORM 2 signature
-        $listener->postFlush(new PostFlushEventArgs($this->em));
+        $clearing = new class {
+            public function postRemove(LifecycleEventArgs $args): void
+            {
+                $args->getObjectManager()->clear();
+            }
+        };
+        $events = $this->em->getEventManager();
+        $there = $events->getListeners(Events::postRemove);
 
-        self::assertSame([], $this->documents());
+        foreach ($there as $one) {
+            $events->removeEventListener([Events::postRemove], $one);
+        }
+
+        $events->addEventListener([Events::postRemove], $clearing);
+
+        foreach ($there as $one) {
+            $events->addEventListener([Events::postRemove], $one);
+        }
+
+        $this->em->remove($article);
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM Article WHERE id = ?', [$id]), 'the premise: the row went');
+        self::assertSame(['remove'], array_map(static fn (array $d): string => $d['event'], $this->documents()));
+    }
+
+    public function testAnEntityWhoseIdentifierWasHandedOutBeforeAClearIsStillCreatedAfterIt(): void
+    {
+        // A line whose identifier is assigned is persisted, the flush is refused, and the
+        // manager is cleared. The line is persisted again, as a new object, and written: that
+        // INSERT is an arrival -- the row did not exist -- and not a change to a row the
+        // listener half-remembered from the flush that never ran. On PostgreSQL under DBAL 3
+        // a generated identifier is handed out the same way, at persist().
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist($ledger = new Ledger('Payables'));
+        $ledger->add(new LedgerLine('jan', 'January'));
+
+        $veto = new class {
+            public function onFlush(): void
+            {
+                throw new \DomainException('this flush is refused');
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::onFlush], $veto);
+
+        try {
+            $this->em->flush();
+            self::fail('the premise: the flush was refused');
+        } catch (\DomainException) {
+        } finally {
+            $this->em->getEventManager()->removeEventListener([Events::onFlush], $veto);
+        }
+
+        $this->em->clear();
+
+        $this->em->persist($again = new Ledger('Payables'));
+        $again->add(new LedgerLine('jan', 'January'));
+        $this->em->flush();
+
+        self::assertSame(
+            [['create', ['old' => null, 'new' => 'January']]],
+            array_map(static fn (array $d): array => [$d['event'], $d['changes']['lines.jan'] ?? null], $this->documents()),
+        );
+    }
+
+    public function testAnUpdateTheApplicationTookBackInsideAFlushIsNotRecordedAndTheFlushsOthersAre(): void
+    {
+        // One flush updates two articles; the application opens a savepoint in the first
+        // one's postUpdate and rolls back to it in the second's. The flush commits with the
+        // first written and the second taken back -- so a record stands by the statement it
+        // was built from, not by whether its flush ran anything at all.
+        $first = $this->persisted(new Article('First'));
+        $second = $this->persisted(new Article('Second'));
+        $this->gateway->documents = [];
+        $connection = $this->em->getConnection();
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($first, $second, $connection) {
+            public function __construct(private readonly Article $first, private readonly Article $second, private readonly \Doctrine\DBAL\Connection $connection)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                match ($args->getObject()) {
+                    $this->first => $this->connection->beginTransaction(),
+                    $this->second => $this->connection->rollBack(),
+                    default => null,
+                };
+            }
+        });
+
+        $first->title = 'First, edited';
+        $second->title = 'Second, edited';
+        $this->em->flush();
+
+        self::assertSame(['First, edited', 'Second'], array_map(fn (Article $a): mixed => $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$a->id]), [$first, $second]), 'the premise: the first was written and the second taken back');
+        self::assertSame(['First, edited'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
     }
 
     public function testAnEntityIdentifiedByAnAssociationIsAudited(): void
@@ -861,6 +986,26 @@ final class TransactionSafetyTest extends DoctrineTestCase
         foreach ($ours as $audit) {
             $this->em->getEventManager()->addEventListener([Events::postFlush], $audit);
         }
+    }
+
+    /**
+     * The fate the connection's log gives each statement that starts so, in order.
+     *
+     * @return list<string>
+     */
+    private function fatesOf(string $prefix): array
+    {
+        $fates = [];
+
+        for ($at = 1, $to = $this->statements->position(); $at <= $to; ++$at) {
+            $statement = $this->statements->statement($at);
+
+            if ($statement !== null && str_starts_with($statement['sql'], $prefix)) {
+                $fates[] = $this->statements->fate($at);
+            }
+        }
+
+        return $fates;
     }
 
     private function detachedListener(): AuditSubscriber

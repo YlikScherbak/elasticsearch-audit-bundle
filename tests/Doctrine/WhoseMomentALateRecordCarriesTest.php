@@ -1062,15 +1062,14 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         self::assertSame(self::ALICE, $removals[0]['loggedAt']);
     }
 
-    public function testAClearBetweenTwoOperationsDoesNotHandTheSecondTheFirstsMoment(): void
+    public function testAClearBetweenTwoOperationsKeepsTheFirstsHistoryUnderItsOwnMoment(): void
     {
         // An import loop: a flush whose publishing was swallowed, then $em->clear(), then
-        // the next operation. The clear drops the records that flush collected — it
-        // always has, because they describe rows that may have been rolled back — and it
-        // has to drop what went with them. Leaving the numbers behind meant the next
-        // flush's first record, at position zero, was matched with the moment of the
-        // records that had just been thrown away: a new change written as somebody else
-        // at a time before it happened.
+        // the next operation. The clear used to drop the records that flush collected, on
+        // the grounds that they might describe rows that were rolled back -- but whether
+        // they were is the connection's to say, and it committed. So they stay, and the
+        // next flush writes them late, each with the moment of the flush it describes: the
+        // clear decides nothing, and hands the second operation nothing of the first's.
         $article = $this->alicePersisted();
 
         $this->aliceChanges(static fn () => $article->title = 'Alice edited this');
@@ -1083,11 +1082,71 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         $this->em->persist(new Article('Bob writes something'));
         $this->em->flush();
 
-        $documents = $this->documents();
+        self::assertSame([
+            ['Alice edited this', 'alice', self::ALICE],
+            ['Bob writes something', 'bob', self::BOB],
+        ], array_map(static fn (array $d): array => [$d['changes']['title']['new'] ?? null, $d['source'], $d['loggedAt']], $this->documents()));
+    }
 
-        self::assertCount(1, $documents, 'the premise: the cleared flush is gone and only Bob is left');
-        self::assertSame('bob', $documents[0]['source'], 'Bob is change was written as Alice, from before the clear');
-        self::assertSame(self::BOB, $documents[0]['loggedAt']);
+    public function testTheOuterFlushsChangeKeepsItsOwnMomentWhenANestedFlushDies(): void
+    {
+        // Alice's flush writes X; X's postUpdate runs a nested flush under somebody else --
+        // Bob, a moment later -- which writes Y and dies. The manager is cleared on the way
+        // out, the savepoint takes Y back, and Alice's flush commits. X's record is Alice's:
+        // her moment, her name. A fact kept while what signed it was lost would be published
+        // under whatever is current when it goes out.
+        $this->em->persist($crate = new Crate('C-1'));
+        $crate->add($x = new CrateItem('SKU-X'));
+        $crate->add($y = new CrateItem('SKU-Y'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $nested = new class($this->em, $x, $y, $this->who, $this->when, self::BOB) {
+            private bool $ran = false;
+
+            public function __construct(
+                private readonly EntityManagerInterface $em,
+                private readonly CrateItem $x,
+                private readonly CrateItem $y,
+                private readonly object $who,
+                private readonly object $when,
+                private readonly string $later,
+            ) {
+            }
+
+            public function postUpdate(\Doctrine\ORM\Event\PostUpdateEventArgs $args): void
+            {
+                if ($args->getObject() === $this->y && $this->ran) {
+                    throw new \RuntimeException('the nested flush dies after its statement');
+                }
+
+                if ($args->getObject() !== $this->x || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->who->actor = 'bob'; // @phpstan-ignore property.notFound
+                $this->when->now = $this->later; // @phpstan-ignore property.notFound
+                $this->y->quantity = 7;
+
+                try {
+                    $this->em->flush();
+                } catch (\RuntimeException) {
+                    // what an application does about a nested flush that failed
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $nested);
+
+        $x->quantity = 2;
+        $this->em->flush();
+
+        self::assertSame(1, (int) $this->em->getConnection()->fetchOne('SELECT quantity FROM CrateItem WHERE id = ?', [$y->id]), 'the premise: the nested flush was taken back');
+        self::assertSame(2, (int) $this->em->getConnection()->fetchOne('SELECT quantity FROM CrateItem WHERE id = ?', [$x->id]), 'the premise: the outer flush committed');
+        self::assertSame(
+            [[['old' => 1, 'new' => 2], 'alice', self::ALICE]],
+            array_map(static fn (array $d): array => [$d['changes']['items.'.$x->id.'.quantity'] ?? null, $d['source'], $d['loggedAt']], $this->documents()),
+        );
     }
 
     public function testOneRunFailingDoesNotThrowAwayTheRecordsOfTheOthers(): void
