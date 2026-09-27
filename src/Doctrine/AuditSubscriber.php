@@ -13,6 +13,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\DepartedObjects;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ElementFieldRuns;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\EntityRowRuns;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\HistoryReplay;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowBinding;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowIdentity;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
@@ -150,6 +152,40 @@ final class AuditSubscriber
     /** @var array<int, AuditRecord> records for entities being removed, keyed by object id */
     private array $pendingRemovals = [];
 
+    /** Said once per flush: a hundred entities would otherwise say the same thing a hundred times. */
+    private bool $reportedLostChangeSets = false;
+
+    /**
+     * The execution each entity's latest UPDATE announcement was tied to, and the flush a
+     * second announcement of it hands its provenance to, by the execution's first statement
+     * ({@see holdWhatItsCollectionsSay()}).
+     *
+     * @var \WeakMap<object, list<int>>
+     */
+    private \WeakMap $lastExecutionOf;
+
+    /** @var array<int, int> */
+    private array $announcedUnder = [];
+
+    /**
+     * What an owning collection's snapshot said at each post* event of its owner: the old and
+     * the new side, represented then, and the execution it was taken beside.
+     *
+     * Transitional, until the join rows are facts of the log too (5.3): an entity's own record
+     * is the log's, and what its owning many-to-many went through is not a fact of its row.
+     * Doctrine replaces the collection's snapshot before postFlush, so it is read where the
+     * events have always read it. Joined to the record of the execution it was taken beside --
+     * by that execution's first statement, not by the owner, or two executions of one row in
+     * one operation would share one snapshot -- and a record of its own when the owner had no
+     * UPDATE to be beside: Doctrine announces a postUpdate for an owner whose only change is
+     * its collection. A listener ahead of this one that flushes in its own postUpdate has
+     * already had the snapshot replaced by then, which is why this does not claim to be where
+     * a collection's history is safe: 5.3 is.
+     *
+     * @var list<array{execution: list<int>, position: int, flush: int, owner: object, key: array<string, mixed>|null, objectType: string, id: int|string, changes: array<string, Change>}>
+     */
+    private array $collectionSnapshots = [];
+
     /**
      * Which flush saw each owner whose record is built after the commit, by object id.
      *
@@ -225,27 +261,6 @@ final class AuditSubscriber
      * failure occurs, and only the raising waits.
      */
     private ?\Throwable $failureWhileBuilding = null;
-
-    /**
-     * What the always-recorded fields of an audited entity held when the flush began,
-     * keyed by object id.
-     *
-     * Context beside a change has to describe the row, and the object stops describing
-     * the row the moment a postUpdate listener touches it — post events are explicitly
-     * not part of that flush's persistence. A field the flush itself wrote is read from
-     * the change set instead, which is recomputed when a preUpdate listener corrects it;
-     * this is for the ones it did not write, where the row keeps what it had.
-     *
-     * Keyed by the flush that saw them, and then by the entity. By the flush because a
-     * flush whose publishing was swallowed is written by the next one, and that next one
-     * is collecting its own context while the old records are still waiting: keyed by
-     * the entity alone, the second visit to the same object overwrote what the first had
-     * kept. Today's order of calls happens to prevent it; a number no other flush holds
-     * prevents it whatever the order becomes.
-     *
-     * @var array<int, array<int, array<string, mixed>>>
-     */
-    private array $contextAsFlushed = [];
 
     /**
      * Which flush this is, counting from the first one this listener sees.
@@ -400,9 +415,6 @@ final class AuditSubscriber
      */
     private \WeakMap $neverWritten;
 
-    /** Reported once per flush: a hundred entities would otherwise say the same thing a hundred times. */
-    private bool $reportedLostChangeSets = false;
-
     /**
      * The transaction nesting level each flush that is still open started at.
      *
@@ -478,16 +490,22 @@ final class AuditSubscriber
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
         $this->pendingIndexByEntity = new \WeakMap();
+        $this->lastExecutionOf = new \WeakMap();
         $this->rows = new RowMemory($statements);
 
         // What ran before this listener existed is nobody's history it can account for: it
         // heard none of the events that name those rows.
         $this->factsReadThrough = $statements->position();
-        $this->elementRuns = new ElementFieldRuns($metadataFactory, $comparator, $this->logger, new RowIdentity($this->identifierOf(...), $this->identifierFrom(...)));
+        $identity = new RowIdentity($this->identifierOf(...), $this->identifierFrom(...));
+        $this->elementRuns = new ElementFieldRuns($metadataFactory, $comparator, $this->logger, $identity);
+        $this->entityRuns = new EntityRowRuns($metadataFactory, $comparator, $identity, $this->logger);
         $this->departed = new DepartedObjects();
     }
 
     private readonly ElementFieldRuns $elementRuns;
+
+    /** What an entity's own row went through: its records, from the log's facts. */
+    private readonly EntityRowRuns $entityRuns;
 
     /** What the application removed, for a record that names it once it is gone. */
     private readonly DepartedObjects $departed;
@@ -586,7 +604,6 @@ final class AuditSubscriber
             // structure, because PHP shares the values rather than copying them. The
             // figure and the flush it came from are in the README.
             $this->rememberChangeSet($element, $uow->getEntityChangeSet($element), $flush);
-            $this->rememberContext($em, $element, $flush);
 
             $this->aboutTheOwnersOf($em, $element, $flush);
         }
@@ -599,7 +616,6 @@ final class AuditSubscriber
             // create whose postPersist runs after somebody's nested flush would
             // otherwise say an entity appeared with no values at all.
             $this->rememberChangeSet($element, $uow->getEntityChangeSet($element), $flush);
-            $this->rememberContext($em, $element, $flush);
 
             $this->aboutTheOwnersOf($em, $element, $flush);
         }
@@ -609,52 +625,6 @@ final class AuditSubscriber
         }
 
         $this->rememberWhatIsBeingEmptied($em, $flush);
-    }
-
-    /**
-     * Keeps the always-recorded fields as the flush found them.
-     *
-     * Only what a declaration names, and only for audited entities — the declaration is
-     * read here anyway, a line further down, for the elements this entity may own.
-     *
-     * Filed under the number it is handed and not under the counter. The two are the same
-     * from onFlush, where the flush collecting is the last one to have been given a
-     * number, and they are not from postUpdate: a flush that ran in between has moved the
-     * counter on, and the owner's context would then be written under that flush's number
-     * while everything that reads it asks under the owner's. No fixture reaches the
-     * difference, which is why this is a statement about the method rather than a fix
-     * with a regression behind it — a method that takes a flush number and uses a
-     * different one is a second rule waiting for the arrangement that tells them apart.
-     */
-    private function rememberContext(EntityManagerInterface $em, object $entity, int $flush): void
-    {
-        try {
-            $metadata = $this->metadataFactory->for($entity);
-        } catch (\Throwable) {
-            // A declaration this listener cannot read is reported where it always was —
-            // on the path that builds the record, through the failure policy. Raising it
-            // here would take the flush down for a mistake the policy is allowed to log.
-            return;
-        }
-
-        if ($metadata === null || $metadata->alwaysRecorded === []) {
-            // Written all the same, and empty: "asked, and there was nothing" is an
-            // answer, and the callers that ask once per flush need to see it.
-            $this->contextAsFlushed[$flush][spl_object_id($entity)] = [];
-
-            return;
-        }
-
-        $classMetadata = $em->getClassMetadata($entity::class);
-        $context = [];
-
-        foreach ($metadata->alwaysRecorded as $field) {
-            if ($classMetadata->hasField($field)) {
-                $context[$field] = $classMetadata->getFieldValue($entity, $field);
-            }
-        }
-
-        $this->contextAsFlushed[$flush][spl_object_id($entity)] = $context;
     }
 
     /**
@@ -825,169 +795,173 @@ final class AuditSubscriber
 
     public function postPersist(PostPersistEventArgs $args): void
     {
-        $record = $this->recordFor($args, AuditEvent::CREATE);
         $manager = self::entityManagerOf($args->getObjectManager());
 
-        if ($manager !== null) {
-            $this->rows->rememberPersisted($manager, $args->getObject());
+        if ($manager === null) {
+            return;
         }
 
-        $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
+        $this->rows->rememberPersisted($manager, $args->getObject());
+        $collecting = $this->collectingNowAfterAStatement($manager);
         $this->theRowNowMatchesTheObject($args->getObject());
-
-        if ($record !== null) {
-            $this->pending[] = $record;
-            $this->pendingFlush[] = $collecting;
-            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting, StatementShape::INSERT);
-            // Registered like an update's: an owner created with its lines has one
-            // record, and what the lines did belongs in it. Without this the membership
-            // found no record to join and invented a second, phantom update.
-            $this->pendingIndexByEntity[$args->getObject()] = array_key_last($this->pending);
-        }
+        $this->holdWhatItsCollectionsSay($manager, $args->getObject(), $collecting, StatementShape::INSERT);
     }
-
     public function postUpdate(PostUpdateEventArgs $args): void
     {
-        // Before the record, and for every updated entity rather than the audited
-        // ones: an element of a tracked collection is usually not audited itself, and
-        // this is the only moment its final change set can be read.
+        // What the row went through is the log's; this is the flush claiming what it ran, and
+        // what an owning collection's snapshot says while Doctrine still has it.
         $manager = self::entityManagerOf($args->getObjectManager());
-        $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
 
-        if ($manager !== null) {
-            $this->readTheChangeSetAgainAfterPreUpdate($manager, $args->getObject(), $collecting);
+        if ($manager === null) {
+            return;
         }
 
-        $record = $this->recordFor($args, AuditEvent::UPDATE);
+        $collecting = $this->collectingNowAfterAStatement($manager);
         $this->theRowNowMatchesTheObject($args->getObject());
-
-        if ($record === null) {
-            return;
-        }
-
-        $entity = $args->getObject();
-
-        // What changed inside its elements is read from the log in postFlush and makes a
-        // record of its own there, so an update with nothing of its own is nothing here.
-        if ($this->skipEmptyUpdates && !$record->hasChanges()) {
-            return;
-        }
-
-        $already = $this->pendingIndexByEntity[$entity] ?? null;
-
-        // The execution this announcement is about: the earliest of the row's statements in
-        // this flush that no record has been tied to. None left means there is no new one --
-        // which is what tells a second announcement of the same UPDATE from a second UPDATE.
-        $execution = $manager === null ? null : $this->statementBehind($manager, $entity, $collecting, StatementShape::UPDATE);
-
-        if ($already !== null
-            && ($this->pending[$already] ?? null)?->event === AuditEvent::UPDATE
-            && $manager !== null
-            && $manager->getUnitOfWork()->getEntityChangeSet($entity) === []
-            && $execution === []
-        ) {
-            // The same UPDATE announced a second time. A flush started from a lifecycle
-            // listener runs on the outer flush's unit of work and carries out whatever it
-            // finds scheduled — including the outer flush's own remaining updates — and
-            // when the outer flush then resumes its list, it dispatches postUpdate for a
-            // row somebody else already wrote. Measured rather than deduced: in
-            // DoctrineCanariesTest the second announcement arrives one level up with an
-            // empty change set, because the unit of work consumed it the first time.
-            //
-            // The log says it outright now: no statement of this row in this flush is left
-            // that a record has not been tied to, so this announcement brings no execution of
-            // its own. An empty change set alone said the same of a second, real UPDATE -- the
-            // outer flush's, announced after a nested flush that wrote the row again and
-            // emptied the unit of work -- and the outer record replaced the nested one and took
-            // its statement, so rolling back the nested one took the outer with it.
-            //
-            // The emptiness is still asked, and it needs the pending record beside it: a change set the listener cannot see is also what a nested flush
-            // leaves behind when its postCommitCleanup() empties the one still running,
-            // which is why this listener keeps a snapshot at all. Nothing pending means a
-            // first announcement of a change set that went missing, and it is recorded.
-            // Something pending, for an update, means the announcement is the second.
-            //
-            // A second, real update of the same entity in the same operation is not this
-            // and must not be folded into the first: the unit of work still holds its
-            // change set, which is what the emptiness asks about, and
-            // WhoseMomentALateRecordCarriesTest walks One -> Two -> Three through a
-            // listener to say so.
-            //
-            // The update the pending record has to be is the one part of this no fixture
-            // reaches, and it is left escaping rather than claimed equivalent. It would
-            // take an entity created earlier in the operation whose later update is
-            // announced with nothing left in the unit of work — three flushes deep, where
-            // Doctrine's own documentation stops promising anything. Without it a
-            // creation would be overwritten by an update of the same row, and a history
-            // saying a thing was edited when it appeared is the kind of wrong this bundle
-            // refuses to produce.
-            //
-            // Recorded once, and under the flush that is collecting NOW: the re-announcing
-            // loop belongs to the outer flush, the change was made before it started, and
-            // its commit is the one the row hangs off. Appending instead put the same
-            // change in the history twice, signed by two different people.
-            // Spliced rather than assigned by key: both of these are lists whose indexes
-            // are each other's, and writing through a key is how an index that means two
-            // things starts.
-            array_splice($this->pending, $already, 1, [$record]);
-            array_splice($this->pendingFlush, $already, 1, [$collecting]);
-            // The same UPDATE, so the same execution: what the first announcement was tied to.
-            array_splice($this->pendingAt, $already, 1, [$this->pendingAt[$already] ?? null]);
-
-            return;
-        }
-
-        $this->pending[] = $record;
-        $this->pendingFlush[] = $collecting;
-        $this->pendingAt[] = $execution;
-        $this->pendingIndexByEntity[$entity] = array_key_last($this->pending);
+        $this->holdWhatItsCollectionsSay($manager, $args->getObject(), $collecting, StatementShape::UPDATE);
     }
 
+    /**
+     * The declaration checked, the execution the event announces tied to it, and what the
+     * entity's owning collections say -- the one part of an entity's record that is not a fact
+     * of its row yet ({@see self::$collectionSnapshots}).
+     */
+    private function holdWhatItsCollectionsSay(EntityManagerInterface $em, object $entity, int $flush, string $kind): void
+    {
+        try {
+            $metadata = $this->checkTheDeclaration($em, $entity);
+
+            if ($metadata === null) {
+                return;
+            }
+
+            $this->warnOfALostChangeSet($em, $entity);
+
+            // Tied whether or not it has a collection to speak of: an announcement is of one
+            // execution, and the next one of the same row is of the next.
+            $execution = $this->statementBehind($em, $entity, $flush, $kind);
+
+            if ($kind === StatementShape::UPDATE && $execution !== []) {
+                $this->lastExecutionOf[$entity] = $execution;
+            } elseif ($kind === StatementShape::UPDATE && isset($this->lastExecutionOf[$entity])) {
+                // The same UPDATE announced a second time: no statement of the row is left that
+                // an announcement has not been tied to. A flush started from a lifecycle
+                // listener runs on the outer flush's unit of work and carries out whatever it
+                // finds scheduled -- the outer flush's own remaining updates too -- and the
+                // outer flush, resuming its list, announces a row somebody else already wrote.
+                // The change was the outer flush's, made before the nested one began, and its
+                // commit is the one the row hangs off: its moment, actor and context are the
+                // outer flush's, the flush announcing it now -- as they have always been.
+                $this->announcedUnder[$this->lastExecutionOf[$entity][0]] = $flush;
+            }
+            $classMetadata = $em->getClassMetadata($entity::class);
+            $collections = array_filter(
+                $metadata->fields,
+                static fn (string $field): bool => $classMetadata->isCollectionValuedAssociation($field) && !$classMetadata->isAssociationInverseSide($field),
+                \ARRAY_FILTER_USE_KEY,
+            );
+
+            if ($collections === []) {
+                return;
+            }
+
+            // Represented now, while the snapshot is Doctrine's: values, not the collection.
+            $changes = (new ChangeSetBuilder($em, $this->comparator))->build($entity, new AuditMetadata($metadata->objectType, $collections), []);
+            $id = $this->identifierOf($em, $entity);
+
+            if ($changes === [] || $id === null) {
+                return;
+            }
+
+            $this->collectionSnapshots[] = [
+                'execution' => $execution,
+                'position' => $this->statements->position(),
+                'flush' => $flush,
+                'owner' => $entity,
+                'key' => RowMemory::keyColumns($em, $entity),
+                'objectType' => $metadata->objectType,
+                'id' => $id,
+                'changes' => $changes,
+            ];
+        } catch (\Throwable $e) {
+            $this->writer->reportFailure($e, null);
+        }
+    }
+
+    /**
+     * Says out loud what Doctrine does silently, to the application's flush and not to this
+     * listener's history.
+     *
+     * A flush started from a lifecycle listener of the flush still running ends in
+     * UnitOfWork::postCommitCleanup(), which empties that flush's change sets -- and with them
+     * its extra updates, collection updates, orphan removals and collection deletions. The
+     * history is read from the connection and is not what it costs any more; what the running
+     * flush was still to write may be. The one place this listener can see it is an entity
+     * announced with nothing left of the change set it had in onFlush: said once per flush, by
+     * class, and with where to move the work. Finding such a listener once took three days.
+     */
+    private function warnOfALostChangeSet(EntityManagerInterface $em, object $entity): void
+    {
+        if ($this->reportedLostChangeSets
+            || ($this->changeSets[spl_object_id($entity)] ?? []) === []
+            || $em->getUnitOfWork()->getEntityChangeSet($entity) !== []
+        ) {
+            return;
+        }
+
+        $this->reportedLostChangeSets = true;
+
+        $this->logger->warning(
+            'The unit of work had no change set left for {entity}: something called flush() from inside a lifecycle listener of this flush, and UnitOfWork::commit() ends in postCommitCleanup(), which empties entityChangeSets -- and with them extraUpdates, collectionUpdates, orphanRemovals and collectionDeletions of the flush still running. The audit history is read from what the connection ran and is not affected; what the running flush had still to write may be. Move that work to postFlush.',
+            ['entity' => $entity::class]
+        );
+    }
+
+    /**
+     * An audited entity's declaration, once it is known to be one that can be honoured; null
+     * for an entity nobody audits. What cannot be honoured is refused -- raised, for the
+     * caller to put through the policy.
+     */
+    private function checkTheDeclaration(EntityManagerInterface $em, object $entity): ?AuditMetadata
+    {
+        $metadata = $this->metadataFactory->for($entity);
+
+        if ($metadata !== null) {
+            $this->assertAuditedFieldsAreThere($em, $entity, $metadata);
+            $this->assertTrackedCollectionsAreServable($em, $entity, $metadata);
+        }
+
+        return $metadata;
+    }
     public function preRemove(PreRemoveEventArgs $args): void
     {
         // Every one, audited or not: what a record may have to name is any entity, and the
         // row's key is still on it here.
         $leaving = self::entityManagerOf($args->getObjectManager());
 
-        if ($leaving !== null) {
-            $this->departed->leaving($leaving, $args->getObject());
+        if ($leaving === null) {
+            return;
         }
 
-        $record = $this->recordFor($args, AuditEvent::REMOVE, withChanges: false);
+        $this->departed->leaving($leaving, $args->getObject());
 
-        if ($record !== null) {
-            $this->pendingRemovals[spl_object_id($args->getObject())] = $record;
-            $manager = self::entityManagerOf($args->getObjectManager());
-            $this->pendingRemovalKeys[spl_object_id($args->getObject())] = $manager === null ? null : RowMemory::keyColumns($manager, $args->getObject());
+        try {
+            $this->checkTheDeclaration($leaving, $args->getObject());
+        } catch (\Throwable $e) {
+            $this->writer->reportFailure($e, null);
         }
     }
-
     public function postRemove(PostRemoveEventArgs $args): void
     {
         $manager = self::entityManagerOf($args->getObjectManager());
-        $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
+
+        if ($manager !== null) {
+            $this->collectingNowAfterAStatement($manager);
+        }
 
         $this->theRowNowMatchesTheObject($args->getObject());
         $this->departed->gone($args->getObject(), $this->statements->position());
-
-        $key = spl_object_id($args->getObject());
-        $record = $this->pendingRemovals[$key] ?? null;
-        $rowKey = $this->pendingRemovalKeys[$key] ?? null;
-        unset($this->pendingRemovals[$key], $this->pendingRemovalKeys[$key]);
-
-        if ($record !== null) {
-            $this->pending[] = $record;
-            // Asked here rather than carried from preRemove, which is where the record
-            // was taken: for an ordinary $em->remove() preRemove runs at the call, before
-            // any flush exists, so what it could have carried is "no flush at all" — and
-            // a removal published late then took whatever moment the publishing request
-            // had. postRemove is inside the flush that did the deleting, which is the
-            // flush the record belongs to.
-            $this->pendingFlush[] = $collecting;
-            $this->pendingAt[] = $manager === null ? null : $this->statementBehind($manager, $args->getObject(), $collecting, StatementShape::DELETE, $rowKey);
-        }
     }
-
     /**
      * The transaction is committed: send what this flush collected.
      */
@@ -1065,97 +1039,18 @@ final class AuditSubscriber
      */
     private function publish(ObjectManager $manager, ?EntityManagerInterface $em): void
     {
-        $this->dropWhatTheLogTookBack(self::entityManagerOf($manager) ?? $em);
+        $em = self::entityManagerOf($manager) ?? $em;
+        $records = [];
+        $collected = [];
 
-        $records = $this->pending;
-        $collected = $this->pendingFlush;
-
-        // Now that the flush is over, every element has its identifier — including the
-        // ones inserted a moment ago — so what happened inside a tracked collection can
-        // be named and folded into its owner's record. An owner whose own columns did
-        // not change gets no postUpdate from Doctrine, there being nothing to UPDATE on
-        // it, so that record is built here or nowhere.
-
-        // The whole of this is inside the failure policy, not only the record building:
-        // withContext() reads the declaration and Doctrine's metadata, and both can
-        // throw. This is postFlush — the transaction has committed — so an exception
-        // escaping would come out of flush() for a database change that is already
-        // real. What the policy cannot do here is undo it: "throw" tells the caller,
-        // it does not rewind the flush.
-        // Which record each owner already has, so that what changed inside its elements in
-        // the same flush joins it rather than standing beside it.
-        $recordOf = clone $this->pendingIndexByEntity;
-
-        foreach ($this->ownersWhoseCollectionWasEmptied() as $owner) {
-            $changes = [];
-            $index = $this->pendingIndexByEntity[$owner] ?? null;
-
-            try {
-                // The flush that saw this owner, which is not always the one publishing:
-                // an inner flush may have run in between, and its number must not become
-                // the outer record's moment or the key its context is read under.
-                $flush = $this->ownerFlush[spl_object_id($owner)] ?? self::NO_FLUSH;
-
-                if ($index !== null && isset($records[$index])) {
-                    $merged = array_replace($records[$index]->changes, $this->withWhatWasEmptied($em, $owner, $changes, $flush));
-                    $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, $merged, $collected[$index] ?? $flush));
-
-                    continue;
-                }
-
-                $record = $this->recordForOwner($manager, $owner, $changes, $flush);
-
-                if ($record !== null) {
-                    $records[] = $record;
-                    $collected[] = $flush;
-                    $recordOf[$owner] = array_key_last($records);
-                }
-            } catch (\Throwable $e) {
-                $this->reportWhileBuilding($e, $index !== null ? ($records[$index] ?? null) : null);
-            }
-        }
-
-        // What changed inside the elements of tracked collections: what the statements the
-        // connection ran wrote, a record per owner and flush, in the order they ran. An
-        // owner's first run joins the record it already has for that flush; after that
-        // nothing goes back into an earlier record, or the history would list a later
-        // statement before an earlier one.
+        // The whole of this is inside the failure policy: this is postFlush, the transaction
+        // has committed, and an exception escaping would come out of flush() for a database
+        // change that is already real. What the policy cannot do here is undo it.
         if ($em !== null) {
-            $runs = [];
-
-            try {
-                $runs = $this->elementFieldRuns($em, consume: true);
-            } catch (\Throwable $e) {
-                $this->reportWhileBuilding($e);
-            }
-
-            $seen = [];
-
-            foreach ($runs as $run) {
-                $owner = $run['owner'];
-
-                if ($owner === null) {
-                    continue;
-                }
-
-                $key = spl_object_id($owner);
-                $index = $recordOf[$owner] ?? null;
-
+            foreach ($this->drafts($em, consume: true) as $draft) {
                 try {
-                    if (!isset($seen[$key]) && $index !== null && isset($records[$index]) && ($collected[$index] ?? self::NO_FLUSH) === $run['flush']) {
-                        $seen[$key] = true;
-                        $records[$index] = $records[$index]->withChanges($this->withContext($em, $owner, array_replace($records[$index]->changes, $run['changes']), $run['flush']));
-
-                        continue;
-                    }
-
-                    $seen[$key] = true;
-                    $record = $this->recordForTheRows($em, $owner, $run['changes'], $run['flush']);
-
-                    if ($record !== null) {
-                        $records[] = $record;
-                        $collected[] = $run['flush'];
-                    }
+                    $records[] = $this->recordOfTheDraft($em, $draft);
+                    $collected[] = $draft['flush'];
                 } catch (\Throwable $e) {
                     $this->reportWhileBuilding($e);
                 }
@@ -1180,8 +1075,6 @@ final class AuditSubscriber
         // tries every record and raises afterwards. The runs are held to the same
         // promise, and the first exception is the one the caller gets, because it is the
         // one writeAll() already reported.
-        $records = array_values($records);
-        $collected = array_values($collected);
         $run = [];
         $moment = self::NO_FLUSH;
         $refused = null;
@@ -1226,71 +1119,311 @@ final class AuditSubscriber
     }
 
     /**
-     * How many records the flush on the stack has collected, wherever it put them.
-     *
-     * Two places, and asking only the first one was a way to lose history without
-     * saying so. Finished records sit in the pending list. And what happened inside a
-     * tracked collection is held against its owner until postFlush builds the record
-     * from it — which is the whole point of that map: **an owner whose own columns did
-     * not change gets no event from Doctrine at all**, so nothing about it ever reaches
-     * the pending list.
-     *
-     * That second one is why this exists. A flush whose only news came from inside a
-     * collection was read as a flush that collected nothing: its rows were committed,
-     * its records were dropped, and the warning said zero records were lost.
-     *
-     * A removal drafted in preRemove is deliberately not among them. It is not something
-     * this flush collected — it is a record waiting for the flush that will do the
-     * deleting, which may be the one about to start — and publish() never writes one.
-     * Counted here it made the warning say a record was being written late that was not
-     * being written at all, and it let a flush with nothing to publish take the branch
-     * that says it is publishing.
-     *
-     * Counted once per owner, and not at all for an owner already in the pending list —
-     * publish() folds what its elements did into the record that is there rather than
-     * writing a second one.
+     * How many executions of an audited entity's row the log took back since the history was
+     * last read into: what a flush that died wrote, and what it would have had records of.
+     * Statements of one change, a table at a time, are one.
      */
-    private function collectedSoFar(?EntityManagerInterface $em): int
+    private function executionsTheLogTookBack(EntityManagerInterface $em): int
     {
-        $count = \count($this->pending);
+        $count = 0;
+        $last = null;
 
-        // The flush each owner's record so far belongs to, as publish() will build it.
-        $recordFlush = [];
+        for ($at = $this->factsReadThrough + 1, $to = $this->statements->position(); $at <= $to; ++$at) {
+            $entry = $this->statements->statement($at);
+            $shape = $entry === null ? null : StatementShape::read($entry['sql']);
+            $binding = $entry === null || $shape === null ? null : RowBinding::of($em, $shape, $entry['params']);
 
-        foreach ($this->pendingIndexByEntity as $owner => $index) {
-            $recordFlush[spl_object_id($owner)] = $this->pendingFlush[$index] ?? self::NO_FLUSH;
-        }
-
-        foreach ($this->emptiedCollections as $owner => [$object]) {
-            if (!isset($this->pendingIndexByEntity[$object])) {
-                ++$count;
-                $recordFlush[$owner] = $this->ownerFlush[$owner] ?? self::NO_FLUSH;
-            }
-        }
-
-        // What changed inside elements is read from the log, a record per owner and flush --
-        // except an owner's first run, which joins the record it has for that flush.
-        $seen = [];
-
-        foreach ($em === null ? [] : $this->elementFieldRuns($em) as $run) {
-            $owner = $run['owner'] === null ? null : spl_object_id($run['owner']);
-
-            if ($owner !== null && !isset($seen[$owner]) && ($recordFlush[$owner] ?? null) === $run['flush']) {
-                $seen[$owner] = true;
+            if ($shape === null || $binding === null || $binding->kind !== RowBinding::ROW || $binding->class === null
+                || $this->statements->fate($at) !== StatementLog::VOID
+                || $this->metadataFactory->for($em->getClassMetadata($binding->class)->newInstance()) === null
+            ) {
+                $last = null;
 
                 continue;
             }
 
-            if ($owner !== null) {
-                $seen[$owner] = true;
+            $row = [$shape->kind, $em->getClassMetadata($binding->class)->rootEntityName, $binding->key === null ? null : self::rowOf($binding->key)];
+
+            // The next table of the same change: the same kind and hierarchy, and a row that is
+            // the same one or one whose key the statement does not carry.
+            if ($last === null || $last[0] !== $row[0] || $last[1] !== $row[1] || ($last[2] !== null && $row[2] !== null && $last[2] !== $row[2])) {
+                ++$count;
             }
 
-            ++$count;
+            $last = $row;
         }
 
         return $count;
     }
 
+    /**
+     * How many records the flush on the stack has collected: exactly as many as publishing
+     * it would write -- counted by building them, on the same road ({@see drafts()}), since two
+     * counts kept in step by hand are how a flush whose only news came from inside a
+     * collection was once said to have collected nothing, and its records were dropped.
+     */
+    private function collectedSoFar(?EntityManagerInterface $em): int
+    {
+        return $em === null ? 0 : \count($this->drafts($em, consume: false));
+    }
+
+    /**
+     * The records of what is being published, each before it is given its context, in the
+     * order they are written -- asked by publish() and, to count them, by a flush that finds
+     * another's state behind it: one road, so that what is counted is what is written.
+     *
+     * - What each execution did to an audited entity's row, from the log's facts
+     *   ({@see EntityRowRuns}), in the order the statements ran, with what the entity's owning
+     *   collections said beside it ({@see self::$collectionSnapshots}); an update of nothing is
+     *   nothing, under skip_empty_updates.
+     * - What an owning collection said beside no execution of its owner, where the event was.
+     * - An owning collection a flush took away whole, into the owner's record or one of its
+     *   own (until 5.3, too).
+     * - What changed inside elements of tracked collections: an owner's first run joins the
+     *   record it has for that flush, and after that nothing goes back into an earlier record.
+     *
+     * The context each is given is the row's once the last execution it holds ran: the
+     * entity's own execution's, or its elements' when one of theirs ran later.
+     *
+     * @return list<array{objectType: string, id: int|string, event: string, flush: int, owner: object|null, class: class-string|null, changes: array<string, mixed>, context: array<string, mixed>, at: int}>
+     */
+    private function drafts(EntityManagerInterface $em, bool $consume): array
+    {
+        $failed = $consume
+            ? function (\Throwable $e): void {
+                $this->reportWhileBuilding($e);
+            }
+            : static function (\Throwable $e): void {
+            };
+        $replay = $this->rows->replayed($em);
+        $besides = [];
+        $alone = [];
+
+        foreach ($this->collectionSnapshots as $snapshot) {
+            if ($this->theLogTookBack($snapshot['execution'])) {
+                continue;
+            }
+
+            if ($snapshot['execution'] === []) {
+                $alone[] = $snapshot;
+            } else {
+                $besides[$snapshot['execution'][0]] = $snapshot;
+            }
+        }
+
+        // Ordered by where each happened: an execution by its first statement, a snapshot
+        // beside none after the statement the log had reached when it was taken.
+        $ordered = [];
+
+        foreach ($this->entityRuns->of($em, $replay, $this->statements, $this->factsReadThrough, $this->departed, $consume, $this->ranDuringAFlush(...), $failed) as $run) {
+            $changes = $run['bare'];
+            $snapshot = $besides[$run['at'][0]] ?? null;
+            unset($besides[$run['at'][0]]);
+
+            if ($snapshot !== null && $run['event'] !== AuditEvent::REMOVE) {
+                $changes = array_replace($changes, $snapshot['changes']);
+            }
+
+            if ($run['event'] === AuditEvent::UPDATE && $this->skipEmptyUpdates && $changes === []) {
+                continue;
+            }
+
+            $ordered[] = [2 * $run['at'][0], [
+                'objectType' => $run['objectType'],
+                'id' => $run['id'],
+                'event' => $run['event'],
+                'flush' => $this->announcedUnder[$run['at'][0]] ?? $run['flush'],
+                'owner' => $run['entity'],
+                'class' => $run['class'],
+                'changes' => $changes,
+                'context' => $run['context'],
+                'at' => $run['at'][\count($run['at']) - 1],
+            ]];
+        }
+
+        foreach ([...$alone, ...array_values($besides)] as $snapshot) {
+            $ordered[] = [2 * $snapshot['position'] + 1, [
+                'objectType' => $snapshot['objectType'],
+                'id' => $snapshot['id'],
+                'event' => AuditEvent::UPDATE,
+                'flush' => $snapshot['flush'],
+                'owner' => $snapshot['owner'],
+                'class' => $snapshot['owner']::class,
+                'changes' => $snapshot['changes'],
+                'context' => $this->contextWhere($em, $replay, $snapshot['owner']::class, $snapshot['key'], $snapshot['position']),
+                'at' => $snapshot['position'],
+            ]];
+        }
+
+        usort($ordered, static fn (array $one, array $other): int => $one[0] <=> $other[0]);
+        /** @var list<array{objectType: string, id: int|string, event: string, flush: int, owner: object|null, class: class-string|null, changes: array<string, mixed>, context: array<string, mixed>, at: int}> $drafts */
+        $drafts = array_column($ordered, 1);
+        $byOwner = [];
+
+        foreach ($drafts as $index => $draft) {
+            if ($draft['event'] !== AuditEvent::REMOVE) {
+                $byOwner[$draft['objectType'].'|'.$draft['id']] = $index;
+            }
+        }
+
+        foreach ($this->ownersWhoseCollectionWasEmptied() as $owner) {
+            try {
+                // The flush that saw this owner, which is not always the one publishing.
+                $flush = $this->ownerFlush[spl_object_id($owner)] ?? self::NO_FLUSH;
+                $metadata = $this->metadataFactory->for($owner);
+                $id = $this->identifierOf($em, $owner);
+
+                if ($metadata === null || $id === null) {
+                    continue;
+                }
+
+                $name = $metadata->objectType.'|'.$id;
+                $index = $byOwner[$name] ?? null;
+
+                if ($index !== null) {
+                    // What the collection held before the flush took it away is the emptying's
+                    // to say: the snapshot of a replaced collection starts from nothing.
+                    $draft = $drafts[$index];
+                    $draft['changes'] = array_replace($draft['changes'], $this->withWhatWasEmptied($em, $owner, [], $flush));
+                    $drafts[$index] = $draft;
+
+                    continue;
+                }
+
+                $key = RowMemory::keyColumns($em, $owner);
+                $drafts[] = [
+                    'objectType' => $metadata->objectType,
+                    'id' => $id,
+                    'event' => AuditEvent::UPDATE,
+                    'flush' => $flush,
+                    'owner' => $owner,
+                    'class' => $owner::class,
+                    'changes' => $this->withWhatWasEmptied($em, $owner, [], $flush),
+                    // Where the replay stands: the emptying is no fact of the log's yet (5.3).
+                    'context' => $key === null ? [] : $replay->contextOfTheRow($owner::class, $key),
+                    'at' => $this->statements->position(),
+                ];
+                $byOwner[$name] = array_key_last($drafts);
+            } catch (\Throwable $e) {
+                $failed($e);
+            }
+        }
+
+        $runs = [];
+
+        try {
+            $runs = $this->elementFieldRuns($em, $consume);
+        } catch (\Throwable $e) {
+            $failed($e);
+        }
+
+        $seen = [];
+
+        foreach ($runs as $run) {
+            $owner = $run['owner'];
+
+            if ($owner === null) {
+                continue;
+            }
+
+            try {
+                $metadata = $this->metadataFactory->for($owner);
+                $id = $this->identifierOf($em, $owner);
+
+                if ($metadata === null || $id === null) {
+                    continue;
+                }
+
+                $name = $metadata->objectType.'|'.$id;
+                $index = $byOwner[$name] ?? null;
+
+                if (!isset($seen[$name]) && $index !== null && $drafts[$index]['flush'] === $run['flush']) {
+                    $seen[$name] = true;
+                    $draft = $drafts[$index];
+                    $draft['changes'] = array_replace($draft['changes'], $run['changes']);
+
+                    if ($run['at'] > $draft['at']) {
+                        $draft['context'] = $run['context'];
+                        $draft['at'] = $run['at'];
+                    }
+
+                    $drafts[$index] = $draft;
+
+                    continue;
+                }
+
+                $seen[$name] = true;
+                $drafts[] = [
+                    'objectType' => $metadata->objectType,
+                    'id' => $id,
+                    'event' => AuditEvent::UPDATE,
+                    'flush' => $run['flush'],
+                    'owner' => $owner,
+                    'class' => $owner::class,
+                    'changes' => $run['changes'],
+                    'context' => $run['context'],
+                    'at' => $run['at'],
+                ];
+            } catch (\Throwable $e) {
+                $failed($e);
+            }
+        }
+
+        return $drafts;
+    }
+
+    /**
+     * A draft as the record it is: given its context, the always-recorded fields as the row
+     * held them once the last execution it holds ran, unless it is a removal, which says only
+     * that the row went.
+     *
+     * @param array{objectType: string, id: int|string, event: string, flush: int, owner: object|null, class: class-string|null, changes: array<string, mixed>, context: array<string, mixed>, at: int} $draft
+     */
+    private function recordOfTheDraft(EntityManagerInterface $em, array $draft): AuditRecord
+    {
+        $record = new AuditRecord($draft['objectType'], $draft['id'], $draft['event'], origin: AuditOrigin::Doctrine);
+
+        if ($draft['event'] === AuditEvent::REMOVE) {
+            return $record;
+        }
+
+        $owner = $draft['owner'] ?? ($draft['class'] === null ? null : $em->getClassMetadata($draft['class'])->newInstance());
+
+        return $record->withChanges($owner === null ? $draft['changes'] : $this->withContext($em, $owner, $draft['changes'], $draft['context']));
+    }
+
+    /**
+     * An owner's context where something that is no fact of its row happened -- what a
+     * collection's snapshot said: the row once the last of its own statements at or before
+     * that point ran, or as the replay holds it when none did.
+     *
+     * @param class-string              $class
+     * @param array<string, mixed>|null $key
+     *
+     * @return array<string, mixed>
+     */
+    private function contextWhere(EntityManagerInterface $em, HistoryReplay $replay, string $class, ?array $key, int $position): array
+    {
+        if ($key === null) {
+            return [];
+        }
+
+        $root = $em->getClassMetadata($em->getClassMetadata($class)->rootEntityName);
+        $id = HistoryReplay::keyOf($root, $key);
+        $context = null;
+
+        foreach ($replay->rowFacts() as $fact) {
+            if ($fact['at'] > $position) {
+                break;
+            }
+
+            if ($fact['id'] === $id && $em->getClassMetadata($fact['class'])->rootEntityName === $root->name) {
+                $context = $fact['context'];
+            }
+        }
+
+        return $context ?? $replay->contextOfTheRow($class, $key);
+    }
     /**
      * Reports a failure that happened while the records were being assembled, without
      * letting it end the assembling.
@@ -1722,7 +1855,8 @@ final class AuditSubscriber
             }
         }
 
-        unset($this->provenance[$flush], $this->contextAsFlushed[$flush], $this->statementMarks[$flush], $this->claimedThrough[$flush], $this->collectionsOnly[$flush]);
+        unset($this->provenance[$flush], $this->statementMarks[$flush], $this->claimedThrough[$flush], $this->collectionsOnly[$flush]);
+        $this->collectionSnapshots = array_values(array_filter($this->collectionSnapshots, static fn (array $snapshot): bool => $snapshot['flush'] !== $flush));
     }
 
     /**
@@ -1763,8 +1897,10 @@ final class AuditSubscriber
         $this->statementMarks = [];
         $this->claimedThrough = [];
         $this->collectionsOnly = [];
-        $this->contextAsFlushed = [];
+        $this->collectionSnapshots = [];
         $this->reportedLostChangeSets = false;
+        $this->lastExecutionOf = new \WeakMap();
+        $this->announcedUnder = [];
 
         // Whatever the log holds from here back is spent: published by the flush that is
         // ending, or dropped with the one that was found abandoned -- and in both cases not
@@ -2042,9 +2178,9 @@ final class AuditSubscriber
             // now -- a flush that died rolled its statements back, and that, not its manager
             // being closed or cleared on the way out, is what says so. What is left is
             // really there.
-            $before = $this->collectedSoFar($abandoned ?? $em);
             $this->dropWhatTheLogTookBack($abandoned ?? $em);
             $collected = $this->collectedSoFar($abandoned ?? $em);
+            $before = $collected + $this->executionsTheLogTookBack($abandoned ?? $em);
 
             if ($committed && $collected > 0) {
                 // Its statements stayed done, and it did not come back through postFlush:
@@ -2094,61 +2230,11 @@ final class AuditSubscriber
     }
 
     /**
-     * The change set read again, after preUpdate has had its say.
-     *
-     * A change set is taken in onFlush, which is before Doctrine builds the UPDATE — and a
-     * preUpdate listener may still correct a value, or bring in a field that was not in
-     * it, which Doctrine merges through recomputeSingleEntityChangeSet(). What the
-     * statement writes is that later answer.
-     *
-     * **For every updated entity, and not only the elements of a tracked collection.**
-     * The elements are why this exists — their changes are folded into the owner's record
-     * from what was collected in onFlush, so a correction that never reached it had the
-     * history saying a line went to 7 while the row took 5 — but narrowing it to them
-     * would take two other things down with it, and neither is obvious from here:
-     *
-     * - a field a preUpdate listener ADDS is not in the snapshot at all, and {@see
-     *   sidesFrom()} keeps such a field exactly as the unit of work reports it. After a
-     *   refused flush the unit of work reports it from a value the column never took, and
-     *   {@see $neverWritten} is what says otherwise — spent by rememberChangeSet(), which
-     *   is reached for that field on this road and no other;
-     * - and the same call is what SPENDS the correction, so leaving it unspent here means
-     *   it is still there for the flush after the one that wrote the column, which then
-     *   starts its change from a value two writes old. Measured, with this one call taken
-     *   out: One to Three recorded as "Two to Three", and the next change to "Four"
-     *   recorded as starting from "One", under a third actor.
-     *
-     * Only when the change set actually moved. A correction in preUpdate is rare, and
-     * walking every entity of every flush to discover that nothing changed is work every
-     * application would pay for the few that need it.
-     */
-    private function readTheChangeSetAgainAfterPreUpdate(EntityManagerInterface $em, object $element, int $flush): void
-    {
-        $current = $em->getUnitOfWork()->getEntityChangeSet($element);
-        $snapshot = $this->changeSets[spl_object_id($element)] ?? null;
-
-        // An empty current set is the unit of work having been emptied under us - by a
-        // listener's own flush - and not a correction. Replacing the snapshot with it
-        // would take the audited entity's record down with it.
-        if ($snapshot === null || $current === [] || $current === $snapshot) {
-            return;
-        }
-
-        // Merged rather than replaced, and for the same reason the owner's own fields
-        // are: what the row went FROM is only in the snapshot.
-        $this->rememberChangeSet($element, self::sidesFrom($current, $snapshot), $flush);
-
-
-    }
-
-    /**
      * The owners an element reaches, checked and remembered: not what the collection gained
      * or lost -- the statements say that -- but what has to hold before they are written.
      *
      * A declaration that cannot be honoured refuses the flush that would have relied on it,
-     * here in onFlush, for an owner that may have no event of its own; and the owner's
-     * always-recorded fields are taken as this flush found them, for the record the log's
-     * facts are written into. The owner the element points at and the one Doctrine remembers
+     * here in onFlush, for an owner that may have no event of its own. The owner the element points at and the one Doctrine remembers
      * it pointing at, which differ exactly when it moves.
      */
     private function aboutTheOwnersOf(EntityManagerInterface $em, object $element, int $flush): void
@@ -2173,10 +2259,6 @@ final class AuditSubscriber
 
                     $this->assertAuditedFieldsAreThere($em, $owner, $metadata);
                     $this->assertTrackedCollectionsAreServable($em, $owner, $metadata);
-
-                    if (!isset($this->contextAsFlushed[$flush][spl_object_id($owner)])) {
-                        $this->rememberContext($em, $owner, $flush);
-                    }
                 }
             }
         } catch (\Throwable $e) {
@@ -2474,26 +2556,25 @@ final class AuditSubscriber
     }
 
     /**
-     * Always-recorded context for a record whose changes arrived from tracked elements:
-     * build() adds it for a record built during the flush, and a record assembled in
-     * postFlush — or amended there — has to keep the same promise, that every history
-     * line reads on its own.
+     * A record's always-recorded context: every history line reads on its own. The context is
+     * the row's -- beside the change, once the change is in the database -- and never the
+     * object's, which a postUpdate listener may have moved and the flush never wrote.
      *
      * @param array<string, Change|mixed> $changes
+     * @param array<string, mixed>        $context the always-recorded fields as the row held them
      *
      * @return array<string, Change|mixed>
      */
-    private function withContext(?EntityManagerInterface $em, object $owner, array $changes, int $flush): array
+    private function withContext(EntityManagerInterface $em, object $owner, array $changes, array $context): array
     {
-        $metadata = $em === null ? null : $this->metadataFactory->for($owner);
+        $metadata = $this->metadataFactory->for($owner);
 
-        if ($em === null || $metadata === null) {
+        if ($metadata === null) {
             return $changes;
         }
 
-        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? [], $this->changeSets[spl_object_id($owner)] ?? []);
+        return (new ChangeSetBuilder($em, $this->comparator))->withAlwaysRecorded($owner, $metadata, $changes, $context);
     }
-
     /**
      * What an emptied collection is recorded as, folded into whatever else the owner has
      * to say.
@@ -2595,45 +2676,9 @@ final class AuditSubscriber
         // context overwrites the owner's own real change on the road where it has one:
         // "sealed -> sealed" where the row went from packed. This was taken out once, as
         // redundant, during a round when the road that needed it had been taken out too.
-        $built = (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied, $this->contextAsFlushed[$flush][spl_object_id($owner)] ?? []);
+        $built = (new ChangeSetBuilder($em, $this->comparator))->build($owner, $metadata, [], $emptied);
 
         return array_replace(array_intersect_key($built, $emptied), $changes);
-    }
-
-    /**
-     * The record for an owner that Doctrine never raised an event for, built after the
-     * commit from what onFlush collected. The entity is still managed and its
-     * identifier is settled, which is all this needs.
-     *
-     * @param array<string, Change> $changes
-     */
-    private function recordForOwner(ObjectManager $manager, object $owner, array $changes, int $flush): ?AuditRecord
-    {
-        $record = null;
-
-        try {
-            $metadata = $this->metadataFactory->for($owner);
-            $em = self::entityManagerOf($manager);
-
-            if ($metadata === null || $em === null) {
-                return null;
-            }
-
-            $id = $this->identifierOf($em, $owner);
-
-            if ($id === null) {
-                return null;
-            }
-
-            $changes = $this->withWhatWasEmptied($em, $owner, $changes, $flush);
-
-            return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
-                ->withChanges($this->withContext($em, $owner, $changes, $flush));
-        } catch (\Throwable $e) {
-            $this->reportWhileBuilding($e, $record);
-
-            return null;
-        }
     }
 
     /**
@@ -2653,203 +2698,19 @@ final class AuditSubscriber
             $this->reportWhileBuilding($failure);
         }
 
-        return $this->elementRuns->of($em, $replay, $this->factsReadThrough, $consume, function (int $at): bool {
-            foreach ($this->windows as [$from, $to]) {
-                if ($at > $from && ($to === null || $at <= $to)) {
-                    return true;
-                }
-            }
-
-            return false;
-        });
+        return $this->elementRuns->of($em, $replay, $this->factsReadThrough, $consume, $this->ranDuringAFlush(...));
     }
 
-    /**
-     * A record of what changed inside an owner's elements, and of nothing else: the
-     * emptying of a collection is the owner's other record's to say, and saying it here too
-     * would say it twice.
-     *
-     * @param array<string, Change> $changes
-     */
-    private function recordForTheRows(EntityManagerInterface $em, object $owner, array $changes, int $flush): ?AuditRecord
+    /** Whether the statement at a position ran while an operation of this listener's did. */
+    private function ranDuringAFlush(int $at): bool
     {
-        $metadata = $this->metadataFactory->for($owner);
-        $id = $this->identifierOf($em, $owner);
-
-        if ($metadata === null || $id === null) {
-            return null;
+        foreach ($this->windows as [$from, $to]) {
+            if ($at > $from && ($to === null || $at <= $to)) {
+                return true;
+            }
         }
 
-        return (new AuditRecord($metadata->objectType, $id, AuditEvent::UPDATE, origin: AuditOrigin::Doctrine))
-            ->withChanges($this->withContext($em, $owner, $changes, $flush));
-    }
-
-    /**
-     * The change set to build a record from: what the unit of work still has, filled in
-     * from the snapshot taken in onFlush for whatever it lost.
-     *
-     * The unit of work wins wherever it still knows a field. A preUpdate listener may
-     * legitimately change the entity after the snapshot was taken — Doctrine then calls
-     * recomputeSingleEntityChangeSet() and merges that in — and the record has to
-     * reflect what was actually written, not what was planned.
-     *
-     * @return array<string, mixed>
-     */
-    private function changeSetFor(EntityManagerInterface $em, object $entity): array
-    {
-        $current = $em->getUnitOfWork()->getEntityChangeSet($entity);
-        $snapshot = $this->changeSets[spl_object_id($entity)] ?? [];
-
-        if ($current === [] && $snapshot !== []) {
-            $this->reportLostChangeSets($entity);
-
-            return self::asTheEntityNowStands($em, $entity, $snapshot);
-        }
-
-        return self::sidesFrom($current, $snapshot);
-    }
-
-    /**
-     * Each side from where it is true: the old from the snapshot onFlush took, the new
-     * from the change set as it finally stands.
-     *
-     * Doctrine does not keep the row's own value around for this. computeChangeSet()
-     * ends by writing the current values into originalEntityData, so a preUpdate
-     * listener that corrects a field and calls recomputeSingleEntityChangeSet() gets a
-     * change set whose "old" is the value that was planned a moment ago - never in the
-     * database, never true. Taking the current set whole then wrote a record saying the
-     * row went from a value it never held.
-     *
-     * @param array<string, mixed> $current  what the unit of work says now
-     * @param array<string, mixed> $snapshot what onFlush saw, before any correction
-     *
-     * @return array<string, mixed>
-     */
-    private static function sidesFrom(array $current, array $snapshot): array
-    {
-        $merged = $snapshot;
-
-        foreach ($current as $field => $sides) {
-            $planned = $snapshot[$field] ?? null;
-
-            if (!\is_array($sides) || !\is_array($planned)) {
-                $merged[$field] = $sides;
-
-                continue;
-            }
-
-            $merged[$field] = [$planned[0] ?? null, $sides[1] ?? null];
-        }
-
-        return $merged;
-    }
-
-    /**
-     * The snapshot, with the "new" side of each field read off the entity.
-     *
-     * The snapshot is what onFlush saw; the row holds what the entity held when the
-     * UPDATE was built, which is later. A preUpdate listener correcting a value —
-     * Doctrine recomputes the change set for exactly that — is the ordinary way the two
-     * differ, and the merge above normally covers it because the unit of work still has
-     * the recomputed set. On the path that gets here it does not: another listener's
-     * flush emptied it. Handing back the snapshot then writes a record that disagrees
-     * with the row, and an audit trail that is wrong is worse than one that is thin.
-     *
-     * Only mapped fields, and only their new side: an association's old and new are
-     * objects the snapshot already holds, and reading one back off the entity would say
-     * nothing the record does not already know.
-     *
-     * @param array<string, mixed> $snapshot
-     *
-     * @return array<string, mixed>
-     */
-    private static function asTheEntityNowStands(EntityManagerInterface $em, object $entity, array $snapshot): array
-    {
-        $metadata = $em->getClassMetadata($entity::class);
-
-        foreach ($snapshot as $field => $sides) {
-            if (!\is_array($sides) || !\array_key_exists(1, $sides) || !$metadata->hasField((string) $field)) {
-                continue;
-            }
-
-            try {
-                $sides[1] = $metadata->getFieldValue($entity, (string) $field);
-            } catch (\Throwable) {
-                continue; // unreadable for whatever reason: the snapshot's own value stands
-            }
-
-            $snapshot[$field] = $sides;
-        }
-
-        return $snapshot;
-    }
-
-    /**
-     * Says out loud what used to be silent.
-     *
-     * Without this the symptom is an update whose "changes" are empty — no error, no
-     * failed write, nothing in any log — and the cause sits in a listener that has
-     * nothing to do with auditing. Finding it took three days once.
-     */
-    private function reportLostChangeSets(object $entity): void
-    {
-        if ($this->reportedLostChangeSets) {
-            return;
-        }
-
-        $this->reportedLostChangeSets = true;
-
-        $this->logger->warning(
-            'The unit of work had no change set left for {entity}; the audit record was built from the snapshot taken in onFlush. Something called flush() from inside a lifecycle listener of this flush: UnitOfWork::commit() ends in postCommitCleanup(), which empties entityChangeSets — and with them extraUpdates, collectionUpdates, orphanRemovals and collectionDeletions of the flush still running, so more than the history may be missing. Move that work to postFlush.',
-            ['entity' => $entity::class]
-        );
-    }
-
-    private function recordFor(PostPersistEventArgs|PostUpdateEventArgs|PreRemoveEventArgs $args, string $event, bool $withChanges = true): ?AuditRecord
-    {
-        $entity = $args->getObject();
-        $record = null;
-
-        try {
-            $metadata = $this->metadataFactory->for($entity);
-
-            if ($metadata === null) {
-                return null;
-            }
-
-            $em = self::entityManagerOf($args->getObjectManager());
-
-            if ($em === null) {
-                return null;
-            }
-
-            $this->assertAuditedFieldsAreThere($em, $entity, $metadata);
-            $this->assertTrackedCollectionsAreServable($em, $entity, $metadata);
-
-            $id = $this->identifierOf($em, $entity);
-
-            if ($id === null) {
-                return null; // nothing to attach a history to
-            }
-
-            $record = new AuditRecord($metadata->objectType, $id, $event, origin: AuditOrigin::Doctrine);
-
-            if ($withChanges) {
-                // Not the emptying. It is folded in after the commit, in publish(), where
-                // what the owner's ELEMENTS said is also known -- and the whole-collection
-                // form has to leave out whatever they already said, or one loss is
-                // described twice. Built here as well, that subtraction had nothing to
-                // subtract from: two roads to one answer, which is the shape this listener
-                // keeps producing and the shape a generated sequence found again.
-                $record = $record->withChanges((new ChangeSetBuilder($em, $this->comparator))->build($entity, $metadata, $this->changeSetFor($em, $entity), [], $this->contextAsFlushed[$this->collectingNow($em)][spl_object_id($entity)] ?? []));
-            }
-
-            return $record;
-        } catch (\Throwable $e) {
-            $this->writer->reportFailure($e, $record);
-
-            return null;
-        }
+        return false;
     }
 
     /**

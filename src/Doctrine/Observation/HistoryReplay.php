@@ -50,8 +50,8 @@ final class HistoryReplay
     /** @var array<string, array<string, true>> rows a DELETE that stayed done took */
     private array $gone = [];
 
-    /** @var array<string, array<string, int|null>> the flush whose DELETE took each of them */
-    private array $goneIn = [];
+    /** @var array<string, array<string, int>> where the DELETE that took each of them is in the log */
+    private array $goneAt = [];
 
     /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool, ownerContext: array<string, mixed>}> */
     private array $facts = [];
@@ -68,7 +68,10 @@ final class HistoryReplay
      * since. Only the columns the replay knows the row by; a field it knows nothing of is left
      * out rather than said to be null.
      *
-     * Read by nothing yet: step 5 builds an entity's records from them (5.2).
+     * Whose flush each is, is asked of the log when the facts are read, not when the statement
+     * was: a replay read in the middle of an operation -- to count what a flush left, say -- meets
+     * statements the flush running them has not claimed yet, and an answer kept from then would
+     * be nobody's for good.
      *
      * @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
      */
@@ -264,7 +267,7 @@ final class HistoryReplay
      */
     public function facts(): array
     {
-        return $this->facts;
+        return array_map(fn (array $fact): array => array_replace($fact, ['flush' => $this->log?->ownerOf($fact['at'])]), $this->facts);
     }
 
     /** @return list<string> */
@@ -290,7 +293,7 @@ final class HistoryReplay
      */
     public function rowFacts(): array
     {
-        return $this->rowFacts;
+        return array_map(fn (array $fact): array => array_replace($fact, ['flush' => $this->log?->ownerOf($fact['at'])]), $this->rowFacts);
     }
 
     /**
@@ -774,7 +777,7 @@ final class HistoryReplay
         ));
 
         $this->gone[$root][$id] = true;
-        $this->goneIn[$root][$id] = $this->log?->ownerOf($this->at);
+        $this->goneAt[$root][$id] = $this->at;
     }
 
     /**
@@ -825,7 +828,7 @@ final class HistoryReplay
      */
     public function removedIn(string $root, string $id, int $flush): bool
     {
-        return isset($this->gone[$root][$id]) && ($this->goneIn[$root][$id] ?? null) === $flush;
+        return isset($this->gone[$root][$id], $this->goneAt[$root][$id]) && $this->log?->ownerOf($this->goneAt[$root][$id]) === $flush;
     }
 
     private function emptied(StatementShape $shape, RowBinding $binding, int|string|null $affected): void

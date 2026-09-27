@@ -310,20 +310,14 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * entry made after that is about the new sequences.
      *
      * Step 4 widened the vocabulary (2026-09-25) and drew six, all one root: the article's old
-     * side after a savepoint of the application's took its UPDATE back. They are the record's
-     * value, not its fate -- the record of the taken-back UPDATE is dropped as it should be --
-     * and step 5, which reads an entity's fields from the log, is where they go.
+     * side after a savepoint of the application's took its UPDATE back -- the record's value,
+     * read from Doctrine's change set, which still believed the row took it. Step 5 reads an
+     * entity's records from the log's facts (5.2c), and the six went with it: empty again, on
+     * the same corpus, both DBALs.
      *
      * @var array<int, array{says: string, because: string}>
      */
-    private const KNOWN = [
-        594 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
-        732 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"from after\\""], invented ["article 1 title \\"title 0\\" -> \\"from after\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
-        841 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
-        1030 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
-        2480 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 1\\""], invented ["article 1 title \\"title 0\\" -> \\"title 1\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
-        2703 => ['says' => 'missing ["article 1 title \\"One\\" -> \\"title 2\\""], invented ["article 1 title \\"title 0\\" -> \\"title 2\\""]', 'because' => 'step 5: an entity\'s fields are read from Doctrine\'s change set, and after the application rolled back an UPDATE of the article to a savepoint of its own Doctrine still believes the row took it -- the next change\'s old side is the value the row never held'],
-    ];
+    private const KNOWN = [];
 
     /**
      * What a sequence does between its flushes.

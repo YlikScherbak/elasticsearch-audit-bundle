@@ -81,8 +81,9 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
         // application's own SQL moves the crate's status; the line goes to three, and that
         // flush writes both records. The crate never had an UPDATE of Doctrine's. Each record's
         // context is the crate's row when its line's statement ran: "packed", then "raw" --
-        // not the object's as each flush began, which never heard of "raw", and not the rows as
-        // they stand when the late one is written, which would lend the first one the future.
+        // not the object's as each flush began, which never heard of "raw" (what was recorded
+        // until 5.2c), and not the rows as they stand when the late one is written, which would
+        // lend the first one the future.
         $this->unownedStatementsAreExpected = true;
         $crate = new Crate('C-1');
         $crate->add($line = new CrateItem('apple'));
@@ -106,10 +107,7 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
                 ['crate', 'update', [$quantity => ['old' => 1, 'new' => 2], 'status' => ['old' => 'packed', 'new' => 'packed']]],
                 ['crate', 'update', [$quantity => ['old' => 2, 'new' => 3], 'status' => ['old' => 'raw', 'new' => 'raw']]],
             ],
-            today: [
-                ['crate', 'update', [$quantity => ['old' => 1, 'new' => 2], 'status' => ['old' => 'packed', 'new' => 'packed']]],
-                ['crate', 'update', [$quantity => ['old' => 2, 'new' => 3], 'status' => ['old' => 'packed', 'new' => 'packed']]],
-            ],
+            today: null,
         );
     }
 
@@ -159,8 +157,10 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
     {
         // A listener ahead of this one, in onFlush, writes the always-recorded column itself
         // before Doctrine's statement runs. When the flush began the row held "bisque"; when
-        // the change was written it held "raw". Which of the two the context says is the
-        // contract 5.2c decides; today it is the flush's beginning.
+        // the change was written it held "raw". The context is the row beside the change once
+        // the change is in the database: "raw" (5.2c; until then, the flush's beginning). The
+        // application's SQL is no audited change of its own, and what it left is what the next
+        // one is written beside.
         $this->unownedStatementsAreExpected = true;
         $this->em->persist($kiln = new Kiln());
         $this->em->flush();
@@ -181,8 +181,8 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame([
-            ['oven', 'update', ['firing' => ['old' => 'bisque', 'new' => 'bisque'], 'label' => ['old' => 'one', 'new' => 'two'], 'site' => ['old' => 'north', 'new' => 'north']]],
-        ], $this->said(), 'today: the context as the flush began');
+            ['oven', 'update', ['firing' => ['old' => 'raw', 'new' => 'raw'], 'label' => ['old' => 'one', 'new' => 'two'], 'site' => ['old' => 'north', 'new' => 'north']]],
+        ], $this->said(), 'the context as the row held it beside the change');
     }
 
     public function testTwoRelaysCreatedPointingAtEachOtherAreTwoCreations(): void
@@ -272,19 +272,17 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
 
         // What the rows went through: the outer UPDATE wrote "Second"; the nested flush wrote
         // "Third", and both join rows -- it carried out the outer flush's collection update with
-        // its own, before the outer one got to it. Today both records say the title went from
-        // "Hello" to "Third", and the first one has both tags. The titles are the log's to put
-        // right (5.2c); which record the tags are in stays today's until the join rows are
-        // facts too (5.3).
+        // its own, before the outer one got to it. Until 5.2c both records said the title went
+        // from "Hello" to "Third", and the first one had both tags. The titles are the log's
+        // now; the tags are in the nested record because the collection's snapshot is taken
+        // where the nested flush announces the row -- the transitional road until the join
+        // rows are facts too (5.3).
         $this->pinned(
             expected: [
                 ['article', 'update', ['status' => ['old' => 'draft', 'new' => 'draft'], 'title' => ['old' => 'Hello', 'new' => 'Second']]],
                 ['article', 'update', ['status' => ['old' => 'draft', 'new' => 'draft'], 'tags' => ['old' => [], 'new' => ['php', 'elasticsearch']], 'title' => ['old' => 'Second', 'new' => 'Third']]],
             ],
-            today: [
-                ['article', 'update', ['status' => ['old' => 'draft', 'new' => 'draft'], 'tags' => ['old' => [], 'new' => ['php', 'elasticsearch']], 'title' => ['old' => 'Hello', 'new' => 'Third']]],
-                ['article', 'update', ['status' => ['old' => 'draft', 'new' => 'draft'], 'title' => ['old' => 'Hello', 'new' => 'Third']]],
-            ],
+            today: null,
         );
     }
 

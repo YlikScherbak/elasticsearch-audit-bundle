@@ -18,10 +18,10 @@ use Doctrine\Persistence\Event\LifecycleEventArgs;
  * An entity's own history, held to what its rows did.
  *
  * Written before step 5 reads an entity's fields from the connection's log instead of
- * Doctrine's change set, so that the step is handed its targets: where the two already agree,
- * the test says it and step 5 must keep it; where they do not, the test says what is recorded
- * today and what has to be, and fails the day either changes -- today's answer pinned, so
- * that it cannot drift unnoticed, and so that mending it takes the pin off.
+ * Doctrine's change set, so that the step was handed its targets: where the two agreed, the
+ * test says it and step 5 had to keep it; where they did not, the test said what was recorded
+ * then and what has to be, pinned, and mending it took the pin off. What is still pinned is an
+ * owning collection's, whose join rows become facts in 5.3.
  */
 final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
 {
@@ -54,7 +54,8 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
     {
         // The column holds the moment to the second, and the object is given the same second
         // with half of one more. Doctrine sees a new value and writes it; the row holds what it
-        // held. A history of the row has nothing to say -- today it says what the object says.
+        // held. A history of the row has nothing to say, and says nothing (5.2c; until then it
+        // said what the object said).
         $this->em->persist($board = new Switchboard());
         $this->em->flush();
         $this->gateway->documents = [];
@@ -64,7 +65,7 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
 
         $this->pinned(
             expected: [],
-            today: [['checkedAt' => ['old' => '2026-09-25 10:00:00', 'new' => '2026-09-25 10:00:00.500000']]],
+            today: null,
         );
     }
 
@@ -115,7 +116,7 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
 
         $this->pinned(
             expected: [['One', 'title 1'], ['title 1', 'title 2']],
-            today: [['title 0', 'title 1'], ['title 1', 'title 2']],
+            today: null,
             said: $this->titles(),
         );
     }
@@ -240,8 +241,7 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
      * make them adjacent: which statements make one change is read over the log as it ran, not
      * over the facts that are left once the others are filtered out.
      *
-     * Held on the road through Doctrine's events today, and to be held on the road through the
-     * log's facts (step 5).
+     * Put right by step 5 (5.2c), which reads an entity's records from the log's facts.
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('whetherTheApplicationWritesBetween')]
     public function testTwoChangesOfAJoinedRowEachOfOneTableAreTwoRecordsWithoutSavepoints(bool $between): void
@@ -283,18 +283,15 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
         $said = array_map(static fn (array $d): array => [$d['objectType'], $d['changes']], $this->documents());
         usort($said, static fn (array $a, array $b): int => strcmp((string) json_encode($a), (string) json_encode($b)));
 
-        // Today they are two records, and the nested one also says the name changed -- which its
-        // UPDATE did not write: the name came from Doctrine's change set, so the change is in the
-        // history twice. A record from the log says what its own statement did.
+        // Two records, each saying what its own statement did. Until 5.2c the nested one also
+        // said the name changed -- which its UPDATE did not write: the name came from Doctrine's
+        // change set, and the change was in the history twice.
         $this->pinned(
             expected: [
                 ['machine', ['name' => ['old' => 'One', 'new' => 'Two']]],
                 ['machine', ['tonnage' => ['old' => 1, 'new' => 5]]],
             ],
-            today: [
-                ['machine', ['name' => ['old' => 'One', 'new' => 'Two']]],
-                ['machine', ['tonnage' => ['old' => 1, 'new' => 5], 'name' => ['old' => 'One', 'new' => 'Two']]],
-            ],
+            today: null,
             said: $said,
         );
     }

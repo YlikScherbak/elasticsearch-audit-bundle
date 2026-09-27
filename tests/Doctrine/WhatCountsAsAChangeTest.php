@@ -18,39 +18,44 @@ use Doctrine\ORM\Events;
  */
 final class WhatCountsAsAChangeTest extends DoctrineTestCase
 {
-    public function testWithoutAComparatorTwoZonesOfTheSameWallClockAreAChange(): void
+    public function testTwoZonesOfOneWallClockInAColumnThatKeepsNoZoneAreNoChange(): void
     {
         $article = $this->published('2026-08-30 10:00:00', 'UTC');
 
-        // Same reading on the wall, two hours apart in fact — and the record then shows
-        // two timestamps that look identical to whoever reads the history.
+        // Same reading on the wall, two hours apart in fact -- and a datetime column keeps the
+        // reading and not the zone. Doctrine writes it; the row holds what it held. The history
+        // is the row's, and has nothing to say (5.2c; until then it said what the object said,
+        // two timestamps that looked identical to whoever read them).
         $article->publishedAt = new \DateTimeImmutable('2026-08-30 10:00:00', new \DateTimeZone('+02:00'));
         $this->em->flush();
 
-        self::assertArrayHasKey('publishedAt', $this->lastDocument()['changes']);
+        self::assertSame('2026-08-30 10:00:00', $this->em->getConnection()->fetchOne('SELECT publishedAt FROM Article WHERE id = ?', [$article->id]), 'the premise: the row holds what it held');
+        self::assertSame([], $this->documents());
     }
 
     public function testAComparatorSettlesItForTheListenerToo(): void
     {
+        // A value the row does tell apart -- a reference written in another case -- that the
+        // application says is the same one. The comparator decides what counts as a change of
+        // what the row holds; what the row cannot hold apart is nothing to decide.
         $this->useComparator(new class implements ValueComparatorInterface {
             public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
             {
-                if ($field !== 'publishedAt') {
+                if ($field !== 'reference') {
                     return null; // no opinion; the default decides
                 }
 
-                return $old instanceof \DateTimeInterface
-                    && $new instanceof \DateTimeInterface
-                    && $old->format('Y-m-d H:i:s') === $new->format('Y-m-d H:i:s');
+                return \is_string($old) && \is_string($new) && strtolower($old) === strtolower($new);
             }
         });
 
-        $article = $this->published('2026-08-30 10:00:00', 'UTC');
+        $shipment = $this->shipment(['read' => true]);
 
-        $article->publishedAt = new \DateTimeImmutable('2026-08-30 10:00:00', new \DateTimeZone('+02:00'));
+        $shipment->reference = 'sh-1';
         $this->em->flush();
 
-        self::assertSame([], $this->documents(), 'by wall clock nothing moved, so there is nothing to record');
+        self::assertSame('sh-1', $this->em->getConnection()->fetchOne('SELECT reference FROM Shipment WHERE id = ?', [$shipment->id]), 'the premise: the row took it');
+        self::assertSame([], $this->documents(), 'by the application\'s measure nothing moved, so there is nothing to record');
     }
 
     public function testTheComparatorIsNotAskedToDecideEverything(): void

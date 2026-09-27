@@ -433,12 +433,12 @@ final class TransactionSafetyTest extends DoctrineTestCase
 
         self::assertSame('Two', $connection->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), 'the premise: the outer flush committed and the nested execution was taken back');
 
-        // Two records were taken, each tied to a statement of its own, and never one statement
-        // for both: the positions, not how many documents stand, say whether two records leaned
-        // on one execution.
+        // One execution, of the statement that stood: what the savepoint took back is no fact
+        // of the row, and a record is never taken for it to be dropped afterwards. (Until 5.2c a
+        // record was taken for each announcement and each tied to a statement of its own; the
+        // positions, not how many documents stood, said whether two leaned on one.)
         $positions = array_map(static fn (array $b): mixed => $b['statement'][0] ?? null, $bound->getArrayCopy());
-        sort($positions);
-        self::assertSame(['Five', 'Two'], $positions, 'each record is tied to an execution of its own');
+        self::assertSame(['Two'], $positions, 'the execution that stood, and nothing of the one taken back');
         self::assertCount(1, $this->documents(), 'and only the outer one stood');
     }
 
@@ -546,12 +546,12 @@ final class TransactionSafetyTest extends DoctrineTestCase
         // The press's change touches only the root's table. A listener ahead of this one, in its
         // postUpdate, updates ANOTHER press's row of the subclass table itself -- same kind, a
         // table of the hierarchy, the same frame, right after the change, announced by nobody.
-        // It is not part of the change: the block ends where the row does.
+        // It is not part of the change: the block ends where the row does, and a block that
+        // took it would put the other row's SET in this record.
         //
-        // Today that shows only in the positions: the application's statement shares the
-        // change's fate and the values come from Doctrine's change set. From step 5 the values
-        // come from the block, and a block that took it would put the other row's SET in this
-        // record.
+        // It is a change of its own, of the other press: a statement in the flush's frame is
+        // the flush's, whoever ran it -- the rule an element's row has had since step 3, and an
+        // entity's has from step 5 (5.2c). Until then it was nobody's record.
         $this->unownedStatementsAreExpected = true;
         $press = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('One');
         $other = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('Other');
@@ -578,8 +578,8 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame(7, (int) $this->em->getConnection()->fetchOne('SELECT tonnage FROM Press WHERE id = ?', [$other->id]), 'the premise: the application\'s statement ran');
-        self::assertSame([['update Machine']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the change, and not the other row after it');
-        self::assertSame([['name' => 'Two']], array_map(static fn (array $b): array => $b['record'], $bound->getArrayCopy()));
+        self::assertSame([['update Machine'], ['update Press']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the change, and not the other row after it');
+        self::assertSame([['name' => 'Two'], ['tonnage' => 7]], array_map(static fn (array $b): array => $b['record'], $bound->getArrayCopy()), 'each saying what its own statement did');
     }
 
     public function testAChangesBlockDoesNotTakeADeleteOfItsRowRightAfterIt(): void
@@ -587,8 +587,9 @@ final class TransactionSafetyTest extends DoctrineTestCase
         // The press's change touches only the root's table; a listener ahead of this one, in
         // its postUpdate, deletes the same row of the subclass table itself -- the same row, a
         // table of the hierarchy, the same frame, right after the change: a DELETE, not part of
-        // an UPDATE. From step 5 a block that took it would give the change the fate and the
-        // position of a removal.
+        // an UPDATE. A block that took it would give the change the fate and the position of a
+        // removal. It is what the application did to the row, in the flush's frame: the row's
+        // removal, recorded as the flush's (5.2c).
         $this->unownedStatementsAreExpected = true;
         $press = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press('One');
         $this->em->persist($press);
@@ -612,8 +613,8 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $press->name = 'Two';
         $this->em->flush();
 
-        self::assertSame([['update Machine']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the change, and not the DELETE after it');
-        self::assertSame([['name' => 'Two']], array_map(static fn (array $b): array => $b['record'], $bound->getArrayCopy()), 'and what it says is the change');
+        self::assertSame([['update Machine'], ['delete Press']], array_map(static fn (array $b): array => $b['tied'], $bound->getArrayCopy()), 'the change, and not the DELETE after it');
+        self::assertSame([['name' => 'Two'], []], array_map(static fn (array $b): array => $b['record'], $bound->getArrayCopy()), 'and what it says is the change');
     }
 
     public function testAJoinedEntityChangedByTwoNestedFlushesWithoutSavepointsIsEachChangeOnce(): void
@@ -776,10 +777,9 @@ final class TransactionSafetyTest extends DoctrineTestCase
         // And then the row really does go 'Two' -> 'Five', in a flush of its own that
         // commits: the same transition as the one taken back, and a fact this time.
         //
-        // What the record SAYS is another matter, and step 5's: an entity's fields are still
-        // read from Doctrine's change set, and the nested flush left 'Five' on the object, so
-        // the outer record says 'One' -> 'Five' where the row took 'Two'. Pinned as it is today
-        // -- the fate is this test's, and the value flips when the fields come from the log.
+        // And what the record says is what the row took: 'One' -> 'Two'. Until step 5 read an
+        // entity's fields from the log (5.2c) it said 'One' -> 'Five', from the change set the
+        // dead nested flush left on the object.
         $article = $this->persisted(new Article('One'));
         $this->gateway->documents = [];
 
@@ -828,8 +828,7 @@ final class TransactionSafetyTest extends DoctrineTestCase
         $said = array_map(static fn (array $d): array => [$d['changes']['title']['old'] ?? null, $d['changes']['title']['new'] ?? null], $this->documents());
 
         self::assertCount(2, $said, 'and the row\'s real move to Five is a record of its own, once');
-        self::assertNotSame([['One', 'Two'], ['Two', 'Five']], $said, 'this is described correctly now: step 5 is done here, take the pin off');
-        self::assertSame([['One', 'Five'], ['Two', 'Five']], $said, 'what the record says has changed; the pin no longer describes it');
+        self::assertSame([['One', 'Two'], ['Two', 'Five']], $said, 'each record says what its own statement did');
     }
 
     public function testARemovalStandsByItsOwnDeleteWhenANestedFlushAheadOfThisListenerDies(): void
@@ -1705,10 +1704,11 @@ final class TransactionSafetyTest extends DoctrineTestCase
     }
 
     /**
-     * The parameters of the statement each pending record is tied to, in the order of the
-     * records, read just before the audit listener publishes them -- by a postFlush listener
-     * ahead of it. What a record is tied to is otherwise gone by the time a test can look:
-     * how many documents stand does not say whether two records leaned on one statement.
+     * The statements of each execution the audit listener's records are read from, in the
+     * order of the records, read just before it publishes them -- by a postFlush listener ahead
+     * of it -- from its reader of the log ({@see EntityRowRuns}). What an execution is made of
+     * is otherwise gone by the time a test can look: how many documents stand does not say
+     * whether two records leaned on one statement.
      *
      * @return \ArrayObject<int, array{record: array<string, mixed>, statement: list<mixed>|null, positions: list<int>, tied: list<string>}>
      */
@@ -1723,23 +1723,26 @@ final class TransactionSafetyTest extends DoctrineTestCase
             {
             }
 
-            public function postFlush(): void
+            public function postFlush(\Doctrine\ORM\Event\PostFlushEventArgs $args): void
             {
-                $pendingAt = (new \ReflectionProperty(AuditSubscriber::class, 'pendingAt'))->getValue($this->audit);
-                $pending = (new \ReflectionProperty(AuditSubscriber::class, 'pending'))->getValue($this->audit);
+                $em = $args->getObjectManager();
+                $read = fn (string $property): mixed => (new \ReflectionProperty(AuditSubscriber::class, $property))->getValue($this->audit);
+                $rows = $read('rows');
+                $runs = $read('entityRuns');
+                \assert($rows instanceof \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory && $runs instanceof \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\EntityRowRuns);
                 $this->bound->exchangeArray([]); // the outermost postFlush is the last, and the one that publishes
 
-                foreach ($pendingAt as $index => $at) {
-                    $statement = $at[0] ?? null; // the first table's -- an article has one
+                foreach ($runs->of($em, $rows->replayed($em), $this->statements, $read('factsReadThrough'), $read('departed')) as $run) {
                     $this->bound[] = [
-                        'record' => array_map(static fn (\Borsche\ElasticsearchAuditBundle\Model\Change $change): mixed => $change->new, $pending[$index]->changes),
-                        'statement' => $statement === null ? null : array_values($this->statements->statement($statement)['params'] ?? []),
-                        'positions' => $at ?? [],
+                        'record' => array_map(static fn (\Borsche\ElasticsearchAuditBundle\Model\Change $change): mixed => $change->new, $run['bare']),
+                        // the first table's -- an article has one
+                        'statement' => array_values($this->statements->statement($run['at'][0])['params'] ?? []),
+                        'positions' => $run['at'],
                         'tied' => array_map(function (int $at): string {
                             $shape = \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape::read($this->statements->statement($at)['sql'] ?? '');
 
                             return $shape === null ? '?' : $shape->kind.' '.$shape->table;
-                        }, $at ?? []),
+                        }, $run['at']),
                     ];
                 }
             }
