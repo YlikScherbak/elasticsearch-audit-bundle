@@ -383,6 +383,121 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'flush, and after the statement a nested one removes the line',
     ];
 
+    /**
+     * What a fingerprint of the history leaves out, each with why: nothing else. A field a
+     * document gains -- an attribute, a field a later step adds -- is in the fingerprint the day
+     * it appears, without anyone adding it here.
+     */
+    public const NOT_FINGERPRINTED = [
+        'id' => 'a UUID v7 whose bits after the timestamp are random: two runs of one sequence give two',
+        'writtenAt' => 'when the transport wrote it, by the wall clock and not the change\'s (WrittenAt): two runs, two moments',
+    ];
+
+    /** What every document has, and a fingerprint refuses one without: absent is not "the same". */
+    public const ALWAYS_THERE = ['objectType', 'objectId', 'event', 'loggedAt', 'source', 'changes'];
+
+    /**
+     * One history as one string: every document in the order it was written, every field but
+     * the ones named in NOT_FINGERPRINTED, every list in its order. Only the order of an object's
+     * keys is left out -- where a value sits among its siblings is not what it says.
+     *
+     * For telling two runs of the same sequences apart: before and after a change of the
+     * listener that must, or must not, change what it writes.
+     *
+     * @param list<array<string, mixed>> $documents
+     */
+    public static function fingerprintOf(array $documents): string
+    {
+        $normal = [];
+
+        foreach ($documents as $at => $document) {
+            foreach (self::ALWAYS_THERE as $key) {
+                if (!\array_key_exists($key, $document)) {
+                    throw new \LogicException(sprintf('Document %d has no "%s", which a fingerprint would take for its value.', $at, $key));
+                }
+            }
+
+            $normal[] = self::keysInOrder(array_diff_key($document, self::NOT_FINGERPRINTED));
+        }
+
+        return md5(json_encode($normal, \JSON_THROW_ON_ERROR | \JSON_PRESERVE_ZERO_FRACTION));
+    }
+
+    private static function keysInOrder(mixed $value): mixed
+    {
+        if (!\is_array($value)) {
+            return $value;
+        }
+
+        $value = array_map(self::keysInOrder(...), $value);
+
+        if (!array_is_list($value)) {
+            ksort($value);
+        }
+
+        return $value;
+    }
+
+    public function testAFingerprintSeesEveryFieldOfEveryDocumentAndItsOrder(): void
+    {
+        // A fingerprint that hashed ['objectType', 'objectId', 'action', 'changes'] said three
+        // commits running that two histories were the same, while it saw neither the event --
+        // documents carry no "action" -- nor who wrote them, nor when.
+        $documents = [
+            ['objectType' => 'article', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-09-27 10:00:00', 'source' => 'alice', 'id' => 'a', 'tenant' => 'north',
+                'changes' => ['title' => ['old' => 'One', 'new' => 'Two'], 'tags' => ['old' => ['php'], 'new' => ['php', 'es']]]],
+            ['objectType' => 'crate', 'objectId' => 'C-1', 'event' => 'create', 'loggedAt' => '2026-09-27 10:00:00', 'source' => 'alice', 'id' => 'b', 'changes' => []],
+        ];
+        $fingerprint = self::fingerprintOf($documents);
+
+        $moved = [
+            'the type' => ['objectType', 'other'],
+            'the id of the object' => ['objectId', 2],
+            'the event' => ['event', 'create'],
+            'the moment' => ['loggedAt', '2026-09-27 10:00:01'],
+            'the actor' => ['source', 'bob'],
+            'the changes' => ['changes', ['title' => ['old' => 'One', 'new' => 'Three']]],
+            'an attribute' => ['tenant', 'south'],
+            'a field it did not have' => ['somethingNew', true],
+        ];
+
+        foreach ($moved as $what => [$field, $value]) {
+            $other = $documents;
+            $other[0][$field] = $value;
+
+            self::assertNotSame($fingerprint, self::fingerprintOf($other), $what.' moved, and the fingerprint did not');
+        }
+
+        $reordered = $documents;
+        $reordered[0]['changes']['tags']['new'] = ['es', 'php'];
+        self::assertNotSame($fingerprint, self::fingerprintOf($reordered), 'a list is in its order');
+        self::assertNotSame($fingerprint, self::fingerprintOf(array_reverse($documents)), 'the documents are in theirs');
+
+        foreach (array_keys(self::NOT_FINGERPRINTED) as $field) {
+            $same = $documents;
+            $same[0][$field] = 'one run';
+            $same[1][$field] = 'another run';
+            self::assertSame($fingerprint, self::fingerprintOf($same), $field.' is named as left out, and is not');
+        }
+
+        $same = $documents;
+        $same[0] = array_reverse($same[0], true);
+        $same[0]['changes'] = array_reverse($same[0]['changes'], true);
+        self::assertSame($fingerprint, self::fingerprintOf($same), 'the order of an object\'s keys is not what it says');
+
+        foreach (self::ALWAYS_THERE as $key) {
+            $without = $documents;
+            unset($without[1][$key]);
+
+            try {
+                self::fingerprintOf($without);
+                self::fail('a document without "'.$key.'" was fingerprinted');
+            } catch (\LogicException $e) {
+                self::assertStringContainsString('"'.$key.'"', $e->getMessage());
+            }
+        }
+    }
+
     /** The tables this reads, and the column that names each row in a statement. */
     private const TABLES = [
         'Article' => 'id',
