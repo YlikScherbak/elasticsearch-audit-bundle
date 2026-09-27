@@ -272,6 +272,29 @@ final class EntityRowRuns
     /**
      * Whether a fact is the next table of the execution before it.
      *
+     * Each condition is here for a case of its own, and each was seen to be the only one that
+     * told that case apart (WhereOneExecutionEndsTest):
+     *
+     * - the next position in the log, not the next fact: the application's statement between
+     *   two changes of the row is no fact of it, and still parts them;
+     * - no flush begun between: without savepoints a nested flush's first statement can follow
+     *   the outer flush's last one on the same row, in the same frame, under the same owner;
+     * - the same flush: a flush nested in a transaction of the application's, without savepoints,
+     *   opens no frame -- the application's is the one both run in -- and each flush claims what
+     *   ran while it did, so back from the nested flush the outer flush's next statement is in
+     *   the same frame under another owner. Redundant by construction where every nested flush
+     *   has a savepoint (DBAL 4 always, DBAL 3 with use_savepoints): two owners are two frames
+     *   there. Kept for where they are not, not as dead code;
+     * - no table twice: one table cannot be two tables of one change;
+     * - the same frame: a savepoint statement takes no place in the log, so being next to each
+     *   other does not make two statements one frame's -- the application's own savepoint, with
+     *   no flush in it, between the root's statement and the subclass's.
+     *
+     * What none of them can tell apart, by the SQL, its parameters and the boundaries the log
+     * keeps: the application's statement on the other table of the row, right after the flush's,
+     * in the flush's own frame, reads as one change written a table at a time -- nothing of it
+     * lost, but two hands not told apart.
+     *
      * @param array{statement: string, class: class-string, id: string, flush: int|null, at: list<int>, tables: array<string, true>} $execution
      * @param array{statement: string, class: class-string, id: string, at: int, flush: int|null}                                    $fact
      */
