@@ -14,6 +14,8 @@ use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityNotFoundException;
 use Doctrine\ORM\Mapping\ClassMetadata;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
  * What each execution did to the row of an audited entity, turned from the facts of the
@@ -41,6 +43,7 @@ final class EntityRowRuns
         private readonly AuditMetadataFactory $audited,
         private readonly ValueComparatorInterface $comparator,
         private readonly RowIdentity $identity,
+        private readonly LoggerInterface $logger = new NullLogger(),
     ) {
     }
 
@@ -56,15 +59,18 @@ final class EntityRowRuns
      * flush's last one on the same row; where it began is what says they are two.
      *
      * A statement no flush owns is not a flush's history -- the application's own SQL, or a
-     * hole in how flushes claim what they run -- and is left out here; what is said of it is
-     * the caller's.
+     * hole in how flushes claim what they run -- and is left out, and said in the log by the
+     * reading that writes the history ({@see NobodysStatement}), as an element's is.
+     *
+     * @param bool                       $consume      whether this is the reading that writes them
+     * @param (\Closure(int): bool)|null $duringAFlush whether the statement at a position ran while a flush of the listener's did
      *
      * Only what came after $readThrough, which the listener moves where a flush's state is
      * forgotten.
      *
      * @return list<array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change>}>
      */
-    public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null): array
+    public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null, bool $consume = false, ?\Closure $duringAFlush = null): array
     {
         /** @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}> $executions */
         $executions = [];
@@ -109,6 +115,16 @@ final class EntityRowRuns
         $runs = [];
 
         foreach ($executions as $execution) {
+            if ($execution['flush'] === null) {
+                // What it did that the history would have said, if anything: a statement of
+                // nothing audited is nothing to say.
+                if ($consume && $execution['fields'] !== []) {
+                    NobodysStatement::say($this->logger, $duringAFlush !== null && $duringAFlush($execution['at'][0]), implode(', ', array_keys($execution['fields'])), $execution['class'], array_keys($execution['key']));
+                }
+
+                continue;
+            }
+
             $record = $this->recordOf($em, $replay, $departed, $builder, $execution);
 
             if ($record !== null) {

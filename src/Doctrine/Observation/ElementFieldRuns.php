@@ -74,22 +74,8 @@ final class ElementFieldRuns
             }
 
             if ($fact['flush'] === null) {
-                // Named by class, field and the columns of the key, and nothing a statement
-                // carried: a value would be one more road out for what redaction keeps in.
-                $what = $element['field'] ?? 'its place in '.$element['collection'];
-
-                if ($consume && $duringAFlush !== null && $duringAFlush($fact['at'])) {
-                    $this->logger->warning('A statement changed {field} of a {class} row, keyed by {key}, while a flush was running, and no flush claimed it, so it is not in the history. That is a hole in how the audit listener marks what a flush runs, and worth reporting.', [
-                        'field' => $what,
-                        'class' => $element['class'],
-                        'key' => implode(', ', array_keys($element['key'])),
-                    ]);
-                } elseif ($consume) {
-                    $this->logger->warning('A statement changed {field} of a {class} row, keyed by {key}, outside every flush, so it is not in the history: SQL the application ran itself, which the bundle does not audit.', [
-                        'field' => $what,
-                        'class' => $element['class'],
-                        'key' => implode(', ', array_keys($element['key'])),
-                    ]);
+                if ($consume) {
+                    NobodysStatement::say($this->logger, $duringAFlush !== null && $duringAFlush($fact['at']), $element['field'] ?? 'its place in '.$element['collection'], $element['class'], array_keys($element['key']));
                 }
 
                 continue;

@@ -320,6 +320,29 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testWhatTheApplicationRanOutsideEveryFlushIsSaidByTheReadingThatWritesTheHistory(): void
+    {
+        // As an element's is: by class, fields and the key's columns, and nothing it carried.
+        // Once, by the reading that writes; a reading that only counts says nothing. And a
+        // statement of nothing audited is nothing to say.
+        $this->unownedStatementsAreExpected = true;
+        $this->em->persist($article = new Article('Hello'));
+        $this->em->flush();
+
+        $this->begin();
+        $this->em->getConnection()->update('Article', ['title' => 'By hand'], ['id' => $article->id]);
+        $this->em->getConnection()->update('Article', ['views' => 9], ['id' => $article->id]);
+        $this->logs = [];
+
+        self::assertSame([], $this->runs());
+        self::assertSame([], $this->logs, 'counting says nothing');
+
+        self::assertSame([], $this->runs(consume: true));
+        self::assertSame(['A statement changed title of a '.Article::class.' row, keyed by id, outside every flush, so it is not in the history: SQL the application ran itself, which the bundle does not audit.'], $this->logs);
+
+        $this->end();
+    }
+
     public function testOnlyWhatRanAfterThePointReadThroughIsRead(): void
     {
         $this->begin();
@@ -701,7 +724,7 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
     /**
      * @return list<array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change>}>
      */
-    private function runs(?HistoryReplay $replay = null): array
+    private function runs(?HistoryReplay $replay = null, bool $consume = false): array
     {
         $listener = $this->listener();
         $identity = new RowIdentity(
@@ -709,8 +732,8 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
             (new \ReflectionMethod(AuditSubscriber::class, 'identifierFrom'))->getClosure($listener),
         );
 
-        return (new EntityRowRuns(new AuditMetadataFactory(), new ValueComparator(), $identity))
-            ->of($this->em, $replay ?? $this->memory()->replayed($this->em), $this->log, $this->from, $this->departed());
+        return (new EntityRowRuns(new AuditMetadataFactory(), new ValueComparator(), $identity, $this->logger()))
+            ->of($this->em, $replay ?? $this->memory()->replayed($this->em), $this->log, $this->from, $this->departed(), $consume, static fn (int $at): bool => false);
     }
 
     /**
