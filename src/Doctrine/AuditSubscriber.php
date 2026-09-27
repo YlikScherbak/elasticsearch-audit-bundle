@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ElementFieldRuns;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowBinding;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowIdentity;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape;
@@ -481,7 +482,7 @@ final class AuditSubscriber
         // What ran before this listener existed is nobody's history it can account for: it
         // heard none of the events that name those rows.
         $this->factsReadThrough = $statements->position();
-        $this->elementRuns = new ElementFieldRuns($metadataFactory, $comparator, $this->logger, $this->identifierOf(...), $this->identifierFrom(...));
+        $this->elementRuns = new ElementFieldRuns($metadataFactory, $comparator, $this->logger, new RowIdentity($this->identifierOf(...), $this->identifierFrom(...)));
     }
 
     private readonly ElementFieldRuns $elementRuns;

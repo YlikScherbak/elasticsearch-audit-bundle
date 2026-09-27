@@ -9,9 +9,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\ChangeSetBuilder;
 use Borsche\ElasticsearchAuditBundle\Doctrine\ElementKey;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
-use Doctrine\DBAL\Types\Type;
 use Doctrine\ORM\EntityManagerInterface;
-use Doctrine\ORM\Mapping\ClassMetadata;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -23,16 +21,11 @@ use Psr\Log\LoggerInterface;
  */
 final class ElementFieldRuns
 {
-    /**
-     * @param \Closure(EntityManagerInterface, object): (int|string|null)               $identifierOf   the id the history names an entity by
-     * @param \Closure(EntityManagerInterface, array<string, mixed>): (int|string|null) $identifierFrom the same, from an identifier's values
-     */
     public function __construct(
         private readonly AuditMetadataFactory $audited,
         private readonly ValueComparatorInterface $comparator,
         private readonly LoggerInterface $logger,
-        private readonly \Closure $identifierOf,
-        private readonly \Closure $identifierFrom,
+        private readonly RowIdentity $identity,
     ) {
     }
 
@@ -115,7 +108,7 @@ final class ElementFieldRuns
                 continue;
             }
 
-            $owner = $this->ownerByKey($em, $element['owner'], $element['ownerKey'], $consume);
+            $owner = $this->identity->byForeignKey($em, $element['owner'], $element['ownerKey'], $consume);
             $declaration = $this->audited->for($owner ?? $em->getClassMetadata($element['owner'])->newInstance());
 
             if ($declaration === null) {
@@ -127,7 +120,7 @@ final class ElementFieldRuns
                 $name = $element['collection'];
                 $value = new Change($fact['old'], $fact['new']);
             } else {
-                $elementId = $this->elementIdByKey($em, $element['class'], $element['key']);
+                $elementId = $this->identity->historyId($em, $element['class'], $element['key']);
 
                 if ($elementId === null) {
                     continue;
@@ -177,69 +170,5 @@ final class ElementFieldRuns
         }
 
         return $runs;
-    }
-
-    /**
-     * The owner a foreign key names: the one the manager holds, or -- when asked to -- a
-     * reference to it. Only a single-column key is followed, as the replay follows one.
-     *
-     * @param class-string $class
-     */
-    private function ownerByKey(EntityManagerInterface $em, string $class, mixed $key, bool $orReference): ?object
-    {
-        $metadata = $em->getClassMetadata($class);
-        $fields = $metadata->getIdentifierFieldNames();
-
-        if (\count($fields) !== 1 || $key === null) {
-            return null;
-        }
-
-        $field = $fields[0];
-        $id = [$field => $metadata->hasAssociation($field) ? $key : self::phpValue($em, $metadata, $field, $key)];
-        $found = $em->getUnitOfWork()->tryGetById($id, $metadata->rootEntityName);
-
-        if (\is_object($found)) {
-            return $found;
-        }
-
-        return $orReference ? $em->getReference($metadata->name, $id) : null;
-    }
-
-    /**
-     * The identifier the history names an element by, from its row's key: the entity's own
-     * when the manager still holds it, and otherwise the same form, from the values.
-     *
-     * @param class-string         $class
-     * @param array<string, mixed> $key column => database value
-     */
-    private function elementIdByKey(EntityManagerInterface $em, string $class, array $key): int|string|null
-    {
-        $metadata = $em->getClassMetadata($class);
-        $values = [];
-
-        foreach ($metadata->getIdentifierFieldNames() as $field) {
-            $association = $metadata->hasAssociation($field);
-            $raw = $key[$association ? $metadata->getSingleAssociationJoinColumnName($field) : $metadata->getColumnName($field)] ?? null;
-
-            if ($raw === null) {
-                return null;
-            }
-
-            $values[$field] = $association ? $raw : self::phpValue($em, $metadata, $field, $raw);
-        }
-
-        $found = $em->getUnitOfWork()->tryGetById($values, $metadata->rootEntityName);
-
-        return \is_object($found) ? ($this->identifierOf)($em, $found) : ($this->identifierFrom)($em, $values);
-    }
-
-    /**
-     * @param ClassMetadata<object> $metadata
-     */
-    private static function phpValue(EntityManagerInterface $em, ClassMetadata $metadata, string $field, mixed $value): mixed
-    {
-        $type = $metadata->getTypeOfField($field);
-
-        return \is_string($type) ? Type::getType($type)->convertToPHPValue($value, $em->getConnection()->getDatabasePlatform()) : $value;
     }
 }
