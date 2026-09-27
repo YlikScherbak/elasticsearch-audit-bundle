@@ -106,6 +106,40 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testAFactCarriesWhatTheAlwaysRecordedFieldsHeldInTheRowOnceItRan(): void
+    {
+        // Created as a draft, then its title changed -- the status beside it is the row's -- and
+        // then, in a postUpdate listener, the object's status moved to something no statement
+        // ever wrote. The context the change carries is the row's: still the draft.
+        $this->begin();
+        $this->em->persist($article = new Article('Hello'));
+        $this->em->flush();
+
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($article) {
+            public function __construct(private readonly Article $article)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->article) {
+                    $this->article->status = 'never written';
+                }
+            }
+        });
+
+        $article->title = 'Hello again';
+        $this->em->flush();
+
+        $facts = $this->facts();
+
+        self::assertSame(['insert', 'update'], array_column($facts, 'statement'), 'the premise: a creation and a change');
+        self::assertSame('never written', $article->status, 'the premise: the object moved on after the statement');
+        self::assertSame([['status' => 'draft'], ['status' => 'draft']], array_column($facts, 'context'), 'the row\'s status, once each statement ran');
+
+        $this->end();
+    }
+
     /**
      * @return iterable<string, array{bool}>
      */
@@ -308,7 +342,7 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
     /**
      * The row facts since the scenario began, from the rows the listener remembers.
      *
-     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>}>
+     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
      */
     private function facts(): array
     {

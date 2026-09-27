@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\ChangeSetBuilder;
 use Borsche\ElasticsearchAuditBundle\Doctrine\CollectionRowsQuery;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Doctrine\DBAL\Types\Type;
@@ -62,9 +63,14 @@ final class HistoryReplay
      * wrote, each from and to. A creation is a fact whether or not any column changed, and a
      * removal carries the row as it stood before it went.
      *
+     * And its context: what the class's always-recorded fields held in the row once the
+     * statement ran -- the row's, not the object's, which a postUpdate listener may have moved
+     * since. Only the columns the replay knows the row by; a field it knows nothing of is left
+     * out rather than said to be null.
+     *
      * Read by nothing yet: step 5 builds an entity's records from them (5.2).
      *
-     * @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>}>
+     * @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
      */
     private array $rowFacts = [];
 
@@ -280,7 +286,7 @@ final class HistoryReplay
     }
 
     /**
-     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>}>
+     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
      */
     public function rowFacts(): array
     {
@@ -588,7 +594,30 @@ final class HistoryReplay
             'at' => $this->at,
             'flush' => $this->log?->ownerOf($this->at),
             'fields' => $fields,
+            'context' => $this->contextOf($class, $row),
         ];
+    }
+
+    /**
+     * What a class's always-recorded fields hold in a row, as the object holds them: the ones
+     * the row has a column for. An association is not context ({@see ChangeSetBuilder::withAlwaysRecorded()}).
+     *
+     * @param ClassMetadata<object> $class the row's own class
+     * @param array<string, mixed>  $row
+     *
+     * @return array<string, mixed>
+     */
+    private function contextOf(ClassMetadata $class, array $row): array
+    {
+        $context = [];
+
+        foreach ($this->audited->for($class->newInstance())->alwaysRecorded ?? [] as $field) {
+            if ($class->hasField($field) && \array_key_exists($column = $class->getColumnName($field), $row)) {
+                $context[$field] = $this->php($class, $field, $row[$column]);
+            }
+        }
+
+        return $context;
     }
 
     /**
