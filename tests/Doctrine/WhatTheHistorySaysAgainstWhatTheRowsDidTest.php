@@ -8,6 +8,8 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\HideEveryLine;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Kiln;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\DBAL\Logging\Middleware as LoggingMiddleware;
@@ -322,18 +324,42 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     /**
      * What a sequence does between its flushes.
      *
-     * Widened in step 4 (2026-09-25) by a clear of the manager between two operations; the
-     * vocabulary before it is {@see self::VOCABULARY_3_3}, kept so that the corpus it drew --
-     * three thousand sequences, green on DBAL 3 and 4 -- can still be run as it was:
-     * AUDIT_MODEL_VOCABULARY=3.3.
+     * Widened in step 5 (5.2c, 2026-09-27) by a world with a JOINED entity and relays that
+     * point at each other: an entity's records are read from the log since then, and a world of
+     * three tables has no hierarchy to write a table at a time and no reference Doctrine has to
+     * complete. The vocabularies before it are kept, so that the corpora they drew -- three
+     * thousand sequences each, green on DBAL 3 and 4 -- can still be run as they were:
+     * AUDIT_MODEL_VOCABULARY=5.2 (step 4's, with the world it ran in) and 3.3.
      */
     private const VOCABULARY = [
-        ...self::VOCABULARY_3_3,
-        'clear the manager',
+        ...self::VOCABULARY_5_2,
+        'edit the kiln\'s root',
+        'edit the kiln\'s subclass',
+        'edit both of the kiln\'s tables',
+        'create two relays pointing at each other',
+        'point a relay elsewhere',
     ];
 
     /** How a flush of a sequence may end, besides the ordinary way. */
     private const ENDINGS = [
+        ...self::ENDINGS_5_2,
+        // A nested flush started after the outer flush's statement that changes the kiln's
+        // subclass while the outer one changed its root: the shape of 5.2b's defect, which a
+        // guard found and no search could.
+        'flush, and after the statement a nested one edits the kiln\'s subclass',
+    ];
+
+    /**
+     * Step 4's vocabulary (2026-09-25): 3.3's, and a clear of the manager between two
+     * operations.
+     */
+    private const VOCABULARY_5_2 = [
+        ...self::VOCABULARY_3_3,
+        'clear the manager',
+    ];
+
+    /** @see self::VOCABULARY_5_2 */
+    private const ENDINGS_5_2 = [
         ...self::ENDINGS_3_3,
         // Step 4: a clear inside a flush, from a listener ahead of this one -- the shape the
         // listener used to answer by forgetting the flush -- and the one that loads a line
@@ -504,6 +530,29 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'Crate' => 'code',
         'CrateItem' => 'id',
     ];
+
+    /** And the tables of step 5's world. */
+    private const TABLES_OF_THE_WIDE_WORLD = [
+        'Oven' => 'id',
+        'Kiln' => 'id',
+        'Relay' => 'id',
+    ];
+
+    /**
+     * Every relay the world started with and every one a step has made since.
+     *
+     * @var list<Relay>
+     */
+    private array $relays = [];
+
+    /**
+     * What every relay has been called, by its id: a reference is said by the name of what it
+     * points at, and the names of a world are its own -- the reading refuses two relays of one
+     * name, so that a name always says which row.
+     *
+     * @var array<string, string>
+     */
+    private array $relayNames = [];
 
     public function testEverySequenceIsDescribedByExactlyWhatTheRowsDid(): void
     {
@@ -837,6 +886,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         $trace = [];
         $rows = [];
         $this->skus = [];
+        $this->relayNames = [];
         $this->aReplacementIsWaiting = false;
 
         foreach ($steps as $step) {
@@ -904,15 +954,26 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * @return list<string>
      */
     /**
-     * The words a sequence is drawn from: today's, or those of 3.3 on request.
+     * The words a sequence is drawn from: today's, or those of 5.2 or 3.3 on request.
      *
      * @return array{0: list<string>, 1: list<string>}
      */
     private static function theVocabulary(): array
     {
-        return ($_SERVER['AUDIT_MODEL_VOCABULARY'] ?? null) === '3.3'
-            ? [self::VOCABULARY_3_3, self::ENDINGS_3_3]
-            : [self::VOCABULARY, self::ENDINGS];
+        return match ($_SERVER['AUDIT_MODEL_VOCABULARY'] ?? null) {
+            '3.3' => [self::VOCABULARY_3_3, self::ENDINGS_3_3],
+            '5.2' => [self::VOCABULARY_5_2, self::ENDINGS_5_2],
+            default => [self::VOCABULARY, self::ENDINGS],
+        };
+    }
+
+    /**
+     * Whether the sequences run in the world of step 5, with a kiln and relays: the corpora of
+     * 3.3 and 5.2 run in the world they were drawn in, reading the tables they read.
+     */
+    private static function theWideWorld(): bool
+    {
+        return self::theVocabulary()[0] === self::VOCABULARY;
     }
 
     private function aSequence(): array
@@ -947,6 +1008,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $steps[] = 'change a line';
             }
 
+            // And the kiln's nested change needs the outer flush's change of the root beside it
+            // to be the shape it is for.
+            if ($ending === 'flush, and after the statement a nested one edits the kiln\'s subclass') {
+                $steps[] = 'edit the kiln\'s root';
+            }
+
             $steps[] = $ending;
         }
 
@@ -965,7 +1032,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * put here after a defect of its shape was found by a person reading the code, which
      * is what a search not finding it means.
      *
-     * @return array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>}
+     * @return array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>, kiln: Kiln|null}
      */
     private function aWorld(int $shape): array
     {
@@ -997,15 +1064,26 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $other->add($lines[] = new CrateItem('SKU-3'));
         }
 
+        // Step 5's: a JOINED entity, and relays to point at each other -- with names of their
+        // own, since a reference is said by the name of what it points at.
+        $kiln = null;
+        $this->relays = [];
+
+        if (self::theWideWorld()) {
+            $this->em->persist($kiln = new Kiln());
+            $this->em->persist($this->relays[] = new Relay('hub'));
+            $this->em->persist($this->relays[] = new Relay('spare'));
+        }
+
         $this->em->flush();
 
         $this->lines = $lines;
 
-        return ['article' => $article, 'crate' => $crate, 'other' => $other, 'lines' => $lines];
+        return ['article' => $article, 'crate' => $crate, 'other' => $other, 'lines' => $lines, 'kiln' => $kiln];
     }
 
     /**
-     * @param array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>} $world
+     * @param array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>, kiln: Kiln|null} $world
      */
     private function apply(string $step, array $world): void
     {
@@ -1082,6 +1160,28 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             'flush, and after the statement a listener removes the line' => $this->flushRemovingALineAfterItsStatement(nested: false),
             'flush, and after the statement a nested one removes the line' => $this->flushRemovingALineAfterItsStatement(nested: true),
             'clear the manager' => $this->did(fn () => $this->em->clear()),
+            'edit the kiln\'s root' => $world['kiln'] !== null && (bool) ($world['kiln']->label = 'label '.++$this->made),
+            'edit the kiln\'s subclass' => $world['kiln'] !== null && (bool) ($world['kiln']->heat += 10),
+            'edit both of the kiln\'s tables' => $world['kiln'] !== null && $this->did(function () use ($world): void {
+                \assert($world['kiln'] !== null);
+                $world['kiln']->label = 'label '.++$this->made;
+                $world['kiln']->heat += 10;
+            }),
+            'create two relays pointing at each other' => self::theWideWorld() && $this->did(function (): void {
+                $one = new Relay('relay '.++$this->made);
+                $other = new Relay('relay '.++$this->made);
+                $one->next = $other;
+                $other->next = $one;
+                $this->em->persist($this->relays[] = $one);
+                $this->em->persist($this->relays[] = $other);
+            }),
+            'point a relay elsewhere' => $this->pointARelayElsewhere(),
+            'flush, and after the statement a nested one edits the kiln\'s subclass' => $world['kiln'] !== null && $this->flushWithOneNestedAfter(static function () use ($world): bool {
+                \assert($world['kiln'] !== null);
+                $world['kiln']->heat += 1;
+
+                return true;
+            }, refused: false),
             'flush, and after the statement a listener ahead of this one clears the manager' => $this->flushClearingAfterTheStatement(thenRemovingALine: false),
             'flush, and after the statement a listener clears the manager, loads a line and removes it' => $this->flushClearingAfterTheStatement(thenRemovingALine: true),
             'flush, and a savepoint of the application\'s around a statement is rolled back after this listener' => $this->flushTakingAStatementBack(aheadOfThisListener: false),
@@ -1092,6 +1192,28 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         if ($acted) {
             $this->acted[$step] = ($this->acted[$step] ?? 0) + 1;
         }
+    }
+
+    /**
+     * The first relay the manager still has points at the next one, or -- when it already does
+     * -- at the one after, or at nothing. Acted when there were two to choose between.
+     */
+    private function pointARelayElsewhere(): bool
+    {
+        $alive = array_values(array_filter(
+            $this->relays,
+            fn (Relay $relay): bool => $this->em->contains($relay)
+                && !$this->em->getUnitOfWork()->isScheduledForDelete($relay)
+                && ($relay->id === null || $this->em->getUnitOfWork()->isScheduledForInsert($relay) || $this->em->getConnection()->fetchOne('SELECT 1 FROM Relay WHERE id = ?', [$relay->id]) !== false),
+        ));
+
+        if (\count($alive) < 2) {
+            return false;
+        }
+
+        $alive[0]->next = $alive[0]->next === $alive[1] ? ($alive[2] ?? null) : $alive[1];
+
+        return true;
     }
 
     /**
@@ -1410,9 +1532,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * under the application's filter put aside, since hiding lines is this world's filter --
      * and a line whose row is gone, or that never got one, is let go.
      *
-     * @param array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>} $world
+     * @param array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>, kiln: Kiln|null} $world
      *
-     * @return array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>}
+     * @return array{article: Article, crate: Crate, other: Crate, lines: list<CrateItem>, kiln: Kiln|null}
      */
     private function theWorldAfter(array $world): array
     {
@@ -1440,20 +1562,32 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                     $lines[] = $again;
                 }
             }
+
+            $kiln = $world['kiln'] === null ? null : $this->em->find(Kiln::class, $world['kiln']->id);
+            $relays = [];
+
+            foreach ($this->relays as $relay) {
+                $again = $relay->id === null ? null : $this->em->find(Relay::class, $relay->id);
+
+                if ($again instanceof Relay) {
+                    $relays[] = $again;
+                }
+            }
         } finally {
             foreach ($suspended as $name) {
                 $filters->restore($name);
             }
         }
 
-        if (!$article instanceof Article || !$crate instanceof Crate || !$other instanceof Crate) {
+        if (!$article instanceof Article || !$crate instanceof Crate || !$other instanceof Crate || ($world['kiln'] !== null && !$kiln instanceof Kiln)) {
             throw new \LogicException('the world lost a row it never deletes');
         }
 
         $this->lines = $lines;
+        $this->relays = $relays;
         $this->aReplacementIsWaiting = false; // a clear takes a waiting replacement with it
 
-        return ['article' => $article, 'crate' => $crate, 'other' => $other, 'lines' => $lines];
+        return ['article' => $article, 'crate' => $crate, 'other' => $other, 'lines' => $lines, 'kiln' => $kiln instanceof Kiln ? $kiln : null];
     }
 
     /**
@@ -1641,14 +1775,24 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     {
         $taken = [];
 
-        foreach (self::TABLES as $table => $key) {
+        foreach (self::theWideWorld() ? [...self::TABLES, ...self::TABLES_OF_THE_WIDE_WORLD] : self::TABLES as $table => $key) {
             foreach ($this->em->getConnection()->fetchAllAssociative('SELECT * FROM '.$table) as $row) {
                 $taken[$table][(string) $row[$key]] = $row;
 
                 if ($table === 'CrateItem') {
                     $this->skus[(string) $row['id']] = (string) $row['sku'];
                 }
+
+                if ($table === 'Relay') {
+                    $this->relayNames[(string) $row['id']] = (string) $row['name'];
+                }
             }
+        }
+
+        $names = array_column($taken['Relay'] ?? [], 'name');
+
+        if (\count($names) !== \count(array_unique($names))) {
+            throw new \LogicException('two relays of one name: a reference said by the name would not say which row');
         }
 
         return $taken;
@@ -1672,6 +1816,35 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
             if ($was !== $is) {
                 $said[] = sprintf('article %s title %s -> %s', $id, json_encode($was), json_encode($is));
+            }
+        }
+
+        // A kiln is one entity in two tables: what either of its rows did is said about it.
+        foreach (($before['Oven'] ?? []) + ($after['Oven'] ?? []) as $id => $ignored) {
+            $was = ($before['Oven'][$id] ?? []) + ($before['Kiln'][$id] ?? []);
+            $is = ($after['Oven'][$id] ?? []) + ($after['Kiln'][$id] ?? []);
+
+            foreach (['label', 'site', 'firing', 'heat'] as $column) {
+                if (($was[$column] ?? null) !== ($is[$column] ?? null)) {
+                    $said[] = sprintf('oven %s %s %s -> %s', $id, $column, json_encode($was[$column] ?? null), json_encode($is[$column] ?? null));
+                }
+            }
+        }
+
+        // A relay's reference is said by the name of the relay it points at.
+        foreach (($before['Relay'] ?? []) + ($after['Relay'] ?? []) as $id => $ignored) {
+            $was = $before['Relay'][$id] ?? null;
+            $is = $after['Relay'][$id] ?? null;
+
+            if (($was['name'] ?? null) !== ($is['name'] ?? null)) {
+                $said[] = sprintf('relay %s name %s -> %s', $id, json_encode($was['name'] ?? null), json_encode($is['name'] ?? null));
+            }
+
+            $from = ($was['next_id'] ?? null) === null ? null : (string) $was['next_id'];
+            $to = ($is['next_id'] ?? null) === null ? null : (string) $is['next_id'];
+
+            if ($from !== $to) {
+                $said[] = sprintf('relay %s next %s -> %s', $id, json_encode($from === null ? null : $this->relayNames[$from] ?? '?'), json_encode($to === null ? null : $this->relayNames[$to] ?? '?'));
             }
         }
 
@@ -1733,6 +1906,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
                 if ($type === 'article' && $field === 'title') {
                     $said[] = sprintf('article %s title %s -> %s', $id, json_encode($old), json_encode($new));
+
+                    continue;
+                }
+
+                if ($type === 'oven' || ($type === 'relay' && ($field === 'name' || $field === 'next'))) {
+                    $said[] = sprintf('%s %s %s %s -> %s', $type, $id, $field, json_encode($old), json_encode($new));
 
                     continue;
                 }
