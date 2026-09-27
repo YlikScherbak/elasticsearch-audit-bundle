@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
@@ -175,6 +176,30 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private bool $reading = false;
 
     /**
+     * Who is acting, as the application would say: whoever the sequence runs as, and -- in
+     * step 5's world -- somebody else inside every flush nested in another. What the listener's
+     * writer asks, and what this test's own observer of flushes takes as each flush begins.
+     */
+    private ActorResolverInterface&\stdClass $acting;
+
+    /**
+     * The flushes running, as this test sees them: where each began -- the connection's nesting
+     * level at its onFlush -- and who was acting then. Its own account, kept by its own listener
+     * and never read from the bundle's log: the one the oracle's authorship is read from.
+     *
+     * @var list<array{level: int, actor: string|null}>
+     */
+    private array $flushesRunning = [];
+
+    /**
+     * Who wrote the statement each reading was taken before, by the same index as the readings;
+     * null for a reading no statement follows.
+     *
+     * @var list<string|null>
+     */
+    private array $checkpointActors = [];
+
+    /**
      * @return list<\Doctrine\DBAL\Driver\Middleware>
      */
     protected function middlewaresOfTheTest(): array
@@ -221,19 +246,58 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $words[0] === 'SAVEPOINT' => $this->open[] = [$words[1] ?? '', \count($this->checkpoints)],
             $words[0] === 'RELEASE' => $this->forgetSavepoint(end($words) ?: ''),
             $words[0] === 'ROLLBACK' && ($words[1] ?? '') === 'TO' => $this->rollBackToSavepoint(end($words) ?: ''),
-            \in_array($words[0], ['INSERT', 'UPDATE', 'DELETE'], true) => $this->read(),
+            \in_array($words[0], ['INSERT', 'UPDATE', 'DELETE'], true) => $this->read($this->whoWritesNow()),
             default => null,
         };
     }
 
-    private function read(): void
+    private function read(?string $by): void
     {
         $this->reading = true;
 
         try {
             $this->checkpoints[] = $this->snapshot();
+            $this->checkpointActors[] = $by;
         } finally {
             $this->reading = false;
+        }
+    }
+
+    /**
+     * Who a statement about to run is written by: the actor of the innermost flush running at a
+     * shallower level than the statement's -- each flush's statements run inside the
+     * transaction it opens, one level down from where it began; one a flush nested in it runs
+     * is deeper still. Outside every flush nobody's (the application's own SQL is no record).
+     */
+    private function whoWritesNow(): string
+    {
+        $level = $this->em->getConnection()->getTransactionNestingLevel();
+
+        // With savepoints, which is what this search runs on: without them a nested flush's
+        // statements are the outer flush's (nested_flush_provenance: outer) -- held by
+        // WhoWroteItTest and WhoseMomentALateRecordCarriesTest in both modes, not here, since a
+        // statement taken back inside a flush there makes the whole transaction rollback-only
+        // and the manager closes under the rest of the sequence.
+        for ($i = \count($this->flushesRunning) - 1; $i >= 0; --$i) {
+            if ($this->flushesRunning[$i]['level'] < $level) {
+                return $this->flushesRunning[$i]['actor'] ?? 'nobody';
+            }
+        }
+
+        return 'nobody';
+    }
+
+    /**
+     * A flush begins or ends, as this test's own listener hears it. What began at the level
+     * now or deeper is over -- ended, refused, or had its postFlush swallowed -- and at an
+     * onFlush the flush beginning is put on top, with who is acting.
+     */
+    private function aFlushAt(int $level, bool $begins): void
+    {
+        $this->flushesRunning = array_values(array_filter($this->flushesRunning, static fn (array $flush): bool => $flush['level'] < $level));
+
+        if ($begins) {
+            $this->flushesRunning[] = ['level' => $level, 'actor' => $this->acting->actor];
         }
     }
 
@@ -253,6 +317,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         for ($i = \count($this->open) - 1; $i >= 0; --$i) {
             if ($this->open[$i][0] === $name) {
                 $this->checkpoints = \array_slice($this->checkpoints, 0, $this->open[$i][1]);
+                $this->checkpointActors = \array_slice($this->checkpointActors, 0, $this->open[$i][1]);
                 array_splice($this->open, $i + 1); // the savepoint itself stays open
 
                 return;
@@ -263,6 +328,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private function undoTo(int $readings, bool $all): void
     {
         $this->checkpoints = \array_slice($this->checkpoints, 0, $readings);
+        $this->checkpointActors = \array_slice($this->checkpointActors, 0, $readings);
 
         if ($all) {
             $this->open = [];
@@ -585,12 +651,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         // and watched failing, in WhatAnEmptiedCollectionSaysAboutItsLinesTest. This is
         // the search; those are the guards. Sixty is enough for the search to stay honest
         // in every ordinary run.
-        $seeds = (int) ($_SERVER['AUDIT_MODEL_SEEDS'] ?? 60);
+        // A number, from the first seed; or a range, "751-1500", so that the long run can be cut
+        // into parts run side by side -- each seed is a sequence of its own, drawn from nothing
+        // but its number, so the parts together are the run.
+        $asked = (string) ($_SERVER['AUDIT_MODEL_SEEDS'] ?? '60');
+        [$first, $last] = preg_match('~^(\d+)-(\d+)$~', $asked, $range) === 1 ? [(int) $range[1], (int) $range[2]] : [1, (int) $asked];
+        $seeds = $last - $first + 1;
         $wrong = [];
 
         $mended = [];
 
-        for ($seed = 1; $seed <= $seeds; ++$seed) {
+        for ($seed = $first; $seed <= $last; ++$seed) {
             $said = $this->whatOneSequenceSaid($seed);
             $known = self::known($seed);
 
@@ -759,6 +830,18 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             // drawn by seed 194
             [7, false, ['move a line', 'flush, and after the statement a nested one removes the line', 'edit the article', 'replace the crate', 'flush', 'flush']],
         ],
+
+        // Relays created by a flush whose kiln UPDATE starts a nested one: Doctrine runs a
+        // creation's completion after the flush's updates, so the nested flush carries it out,
+        // as a statement of its own -- the creation is the outer flush's and the reference the
+        // nested one's, signed by who was acting there. Found by the widened search (5.2c), and
+        // measured: with a creation's completion folded across flushes -- no flush begun between,
+        // and the same flush, both taken out of the reader -- the reference is signed by the
+        // outer flush's actor. Runs in step 5's world, so under its vocabulary only.
+        'a reference a nested flush completes is its change, signed by it' => [
+            // drawn by seed 32
+            [6, false, ['edit the kiln\'s root', 'change a line', 'flush, and after the statement a listener removes the line', 'move a line back', 'edit the kiln\'s root', 'flush, and after the statement a nested one edits the kiln\'s subclass', 'replace the crate with a new line', 'create two relays pointing at each other', 'edit the kiln\'s root', 'flush, and after the statement a nested one edits the kiln\'s subclass', 'flush']],
+        ],
     ];
 
     public function testTheSequencesThatTellARuleApartStillDescribeWhatTheRowsDid(): void
@@ -768,6 +851,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         foreach (self::TELLS_APART as $rule => $sequences) {
             foreach ($sequences as $sequence) {
                 [$shape, $filtered, $steps] = $sequence;
+
+                // A sequence of step 5's words tells its rule apart in step 5's world, and is not
+                // one the vocabularies before it can draw.
+                if (!self::theWideWorld() && array_diff($steps, [...self::VOCABULARY_5_2, ...self::ENDINGS_5_2, 'flush']) !== []) {
+                    continue;
+                }
+
                 $excused = $sequence[3] ?? null;
                 $said = $this->whatTheseStepsSaid($shape, $filtered, $steps);
 
@@ -819,13 +909,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             ['objectType' => 'crate', 'objectId' => 'C-1', 'changes' => ['items.7' => ['old' => 'DUP', 'new' => null]]],
         ]);
 
-        self::assertSame(['crate C-1 lost DUP', 'crate C-1 lost DUP'], $twice, 'two documents about one row are two statements');
-        self::assertSame(['crate C-1 lost DUP'], self::missingFrom($twice, ['crate C-1 lost DUP']), 'and one of them is one too many');
+        self::assertSame(['crate C-1 lost DUP by nobody', 'crate C-1 lost DUP by nobody'], $twice, 'two documents about one row are two statements');
+        self::assertSame(['crate C-1 lost DUP by nobody'], self::missingFrom($twice, ['crate C-1 lost DUP by nobody']), 'and one of them is one too many');
 
         // The whole-collection form, where the count is the only thing that says a row
         // went: two lines called DUP became one, so exactly one of them left.
         self::assertSame(
-            ['crate C-1 lost DUP'],
+            ['crate C-1 lost DUP by nobody'],
             $this->statementsIn([
                 ['objectType' => 'crate', 'objectId' => 'C-1', 'changes' => ['items' => ['old' => ['DUP', 'DUP'], 'new' => ['DUP']]]],
             ]),
@@ -837,12 +927,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         // An audited entity's creation and removal are statements of their own, whatever their
         // changes say: a creation with nothing to say is still one.
         self::assertSame(
-            ['relay 5 created', 'relay 5 name null -> "relay 1"', 'relay 7 removed'],
+            ['relay 5 created by alice', 'relay 5 name null -> "relay 1" by alice', 'relay 7 removed by bob'],
             $this->statementsIn([
-                ['objectType' => 'relay', 'objectId' => 5, 'event' => 'create', 'changes' => ['name' => ['old' => null, 'new' => 'relay 1']]],
-                ['objectType' => 'relay', 'objectId' => 7, 'event' => 'remove', 'changes' => []],
+                ['objectType' => 'relay', 'objectId' => 5, 'event' => 'create', 'source' => 'alice', 'changes' => ['name' => ['old' => null, 'new' => 'relay 1']]],
+                ['objectType' => 'relay', 'objectId' => 7, 'event' => 'remove', 'source' => 'bob', 'changes' => []],
             ]),
-            'a creation and a removal',
+            'a creation and a removal, each signed by whom its record says',
         );
     }
 
@@ -885,8 +975,38 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private function whatTheseStepsSaid(int $shape, bool $filtered, array $steps, int $seed = 0): ?array
     {
         $this->setUp();
+
+        // Who the sequence runs as: in step 5's world one of two by the seed -- not drawn, so the
+        // steps a seed draws are what they were -- and in the worlds before it the one actor they
+        // always ran as.
+        $this->acting = new class extends \stdClass implements ActorResolverInterface {
+            public ?string $actor = 'tests';
+
+            public function resolve(): ?string
+            {
+                return $this->actor;
+            }
+        };
+        $this->acting->actor = self::theWideWorld() ? ($seed % 2 === 1 ? 'alice' : 'carol') : 'tests';
+        $this->actors = $this->acting;
         $this->attachListener(FailurePolicy::Log);
         $this->made = 0;
+        $this->flushesRunning = [];
+        $this->em->getEventManager()->addEventListener([Events::onFlush, Events::postFlush], new class($this->aFlushAt(...)) {
+            public function __construct(private readonly \Closure $at)
+            {
+            }
+
+            public function onFlush(\Doctrine\ORM\Event\OnFlushEventArgs $args): void
+            {
+                ($this->at)($args->getObjectManager()->getConnection()->getTransactionNestingLevel(), true);
+            }
+
+            public function postFlush(\Doctrine\ORM\Event\PostFlushEventArgs $args): void
+            {
+                ($this->at)($args->getObjectManager()->getConnection()->getTransactionNestingLevel(), false);
+            }
+        });
 
         $world = $this->aWorld($shape);
 
@@ -915,14 +1035,18 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             // crate and comes back nets to nothing over a sequence and is two things that
             // happened, and the history is right to say both.
             $this->checkpoints = [];
+            $this->checkpointActors = [];
             $this->open = [];
             $points = [$this->snapshot()];
             $this->apply($step, $world);
             $world = $this->theWorldAfter($world);
             $points = [...$points, ...$this->checkpoints, $this->snapshot()];
+            $by = [null, ...$this->checkpointActors, null];
 
+            // What changed between two readings is the statement's the first was taken before,
+            // and the flush running it is whose record it is.
             for ($i = 1, $n = \count($points); $i < $n; ++$i) {
-                $rows = array_merge($rows, $this->statementsBetween($points[$i - 1], $points[$i]));
+                $rows = array_merge($rows, $this->statementsBetween($points[$i - 1], $points[$i], $by[$i - 1]));
             }
         }
 
@@ -1439,11 +1563,22 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private function aroundTheNestedFlush(\Closure $flush): void
     {
         $this->checkpoints[] = $this->snapshot();
+        $this->checkpointActors[] = null;
+        $outer = $this->acting->actor;
+
+        // In step 5's world a flush nested in another runs as somebody else: whose records the
+        // statements it carries out are, the outer flush's remaining plan among them, is what
+        // the oracle can then tell apart.
+        if (self::theWideWorld()) {
+            $this->acting->actor = 'bob';
+        }
 
         try {
             $flush();
         } finally {
+            $this->acting->actor = $outer;
             $this->checkpoints[] = $this->snapshot();
+            $this->checkpointActors[] = null;
         }
     }
 
@@ -1860,12 +1995,16 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     /**
      * What the rows did, as statements.
      *
+     * Each with who wrote it: a fact is its value and its author together, or Alice and Bob
+     * swapped between two changes would go unseen.
+     *
      * @param array<string, array<string, array<string, mixed>>> $before
      * @param array<string, array<string, array<string, mixed>>> $after
+     * @param string|null                                        $by    who wrote the statement between them
      *
      * @return list<string>
      */
-    private function statementsBetween(array $before, array $after): array
+    private function statementsBetween(array $before, array $after, ?string $by = 'nobody'): array
     {
         $said = [];
 
@@ -1922,6 +2061,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
         }
 
+        // (the lines follow; what the rows did is signed below, all of it)
         // A line belongs to a crate, so what a line did is said about its crate: which is
         // also the only place the history says it.
         foreach (($before['CrateItem'] ?? []) + ($after['CrateItem'] ?? []) as $id => $ignored) {
@@ -1952,7 +2092,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
         }
 
-        return $said;
+        if ($said !== [] && $by === null) {
+            throw new \LogicException('the rows moved between two readings with no statement between them: '.implode('; ', $said));
+        }
+
+        return array_map(static fn (string $one): string => $one.' by '.$by, $said);
     }
 
     /**
@@ -1969,6 +2113,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         foreach ($documents as $document) {
             $type = $document['objectType'];
             $id = (string) $document['objectId'];
+            $from = \count($said);
 
             if (\in_array($type, self::AUDITED_TABLES, true) && \in_array($document['event'] ?? null, ['create', 'remove'], true)) {
                 $said[] = sprintf('%s %s %s', $type, $id, $document['event'] === 'create' ? 'created' : 'removed');
@@ -2034,6 +2179,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 if (($parts[2] ?? null) === 'quantity') {
                     $said[] = sprintf('crate %s line %s quantity %s -> %s', $id, $this->skuOf($parts[1]), json_encode($old), json_encode($new));
                 }
+            }
+
+            // Signed by whom the record says.
+            for ($i = $from, $n = \count($said); $i < $n; ++$i) {
+                $said[$i] .= ' by '.(\is_string($document['source'] ?? null) ? $document['source'] : 'nobody');
             }
         }
 
