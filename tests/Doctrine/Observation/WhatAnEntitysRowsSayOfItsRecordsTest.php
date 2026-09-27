@@ -18,6 +18,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Beacon;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Events;
@@ -330,6 +331,203 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
         self::assertSame([['update', 'article', $article->id, ['status' => ['draft', 'draft'], 'title' => ['Hello', 'Hello again']]]], self::said($this->runs()));
 
         $this->end();
+    }
+
+    public function testTwoRelaysCreatedPointingAtEachOtherAreTwoCreationsWithTheirReferences(): void
+    {
+        // One of them is inserted with its reference empty and given it by an UPDATE Doctrine
+        // announces to nobody: the rest of its creation.
+        $this->begin();
+        $one = new Relay('one');
+        $two = new Relay('two');
+        $one->next = $two;
+        $two->next = $one;
+        $this->em->persist($one);
+        $this->em->persist($two);
+        $this->em->flush();
+
+        $said = self::said($runs = $this->runs());
+        usort($said, static fn (array $a, array $b): int => strcmp((string) json_encode($a[3]), (string) json_encode($b[3])));
+
+        self::assertSame([
+            ['create', 'relay', $one->id, ['name' => [null, 'one'], 'next' => [null, 'two']]],
+            ['create', 'relay', $two->id, ['name' => [null, 'two'], 'next' => [null, 'one']]],
+        ], $said);
+        $counts = array_map(static fn (array $run): int => \count($run['at']), $runs);
+        sort($counts);
+        self::assertSame([1, 2], $counts, 'the premise: one of them is its INSERT and the UPDATE after it');
+
+        $this->end();
+    }
+
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function whetherInATransactionOfTheApplications(): iterable
+    {
+        yield 'in a transaction of the application\'s' => [true];
+        yield 'on its own, without savepoints' => [false];
+    }
+
+    /**
+     * The same statement as the completion -- the reference its INSERT left empty, and nothing
+     * more -- but through a flush of the application's, begun after the creation: a change.
+     * On its own and without savepoints the two flushes' statements are in one frame and under
+     * one owner, and where the second flush began is all that tells them apart.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('whetherInATransactionOfTheApplications')]
+    public function testAReferenceGivenThroughAFlushRightAfterTheCreationIsAChange(bool $inATransaction): void
+    {
+        $this->unownedStatementsAreExpected = true;
+        $this->log = $this->watchTheConnection(FailurePolicy::Log, savepoints: false);
+        $this->em->persist($hub = new Relay('hub'));
+        $this->em->flush();
+
+        $replay = null;
+
+        if ($inATransaction) {
+            $this->begin();
+        } else {
+            $this->from = $this->log->position();
+            $replay = new HistoryReplay($this->em, $this->memory()->rows(), $this->memory()->takenAt());
+        }
+
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($this->em, $hub) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Relay $hub)
+            {
+            }
+
+            public function postPersist(LifecycleEventArgs $args): void
+            {
+                $relay = $args->getObject();
+
+                if (!$relay instanceof Relay || $relay === $this->hub || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $relay->next = $this->hub;
+                $this->em->flush();
+            }
+        });
+
+        $this->em->persist($spoke = new Relay('spoke'));
+        $this->em->flush();
+
+        // A creation without a key the database hands out is bound to its INSERT by the order
+        // postPersist announced it in, which a replay of its own does not have: told it here.
+        $replay?->replay($this->log, $this->from, null, [Relay::class => [['id' => $spoke->id]]]);
+        $runs = $this->runs($replay);
+
+        self::assertSame([
+            ['create', 'relay', $spoke->id, ['name' => [null, 'spoke']]],
+            ['update', 'relay', $spoke->id, ['next' => [null, 'hub']]],
+        ], self::said($runs));
+
+        if ($inATransaction) {
+            $this->end();
+        }
+    }
+
+    public function testAStatementOfTheApplicationsWritingAColumnTheInsertGaveIsAChange(): void
+    {
+        // In the same flush, no flush begun since, but writing a column the INSERT gave a value
+        // to: not the rest of the creation.
+        $this->begin();
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($this->em) {
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em)
+            {
+            }
+
+            public function postPersist(LifecycleEventArgs $args): void
+            {
+                $relay = $args->getObject();
+
+                if ($relay instanceof Relay) {
+                    $this->em->getConnection()->update('Relay', ['name' => 'renamed'], ['id' => $relay->id]);
+                }
+            }
+        });
+
+        $this->em->persist($relay = new Relay('given'));
+        $this->em->flush();
+
+        self::assertSame([
+            ['create', 'relay', $relay->id, ['name' => [null, 'given']]],
+            ['update', 'relay', $relay->id, ['name' => ['given', 'renamed']]],
+        ], self::said($this->runs()));
+
+        $this->end();
+    }
+
+    public function testAColumnTheInsertLeftEmptyThatIsNoReferenceIsAChange(): void
+    {
+        // Written afterwards in the same flush, left empty by the INSERT -- but a label, not a
+        // reference: Doctrine completes nothing but references.
+        $this->begin();
+        $this->aStatementAfterEachCreation(Beacon::class, ['label' => 'afterwards']);
+        $this->em->persist($beacon = new Beacon());
+        $this->em->flush();
+
+        self::assertSame([
+            ['create', 'beacon', $beacon->id, []],
+            ['update', 'beacon', $beacon->id, ['label' => [null, 'afterwards']]],
+        ], self::said($this->runs()));
+
+        $this->end();
+    }
+
+    public function testAReferenceTheInsertGaveAValueIsAChangeWhenWrittenAgain(): void
+    {
+        // A reference, in the same flush -- but one the INSERT already wrote: no completion.
+        $this->em->persist($hub = new Relay('hub'));
+        $this->em->persist($other = new Relay('other'));
+        $this->em->flush();
+
+        $this->begin();
+        $this->aStatementAfterEachCreation(Relay::class, ['next_id' => $other->id]);
+        $spoke = new Relay('spoke');
+        $spoke->next = $hub;
+        $this->em->persist($spoke);
+        $this->em->flush();
+
+        self::assertSame([
+            ['create', 'relay', $spoke->id, ['name' => [null, 'spoke'], 'next' => [null, 'hub']]],
+            ['update', 'relay', $spoke->id, ['next' => ['hub', 'other']]],
+        ], self::said($this->runs()));
+
+        $this->end();
+    }
+
+    /**
+     * A postPersist listener of the application's that writes the new row itself, with SQL
+     * of its own, in the same flush.
+     *
+     * @param class-string         $class
+     * @param array<string, mixed> $columns
+     */
+    private function aStatementAfterEachCreation(string $class, array $columns): void
+    {
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($this->em, $class, $columns) {
+            /**
+             * @param class-string         $class
+             * @param array<string, mixed> $columns
+             */
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly string $class, private readonly array $columns)
+            {
+            }
+
+            public function postPersist(LifecycleEventArgs $args): void
+            {
+                $entity = $args->getObject();
+
+                if ($entity instanceof $this->class && $entity::class === $this->class) {
+                    $this->em->getConnection()->update($this->class === Beacon::class ? 'Beacon' : 'Relay', $this->columns, ['id' => $this->em->getClassMetadata($this->class)->getIdentifierValues($entity)['id']]);
+                }
+            }
+        });
     }
 
     /** A transaction of the application's own around what follows, and where the log stands. */

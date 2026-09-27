@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
 
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\ChangeSetBuilder;
+use Borsche\ElasticsearchAuditBundle\Doctrine\CollectionRowsQuery;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
@@ -80,6 +81,7 @@ final class EntityRowRuns
                 $execution['at'][] = $fact['at'];
                 $execution['tables'][$table] = true;
                 $execution['fields'] = array_replace($execution['fields'], $fact['fields']);
+                $execution['context'] = $fact['context'];
                 $executions[$open] = $execution;
 
                 continue;
@@ -94,13 +96,14 @@ final class EntityRowRuns
                 'at' => [$fact['at']],
                 'tables' => [(string) $table => true],
                 'fields' => $fact['fields'],
-                // The first table's: the replay holds an UPDATE's row whole, and whatever a
-                // creation's later tables add is among its fields, which a context gives way to.
+                // The row once the whole change is in the database: the last statement's, as
+                // each table of the change is written.
                 'context' => $fact['context'],
             ];
             $open = array_key_last($executions);
         }
 
+        $executions = self::withTheirCompletions($em, $log, $executions);
         $builder = new ChangeSetBuilder($em, $this->comparator);
         $runs = [];
 
@@ -113,6 +116,123 @@ final class EntityRowRuns
         }
 
         return $runs;
+    }
+
+    /**
+     * A creation with the UPDATE Doctrine finished it with, as one creation.
+     *
+     * Two new rows that point at each other are a cycle no order of INSERTs satisfies: Doctrine
+     * inserts one with its reference empty and fills it in afterwards, in an UPDATE nobody
+     * announces (UnitOfWork::scheduleExtraUpdate()). That UPDATE is the rest of the creation,
+     * not a change: what the history says is that the row appeared pointing where it points.
+     *
+     * Told apart by its shape, and only by that: of a row the same flush created, with no flush
+     * begun since, writing nothing but foreign keys its INSERT left empty. A change the
+     * application makes afterwards is anything else -- through a flush, which begins one, or a
+     * statement of its own that writes a column the INSERT gave a value to, or one that is not a
+     * reference -- and stays a change. A statement of the application's own that sets exactly
+     * such a reference, and nothing more, in the same flush, reads as the same completion: the
+     * log holds nothing that tells the two apart.
+     *
+     * @param list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}> $executions
+     *
+     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
+     */
+    private static function withTheirCompletions(EntityManagerInterface $em, StatementLog $log, array $executions): array
+    {
+        $kept = [];
+        $creations = [];
+
+        foreach ($executions as $execution) {
+            $row = $execution['class'].'|'.$execution['id'];
+
+            // Asked of the INSERT, not of what came between: Doctrine runs its completions once
+            // every INSERT has, and a listener's own statement may have run in between.
+            $at = $creations[$row] ?? null;
+            $creation = $at === null ? null : $kept[$at];
+
+            if ($creation !== null && $execution['statement'] === StatementShape::UPDATE && self::completes($em, $log, $creation, $execution)) {
+                foreach ($execution['fields'] as $field => $sides) {
+                    $creation['fields'][$field] = ['old' => null, 'new' => $sides['new']];
+                }
+
+                $creation['at'] = [...$creation['at'], ...$execution['at']];
+                $creation['context'] = $execution['context'];
+                $kept[$at] = $creation;
+
+                continue;
+            }
+
+            $kept[] = $execution;
+
+            if ($execution['statement'] === StatementShape::INSERT) {
+                $creations[$row] = array_key_last($kept);
+            }
+        }
+
+        return $kept;
+    }
+
+    /**
+     * Whether an UPDATE is the rest of a creation: {@see withTheirCompletions()}.
+     *
+     * @param array{class: class-string, flush: int|null, at: list<int>} $creation
+     * @param array{class: class-string, flush: int|null, at: list<int>} $update
+     */
+    private static function completes(EntityManagerInterface $em, StatementLog $log, array $creation, array $update): bool
+    {
+        if ($creation['flush'] === null || $update['flush'] !== $creation['flush']) {
+            return false;
+        }
+
+        for ($at = $creation['at'][\count($creation['at']) - 1]; $at < $update['at'][0]; ++$at) {
+            if ($log->aFlushStartedAfter($at)) {
+                return false;
+            }
+        }
+
+        $metadata = $em->getClassMetadata($creation['class']);
+        $references = [];
+
+        foreach ($metadata->getAssociationNames() as $association) {
+            if ($metadata->isSingleValuedAssociation($association) && !$metadata->isAssociationInverseSide($association)) {
+                foreach ((array) CollectionRowsQuery::entry($metadata->getAssociationMapping($association), 'joinColumns') as $column) {
+                    $name = CollectionRowsQuery::entry($column, 'name');
+
+                    if (\is_string($name)) {
+                        $references[$name] = true;
+                    }
+                }
+            }
+        }
+
+        // What the INSERT gave each column it wrote.
+        $inserted = [];
+
+        foreach ($creation['at'] as $at) {
+            $statement = $log->statement($at);
+            $shape = StatementShape::read($statement['sql'] ?? '');
+
+            foreach ($shape === null ? [] : $shape->assigned as $column => $parameter) {
+                $inserted[$column] = $parameter === null ? true : ($statement['params'][$parameter] ?? null);
+            }
+        }
+
+        foreach ($update['at'] as $at) {
+            $shape = StatementShape::read($log->statement($at)['sql'] ?? '');
+
+            if ($shape === null || $shape->assigned === []) {
+                return false;
+            }
+
+            foreach ($shape->assigned as $column => $parameter) {
+                if ($parameter === null || !isset($references[$column]) || !\array_key_exists($column, $inserted) || $inserted[$column] !== null) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     /**
