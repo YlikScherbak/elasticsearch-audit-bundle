@@ -11,6 +11,7 @@ use Borsche\ElasticsearchAuditBundle\Contract\TracksCollectionElementsInterface;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\DepartedObjects;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ElementFieldRuns;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowBinding;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowIdentity;
@@ -483,9 +484,13 @@ final class AuditSubscriber
         // heard none of the events that name those rows.
         $this->factsReadThrough = $statements->position();
         $this->elementRuns = new ElementFieldRuns($metadataFactory, $comparator, $this->logger, new RowIdentity($this->identifierOf(...), $this->identifierFrom(...)));
+        $this->departed = new DepartedObjects();
     }
 
     private readonly ElementFieldRuns $elementRuns;
+
+    /** What the application removed, for a record that names it once it is gone. */
+    private readonly DepartedObjects $departed;
 
     /**
      * What each watched row held: remembered at preFlush and at a load inside a flush, and
@@ -940,6 +945,14 @@ final class AuditSubscriber
 
     public function preRemove(PreRemoveEventArgs $args): void
     {
+        // Every one, audited or not: what a record may have to name is any entity, and the
+        // row's key is still on it here.
+        $leaving = self::entityManagerOf($args->getObjectManager());
+
+        if ($leaving !== null) {
+            $this->departed->leaving($leaving, $args->getObject());
+        }
+
         $record = $this->recordFor($args, AuditEvent::REMOVE, withChanges: false);
 
         if ($record !== null) {
@@ -955,6 +968,7 @@ final class AuditSubscriber
         $collecting = $manager === null ? self::NO_FLUSH : $this->collectingNowAfterAStatement($manager);
 
         $this->theRowNowMatchesTheObject($args->getObject());
+        $this->departed->gone($args->getObject(), $this->statements->position());
 
         $key = spl_object_id($args->getObject());
         $record = $this->pendingRemovals[$key] ?? null;
@@ -1756,6 +1770,7 @@ final class AuditSubscriber
         // ending, or dropped with the one that was found abandoned -- and in both cases not
         // the business of the next flush, which would otherwise write it as its own.
         $this->factsReadThrough = max($this->factsReadThrough, $this->statements->position());
+        $this->departed->forgetThrough($this->factsReadThrough, $keepingWhatWasDraftedForTheNextFlush);
 
         $last = array_key_last($this->windows);
 

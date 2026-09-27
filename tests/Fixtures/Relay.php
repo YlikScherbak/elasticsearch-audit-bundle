@@ -31,8 +31,9 @@ class Relay
     ) {
     }
 
+    /** A relay called "refuses" cannot be represented: a representer failing for a row that is there. */
     public function getName(): string
     {
-        return $this->name;
+        return $this->name === 'refuses' ? throw new \RuntimeException('This relay refuses to be represented.') : $this->name;
     }
 }

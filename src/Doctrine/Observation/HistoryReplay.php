@@ -740,6 +740,48 @@ final class HistoryReplay
     }
 
     /**
+     * The entity a row a DELETE took was, as the row stood before it went: a copy of the row's
+     * class with every column through its type -- what a representer is shown of a removed
+     * entity, the same as of a removed element. Its associations are not there: nothing of
+     * another row is read to fill them in.
+     *
+     * Null when no DELETE this replay read took it: the row is there, or nothing watched it.
+     *
+     * @param class-string         $class a class of the row's hierarchy
+     * @param array<string, mixed> $key   its identifier columns and their database values
+     */
+    public function asItStoodBeforeItWent(string $class, array $key): ?object
+    {
+        $root = $this->em()->getClassMetadata($this->em()->getClassMetadata($class)->rootEntityName);
+        $id = self::keyOf($root, $key);
+
+        if (!isset($this->gone[$root->name][$id], $this->rows[$root->name][$id])) {
+            return null;
+        }
+
+        $row = $this->rows[$root->name][$id];
+
+        return $this->copyOf($this->classOfRow($root, $row), $row);
+    }
+
+    /**
+     * A new object of a class holding a row's columns, each through its type.
+     *
+     * @param ClassMetadata<object> $metadata
+     * @param array<string, mixed>  $row
+     */
+    private function copyOf(ClassMetadata $metadata, array $row): object
+    {
+        $copy = $metadata->newInstance();
+
+        foreach ($metadata->getFieldNames() as $field) {
+            $metadata->setFieldValue($copy, $field, $this->php($metadata, $field, $row[$metadata->getColumnName($field)] ?? null));
+        }
+
+        return $copy;
+    }
+
+    /**
      * Whether a DELETE of this flush took the row: what an owner's collection went through in
      * the flush that removed the owner is its remove, not a second event.
      */
@@ -902,12 +944,7 @@ final class HistoryReplay
     private function represent(ClassMetadata $metadata, array $row, ClassMetadata $owner, string $collection): mixed
     {
         $this->representFailed = false;
-        $copy = $metadata->newInstance();
-
-        foreach ($metadata->getFieldNames() as $field) {
-            $metadata->setFieldValue($copy, $field, $this->php($metadata, $field, $row[$metadata->getColumnName($field)] ?? null));
-        }
-
+        $copy = $this->copyOf($metadata, $row);
         $represent = $this->audited->for($owner->newInstance())?->fields[$collection] ?? null;
 
         if ($represent === null) {

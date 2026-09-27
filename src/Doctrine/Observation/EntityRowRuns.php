@@ -12,6 +12,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\EntityNotFoundException;
 use Doctrine\ORM\Mapping\ClassMetadata;
 
 /**
@@ -63,7 +64,7 @@ final class EntityRowRuns
      *
      * @return list<array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change>}>
      */
-    public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough): array
+    public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null): array
     {
         /** @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}> $executions */
         $executions = [];
@@ -108,7 +109,7 @@ final class EntityRowRuns
         $runs = [];
 
         foreach ($executions as $execution) {
-            $record = $this->recordOf($em, $builder, $execution);
+            $record = $this->recordOf($em, $replay, $departed, $builder, $execution);
 
             if ($record !== null) {
                 $runs[] = $record;
@@ -260,7 +261,7 @@ final class EntityRowRuns
      *
      * @return array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change>}|null
      */
-    private function recordOf(EntityManagerInterface $em, ChangeSetBuilder $builder, array $execution): ?array
+    private function recordOf(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, ChangeSetBuilder $builder, array $execution): ?array
     {
         if ($execution['flush'] === null) {
             return null;
@@ -283,11 +284,11 @@ final class EntityRowRuns
 
             foreach ($execution['fields'] as $field => $sides) {
                 $changeSet[$field] = $metadata->isSingleValuedAssociation($field)
-                    ? [$this->related($em, $metadata, $field, $sides['old']), $this->related($em, $metadata, $field, $sides['new'])]
+                    ? [$this->related($em, $replay, $departed, $metadata, $field, $sides['old']), $this->related($em, $replay, $departed, $metadata, $field, $sides['new'])]
                     : [$sides['old'], $sides['new']];
             }
 
-            $changes = $builder->build($entity ?? $metadata->newInstance(), self::ofTheRow($metadata, $declaration), $changeSet, [], $execution['context']);
+            $changes = $builder->build($entity ?? $metadata->newInstance(), $this->ofTheRow($em, $metadata, $declaration), $changeSet, [], $execution['context']);
         }
 
         return [
@@ -303,24 +304,62 @@ final class EntityRowRuns
     }
 
     /**
-     * The entity a foreign key the row holds names, as a representer is handed one: the object
-     * the manager holds, or a reference to it.
+     * The entity a foreign key the row holds names, as a representer is handed one. In order:
+     *
+     * - for a row of a watched class that a DELETE this replay read took, a copy of it as the
+     *   row stood before it went ({@see HistoryReplay::asItStoodBeforeItWent()}) -- what the row
+     *   held, whatever the object was changed to and never wrote;
+     * - for one of any other class the application removed, the object it held
+     *   ({@see DepartedObjects}), as it left it: the bundle does not read those rows;
+     * - and otherwise the object the manager holds, or a reference, which the representer loads
+     *   if it reads the row. A row that turns out not to be there is named by its identifier
+     *   ({@see ofTheRow()}).
      *
      * @param ClassMetadata<object> $metadata
      */
-    private function related(EntityManagerInterface $em, ClassMetadata $metadata, string $association, mixed $key): ?object
+    private function related(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, ClassMetadata $metadata, string $association, mixed $key): ?object
     {
-        return $this->identity->byForeignKey($em, $metadata->getAssociationTargetClass($association), $key, orReference: true);
+        if ($key === null) {
+            return null;
+        }
+
+        $target = $metadata->getAssociationTargetClass($association);
+        $columns = $em->getClassMetadata($target)->getIdentifierColumnNames();
+        $row = \count($columns) === 1 ? [$columns[0] => $key] : null;
+
+        return ($row === null ? null : $replay->asItStoodBeforeItWent($target, $row))
+            ?? ($row === null ? null : $departed?->find($em, $target, $row))
+            ?? $this->identity->byForeignKey($em, $target, $key, orReference: true);
     }
 
     /**
      * The declaration without its collections: what the entity's row can say.
      *
+     * And each representer of a reference answering for a row that is not there: a reference
+     * the representer loads, to a row that has gone -- no DELETE this listener read took it,
+     * or nobody watches its class -- is named by its identifier rather than failing the
+     * record. Only that: whatever else a representer throws is the application's failure, and
+     * goes through the policy as it does.
+     *
      * @param ClassMetadata<object> $metadata
      */
-    private static function ofTheRow(ClassMetadata $metadata, AuditMetadata $declaration): AuditMetadata
+    private function ofTheRow(EntityManagerInterface $em, ClassMetadata $metadata, AuditMetadata $declaration): AuditMetadata
     {
-        $fields = array_filter($declaration->fields, static fn (string $field): bool => !$metadata->isCollectionValuedAssociation($field), \ARRAY_FILTER_USE_KEY);
+        $fields = [];
+
+        foreach ($declaration->fields as $field => $represent) {
+            if ($metadata->isCollectionValuedAssociation($field)) {
+                continue;
+            }
+
+            $fields[$field] = $represent === null ? null : function (object $related) use ($em, $represent): mixed {
+                try {
+                    return $represent($related);
+                } catch (EntityNotFoundException) {
+                    return $this->identity->idOf($em, $related);
+                }
+            };
+        }
 
         return new AuditMetadata(
             $declaration->objectType,

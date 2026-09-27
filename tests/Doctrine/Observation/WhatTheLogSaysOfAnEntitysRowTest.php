@@ -15,6 +15,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Pouch;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Preference;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Sku;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Switchboard;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SwitchMode;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -102,6 +103,34 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
         self::assertSame(['insert', Article::class, (string) $article->id], \array_slice($said[0], 0, 3));
         self::assertSame([null, $ada->id], array_map(static fn (mixed $v): mixed => $v === null ? null : (int) $v, $said[0][3]['author']), 'the author it was created with, as its key');
         self::assertSame(['update', Article::class, (string) $article->id, ['author' => [$ada->id, $bea->id]]], [$said[1][0], $said[1][1], $said[1][2], array_map(static fn (array $sides): array => array_map('intval', $sides), $said[1][3])]);
+
+        $this->end();
+    }
+
+    public function testARowADeleteTookIsKnownAsItStoodBeforeItWent(): void
+    {
+        // Renamed in memory, never written, and removed: what the row held is the name it had.
+        // A row still there, or one of a class nobody watches, is nothing this can say.
+        $this->em->persist($hub = new Relay('hub'));
+        $this->em->persist($kept = new Relay('kept'));
+        $this->em->persist($ada = new Author('Ada'));
+        $this->em->flush();
+        $key = ['id' => $hub->id];
+
+        $this->begin();
+        $hub->name = 'renamed';
+        $this->em->remove($hub);
+        $this->em->remove($ada);
+        $this->em->flush();
+
+        $replay = $this->memory()->replayed($this->em);
+        $copy = $replay->asItStoodBeforeItWent(Relay::class, $key);
+
+        self::assertInstanceOf(Relay::class, $copy);
+        self::assertNotSame($hub, $copy);
+        self::assertSame(['hub', $key['id']], [$copy->name, $copy->id]);
+        self::assertNull($replay->asItStoodBeforeItWent(Relay::class, ['id' => $kept->id]), 'a row still there');
+        self::assertNull($replay->asItStoodBeforeItWent(Author::class, ['id' => $ada->id]), 'a row nothing watches');
 
         $this->end();
     }

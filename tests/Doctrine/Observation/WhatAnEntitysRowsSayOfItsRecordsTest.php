@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Observation;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\DepartedObjects;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\EntityRowRuns;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\HistoryReplay;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowIdentity;
@@ -530,6 +531,160 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
         });
     }
 
+    public function testAWatchedTargetTheFlushRemovedIsNamedAsItsRowStood(): void
+    {
+        // The relay a spoke leaves is renamed in memory, never written, and removed by the same
+        // flush: the name is the row's.
+        $this->em->persist($hub = new Relay('hub'));
+        $this->em->persist($other = new Relay('other'));
+        $spoke = new Relay('spoke');
+        $spoke->next = $hub;
+        $this->em->persist($spoke);
+        $this->em->flush();
+
+        $this->begin();
+        $hub->name = 'renamed';
+        $spoke->next = $other;
+        $this->em->remove($hub);
+        $this->em->flush();
+
+        self::assertSame([['update', 'relay', $spoke->id, ['next' => ['hub', 'other']]]], array_values(array_filter(self::said($this->runs()), static fn (array $run): bool => $run[0] === 'update')));
+
+        $this->end();
+    }
+
+    public function testAnUnwatchedTargetTheFlushRemovedIsNamedByTheObjectTheApplicationHeld(): void
+    {
+        // Nothing reads an author's row: what names the author is the object the application
+        // removed, as it left it -- renamed and never written, the new name. Read where the
+        // listener publishes, before the flush's state is forgotten: here, with its postFlush
+        // held back, as a flush whose postFlush somebody swallowed leaves it -- and after a
+        // clear, so nothing but what the listener kept holds the author.
+        $this->em->persist($ada = new Author('Ada'));
+        $this->em->persist($bea = new Author('Bea'));
+        $article = new Article('Hello');
+        $article->author = $ada;
+        $this->em->persist($article);
+        $this->em->flush();
+
+        $listener = $this->listener();
+        $this->em->getEventManager()->removeEventListener([Events::postFlush], $listener);
+
+        $this->begin();
+        $ada->name = 'Ada, renamed';
+        $article->author = $bea;
+        $this->em->remove($ada);
+        $this->em->flush();
+        $this->em->clear();
+        unset($ada);
+        gc_collect_cycles();
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $listener);
+
+        self::assertSame(1, $this->departed()->size(), 'the premise: the listener holds what was removed until it is written');
+        self::assertSame([['update', 'article', $article->id, ['author' => ['Ada, renamed', 'Bea'], 'status' => ['draft', 'draft']]]], self::said($this->runs()));
+
+        $this->end();
+    }
+
+    public function testWhatWasRemovedIsLetGoOfOnceItsHistoryIsWritten(): void
+    {
+        // Published with its flush: let go of then. Published late, by the next flush, because
+        // somebody swallowed this one's postFlush: held until then, and let go of then. And a
+        // removal called off before any flush ran it is let go of with the operation that
+        // forgets it.
+        $this->em->persist($ada = new Author('Ada'));
+        $this->em->persist($bea = new Author('Bea'));
+        $this->em->persist($cy = new Author('Cy'));
+        $this->em->flush();
+
+        $this->em->remove($ada);
+        $this->em->flush();
+        self::assertSame(0, $this->departed()->size(), 'written with its flush');
+
+        $listener = $this->listener();
+        $this->em->getEventManager()->removeEventListener([Events::postFlush], $listener);
+        $this->em->remove($bea);
+        $this->em->flush();
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $listener);
+        self::assertSame(1, $this->departed()->size(), 'the premise: its postFlush never came');
+
+        // Asked inside the next flush, once the late records are out and before its own are:
+        // the next flush's forgetting would let go of it anyway.
+        $sizes = [];
+        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($sizes, $this->departed()) {
+            /** @param list<int> $sizes */
+            public function __construct(private array &$sizes, private readonly DepartedObjects $departed)
+            {
+            }
+
+            public function postPersist(LifecycleEventArgs $args): void
+            {
+                $this->sizes[] = $this->departed->size();
+            }
+        });
+        $this->em->persist(new Author('Dee'));
+        $this->em->flush();
+        self::assertSame([0], $sizes, 'written late, by the next flush, and let go of there');
+        self::assertSame(0, $this->departed()->size());
+
+        $this->em->remove($cy);
+        $this->em->persist($cy);
+        $this->em->persist(new Author('Eve'));
+        $this->em->flush();
+        self::assertSame(0, $this->departed()->size(), 'a removal called off');
+    }
+
+    public function testATargetWhoseRowIsGoneIsNamedByItsIdentifier(): void
+    {
+        // The article left Ada, and then Ada's row went with the application's own SQL: nothing
+        // removed her, nothing watched her row, and the manager no longer holds her.
+        $this->em->persist($ada = new Author('Ada'));
+        $this->em->persist($bea = new Author('Bea'));
+        $article = new Article('Hello');
+        $article->author = $ada;
+        $this->em->persist($article);
+        $this->em->flush();
+        $adaId = $ada->id;
+
+        $this->begin();
+        $article->author = $bea;
+        $this->em->flush();
+        $this->em->getConnection()->delete('Author', ['id' => $adaId]);
+        $this->em->clear();
+
+        self::assertSame([['update', 'article', $article->id, ['author' => [$adaId, 'Bea'], 'status' => ['draft', 'draft']]]], self::said($this->runs()));
+
+        $this->end();
+    }
+
+    public function testARepresenterThatFailsForARowThatIsThereFailsTheReading(): void
+    {
+        // A reference to a row that is there, whose representer throws: the application's
+        // failure, for the policy -- not a row that went, and not named by its identifier.
+        $this->unownedStatementsAreExpected = true;
+        $this->em->persist($refuses = new Relay('refuses'));
+        $spoke = new Relay('spoke');
+        $this->em->persist($spoke);
+        $this->em->flush();
+
+        $this->begin();
+        $this->em->getConnection()->update('Relay', ['next_id' => $refuses->id], ['id' => $spoke->id]);
+        $this->em->clear();
+        $spoke = $this->em->find(Relay::class, $spoke->id);
+        self::assertInstanceOf(Relay::class, $spoke);
+        $spoke->next = null;
+        $this->em->flush();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('This relay refuses to be represented.');
+
+        try {
+            $this->runs();
+        } finally {
+            $this->end();
+        }
+    }
+
     /** A transaction of the application's own around what follows, and where the log stands. */
     private function begin(): void
     {
@@ -555,7 +710,7 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
         );
 
         return (new EntityRowRuns(new AuditMetadataFactory(), new ValueComparator(), $identity))
-            ->of($this->em, $replay ?? $this->memory()->replayed($this->em), $this->log, $this->from);
+            ->of($this->em, $replay ?? $this->memory()->replayed($this->em), $this->log, $this->from, $this->departed());
     }
 
     /**
@@ -574,6 +729,14 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
 
             return [$run['event'], $run['objectType'], $run['id'], $changes];
         }, $runs);
+    }
+
+    private function departed(): DepartedObjects
+    {
+        $departed = (new \ReflectionProperty(AuditSubscriber::class, 'departed'))->getValue($this->listener());
+        self::assertInstanceOf(DepartedObjects::class, $departed);
+
+        return $departed;
     }
 
     private function memory(): RowMemory

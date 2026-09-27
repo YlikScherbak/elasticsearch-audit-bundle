@@ -117,6 +117,12 @@ final class RowIdentity
         return \is_object($found) ? ($this->identifierOf)($em, $found) : ($this->identifierFrom)($em, $values);
     }
 
+    /** The id the history names an entity by. */
+    public function idOf(EntityManagerInterface $em, object $entity): int|string|null
+    {
+        return ($this->identifierOf)($em, $entity);
+    }
+
     /**
      * @param ClassMetadata<object> $metadata
      */
