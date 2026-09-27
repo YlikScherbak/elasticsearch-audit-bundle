@@ -531,6 +531,14 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'CrateItem' => 'id',
     ];
 
+    /** The tables of the audited entities, and what the history calls each. */
+    private const AUDITED_TABLES = [
+        'Article' => 'article',
+        'Crate' => 'crate',
+        'Oven' => 'oven',
+        'Relay' => 'relay',
+    ];
+
     /** And the tables of step 5's world. */
     private const TABLES_OF_THE_WIDE_WORLD = [
         'Oven' => 'id',
@@ -825,6 +833,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         );
 
         self::assertSame([], self::missingFrom(['a', 'b'], ['b', 'a']), 'and order is not a difference');
+
+        // An audited entity's creation and removal are statements of their own, whatever their
+        // changes say: a creation with nothing to say is still one.
+        self::assertSame(
+            ['relay 5 created', 'relay 5 name null -> "relay 1"', 'relay 7 removed'],
+            $this->statementsIn([
+                ['objectType' => 'relay', 'objectId' => 5, 'event' => 'create', 'changes' => ['name' => ['old' => null, 'new' => 'relay 1']]],
+                ['objectType' => 'relay', 'objectId' => 7, 'event' => 'remove', 'changes' => []],
+            ]),
+            'a creation and a removal',
+        );
     }
 
     /**
@@ -909,6 +928,22 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         sort($rows);
         $history = $this->statementsIn($this->documents());
+
+        // What the sequence asked of its relays, and nothing more: relays created pointing at
+        // each other and never pointed elsewhere have a creation each and no update -- the
+        // UPDATE Doctrine completes a creation with is part of it. Asked of the steps, which
+        // are the scenario's, and not of any rule of the listener's; and only where the flushes
+        // are plain ones -- Doctrine runs a creation's completion after the flush's updates, so
+        // a flush nested in one of those carries it out, as its own statement.
+        if (self::relaysCreatedAndLeftAlone($steps)) {
+            foreach ($this->documents() as $document) {
+                if ($document['objectType'] === 'relay' && $document['event'] === 'update') {
+                    $history[] = sprintf('relay %s updated, which no step asked for', $document['objectId']);
+                }
+            }
+
+            sort($history);
+        }
 
         if ($rows === $history) {
             return null;
@@ -1192,6 +1227,30 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         if ($acted) {
             $this->acted[$step] = ($this->acted[$step] ?? 0) + 1;
         }
+    }
+
+    /**
+     * Whether a sequence creates relays pointing at each other and leaves them to plain flushes:
+     * never pointed elsewhere, and no flush after the first creation but ordinary, refused or
+     * with its publishing swallowed.
+     *
+     * @param list<string> $steps
+     */
+    private static function relaysCreatedAndLeftAlone(array $steps): bool
+    {
+        $first = array_search('create two relays pointing at each other', $steps, true);
+
+        if ($first === false || \in_array('point a relay elsewhere', $steps, true)) {
+            return false;
+        }
+
+        foreach (\array_slice($steps, (int) $first) as $step) {
+            if (str_starts_with($step, 'flush') && !\in_array($step, ['flush', 'flush, refused', 'flush, publishing swallowed'], true)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -1810,6 +1869,21 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     {
         $said = [];
 
+        // An audited entity's row appearing between two readings is its creation, and going is
+        // its removal: readings are taken before every statement, so a row created and removed
+        // in one operation is both. A kiln is its root's row; a line is not audited, and what it
+        // did is its crate's.
+        foreach (self::AUDITED_TABLES as $table => $type) {
+            foreach (($before[$table] ?? []) + ($after[$table] ?? []) as $id => $ignored) {
+                $was = isset($before[$table][$id]);
+                $is = isset($after[$table][$id]);
+
+                if ($was !== $is) {
+                    $said[] = sprintf('%s %s %s', $type, $id, $is ? 'created' : 'removed');
+                }
+            }
+        }
+
         foreach (($before['Article'] ?? []) + ($after['Article'] ?? []) as $id => $ignored) {
             $was = $before['Article'][$id]['title'] ?? null;
             $is = $after['Article'][$id]['title'] ?? null;
@@ -1895,6 +1969,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         foreach ($documents as $document) {
             $type = $document['objectType'];
             $id = (string) $document['objectId'];
+
+            if (\in_array($type, self::AUDITED_TABLES, true) && \in_array($document['event'] ?? null, ['create', 'remove'], true)) {
+                $said[] = sprintf('%s %s %s', $type, $id, $document['event'] === 'create' ? 'created' : 'removed');
+            }
 
             foreach ($document['changes'] as $field => $change) {
                 $old = $change['old'] ?? null;
