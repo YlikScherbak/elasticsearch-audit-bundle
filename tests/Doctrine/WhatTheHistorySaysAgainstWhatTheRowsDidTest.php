@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\HideEveryLine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Kiln;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\DBAL\Logging\Middleware as LoggingMiddleware;
@@ -241,6 +242,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     /** The table of the last statement written, while its flush is still the one running. */
     private ?string $lastTableWritten = null;
 
+    /** Whether the kiln has been written since the outermost flush running began. */
+    private bool $kilnWrittenThisFlush = false;
+
     /** The frame the listener of step 5's world writes through, for the ending that needs one. */
     private ?AuditFrame $frame = null;
 
@@ -341,6 +345,18 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->reach('a nested flush carried out the outer flush\'s plan');
         }
 
+        if ($table === 'article_tag' && $nested) {
+            $this->reach('a link of the article\'s written in a nested flush');
+        }
+
+        if ($table === 'article_tag' && $this->kilnWrittenThisFlush) {
+            $this->reach('a link of the article\'s written in a flush that changed the kiln');
+        }
+
+        if ($kiln) {
+            $this->kilnWrittenThisFlush = true;
+        }
+
         // The persister writes a JOINED change a table at a time, root first.
         if ($words[0] === 'UPDATE' && $table === 'Kiln' && $this->lastTableWritten === 'Oven') {
             $this->reach('a change of both of the kiln\'s tables in one execution');
@@ -374,6 +390,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
             if ($table === 'Relay') {
                 $this->reach('a relay written and taken back '.$how);
+            }
+
+            if ($table === 'article_tag' && self::theTaggedWorld()) {
+                $this->reach('a link of the article\'s taken back '.$how);
             }
         }
     }
@@ -429,6 +449,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
 
         $this->lastTableWritten = null;
+
+        if ($this->flushesRunning === [] || \count($this->flushesRunning) === 1 && $begins) {
+            $this->kilnWrittenThisFlush = false; // an operation begins, or none is running
+        }
     }
 
     private function forgetSavepoint(string $name): void
@@ -532,6 +556,26 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * AUDIT_MODEL_VOCABULARY=5.2 (step 4's, with the world it ran in) and 3.3.
      */
     private const VOCABULARY = [
+        ...self::VOCABULARY_5_2C,
+        'tag the article',
+        'untag the article',
+        'clear the article\'s tags',
+        'replace the article\'s tags',
+    ];
+
+    /**
+     * Step 5's first world (5.2c, 2026-09-27): a kiln and relays -- the one run by default.
+     *
+     * The tagged world ({@see self::VOCABULARY}) is run on request, AUDIT_MODEL_VOCABULARY=5.3,
+     * until 5.3 makes it the default: it is the judge 5.3 is built against, and it was built
+     * before it. Measured on the listener of 5.2c, 576 of its 3000 sequences disagree with the
+     * rows, every one of them about the article's tags and nothing else -- a tag a nested flush
+     * gave lost (287), a tag's move signed by the other flush's actor (194), a link taken back
+     * still recorded (90), and five of both -- the collection's snapshot at its owner's events,
+     * which 5.3 replaces with the join rows. Listed seed by seed they would be 576 entries of
+     * KNOWN for one commit's life; run on request, they are what 5.3 has to bring to none.
+     */
+    private const VOCABULARY_5_2C = [
         ...self::VOCABULARY_5_2,
         'edit the kiln\'s root',
         'edit the kiln\'s subclass',
@@ -558,11 +602,34 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'a nested flush carried out the outer flush\'s plan',
     ];
 
-    /** The tables of the rows the history is written about, entities' and lines'. */
-    private const HISTORY_TABLES = ['Article', 'Crate', 'CrateItem', 'Oven', 'Kiln', 'Relay'];
+    /**
+     * And what the tagged world was widened to reach.
+     *
+     * Not a link taken back to a savepoint with the flush going on: Doctrine writes a
+     * collection's join rows after every entity's UPDATE, so a savepoint the application opens
+     * around an entity's statement never holds one, and nothing is raised between the join rows
+     * and the commit for it to be rolled back in. Its road is a nested flush that dies after
+     * writing its own -- a guard of 5.3's, written by hand, not a word of this search.
+     */
+    private const COMBINATIONS_OF_THE_TAGS = [
+        'a link of the article\'s written in a nested flush',
+        'a link of the article\'s taken back with the whole transaction',
+        'a link of the article\'s written in a flush that changed the kiln',
+    ];
+
+    /** The tables of the rows the history is written about, entities', lines' and links'. */
+    private const HISTORY_TABLES = ['Article', 'Crate', 'CrateItem', 'Oven', 'Kiln', 'Relay', 'article_tag'];
 
     /** How a flush of a sequence may end, besides the ordinary way. */
     private const ENDINGS = [
+        ...self::ENDINGS_5_2C,
+        // A nested flush started after the outer flush's statement that tags the article: the
+        // join rows of one owner written by two flushes of one operation.
+        'flush, and after the statement a nested one tags the article',
+    ];
+
+    /** @see self::VOCABULARY_5_2C */
+    private const ENDINGS_5_2C = [
         ...self::ENDINGS_5_2,
         // A nested flush started after the outer flush's statement that changes the kiln's
         // subclass while the outer one changed its root: the shape of 5.2b's defect, which a
@@ -779,6 +846,25 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'Relay' => 'id',
     ];
 
+    /** And of the tagged world: a join row is keyed by both its columns. */
+    private const TABLES_OF_THE_TAGGED_WORLD = [
+        'Tag' => 'id',
+        'article_tag' => 'article_id|tag_id',
+    ];
+
+    /**
+     * Every tag of the world. Named as the history names them, and alone in their names: a link
+     * is said by the label of the tag it is to, so the reading refuses two tags of one label --
+     * the same blind spot of the oracle's as the relays', and not to be lifted for the same
+     * reason.
+     *
+     * @var list<Tag>
+     */
+    private array $tags = [];
+
+    /** @var array<string, string> what every tag is called, by its id */
+    private array $tagLabels = [];
+
     /**
      * Every relay the world started with and every one a step has made since.
      *
@@ -862,6 +948,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         if (self::theWideWorld()) {
             $words = [...$words, ...self::COMBINATIONS];
+        }
+
+        if (self::theTaggedWorld()) {
+            $words = [...$words, ...self::COMBINATIONS_OF_THE_TAGS];
         }
 
         if ($seeds >= 60) {
@@ -1213,6 +1303,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         $rows = [];
         $this->skus = [];
         $this->relayNames = [];
+        $this->tagLabels = [];
+        $this->kilnWrittenThisFlush = false;
         $this->aReplacementIsWaiting = false;
 
         foreach ($steps as $step) {
@@ -1301,7 +1393,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * @return list<string>
      */
     /**
-     * The words a sequence is drawn from: today's, or those of 5.2 or 3.3 on request.
+     * The words a sequence is drawn from: 5.2c's by default, or those of 5.3, 5.2 or 3.3 on
+     * request.
      *
      * @return array{0: list<string>, 1: list<string>}
      */
@@ -1310,7 +1403,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         return match ($_SERVER['AUDIT_MODEL_VOCABULARY'] ?? null) {
             '3.3' => [self::VOCABULARY_3_3, self::ENDINGS_3_3],
             '5.2' => [self::VOCABULARY_5_2, self::ENDINGS_5_2],
-            default => [self::VOCABULARY, self::ENDINGS],
+            '5.3' => [self::VOCABULARY, self::ENDINGS],
+            default => [self::VOCABULARY_5_2C, self::ENDINGS_5_2C],
         };
     }
 
@@ -1319,6 +1413,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * 3.3 and 5.2 run in the world they were drawn in, reading the tables they read.
      */
     private static function theWideWorld(): bool
+    {
+        return self::theVocabulary()[0] === self::VOCABULARY || self::theVocabulary()[0] === self::VOCABULARY_5_2C;
+    }
+
+    /** Whether the world has the article's tags too: today's, and not 5.2c's. */
+    private static function theTaggedWorld(): bool
     {
         return self::theVocabulary()[0] === self::VOCABULARY;
     }
@@ -1373,6 +1473,20 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             if ($ending === 'flush, inside a transaction of the application\'s it rolls back, in an atomic frame') {
                 $steps[] = 'edit the kiln\'s root';
                 $steps[] = 'create two relays pointing at each other';
+
+                if ($endings === self::ENDINGS) {
+                    $steps[] = 'tag the article';
+                }
+            }
+
+            // The nested flush's link needs the outer flush's UPDATE to start from, and the
+            // savepoint ending of a line's may as well take a link back as a line.
+            if ($ending === 'flush, and after the statement a nested one tags the article') {
+                $steps[] = 'edit the article';
+            }
+
+            if ($endings === self::ENDINGS && str_starts_with($ending, 'flush, and a savepoint of the application\'s around a statement')) {
+                $steps[] = 'tag the article';
             }
 
             $steps[] = $ending;
@@ -1434,6 +1548,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->em->persist($kiln = new Kiln());
             $this->em->persist($this->relays[] = new Relay('hub'));
             $this->em->persist($this->relays[] = new Relay('spare'));
+        }
+
+        // The tagged world's: three tags, the article carrying the first.
+        $this->tags = [];
+
+        if (self::theTaggedWorld()) {
+            foreach (['php', 'es', 'db'] as $label) {
+                $this->em->persist($this->tags[] = new Tag($label));
+            }
+
+            $article->tags->add($this->tags[0]);
         }
 
         $this->em->flush();
@@ -1537,6 +1662,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $this->em->persist($this->relays[] = $other);
             }),
             'point a relay elsewhere' => $this->pointARelayElsewhere(),
+            'tag the article' => $this->tagTheArticle($world['article']),
+            'untag the article' => self::theTaggedWorld() && !$world['article']->tags->isEmpty() && (bool) $world['article']->tags->removeElement($world['article']->tags->first()),
+            'clear the article\'s tags' => self::theTaggedWorld() && !$world['article']->tags->isEmpty() && $this->did(fn () => $world['article']->tags->clear()),
+            'replace the article\'s tags' => self::theTaggedWorld() && $this->tags !== [] && $this->did(function () use ($world): void {
+                $world['article']->tags = new ArrayCollection([$this->tags[\count($this->tags) - 1]]);
+            }),
+            'flush, and after the statement a nested one tags the article' => $this->flushWithOneNestedAfter(fn (): bool => $this->tagTheArticle($world['article']), refused: false, itWrites: ['article_tag']),
             'flush, inside a transaction of the application\'s it rolls back, in an atomic frame' => $this->flushRolledBackInAnAtomicFrame(),
             'flush, and a savepoint of the application\'s around the kiln\'s statement is rolled back' => $this->flushTakingAStatementBack(aheadOfThisListener: false, only: Kiln::class),
             'flush, and a savepoint of the application\'s around a relay\'s statement is rolled back' => $this->flushTakingAStatementBack(aheadOfThisListener: false, only: Relay::class),
@@ -1612,6 +1744,24 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
 
         return true;
+    }
+
+    /** The article gains the first tag of the world it does not carry. Acted when there was one. */
+    private function tagTheArticle(Article $article): bool
+    {
+        if (!self::theTaggedWorld()) {
+            return false;
+        }
+
+        foreach ($this->tags as $tag) {
+            if ($this->em->contains($tag) && !$article->tags->contains($tag)) {
+                $article->tags->add($tag);
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -2004,6 +2154,15 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
 
             $kiln = $world['kiln'] === null ? null : $this->em->find(Kiln::class, $world['kiln']->id);
+            $tags = [];
+
+            foreach ($this->tags as $tag) {
+                $again = $tag->id === null ? null : $this->em->find(Tag::class, $tag->id);
+
+                if ($again instanceof Tag) {
+                    $tags[] = $again;
+                }
+            }
             $relays = [];
 
             foreach ($this->relays as $relay) {
@@ -2025,6 +2184,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         $this->lines = $lines;
         $this->relays = $relays;
+        $this->tags = $tags;
         $this->aReplacementIsWaiting = false; // a clear takes a waiting replacement with it
 
         return ['article' => $article, 'crate' => $crate, 'other' => $other, 'lines' => $lines, 'kiln' => $kiln instanceof Kiln ? $kiln : null];
@@ -2220,9 +2380,19 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     {
         $taken = [];
 
-        foreach (self::theWideWorld() ? [...self::TABLES, ...self::TABLES_OF_THE_WIDE_WORLD] : self::TABLES as $table => $key) {
+        $tables = self::theWideWorld() ? [...self::TABLES, ...self::TABLES_OF_THE_WIDE_WORLD] : self::TABLES;
+
+        if (self::theTaggedWorld()) {
+            $tables = [...$tables, ...self::TABLES_OF_THE_TAGGED_WORLD];
+        }
+
+        foreach ($tables as $table => $key) {
             foreach ($this->em->getConnection()->fetchAllAssociative('SELECT * FROM '.$table) as $row) {
-                $taken[$table][(string) $row[$key]] = $row;
+                $taken[$table][implode('|', array_map(static fn (string $column): string => (string) $row[$column], explode('|', $key)))] = $row;
+
+                if ($table === 'Tag') {
+                    $this->tagLabels[(string) $row['id']] = (string) $row['label'];
+                }
 
                 if ($table === 'CrateItem') {
                     $this->skus[(string) $row['id']] = (string) $row['sku'];
@@ -2243,6 +2413,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         if (\count($names) !== \count(array_unique($names))) {
             throw new \LogicException('two relays of one name: a reference said by the name would not say which row');
+        }
+
+        $labels = array_column($taken['Tag'] ?? [], 'label');
+
+        if (\count($labels) !== \count(array_unique($labels))) {
+            throw new \LogicException('two tags of one label: a link said by the label would not say which row');
         }
 
         return $taken;
@@ -2317,6 +2493,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
         }
 
+        // A link of the article's is its join row: one appearing is a tag it gained, one going a
+        // tag it lost -- said by the tag's label.
+        foreach (($before['article_tag'] ?? []) + ($after['article_tag'] ?? []) as $link => $row) {
+            $was = isset($before['article_tag'][$link]);
+            $is = isset($after['article_tag'][$link]);
+
+            if ($was !== $is) {
+                $said[] = sprintf('article %s %s %s', $row['article_id'], $is ? 'tagged' : 'untagged', json_encode($this->tagLabels[(string) $row['tag_id']] ?? '?'));
+            }
+        }
+
         // (the lines follow; what the rows did is signed below, all of it)
         // A line belongs to a crate, so what a line did is said about its crate: which is
         // also the only place the history says it.
@@ -2385,6 +2572,20 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
                 if ($type === 'article' && $field === 'title') {
                     $said[] = sprintf('article %s title %s -> %s', $id, json_encode($old), json_encode($new));
+
+                    continue;
+                }
+
+                // The tags as the whole list moved: what it gained and lost, counting repeats. Its
+                // order is the targeted tests' to hold; the facts are these.
+                if ($type === 'article' && $field === 'tags') {
+                    foreach (self::missingFrom((array) $new, (array) $old) as $label) {
+                        $said[] = sprintf('article %s tagged %s', $id, json_encode($label));
+                    }
+
+                    foreach (self::missingFrom((array) $old, (array) $new) as $label) {
+                        $said[] = sprintf('article %s untagged %s', $id, json_encode($label));
+                    }
 
                     continue;
                 }
