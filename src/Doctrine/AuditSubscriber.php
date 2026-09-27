@@ -156,18 +156,6 @@ final class AuditSubscriber
     private bool $reportedLostChangeSets = false;
 
     /**
-     * The execution each entity's latest UPDATE announcement was tied to, and the flush a
-     * second announcement of it hands its provenance to, by the execution's first statement
-     * ({@see holdWhatItsCollectionsSay()}).
-     *
-     * @var \WeakMap<object, list<int>>
-     */
-    private \WeakMap $lastExecutionOf;
-
-    /** @var array<int, int> */
-    private array $announcedUnder = [];
-
-    /**
      * What an owning collection's snapshot said at each post* event of its owner: the old and
      * the new side, represented then, and the execution it was taken beside.
      *
@@ -490,7 +478,6 @@ final class AuditSubscriber
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
         $this->pendingIndexByEntity = new \WeakMap();
-        $this->lastExecutionOf = new \WeakMap();
         $this->rows = new RowMemory($statements);
 
         // What ran before this listener existed is nobody's history it can account for: it
@@ -841,19 +828,6 @@ final class AuditSubscriber
             // execution, and the next one of the same row is of the next.
             $execution = $this->statementBehind($em, $entity, $flush, $kind);
 
-            if ($kind === StatementShape::UPDATE && $execution !== []) {
-                $this->lastExecutionOf[$entity] = $execution;
-            } elseif ($kind === StatementShape::UPDATE && isset($this->lastExecutionOf[$entity])) {
-                // The same UPDATE announced a second time: no statement of the row is left that
-                // an announcement has not been tied to. A flush started from a lifecycle
-                // listener runs on the outer flush's unit of work and carries out whatever it
-                // finds scheduled -- the outer flush's own remaining updates too -- and the
-                // outer flush, resuming its list, announces a row somebody else already wrote.
-                // The change was the outer flush's, made before the nested one began, and its
-                // commit is the one the row hangs off: its moment, actor and context are the
-                // outer flush's, the flush announcing it now -- as they have always been.
-                $this->announcedUnder[$this->lastExecutionOf[$entity][0]] = $flush;
-            }
             $classMetadata = $em->getClassMetadata($entity::class);
             $collections = array_filter(
                 $metadata->fields,
@@ -892,13 +866,16 @@ final class AuditSubscriber
      * Says out loud what Doctrine does silently, to the application's flush and not to this
      * listener's history.
      *
-     * A flush started from a lifecycle listener of the flush still running ends in
-     * UnitOfWork::postCommitCleanup(), which empties that flush's change sets -- and with them
-     * its extra updates, collection updates, orphan removals and collection deletions. The
-     * history is read from the connection and is not what it costs any more; what the running
-     * flush was still to write may be. The one place this listener can see it is an entity
-     * announced with nothing left of the change set it had in onFlush: said once per flush, by
-     * class, and with where to move the work. Finding such a listener once took three days.
+     * What is seen is an entity announced with nothing left of the change set it had in
+     * onFlush: something ran a flush from a lifecycle listener of this one, and
+     * UnitOfWork::postCommitCleanup() emptied the change sets of the flush still running. What
+     * that may have cost the application -- the same cleanup resets what the running flush had
+     * still to do -- is said as a risk, not as a loss this listener could confirm. Said once per
+     * flush, by class, with where to move the work: finding such a listener once took three days.
+     *
+     * The only reading of Doctrine's change sets left here, and a diagnostic only: it changes no
+     * record, and it is logged, not put through the failure policy -- it is about Doctrine and
+     * the application's listener, not about this bundle's history.
      */
     private function warnOfALostChangeSet(EntityManagerInterface $em, object $entity): void
     {
@@ -912,7 +889,7 @@ final class AuditSubscriber
         $this->reportedLostChangeSets = true;
 
         $this->logger->warning(
-            'The unit of work had no change set left for {entity}: something called flush() from inside a lifecycle listener of this flush, and UnitOfWork::commit() ends in postCommitCleanup(), which empties entityChangeSets -- and with them extraUpdates, collectionUpdates, orphanRemovals and collectionDeletions of the flush still running. The audit history is read from what the connection ran and is not affected; what the running flush had still to write may be. Move that work to postFlush.',
+            'The unit of work had no change set left for {entity}, which it had when this flush began: something called flush() from inside a lifecycle listener of this flush, and UnitOfWork::commit() ends in postCommitCleanup(), which empties the change sets of the flush still running. The same cleanup resets its extraUpdates, collectionUpdates, orphanRemovals and collectionDeletions, so what that flush had still to write is at risk. The audit history is read from what the connection ran and does not depend on it. Move that work to postFlush.',
             ['entity' => $entity::class]
         );
     }
@@ -1232,7 +1209,12 @@ final class AuditSubscriber
                 'objectType' => $run['objectType'],
                 'id' => $run['id'],
                 'event' => $run['event'],
-                'flush' => $this->announcedUnder[$run['at'][0]] ?? $run['flush'],
+                // Whose record it is, is whose statement it is: the flush that ran it. A flush
+                // nested in another carries out whatever it finds scheduled, the outer flush's
+                // remaining updates too, and what it ran is its own -- signed, timed and put in
+                // context as its own (WhoWroteItTest), as an element's rows are. The outer flush
+                // announcing the row again afterwards says nothing of who wrote it.
+                'flush' => $run['flush'],
                 'owner' => $run['entity'],
                 'class' => $run['class'],
                 'changes' => $changes,
@@ -1899,8 +1881,6 @@ final class AuditSubscriber
         $this->collectionsOnly = [];
         $this->collectionSnapshots = [];
         $this->reportedLostChangeSets = false;
-        $this->lastExecutionOf = new \WeakMap();
-        $this->announcedUnder = [];
 
         // Whatever the log holds from here back is spent: published by the flush that is
         // ending, or dropped with the one that was found abandoned -- and in both cases not

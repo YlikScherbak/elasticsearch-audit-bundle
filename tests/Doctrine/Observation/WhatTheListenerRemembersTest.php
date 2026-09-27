@@ -117,7 +117,8 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         // which rows it moved, so the history may be missing what it did, and the listener
         // says that -- in its log, once, at the reading that moves past it, by class and count
         // and never by what the statement carried. A watched collection's join table is the
-        // same. What does not write a watched row is not doubt: the tables of the
+        // same, and so is an audited entity's own table: what cannot be bound is never read
+        // as "no change" (5.2c, when an entity's records came to be read from the log). What does not write a watched row is not doubt: the tables of the
         // application's own, mapped or not, read or not, and the schema's DDL.
         $this->unownedStatementsAreExpected = true;
         $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
@@ -129,6 +130,7 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         $connection->executeStatement("UPDATE CrateItem SET quantity = quantity + 1 WHERE sku LIKE 'SKU-SECRET%'");
         $connection->executeStatement('UPDATE CrateItem SET quantity = 0');
         $connection->executeStatement("DELETE FROM article_tag WHERE tag_id IN (SELECT id FROM Tag WHERE label = 'SECRET')");
+        $connection->executeStatement("UPDATE Article SET title = 'SECRET-TITLE' WHERE title LIKE 'SECRET%'");
         $connection->executeStatement("UPDATE Vehicle SET plate = 'SECRET-PLATE'");
         $connection->executeStatement("UPDATE Vehicle SET plate = 'SECRET-PLATE' WHERE plate LIKE 'SECRET%'");
         $connection->executeStatement('CREATE TABLE Scratch (id INT)');
@@ -141,7 +143,7 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         $x->sku = 'SKU-X2';
         $this->em->flush();
 
-        self::assertSame(['What the connection ran could not be followed for 3 statement(s) of '.CrateItem::class.', '.Article::class.' since the history was last written, so the history may be missing what they did.'], $doubts());
+        self::assertSame(['What the connection ran could not be followed for 4 statement(s) of '.CrateItem::class.', '.Article::class.' since the history was last written, so the history may be missing what they did.'], $doubts());
         self::assertSame([], array_values(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'SECRET'))), 'nothing a statement carried');
 
         $x->sku = 'SKU-X3';

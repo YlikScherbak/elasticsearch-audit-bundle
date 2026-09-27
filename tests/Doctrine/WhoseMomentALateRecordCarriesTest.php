@@ -387,14 +387,32 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
         self::assertSame('carol', $records['Carol writes something']['source'] ?? null, 'and the flush that did the writing is only itself');
     }
 
-    public function testWhatTheOuterFlushCollectsAfterTheInnerOneIsStillTheOuterFlushes(): void
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function whetherTheConnectionUsesSavepoints(): iterable
     {
-        // The half of the previous test that it cannot see. Doctrine works through the
-        // entities of one flush in turn, so a nested flush started from the first
-        // entity's postUpdate is over by the time the second entity's runs — and
-        // everything after it has to be filed under the outer flush again. Without the
-        // inner number coming off the stack, the second record is collected under the
-        // inner flush's number and published with its actor and its clock.
+        yield 'with savepoints' => [true];
+        yield 'without them, where DBAL 3 allows it' => [false];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('whetherTheConnectionUsesSavepoints')]
+    public function testWhatANestedFlushCarriesOutForTheOuterOneIsTheNestedFlushes(bool $savepoints): void
+    {
+        // Alice's flush changes two articles; a listener, in the first one's postUpdate, lets
+        // Bob change a third and flush. Doctrine runs that nested flush on the outer flush's
+        // unit of work, and it carries out whatever it finds scheduled -- Alice's second
+        // article too: measured, its UPDATE runs in the nested flush's savepoint, before the
+        // outer flush gets back to it. The record of a statement is the flush's that ran it
+        // (WhoWroteItTest): the second article's is Bob's, at his moment. (Until 5.2c it was
+        // signed as the outer flush's, from the announcement the outer flush made of it
+        // afterwards.) Without savepoints -- DBAL 3's default, nested_flush_provenance: outer --
+        // nothing on the wire tells the nested flush's statements apart, and they are the outer
+        // flush's: Alice's, as they are for an element's rows (WhoWroteItTest).
+        $this->watchTheConnection(FailurePolicy::Log, savepoints: $savepoints);
+        $connection = $this->em->getConnection();
+        $apart = !method_exists($connection, 'getNestTransactionsWithSavepoints') || $connection->getNestTransactionsWithSavepoints();
+
         $this->em->persist($first = new Article('First'));
         $this->em->persist($second = new Article('Second'));
         $this->em->persist($aside = new Article('Something else'));
@@ -441,8 +459,8 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
 
         self::assertArrayHasKey('Second, edited by Alice', $records, 'the premise: both of the outer flush\'s entities were recorded');
 
-        self::assertSame('alice', $records['Second, edited by Alice']['source'], 'what the outer flush collected after the inner one finished was filed under the inner flush');
-        self::assertSame(self::ALICE, $records['Second, edited by Alice']['loggedAt']);
+        self::assertSame(['alice', self::ALICE], [$records['First, edited by Alice']['source'], $records['First, edited by Alice']['loggedAt']], 'the outer flush\'s own statement');
+        self::assertSame($apart ? ['bob', self::BOB] : ['alice', self::ALICE], [$records['Second, edited by Alice']['source'], $records['Second, edited by Alice']['loggedAt']], 'the statement the nested flush ran for it');
     }
 
     public function testAnOwnerSeenOnlyByTheInnerFlushKeepsThatFlushesContext(): void
@@ -851,12 +869,12 @@ final class WhoseMomentALateRecordCarriesTest extends DoctrineTestCase
             $this->documents(),
         );
 
-        // The whole history of the operation, and nothing else. Alice's two changes are
-        // hers although the flush that logged the refusal carried one of them out, and
-        // that flush's own change is Bob's.
+        // The whole history of the operation, and nothing else. The flush that logged the
+        // refusal carried Alice's second change out with its own, and what it ran is its own:
+        // signed by Bob (until 5.2c, by the outer flush that announced it again afterwards).
         self::assertSame([
             ['First, edited by Alice', 'alice'],
-            ['Second, edited by Alice', 'alice'],
+            ['Second, edited by Alice', 'bob'],
             ['Bob logged the refusal', 'bob'],
         ], $signed);
     }
