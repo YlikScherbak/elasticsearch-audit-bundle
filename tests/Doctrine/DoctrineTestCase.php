@@ -118,6 +118,19 @@ abstract class DoctrineTestCase extends TestCase
      */
     protected function tearDown(): void
     {
+        // A transaction a test left open is a test that hangs the next one on a real database:
+        // it holds its locks, and the next test's schema waits on them for ever -- while on
+        // SQLite in memory nothing notices. Closed here so the next test can run, and failed
+        // here so that the one that left it is named, in a second, on SQLite.
+        $connection = $this->em->getConnection();
+        $left = $connection->getTransactionNestingLevel();
+
+        while ($connection->isTransactionActive()) {
+            $connection->rollBack();
+        }
+
+        self::assertSame(0, $left, 'the test left a transaction open; on MySQL or Postgres it would hold its locks and the next test would wait on them for ever');
+
         if (!$this->unownedStatementsAreExpected) {
             self::assertSame([], array_values(array_filter(
                 $this->logs,

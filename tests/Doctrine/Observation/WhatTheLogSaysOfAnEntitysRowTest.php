@@ -11,6 +11,9 @@ use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Beacon;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Pouch;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Preference;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Sku;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Switchboard;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SwitchMode;
@@ -55,6 +58,8 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
             ['insert', Press::class, (string) $press->id, ['tonnage' => [null, 1]]],
         ], self::said($facts));
         self::assertNotSame($facts[0]['at'], $facts[1]['at'], 'two statements, two positions');
+
+        $this->end();
     }
 
     public function testACreationWithNothingToSayIsStillACreationAndItsRemovalKnowsTheRow(): void
@@ -74,6 +79,8 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
             ['delete', Beacon::class, $id, ['label' => [null, null]]],
         ], self::said($this->facts()));
         self::assertSame(['id' => (int) $id], array_map('intval', $this->facts()[1]['key']));
+
+        $this->end();
     }
 
     public function testAManyToOneIsTheKeyItNamesInACreationAndInAChange(): void
@@ -95,6 +102,8 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
         self::assertSame(['insert', Article::class, (string) $article->id], \array_slice($said[0], 0, 3));
         self::assertSame([null, $ada->id], array_map(static fn (mixed $v): mixed => $v === null ? null : (int) $v, $said[0][3]['author']), 'the author it was created with, as its key');
         self::assertSame(['update', Article::class, (string) $article->id, ['author' => [$ada->id, $bea->id]]], [$said[1][0], $said[1][1], $said[1][2], array_map(static fn (array $sides): array => array_map('intval', $sides), $said[1][3])]);
+
+        $this->end();
     }
 
     /**
@@ -152,6 +161,8 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
             'lit' => ['old' => false, 'new' => true],
             'mode' => ['old' => SwitchMode::Manual, 'new' => SwitchMode::Automatic],
         ], $second, 'and the next second is exactly that move, a boolean and an enum as the object holds them');
+
+        $this->end();
     }
 
     public function testARowLoadedAfterItsFlushBeganAndRemovedThereIsKnownAsItStood(): void
@@ -212,19 +223,79 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
         self::assertSame([['delete', Article::class, (string) $yId]], array_map(static fn (array $fact): array => \array_slice($fact, 0, 3), $removal));
         self::assertSame([null, 'Y, as it stood'], [null, $removal[0][3]['title'][0]], 'as it stood before it went');
         self::assertSame([], $this->memory()->replayed($this->em)->doubts(), 'and no statement was a row nobody knew');
+
+        $this->end();
     }
 
-    protected function tearDown(): void
+    public function testARowRememberedFromItsObjectIsKeyedAsTheStatementsKeyIt(): void
     {
-        // The facts are read inside the scenario's transaction; it is closed here, or on a real
-        // database it holds its locks and the next test's schema waits on them for ever.
-        $connection = $this->em->getConnection();
+        // One rule, in one place: what the listener remembers of a row is the row's form, and
+        // the replay alone brings it to the object's. The key is where that shows first: an
+        // identifier of a type of its own is an object on the entity and a string in the
+        // statement, and a row remembered from the entity -- at the preFlush after a load --
+        // has to be keyed as the statement keys it, or the UPDATE finds no row it knows.
+        $this->em->persist(new Pouch(new Sku('P-1'), 'coins'));
+        $this->em->flush();
+        $pouch = $this->loadedAfresh(Pouch::class, 'P-1');
 
-        while ($connection->isTransactionActive()) {
-            $connection->rollBack();
-        }
+        $this->begin();
+        $pouch->contents = 'keys';
+        $this->em->flush();
 
-        parent::tearDown();
+        self::assertSame([['update', Pouch::class, 'P-1', ['contents' => ['coins', 'keys']]]], self::said($this->facts()));
+        self::assertSame([], $this->memory()->replayed($this->em)->doubts(), 'and the row was one it knew');
+
+        $this->end();
+    }
+
+    public function testARowRememberedFromItsObjectHoldsItsValuesAsTheRowDoes(): void
+    {
+        // And the values: an array is held by the row as JSON, and the replay reads it back from
+        // that. Remembered as the object holds it, it could not be read back at all.
+        $preference = new Preference();
+        $preference->options = ['theme' => 'dark'];
+        $this->em->persist($preference);
+        $this->em->flush();
+        $id = $preference->id;
+        unset($preference);
+        $preference = $this->loadedAfresh(Preference::class, $id);
+
+        $this->begin();
+        $preference->options = ['theme' => 'light'];
+        $this->em->flush();
+
+        self::assertSame([['update', Preference::class, (string) $preference->id, ['options' => [['theme' => 'dark'], ['theme' => 'light']]]]], self::said($this->facts()));
+
+        $this->end();
+    }
+
+    /**
+     * An entity loaded again with nothing of it remembered: the object let go of, the manager
+     * cleared, and the rows nobody holds forgotten at a settling -- so that the listener takes
+     * its row from the object, at the next preFlush, and from nowhere else.
+     *
+     * @template T of object
+     *
+     * @param class-string<T> $class
+     *
+     * @return T
+     */
+    private function loadedAfresh(string $class, mixed $id): object
+    {
+        $this->em->clear();
+        gc_collect_cycles();
+        $this->em->persist(new Author('somebody'));
+        $this->em->flush();
+
+        $entity = $this->em->find($class, $id instanceof Sku ? $id : ($class === Pouch::class ? new Sku((string) $id) : $id));
+        self::assertInstanceOf($class, $entity);
+        self::assertSame([], array_filter(
+            $this->memory()->rows()[$class] ?? [],
+            static fn (mixed $row, string $key): bool => $key === (string) $id,
+            \ARRAY_FILTER_USE_BOTH,
+        ), 'the premise: nothing of its row is remembered but what its object will give');
+
+        return $entity;
     }
 
     /** A transaction of the application's own around what follows, and where the log stands. */
@@ -245,6 +316,12 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
             $this->memory()->replayed($this->em)->rowFacts(),
             fn (array $fact): bool => $fact['at'] > $this->from,
         ));
+    }
+
+    /** The scenario's transaction closed, once its facts are read. */
+    private function end(): void
+    {
+        $this->em->getConnection()->rollBack();
     }
 
     /**
