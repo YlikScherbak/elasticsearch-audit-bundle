@@ -83,6 +83,9 @@ final class StatementLog
     /** Whether an observer was put in front of a driver: what audit:check asks of the audited connection. */
     private bool $watching = false;
 
+    /** @var array<int, true> the statements after which a flush began, by sequence number */
+    private array $flushesStartedAfter = [];
+
     /**
      * @param bool $letsGo whether what its reader has read is let go. The listener is the one
      *                     reader, and a log that kept everything would grow with every
@@ -122,6 +125,27 @@ final class StatementLog
     public function mark(): array
     {
         return [$this->nextFrame, $this->open === [] ? null : $this->open[\count($this->open) - 1]];
+    }
+
+    /**
+     * A flush is about to begin: whatever runs from here is not of one piece with what ran
+     * before.
+     *
+     * Without savepoints a flush nested inside another opens no frame, and its first statement
+     * can sit right after the outer flush's last one -- of the same row, in the same frame:
+     * what tells one change of a JOINED entity, written a table at a time, from two changes of
+     * it is where a flush began. Kept for as long as the statement before it is, and not for as
+     * long as the flush: a nested flush is over long before its statements are read.
+     */
+    public function aFlushStarts(): void
+    {
+        $this->flushesStartedAfter[$this->sequence] = true;
+    }
+
+    /** Whether a flush began between this statement and the next one. */
+    public function aFlushStartedAfter(int $statement): bool
+    {
+        return isset($this->flushesStartedAfter[$statement]);
     }
 
     /**
@@ -383,6 +407,12 @@ final class StatementLog
             unset($this->statements[$sequence]);
         }
 
+        foreach (array_keys($this->flushesStartedAfter) as $sequence) {
+            if ($sequence <= $statement) {
+                unset($this->flushesStartedAfter[$sequence]);
+            }
+        }
+
         $used = [];
 
         foreach ($this->statements as $entry) {
@@ -403,7 +433,7 @@ final class StatementLog
     /** How much is held, for the tests that pin that it does not grow. */
     public function size(): int
     {
-        return \count($this->statements) + \count($this->frames);
+        return \count($this->statements) + \count($this->frames) + \count($this->flushesStartedAfter);
     }
 
     private function open(?string $savepoint): void

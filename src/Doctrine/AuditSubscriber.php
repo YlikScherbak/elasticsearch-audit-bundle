@@ -560,6 +560,7 @@ final class AuditSubscriber
 
         $this->beginFlush($em, $flush);
         $this->statementMarks[$flush] = $mark;
+        $this->statements->aFlushStarts();
 
         $this->provenance[$flush] = $this->writer->provenance();
 
