@@ -44,8 +44,10 @@ use Psr\Log\AbstractLogger;
  * **What the oracle holds the history to, and what it leaves to others** (step 5, 5.2c). It
  * checks facts: each value a statement set, the creation or removal of an audited row, and
  * who wrote it -- the actor of the flush that ran the statement, from this test's own account
- * of flushes. And, compared as a multiset, it checks the precondition of any grouping: no
- * statement lost, none told twice. How facts are divided into records, and in what order the
+ * of flushes. Compared as a multiset, it checks the completeness and the multiplicity of the
+ * expected facts, with their values, events and authors -- which is what any grouping of them
+ * has to start from; not of statements, since a statement that moves no value is no fact, and
+ * the statements of a JOINED creation are one. How facts are divided into records, and in what order the
  * records come, is a rule of presenting them -- the contract's, not the database's, which says
  * nothing of it -- and is held by the targeted tests of the reader (WhereOneExecutionEndsTest,
  * WhatAnEntitysRowsSayOfItsRecordsTest); a second copy of those rules here would check the
@@ -357,19 +359,21 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      *
      * @param list<string|null> $tables
      */
-    private function takenBack(array $tables): void
+    private function takenBack(array $tables, bool $theWholeTransaction): void
     {
         if (!self::theWideWorld()) {
             return;
         }
 
+        $how = $theWholeTransaction ? 'with the whole transaction' : 'to a savepoint';
+
         foreach ($tables as $table) {
             if ($table === 'Oven' || $table === 'Kiln') {
-                $this->reach('a change of the kiln taken back');
+                $this->reach('a change of the kiln taken back '.$how);
             }
 
             if ($table === 'Relay') {
-                $this->reach('a relay written and taken back');
+                $this->reach('a relay written and taken back '.$how);
             }
         }
     }
@@ -442,7 +446,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     {
         for ($i = \count($this->open) - 1; $i >= 0; --$i) {
             if ($this->open[$i][0] === $name) {
-                $this->takenBack(\array_slice($this->checkpointTables, $this->open[$i][1]));
+                $this->takenBack(\array_slice($this->checkpointTables, $this->open[$i][1]), theWholeTransaction: false);
                 $this->checkpoints = \array_slice($this->checkpoints, 0, $this->open[$i][1]);
                 $this->checkpointActors = \array_slice($this->checkpointActors, 0, $this->open[$i][1]);
                 $this->checkpointTables = \array_slice($this->checkpointTables, 0, $this->open[$i][1]);
@@ -455,7 +459,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
     private function undoTo(int $readings, bool $all): void
     {
-        $this->takenBack(\array_slice($this->checkpointTables, $readings));
+        $this->takenBack(\array_slice($this->checkpointTables, $readings), theWholeTransaction: $all);
         $this->checkpoints = \array_slice($this->checkpoints, 0, $readings);
         $this->checkpointActors = \array_slice($this->checkpointActors, 0, $readings);
         $this->checkpointTables = \array_slice($this->checkpointTables, 0, $readings);
@@ -542,9 +546,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private const COMBINATIONS = [
         'a change of the kiln in a nested flush',
-        'a change of the kiln taken back',
+        // Taken back two ways, told apart: with the whole transaction -- the atomic-frame
+        // ending's road -- and to a savepoint of the application's with the flush going on.
+        'a change of the kiln taken back with the whole transaction',
+        'a change of the kiln taken back to a savepoint',
         'a change of both of the kiln\'s tables in one execution',
-        'a relay written and taken back',
+        'a relay written and taken back with the whole transaction',
+        'a relay written and taken back to a savepoint',
         'a relay written in a nested flush',
         'a flush nested under another actor wrote a row the history is about',
         'a nested flush carried out the outer flush\'s plan',
@@ -566,6 +574,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         // statement of those rows being run and then undone -- a relay's INSERT and the UPDATE
         // completing it raise no event a savepoint could be opened in.
         'flush, inside a transaction of the application\'s it rolls back, in an atomic frame',
+        // A savepoint of the application's around one statement of the kiln's, or of a relay's,
+        // rolled back with the flush going on: the other road to a statement of those rows taken
+        // back, and the one the savepoint endings above reach for them only by luck -- they
+        // open at the first entity the flush updates, which is a line's before it is theirs.
+        'flush, and a savepoint of the application\'s around the kiln\'s statement is rolled back',
+        'flush, and a savepoint of the application\'s around a relay\'s statement is rolled back',
     ];
 
     /**
@@ -1347,6 +1361,14 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $steps[] = 'edit the kiln\'s root';
             }
 
+            if ($ending === 'flush, and a savepoint of the application\'s around the kiln\'s statement is rolled back') {
+                $steps[] = 'edit the kiln\'s root';
+            }
+
+            if ($ending === 'flush, and a savepoint of the application\'s around a relay\'s statement is rolled back') {
+                $steps[] = 'point a relay elsewhere';
+            }
+
             // And the rolled-back transaction needs the rows it is there to take back.
             if ($ending === 'flush, inside a transaction of the application\'s it rolls back, in an atomic frame') {
                 $steps[] = 'edit the kiln\'s root';
@@ -1516,6 +1538,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }),
             'point a relay elsewhere' => $this->pointARelayElsewhere(),
             'flush, inside a transaction of the application\'s it rolls back, in an atomic frame' => $this->flushRolledBackInAnAtomicFrame(),
+            'flush, and a savepoint of the application\'s around the kiln\'s statement is rolled back' => $this->flushTakingAStatementBack(aheadOfThisListener: false, only: Kiln::class),
+            'flush, and a savepoint of the application\'s around a relay\'s statement is rolled back' => $this->flushTakingAStatementBack(aheadOfThisListener: false, only: Relay::class),
             'flush, and after the statement a nested one edits the kiln\'s subclass' => $world['kiln'] !== null && $this->flushWithOneNestedAfter(static function () use ($world): bool {
                 \assert($world['kiln'] !== null);
                 $world['kiln']->heat += 1;
@@ -2074,22 +2098,27 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * ahead of it. The flush goes on and commits the rest; Doctrine believes the row written.
      * Acted when the rollback ran.
      */
-    private function flushTakingAStatementBack(bool $aheadOfThisListener): bool
+    /**
+     * @param class-string|null $only the class whose UPDATE the savepoint is opened around; the
+     *                                first entity the flush updates, when none
+     */
+    private function flushTakingAStatementBack(bool $aheadOfThisListener, ?string $only = null): bool
     {
         $this->aReplacementIsWaiting = false;
 
-        $taking = new class($this->em->getConnection()) {
+        $taking = new class($this->em->getConnection(), $only) {
             public bool $acted = false;
 
             private ?object $inside = null;
 
-            public function __construct(private readonly \Doctrine\DBAL\Connection $connection)
+            /** @param class-string|null $only */
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly ?string $only)
             {
             }
 
             public function preUpdate(\Doctrine\ORM\Event\PreUpdateEventArgs $args): void
             {
-                if ($this->acted || $this->inside !== null) {
+                if ($this->acted || $this->inside !== null || ($this->only !== null && !$args->getObject() instanceof $this->only)) {
                     return;
                 }
 
@@ -2205,6 +2234,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
         }
 
+        // A blind spot of this oracle's, not the bundle's, which binds a reference by its key: the
+        // oracle says a reference by the name of the relay it points at, so two relays of one
+        // name would be two rows it could not tell apart. Refused, then, and not to be lifted as
+        // redundant -- the namesake lines of the crate were put into the world for the opposite
+        // reason, where the one telling rows apart by what they are shown as was the bundle.
         $names = array_column($taken['Relay'] ?? [], 'name');
 
         if (\count($names) !== \count(array_unique($names))) {
