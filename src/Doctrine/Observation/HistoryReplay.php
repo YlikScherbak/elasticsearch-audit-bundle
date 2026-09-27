@@ -53,7 +53,7 @@ final class HistoryReplay
     /** @var array<string, array<string, int|null>> the flush whose DELETE took each of them */
     private array $goneIn = [];
 
-    /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool}> */
+    /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool, ownerContext: array<string, mixed>}> */
     private array $facts = [];
 
     /**
@@ -260,7 +260,7 @@ final class HistoryReplay
     }
 
     /**
-     * @return list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool}>
+     * @return list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool, ownerContext: array<string, mixed>}>
      */
     public function facts(): array
     {
@@ -363,7 +363,26 @@ final class HistoryReplay
      */
     private function said(string $type, string $id, string $field, mixed $old, mixed $new, ?array $element = null, bool $failed = false): void
     {
-        $this->facts[] = ['type' => $type, 'id' => $id, 'field' => $field, 'old' => $old, 'new' => $new, 'flush' => $this->log?->ownerOf($this->at), 'at' => $this->at, 'element' => $element, 'failed' => $failed];
+        $this->facts[] = ['type' => $type, 'id' => $id, 'field' => $field, 'old' => $old, 'new' => $new, 'flush' => $this->log?->ownerOf($this->at), 'at' => $this->at, 'element' => $element, 'failed' => $failed, 'ownerContext' => $element === null ? [] : $this->contextOfTheOwner($element['owner'], $id)];
+    }
+
+    /**
+     * What an owner's always-recorded fields hold in its row at this point of the log: the
+     * context of what an element did, which is the owner's row beside the change when the
+     * change is in the database -- not as the flush began, and not as the rows stand once the
+     * history is written. The owner's own UPDATE need not be anywhere near: the application's
+     * SQL may have moved the row between two statements of its elements.
+     *
+     * @param class-string $owner
+     *
+     * @return array<string, mixed>
+     */
+    private function contextOfTheOwner(string $owner, string $id): array
+    {
+        $root = $this->em()->getClassMetadata($this->em()->getClassMetadata($owner)->rootEntityName);
+        $row = $this->rows[$root->name][$id] ?? null;
+
+        return $row === null ? [] : $this->contextOf($this->classOfRow($root, $row), $row);
     }
 
     /**

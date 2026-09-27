@@ -57,7 +57,7 @@ final class ElementFieldRuns
      *
      * @param (\Closure(int): bool)|null $duringAFlush whether the statement at a position ran while a flush of the listener's did
      *
-     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>}>
+     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>, at: int, context: array<string, mixed>}>
      */
     public function of(EntityManagerInterface $em, HistoryReplay $replay, int $readThrough, bool $consume = false, ?\Closure $duringAFlush = null): array
     {
@@ -65,6 +65,8 @@ final class ElementFieldRuns
         $runs = [];
         $changes = [];
         $last = [];
+        $ranTo = [];
+        $contexts = [];
 
         foreach ($replay->facts() as $fact) {
             $element = $fact['element'];
@@ -132,15 +134,20 @@ final class ElementFieldRuns
             $at = $last[$who] ?? null;
 
             if ($at === null || $runs[$at]['flush'] !== $fact['flush'] || isset($changes[$at][$name])) {
-                $runs[] = ['owner' => $owner, 'flush' => $fact['flush'], 'changes' => []];
+                $runs[] = ['owner' => $owner, 'flush' => $fact['flush']];
                 $at = $last[$who] = array_key_last($runs);
             }
 
             $changes[$at][$name] = $value;
+            // The context of a run is the owner's row once the last statement it holds ran.
+            $ranTo[$at] = $fact['at'];
+            $contexts[$at] = $fact['ownerContext'];
         }
 
+        $read = [];
+
         foreach ($runs as $at => $run) {
-            $runs[$at]['changes'] = $changes[$at] ?? [];
+            $read[] = ['owner' => $run['owner'], 'flush' => $run['flush'], 'changes' => $changes[$at] ?? [], 'at' => $ranTo[$at] ?? 0, 'context' => $contexts[$at] ?? []];
         }
 
         // What the log could not be followed through, said once for the reading and by class
@@ -155,6 +162,6 @@ final class ElementFieldRuns
             ]);
         }
 
-        return $runs;
+        return $read;
     }
 }

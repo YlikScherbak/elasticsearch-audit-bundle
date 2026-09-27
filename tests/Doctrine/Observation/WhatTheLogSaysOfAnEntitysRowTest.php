@@ -11,6 +11,8 @@ use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Beacon;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Pouch;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Preference;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Sku;
@@ -131,6 +133,35 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
         self::assertSame(['hub', $key['id']], [$copy->name, $copy->id]);
         self::assertNull($replay->asItStoodBeforeItWent(Relay::class, ['id' => $kept->id]), 'a row still there');
         self::assertNull($replay->asItStoodBeforeItWent(Author::class, ['id' => $ada->id]), 'a row nothing watches');
+
+        $this->end();
+    }
+
+    public function testAnElementsFactCarriesItsOwnersContextWhereItRan(): void
+    {
+        // A line goes from one to two; the application's own SQL moves the crate's status; the
+        // line goes to three. The owner never had an UPDATE of Doctrine's: each fact says what
+        // its row held when the line's statement ran.
+        $this->unownedStatementsAreExpected = true;
+        $crate = new Crate('C-1');
+        $crate->add($line = new CrateItem('apple'));
+        $this->em->persist($crate);
+        $this->em->flush();
+
+        $this->begin();
+        $line->quantity = 2;
+        $this->em->flush();
+        $this->em->getConnection()->update('Crate', ['status' => 'raw'], ['code' => 'C-1']);
+        $line->quantity = 3;
+        $this->em->flush();
+
+        $facts = array_values(array_filter(
+            $this->memory()->replayed($this->em)->facts(),
+            fn (array $fact): bool => $fact['at'] > $this->from && $fact['element'] !== null,
+        ));
+
+        self::assertSame([[1, 2], [2, 3]], array_map(static fn (array $fact): array => [$fact['old'], $fact['new']], $facts), 'the premise: the two changes of the line');
+        self::assertSame([['status' => 'packed'], ['status' => 'raw']], array_column($facts, 'ownerContext'));
 
         $this->end();
     }

@@ -2640,7 +2640,7 @@ final class AuditSubscriber
      * What changed inside the elements of tracked collections since the log was last read
      * into the history: {@see ElementFieldRuns::of()}.
      *
-     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>}>
+     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>, at: int, context: array<string, mixed>}>
      */
     private function elementFieldRuns(EntityManagerInterface $em, bool $consume = false): array
     {

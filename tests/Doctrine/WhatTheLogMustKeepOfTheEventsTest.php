@@ -8,6 +8,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Kiln;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
@@ -51,6 +53,64 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame([['article', 'update', ['author' => ['old' => 'Ada', 'new' => 'Bea'], 'status' => ['old' => 'draft', 'new' => 'draft']]]], $this->said());
+    }
+
+    public function testAnAuthorTheFlushRemovedIsNamedByEveryArticleThatLeftIt(): void
+    {
+        // One author, the old side of two records: named by both, not only by the first.
+        [$first, $ada, $bea] = $this->anArticleBy('Ada', 'Bea');
+        $second = new Article('Again');
+        $second->author = $ada;
+        $this->em->persist($second);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $first->author = $bea;
+        $second->author = $bea;
+        $this->em->remove($ada);
+        $this->em->flush();
+
+        $change = ['author' => ['old' => 'Ada', 'new' => 'Bea'], 'status' => ['old' => 'draft', 'new' => 'draft']];
+
+        self::assertSame([['article', 'update', $change], ['article', 'update', $change]], $this->said());
+    }
+
+    public function testTheContextOfWhatAnElementDidIsItsOwnersRowWhereItRan(): void
+    {
+        // A line goes from one to two, in a flush whose postFlush somebody swallowed; the
+        // application's own SQL moves the crate's status; the line goes to three, and that
+        // flush writes both records. The crate never had an UPDATE of Doctrine's. Each record's
+        // context is the crate's row when its line's statement ran: "packed", then "raw" --
+        // not the object's as each flush began, which never heard of "raw", and not the rows as
+        // they stand when the late one is written, which would lend the first one the future.
+        $this->unownedStatementsAreExpected = true;
+        $crate = new Crate('C-1');
+        $crate->add($line = new CrateItem('apple'));
+        $this->em->persist($crate);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $listener = $this->silenceOurPostFlush();
+        $line->quantity = 2;
+        $this->em->flush();
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $listener);
+
+        $this->em->getConnection()->update('Crate', ['status' => 'raw'], ['code' => 'C-1']);
+        $line->quantity = 3;
+        $this->em->flush();
+
+        $quantity = 'items.'.$line->id.'.quantity';
+
+        $this->pinned(
+            expected: [
+                ['crate', 'update', [$quantity => ['old' => 1, 'new' => 2], 'status' => ['old' => 'packed', 'new' => 'packed']]],
+                ['crate', 'update', [$quantity => ['old' => 2, 'new' => 3], 'status' => ['old' => 'raw', 'new' => 'raw']]],
+            ],
+            today: [
+                ['crate', 'update', [$quantity => ['old' => 1, 'new' => 2], 'status' => ['old' => 'packed', 'new' => 'packed']]],
+                ['crate', 'update', [$quantity => ['old' => 2, 'new' => 3], 'status' => ['old' => 'packed', 'new' => 'packed']]],
+            ],
+        );
     }
 
     public function testAChangeOfOneTableOfAJoinedRowHasTheContextOfBoth(): void
