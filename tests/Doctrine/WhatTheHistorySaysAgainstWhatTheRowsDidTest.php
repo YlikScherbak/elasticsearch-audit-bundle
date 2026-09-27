@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Contract\ActorResolverInterface;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
@@ -38,6 +40,17 @@ use Psr\Log\AbstractLogger;
  * listener changed nothing" — but a second manager needs a second database, and two of
  * the databases this suite runs on in CI would give it the same one. That property has
  * its own tests (see TransactionSafetyTest); this one is about the history.
+ *
+ * **What the oracle holds the history to, and what it leaves to others** (step 5, 5.2c). It
+ * checks facts: each value a statement set, the creation or removal of an audited row, and
+ * who wrote it -- the actor of the flush that ran the statement, from this test's own account
+ * of flushes. And, compared as a multiset, it checks the precondition of any grouping: no
+ * statement lost, none told twice. How facts are divided into records, and in what order the
+ * records come, is a rule of presenting them -- the contract's, not the database's, which says
+ * nothing of it -- and is held by the targeted tests of the reader (WhereOneExecutionEndsTest,
+ * WhatAnEntitysRowsSayOfItsRecordsTest); a second copy of those rules here would check the
+ * reader against itself. The fingerprint of two runs sees a change of those properties, and
+ * cannot say which run is right.
  *
  * **Both forms of a collection change count as the same statement.** "items.7 left" and
  * "items went from these to those" describe one fact, and which of them the bundle uses
@@ -81,9 +94,12 @@ use Psr\Log\AbstractLogger;
  *      chooses nothing: it sweeps up whatever the collection is holding, phantom
  *      included. A phantom arrives without being asked for once a flush can start inside
  *      another, and every one of the six sequences that hole produced was that shape.
- *   4. **A flush started from inside another one.** Rounds two to five of this candidate's
- *      review lived entirely there, and not one of their defects could be found here. This
- *      is the largest hole in the list and the next thing to close.
+ *   4. **A flush started from inside another one** -- closed: the endings nest a flush before
+ *      the statement and after it, refused or not, and in step 5's world under another actor.
+ *      What is left of it is a connection without savepoints, where a statement taken back
+ *      inside a flush makes the transaction rollback-only and the manager closes under the
+ *      rest of the sequence; `nested_flush_provenance: outer` is held there by
+ *      `WhoWroteItTest` and `WhoseMomentALateRecordCarriesTest`.
  *   5. **An owning many-to-many.** Emptying one deletes join rows and leaves the elements
  *      where they are, which is a different road through Doctrine and the only one that
  *      reads a join table. Covered by hand in
@@ -200,6 +216,33 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private array $checkpointActors = [];
 
     /**
+     * The table of the statement each reading was taken before, by the same index; null for a
+     * reading no statement follows. What a rollback took back is read from here.
+     *
+     * @var list<string|null>
+     */
+    private array $checkpointTables = [];
+
+    /**
+     * How many times each combination of step 5's world was reached, across the sequences run
+     * so far -- reached, not drawn: a statement of the kind it names ran, in the circumstance it
+     * names, on a row the history is written about; for one taken back, a statement that ran and
+     * was then undone. What the widened search is for is these, not the words that lead to them.
+     *
+     * @var array<string, int>
+     */
+    private array $reached = [];
+
+    /** The tables a nested flush running now was asked to write by its own step; null outside one. */
+    private ?array $theNestedFlushWrites = null;
+
+    /** The table of the last statement written, while its flush is still the one running. */
+    private ?string $lastTableWritten = null;
+
+    /** The frame the listener of step 5's world writes through, for the ending that needs one. */
+    private ?AuditFrame $frame = null;
+
+    /**
      * @return list<\Doctrine\DBAL\Driver\Middleware>
      */
     protected function middlewaresOfTheTest(): array
@@ -246,18 +289,99 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $words[0] === 'SAVEPOINT' => $this->open[] = [$words[1] ?? '', \count($this->checkpoints)],
             $words[0] === 'RELEASE' => $this->forgetSavepoint(end($words) ?: ''),
             $words[0] === 'ROLLBACK' && ($words[1] ?? '') === 'TO' => $this->rollBackToSavepoint(end($words) ?: ''),
-            \in_array($words[0], ['INSERT', 'UPDATE', 'DELETE'], true) => $this->read($this->whoWritesNow()),
+            \in_array($words[0], ['INSERT', 'UPDATE', 'DELETE'], true) => $this->aWrite($words),
             default => null,
         };
     }
 
-    private function read(?string $by): void
+    /**
+     * A statement that writes, about to run: read the rows before it, and count what it reaches.
+     *
+     * @param list<string> $words
+     */
+    private function aWrite(array $words): void
+    {
+        // The words are upper-cased; the table is named as the world names it.
+        $named = trim(match ($words[0]) {
+            'INSERT', 'DELETE' => $words[2] ?? '',
+            default => $words[1] ?? '',
+        }, '`"[]');
+        $table = $named;
+
+        foreach (self::HISTORY_TABLES as $one) {
+            if (strcasecmp($one, $named) === 0) {
+                $table = $one;
+            }
+        }
+        $by = $this->whoWritesNow();
+        $this->read($by, $table);
+
+        if (!self::theWideWorld() || !\in_array($table, self::HISTORY_TABLES, true)) {
+            return;
+        }
+
+        $nested = \count(array_filter($this->flushesRunning, fn (array $flush): bool => $flush['level'] < $this->em->getConnection()->getTransactionNestingLevel())) > 1;
+        $kiln = $table === 'Oven' || $table === 'Kiln';
+
+        if ($nested && $kiln) {
+            $this->reach('a change of the kiln in a nested flush');
+        }
+
+        if ($nested && $table === 'Relay') {
+            $this->reach('a relay written in a nested flush');
+        }
+
+        if ($nested && $by === 'bob') {
+            $this->reach('a flush nested under another actor wrote a row the history is about');
+        }
+
+        if ($nested && $this->theNestedFlushWrites !== null && !\in_array($table, $this->theNestedFlushWrites, true)) {
+            $this->reach('a nested flush carried out the outer flush\'s plan');
+        }
+
+        // The persister writes a JOINED change a table at a time, root first.
+        if ($words[0] === 'UPDATE' && $table === 'Kiln' && $this->lastTableWritten === 'Oven') {
+            $this->reach('a change of both of the kiln\'s tables in one execution');
+        }
+
+        $this->lastTableWritten = $table;
+    }
+
+    private function reach(string $combination): void
+    {
+        $this->reached[$combination] = ($this->reached[$combination] ?? 0) + 1;
+    }
+
+    /**
+     * What a rollback took back: the statements behind the readings it drops.
+     *
+     * @param list<string|null> $tables
+     */
+    private function takenBack(array $tables): void
+    {
+        if (!self::theWideWorld()) {
+            return;
+        }
+
+        foreach ($tables as $table) {
+            if ($table === 'Oven' || $table === 'Kiln') {
+                $this->reach('a change of the kiln taken back');
+            }
+
+            if ($table === 'Relay') {
+                $this->reach('a relay written and taken back');
+            }
+        }
+    }
+
+    private function read(?string $by, ?string $table = null): void
     {
         $this->reading = true;
 
         try {
             $this->checkpoints[] = $this->snapshot();
             $this->checkpointActors[] = $by;
+            $this->checkpointTables[] = $table;
         } finally {
             $this->reading = false;
         }
@@ -299,6 +423,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         if ($begins) {
             $this->flushesRunning[] = ['level' => $level, 'actor' => $this->acting->actor];
         }
+
+        $this->lastTableWritten = null;
     }
 
     private function forgetSavepoint(string $name): void
@@ -316,8 +442,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     {
         for ($i = \count($this->open) - 1; $i >= 0; --$i) {
             if ($this->open[$i][0] === $name) {
+                $this->takenBack(\array_slice($this->checkpointTables, $this->open[$i][1]));
                 $this->checkpoints = \array_slice($this->checkpoints, 0, $this->open[$i][1]);
                 $this->checkpointActors = \array_slice($this->checkpointActors, 0, $this->open[$i][1]);
+                $this->checkpointTables = \array_slice($this->checkpointTables, 0, $this->open[$i][1]);
                 array_splice($this->open, $i + 1); // the savepoint itself stays open
 
                 return;
@@ -327,8 +455,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
     private function undoTo(int $readings, bool $all): void
     {
+        $this->takenBack(\array_slice($this->checkpointTables, $readings));
         $this->checkpoints = \array_slice($this->checkpoints, 0, $readings);
         $this->checkpointActors = \array_slice($this->checkpointActors, 0, $readings);
+        $this->checkpointTables = \array_slice($this->checkpointTables, 0, $readings);
 
         if ($all) {
             $this->open = [];
@@ -406,6 +536,23 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'point a relay elsewhere',
     ];
 
+    /**
+     * What step 5's world was widened to reach: each counted when it happened
+     * ({@see self::$reached}), and held to the same floors as the words.
+     */
+    private const COMBINATIONS = [
+        'a change of the kiln in a nested flush',
+        'a change of the kiln taken back',
+        'a change of both of the kiln\'s tables in one execution',
+        'a relay written and taken back',
+        'a relay written in a nested flush',
+        'a flush nested under another actor wrote a row the history is about',
+        'a nested flush carried out the outer flush\'s plan',
+    ];
+
+    /** The tables of the rows the history is written about, entities' and lines'. */
+    private const HISTORY_TABLES = ['Article', 'Crate', 'CrateItem', 'Oven', 'Kiln', 'Relay'];
+
     /** How a flush of a sequence may end, besides the ordinary way. */
     private const ENDINGS = [
         ...self::ENDINGS_5_2,
@@ -413,6 +560,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         // subclass while the outer one changed its root: the shape of 5.2b's defect, which a
         // guard found and no search could.
         'flush, and after the statement a nested one edits the kiln\'s subclass',
+        // The application's own transaction around the flush, rolled back, in the atomic frame
+        // the README gives for it: what the flush wrote is taken back, the kiln's and the
+        // relays' with it, and the frame drops what it held. The one road in this world to a
+        // statement of those rows being run and then undone -- a relay's INSERT and the UPDATE
+        // completing it raise no event a savepoint could be opened in.
+        'flush, inside a transaction of the application\'s it rolls back, in an atomic frame',
     ];
 
     /**
@@ -689,11 +842,19 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         // sequences run is what it must not fall under.
         $words = [...self::theVocabulary()[0], ...self::theVocabulary()[1], 'flush'];
 
+        // And what step 5's world is for, held to the same floors: a combination the search
+        // stopped reaching is a world that lost its shape, whatever its words still do.
+        $counted = [...$this->acted, ...$this->reached];
+
+        if (self::theWideWorld()) {
+            $words = [...$words, ...self::COMBINATIONS];
+        }
+
         if ($seeds >= 60) {
             self::assertSame([], array_values(array_filter(
                 $words,
-                fn (string $word): bool => ($this->acted[$word] ?? 0) === 0,
-            )), sprintf('these words of the vocabulary did nothing in %d sequences -- most likely the seeds stopped drawing them; look at the draw before the listener', $seeds));
+                static fn (string $word): bool => ($counted[$word] ?? 0) === 0,
+            )), sprintf('these words or combinations did nothing in %d sequences -- most likely the seeds stopped drawing them, or what they need beside them; look at the draw before the listener', $seeds));
         }
 
         if ($seeds >= 3000) {
@@ -701,9 +862,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
             self::assertSame([], array_values(array_filter(
                 $words,
-                fn (string $word): bool => ($this->acted[$word] ?? 0) < $floor,
-            )), sprintf('these words acted fewer than %d times in %d sequences: a word of the search has died', $floor, $seeds));
+                static fn (string $word): bool => ($counted[$word] ?? 0) < $floor,
+            )), sprintf('these words or combinations were reached fewer than %d times in %d sequences: a shape of the search has died', $floor, $seeds));
         }
+
+        fwrite(\STDERR, $_SERVER['AUDIT_MODEL_REACHED'] ?? false ? 'REACHED '.json_encode($counted)."\n" : '');
 
         self::assertSame(
             [],
@@ -989,7 +1152,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         };
         $this->acting->actor = self::theWideWorld() ? ($seed % 2 === 1 ? 'alice' : 'carol') : 'tests';
         $this->actors = $this->acting;
-        $this->attachListener(FailurePolicy::Log);
+        $this->frame = null;
+
+        // Through a frame in step 5's world, for the ending that begins one; a frame not begun
+        // holds nothing.
+        if (self::theWideWorld()) {
+            $buffer = new FrameBuffer();
+            $this->frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer, FailurePolicy::Log));
+        } else {
+            $this->attachListener(FailurePolicy::Log);
+        }
+
         $this->made = 0;
         $this->flushesRunning = [];
         $this->em->getEventManager()->addEventListener([Events::onFlush, Events::postFlush], new class($this->aFlushAt(...)) {
@@ -1036,6 +1209,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             // happened, and the history is right to say both.
             $this->checkpoints = [];
             $this->checkpointActors = [];
+            $this->checkpointTables = [];
             $this->open = [];
             $points = [$this->snapshot()];
             $this->apply($step, $world);
@@ -1173,6 +1347,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $steps[] = 'edit the kiln\'s root';
             }
 
+            // And the rolled-back transaction needs the rows it is there to take back.
+            if ($ending === 'flush, inside a transaction of the application\'s it rolls back, in an atomic frame') {
+                $steps[] = 'edit the kiln\'s root';
+                $steps[] = 'create two relays pointing at each other';
+            }
+
             $steps[] = $ending;
         }
 
@@ -1297,7 +1477,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $world['article']->title = 'from after';
 
                 return true;
-            }, refused: false),
+            }, refused: false, itWrites: ['Article']),
             'flush, and after the statement a nested one empties the crate' => $this->flushWithOneNestedAfter(function () use ($crate): bool {
                 if ($this->holdsAPhantom($crate)) {
                     return false;
@@ -1306,7 +1486,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $crate->items = new ArrayCollection();
 
                 return true;
-            }, refused: false),
+            }, refused: false, itWrites: ['CrateItem']),
             'flush, and after the statement a nested one empties the crate and is refused' => $this->flushWithOneNestedAfter(function () use ($crate): bool {
                 if ($this->holdsAPhantom($crate)) {
                     return false;
@@ -1315,7 +1495,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $crate->items = new ArrayCollection();
 
                 return true;
-            }, refused: true),
+            }, refused: true, itWrites: ['CrateItem']),
             'flush, and after the statement a listener removes the line' => $this->flushRemovingALineAfterItsStatement(nested: false),
             'flush, and after the statement a nested one removes the line' => $this->flushRemovingALineAfterItsStatement(nested: true),
             'clear the manager' => $this->did(fn () => $this->em->clear()),
@@ -1335,12 +1515,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $this->em->persist($this->relays[] = $other);
             }),
             'point a relay elsewhere' => $this->pointARelayElsewhere(),
+            'flush, inside a transaction of the application\'s it rolls back, in an atomic frame' => $this->flushRolledBackInAnAtomicFrame(),
             'flush, and after the statement a nested one edits the kiln\'s subclass' => $world['kiln'] !== null && $this->flushWithOneNestedAfter(static function () use ($world): bool {
                 \assert($world['kiln'] !== null);
                 $world['kiln']->heat += 1;
 
                 return true;
-            }, refused: false),
+            }, refused: false, itWrites: ['Kiln']),
             'flush, and after the statement a listener ahead of this one clears the manager' => $this->flushClearingAfterTheStatement(thenRemovingALine: false),
             'flush, and after the statement a listener clears the manager, loads a line and removes it' => $this->flushClearingAfterTheStatement(thenRemovingALine: true),
             'flush, and a savepoint of the application\'s around a statement is rolled back after this listener' => $this->flushTakingAStatementBack(aheadOfThisListener: false),
@@ -1351,6 +1532,38 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         if ($acted) {
             $this->acted[$step] = ($this->acted[$step] ?? 0) + 1;
         }
+    }
+
+    /**
+     * The README's recipe for an application that owns a wider transaction: an atomic frame, the
+     * transaction, the flush, and -- here -- the rollback, a clear of what Doctrine believes
+     * written, and the frame reset. Acted when it rolled a flush back.
+     */
+    private function flushRolledBackInAnAtomicFrame(): bool
+    {
+        if ($this->frame === null) {
+            return false;
+        }
+
+        $this->aReplacementIsWaiting = false;
+        $connection = $this->em->getConnection();
+        $this->frame->begin(atomic: true);
+        $connection->beginTransaction();
+
+        try {
+            $this->em->flush();
+        } catch (\Throwable) {
+            // Whatever the application could not complete is not this test's subject.
+        } finally {
+            if ($connection->isTransactionActive()) {
+                $connection->rollBack();
+            }
+
+            $this->em->clear();
+            $this->frame->reset();
+        }
+
+        return true;
     }
 
     /**
@@ -1537,7 +1750,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
                 $this->ran = true;
                 $this->article->title = 'from inside';
-                ($this->around)(fn () => $this->em->flush());
+                ($this->around)(fn () => $this->em->flush(), ['Article']);
             }
         };
 
@@ -1560,11 +1773,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * The reading after is taken in a finally, so that a refused nested flush -- which
      * writes nothing -- still marks where it was.
      */
-    private function aroundTheNestedFlush(\Closure $flush): void
+    /**
+     * @param list<string>|null $itWrites the tables the nested flush's own step writes: what it
+     *                                    writes besides is the outer flush's plan, carried out
+     */
+    private function aroundTheNestedFlush(\Closure $flush, ?array $itWrites = null): void
     {
         $this->checkpoints[] = $this->snapshot();
         $this->checkpointActors[] = null;
+        $this->checkpointTables[] = null;
         $outer = $this->acting->actor;
+        $this->theNestedFlushWrites = $itWrites;
 
         // In step 5's world a flush nested in another runs as somebody else: whose records the
         // statements it carries out are, the outer flush's remaining plan among them, is what
@@ -1577,8 +1796,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $flush();
         } finally {
             $this->acting->actor = $outer;
+            $this->theNestedFlushWrites = null;
             $this->checkpoints[] = $this->snapshot();
             $this->checkpointActors[] = null;
+            $this->checkpointTables[] = null;
         }
     }
 
@@ -1600,11 +1821,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     /**
      * @param \Closure(): bool $what whether it did its part
      */
-    private function flushWithOneNestedAfter(\Closure $what, bool $refused): bool
+    private function flushWithOneNestedAfter(\Closure $what, bool $refused, ?array $itWrites = null): bool
     {
         $this->aReplacementIsWaiting = false;
 
-        $inner = new class($this->em, $what, $refused, $this->aroundTheNestedFlush(...)) {
+        $inner = new class($this->em, $what, $refused, $this->aroundTheNestedFlush(...), $itWrites) {
             private bool $ran = false;
 
             public bool $acted = false;
@@ -1614,6 +1835,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 private readonly \Closure $what,
                 private readonly bool $refused,
                 private readonly \Closure $around,
+                private readonly ?array $itWrites,
             ) {
             }
 
@@ -1638,7 +1860,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 }
 
                 try {
-                    ($this->around)(fn () => $this->em->flush());
+                    ($this->around)(fn () => $this->em->flush(), $this->itWrites);
                 } catch (\DomainException) {
                     // what an application does about a listener that refuses its flush
                 } finally {
@@ -1702,7 +1924,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $this->em->remove($line);
 
                 if ($this->nested) {
-                    ($this->around)(fn () => $this->em->flush());
+                    ($this->around)(fn () => $this->em->flush(), ['CrateItem']);
                 }
             }
         };
