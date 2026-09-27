@@ -55,6 +55,19 @@ final class HistoryReplay
     /** @var list<array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool}> */
     private array $facts = [];
 
+    /**
+     * What each statement did to a row of an audited class, one fact a statement: an INSERT, an
+     * UPDATE or a DELETE, the row's class -- the most derived, for a hierarchy -- and key, the
+     * statement's position in the log and the flush it belongs to, and the audited columns it
+     * wrote, each from and to. A creation is a fact whether or not any column changed, and a
+     * removal carries the row as it stood before it went.
+     *
+     * Read by nothing yet: step 5 builds an entity's records from them (5.2).
+     *
+     * @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>}>
+     */
+    private array $rowFacts = [];
+
     /** @var list<string> */
     private array $doubts = [];
 
@@ -267,6 +280,14 @@ final class HistoryReplay
     }
 
     /**
+     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>}>
+     */
+    public function rowFacts(): array
+    {
+        return $this->rowFacts;
+    }
+
+    /**
      * What the representers threw for the statements after a position, for a writer to report
      * each once.
      *
@@ -427,6 +448,13 @@ final class HistoryReplay
         foreach ($there === [] ? $this->ownersOf($metadata, $this->rows[$root][$id]) : [] as $owner) {
             $this->member($metadata, $owner, $id, self::keyColumnsOf($metadata, $this->rows[$root][$id]), $this->rows[$root][$id], arrived: true);
         }
+
+        // The creation, from what this table's INSERT wrote: every audited column of it, from
+        // nothing.
+        $this->rowFact(StatementShape::INSERT, $metadata, $this->rows[$root][$id], array_map(
+            static fn (mixed $value): array => ['old' => null, 'new' => $value],
+            $this->auditedColumns($metadata, $this->rows[$root][$id], array_keys($row)),
+        ));
     }
 
     /**
@@ -458,6 +486,20 @@ final class HistoryReplay
         }
 
         $this->rows[$root][$id] = $after;
+
+        // The change, from what this statement wrote: the audited columns it set, each from the
+        // row's value -- a foreign key as the key it names -- and only those that moved.
+        $was = $this->auditedColumns($metadata, $before, array_keys($shape->assigned));
+        $is = $this->auditedColumns($metadata, $after, array_keys($shape->assigned));
+        $changed = [];
+
+        foreach ($is as $field => $value) {
+            if (!self::same($was[$field] ?? null, $value)) {
+                $changed[$field] = ['old' => $was[$field] ?? null, 'new' => $value];
+            }
+        }
+
+        $this->rowFact(StatementShape::UPDATE, $metadata, $after, $changed);
 
         $ownersBefore = self::byColumn($this->ownersOf($metadata, $before));
         $ownersAfter = self::byColumn($this->ownersOf($metadata, $after));
@@ -524,6 +566,99 @@ final class HistoryReplay
     }
 
     /**
+     * A fact about a row of an audited class, or nothing for a class nobody audits.
+     *
+     * @param ClassMetadata<object>                          $metadata the mapping of the table the statement wrote
+     * @param array<string, mixed>                           $row      the row as the replay holds it, every table of it
+     * @param array<string, array{old: mixed, new: mixed}>   $fields
+     */
+    private function rowFact(string $statement, ClassMetadata $metadata, array $row, array $fields): void
+    {
+        $class = $this->classOfRow($metadata, $row);
+
+        if ($this->audited->for($class->newInstance()) === null) {
+            return;
+        }
+
+        $this->rowFacts[] = [
+            'statement' => $statement,
+            'class' => $class->name,
+            'id' => self::keyOf($metadata, $row),
+            'key' => self::keyColumnsOf($metadata, $row),
+            'at' => $this->at,
+            'flush' => $this->log?->ownerOf($this->at),
+            'fields' => $fields,
+        ];
+    }
+
+    /**
+     * The class a row is of: the mapping's own, or -- in a hierarchy -- the one its
+     * discriminator names, so that a subclass's audited columns are known wherever they are.
+     *
+     * @param ClassMetadata<object> $metadata
+     * @param array<string, mixed>  $row
+     *
+     * @return ClassMetadata<object>
+     */
+    private function classOfRow(ClassMetadata $metadata, array $row): ClassMetadata
+    {
+        $root = $this->em()->getClassMetadata($metadata->rootEntityName);
+        $column = $root->discriminatorColumn['name'] ?? null;
+        $value = $column === null ? null : ($row[$column] ?? null);
+        $class = $value === null ? null : ($root->discriminatorMap[$value] ?? null);
+
+        return $class === null ? $metadata : $this->em()->getClassMetadata($class);
+    }
+
+    /**
+     * The audited fields among some columns of a row, with the row's values as the object
+     * holds them: a field through its type, a single-valued association as the key it names.
+     *
+     * @param ClassMetadata<object> $metadata
+     * @param array<string, mixed>  $row
+     * @param list<string>          $columns
+     *
+     * @return array<string, mixed>
+     */
+    private function auditedColumns(ClassMetadata $metadata, array $row, array $columns): array
+    {
+        $class = $this->classOfRow($metadata, $row);
+        $declaration = $this->audited->for($class->newInstance());
+
+        if ($declaration === null) {
+            return [];
+        }
+
+        $values = [];
+
+        foreach ($columns as $column) {
+            $field = $class->fieldNames[$column] ?? null;
+
+            if ($field !== null) {
+                if (\array_key_exists($field, $declaration->fields)) {
+                    $values[$field] = $this->php($class, $field, $row[$column] ?? null);
+                }
+
+                continue;
+            }
+
+            foreach ($class->getAssociationNames() as $association) {
+                if (!$class->isSingleValuedAssociation($association) || !\array_key_exists($association, $declaration->fields)) {
+                    continue;
+                }
+
+                $joinColumns = CollectionRowsQuery::entry($class->getAssociationMapping($association), 'joinColumns');
+
+                if (\is_array($joinColumns) && \count($joinColumns) === 1 && CollectionRowsQuery::entry(reset($joinColumns), 'name') === $column) {
+                    $values[$association] = $row[$column] ?? null;
+                }
+            }
+        }
+
+        return $values;
+    }
+
+    /**
      * @param list<array{type: string, id: string, key: mixed, column: string, collection: string, metadata: ClassMetadata<object>}> $owners
      *
      * @return array<string, array{type: string, id: string, key: mixed, column: string, collection: string, metadata: ClassMetadata<object>}>
@@ -562,6 +697,14 @@ final class HistoryReplay
         foreach ($this->ownersOf($metadata, $this->rows[$root][$id]) as $owner) {
             $this->member($metadata, $owner, $id, $key, $this->rows[$root][$id], arrived: false);
         }
+
+        // The removal, with the row as it stood before it went -- every table of it, which the
+        // replay holds as one row -- taken now, before the row is let go of.
+        $gone = $this->rows[$root][$id];
+        $this->rowFact(StatementShape::DELETE, $metadata, $gone, array_map(
+            static fn (mixed $value): array => ['old' => $value, 'new' => null],
+            $this->auditedColumns($this->classOfRow($metadata, $gone), $gone, array_keys($gone)),
+        ));
 
         $this->gone[$root][$id] = true;
         $this->goneIn[$root][$id] = $this->log?->ownerOf($this->at);
@@ -836,8 +979,17 @@ final class HistoryReplay
         }
 
         $type = $metadata->getTypeOfField($field);
+        $value = \is_string($type) ? Type::getType($type)->convertToPHPValue($value, $this->em()->getConnection()->getDatabasePlatform()) : $value;
 
-        return \is_string($type) ? Type::getType($type)->convertToPHPValue($value, $this->em()->getConnection()->getDatabasePlatform()) : $value;
+        // An enum is the case the object holds, not the string its column does: hydration makes
+        // it one, and the type alone does not.
+        $enum = CollectionRowsQuery::entry($metadata->getFieldMapping($field), 'enumType');
+
+        if (\is_string($enum) && is_subclass_of($enum, \BackedEnum::class) && (\is_int($value) || \is_string($value))) {
+            return $enum::from($value);
+        }
+
+        return $value;
     }
 
     /**
