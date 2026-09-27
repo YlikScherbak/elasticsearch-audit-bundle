@@ -62,15 +62,22 @@ final class EntityRowRuns
      * hole in how flushes claim what they run -- and is left out, and said in the log by the
      * reading that writes the history ({@see NobodysStatement}), as an element's is.
      *
-     * @param bool                       $consume      whether this is the reading that writes them
-     * @param (\Closure(int): bool)|null $duringAFlush whether the statement at a position ran while a flush of the listener's did
+     * @param bool                              $consume      whether this is the reading that writes them
+     * @param (\Closure(int): bool)|null        $duringAFlush whether the statement at a position ran while a flush of the listener's did
+     * @param (\Closure(\Throwable): void)|null $failed       what is done with a failure building one execution's record -- a
+     *                                                         representer of the application's that threw: that record is left
+     *                                                         out and the others are read; without it, the failure is raised
+     *
+     * Each record's changes are given twice: with its context -- the always-recorded fields
+     * as the row held them once the whole change ran -- and bare, with the context apart, for
+     * a caller that folds more into the record and gives it its context afterwards.
      *
      * Only what came after $readThrough, which the listener moves where a flush's state is
      * forgotten.
      *
-     * @return list<array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change>}>
+     * @return list<array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change|mixed>, bare: array<string, Change>, context: array<string, mixed>}>
      */
-    public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null, bool $consume = false, ?\Closure $duringAFlush = null): array
+    public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null, bool $consume = false, ?\Closure $duringAFlush = null, ?\Closure $failed = null): array
     {
         /** @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}> $executions */
         $executions = [];
@@ -125,7 +132,17 @@ final class EntityRowRuns
                 continue;
             }
 
-            $record = $this->recordOf($em, $replay, $departed, $builder, $execution);
+            try {
+                $record = $this->recordOf($em, $replay, $departed, $builder, $execution);
+            } catch (\Throwable $e) {
+                if ($failed === null) {
+                    throw $e;
+                }
+
+                $failed($e);
+
+                continue;
+            }
 
             if ($record !== null) {
                 $runs[] = $record;
@@ -275,7 +292,7 @@ final class EntityRowRuns
     /**
      * @param array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>} $execution
      *
-     * @return array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change>}|null
+     * @return array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change|mixed>, bare: array<string, Change>, context: array<string, mixed>}|null
      */
     private function recordOf(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, ChangeSetBuilder $builder, array $execution): ?array
     {
@@ -294,6 +311,7 @@ final class EntityRowRuns
         }
 
         $changes = [];
+        $bare = [];
 
         if ($event !== AuditEvent::REMOVE) {
             $changeSet = [];
@@ -304,7 +322,10 @@ final class EntityRowRuns
                     : [$sides['old'], $sides['new']];
             }
 
-            $changes = $builder->build($entity ?? $metadata->newInstance(), $this->ofTheRow($em, $metadata, $declaration), $changeSet, [], $execution['context']);
+            $object = $entity ?? $metadata->newInstance();
+            $ofTheRow = $this->ofTheRow($em, $metadata, $declaration);
+            $bare = $builder->build($object, new AuditMetadata($ofTheRow->objectType, $ofTheRow->fields), $changeSet);
+            $changes = $builder->withAlwaysRecorded($object, $ofTheRow, $bare, $execution['context']);
         }
 
         return [
@@ -316,6 +337,8 @@ final class EntityRowRuns
             'flush' => $execution['flush'],
             'at' => $execution['at'],
             'changes' => $changes,
+            'bare' => $bare,
+            'context' => $event === AuditEvent::REMOVE ? [] : $execution['context'],
         ];
     }
 

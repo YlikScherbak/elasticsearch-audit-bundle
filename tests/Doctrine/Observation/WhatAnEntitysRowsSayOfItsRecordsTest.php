@@ -722,7 +722,7 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
     }
 
     /**
-     * @return list<array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change>}>
+     * @return list<array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change|mixed>, bare: array<string, Change>, context: array<string, mixed>}>
      */
     private function runs(?HistoryReplay $replay = null, bool $consume = false): array
     {

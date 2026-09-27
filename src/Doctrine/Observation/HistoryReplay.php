@@ -367,6 +367,25 @@ final class HistoryReplay
     }
 
     /**
+     * What a row's always-recorded fields hold where the replay has read to -- which is where
+     * the log stands when it is asked during a flush: the context of something that happened
+     * there and that is no fact of the row's (what a collection's snapshot says, until its
+     * join rows are facts too). Nothing for a row it does not know.
+     *
+     * @param class-string         $class a class of the row's hierarchy
+     * @param array<string, mixed> $key   its identifier columns and their database values
+     *
+     * @return array<string, mixed>
+     */
+    public function contextOfTheRow(string $class, array $key): array
+    {
+        $root = $this->em()->getClassMetadata($this->em()->getClassMetadata($class)->rootEntityName);
+        $row = $this->rows[$root->name][self::keyOf($root, $key)] ?? null;
+
+        return $row === null ? [] : $this->contextOf($this->classOfRow($root, $row), $row);
+    }
+
+    /**
      * What an owner's always-recorded fields hold in its row at this point of the log: the
      * context of what an element did, which is the owner's row beside the change when the
      * change is in the database -- not as the flush began, and not as the rows stand once the
