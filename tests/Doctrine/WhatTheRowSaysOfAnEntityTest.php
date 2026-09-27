@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
+use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Switchboard;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SwitchMode;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
@@ -214,6 +217,86 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
             said: array_values(array_filter(array_map(static fn (array $d): mixed => $d['changes']['tags'] ?? null, $this->documents()))),
         );
         $this->logs = []; // the warning it says so with, which is today's too
+    }
+
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function whetherTheApplicationWritesBetween(): iterable
+    {
+        yield 'the two changes one after the other' => [false];
+        yield 'a statement of the application\'s between them' => [true];
+    }
+
+    /**
+     * Two changes of one JOINED row, each touching one table of it, are two records.
+     *
+     * Without savepoints (DBAL 3, nested_flush_provenance: outer) no frame tells a nested
+     * flush's statements from the outer flush's: the outer flush changes the root's column, a
+     * listener ahead of this one runs a nested flush that changes the subclass's, and in the log
+     * the two UPDATEs are of one row, of the hierarchy's two tables, in one frame, under one
+     * owner -- measured. What separates them is where the nested flush began. And a statement
+     * of the application's own between them, which says nothing of any audited row, does not
+     * make them adjacent: which statements make one change is read over the log as it ran, not
+     * over the facts that are left once the others are filtered out.
+     *
+     * Held on the road through Doctrine's events today, and to be held on the road through the
+     * log's facts (step 5).
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('whetherTheApplicationWritesBetween')]
+    public function testTwoChangesOfAJoinedRowEachOfOneTableAreTwoRecordsWithoutSavepoints(bool $between): void
+    {
+        $this->unownedStatementsAreExpected = true;
+        $this->watchTheConnection(FailurePolicy::Log, savepoints: false);
+        $this->em->persist($vehicle = new Vehicle());
+        $this->em->persist($press = new Press('One'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $this->ahead([Events::postUpdate], new class($this->em, $press, $between ? $vehicle->id : null) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Press $press, private readonly mixed $vehicle)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->press || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+
+                if ($this->vehicle !== null) {
+                    $this->em->getConnection()->update('Vehicle', ['plate' => 'between'], ['id' => $this->vehicle]);
+                }
+
+                $this->press->tonnage = 5;
+                $this->em->flush();
+            }
+        });
+
+        $press->name = 'Two';
+        $this->em->flush();
+
+        $said = array_map(static fn (array $d): array => [$d['objectType'], $d['changes']], $this->documents());
+        usort($said, static fn (array $a, array $b): int => strcmp((string) json_encode($a), (string) json_encode($b)));
+
+        // Today they are two records, and the nested one also says the name changed -- which its
+        // UPDATE did not write: the name came from Doctrine's change set, so the change is in the
+        // history twice. A record from the log says what its own statement did.
+        $this->pinned(
+            expected: [
+                ['machine', ['name' => ['old' => 'One', 'new' => 'Two']]],
+                ['machine', ['tonnage' => ['old' => 1, 'new' => 5]]],
+            ],
+            today: [
+                ['machine', ['name' => ['old' => 'One', 'new' => 'Two']]],
+                ['machine', ['tonnage' => ['old' => 1, 'new' => 5], 'name' => ['old' => 'One', 'new' => 'Two']]],
+            ],
+            said: $said,
+        );
     }
 
     /**
