@@ -137,6 +137,57 @@ final class JoinRowsQuery
     }
 
     /**
+     * Which owners hold one target: what is asked right after the target's DELETE, to tell
+     * whether the database took its rows with it ({@see LookRightAfter}). One placeholder for
+     * each of the target's key columns, in the order given.
+     *
+     * @param mixed        $mapping the association's mapping, owning side
+     * @param list<string> $columns the target's key columns, in the order the look binds them
+     *
+     * @return array{sql: string, owners: list<string>}|null the owners' referenced columns, in the order the statement selects them
+     */
+    public static function ownersHolding(AbstractPlatform $platform, mixed $mapping, array $columns): ?array
+    {
+        $table = self::table($platform, $mapping);
+        $owners = self::columns(CollectionRowsQuery::entry(CollectionRowsQuery::entry($mapping, 'joinTable'), 'joinColumns'));
+        $targets = self::columns(CollectionRowsQuery::entry(CollectionRowsQuery::entry($mapping, 'joinTable'), 'inverseJoinColumns'));
+
+        if ($table === null || $owners === null || $targets === null) {
+            return null;
+        }
+
+        $byReferenced = [];
+
+        foreach ($targets as [$name, $referenced, $column]) {
+            $byReferenced[$referenced] = self::named($platform, $name, $column).' = ?';
+        }
+
+        $where = [];
+
+        foreach ($columns as $column) {
+            if (!isset($byReferenced[$column])) {
+                return null;
+            }
+
+            $where[] = $byReferenced[$column];
+        }
+
+        if (\count($where) !== \count($byReferenced)) {
+            return null;
+        }
+
+        return [
+            'sql' => sprintf(
+                'SELECT %s FROM %s WHERE %s',
+                implode(', ', array_map(static fn (array $c): string => self::named($platform, $c[0], $c[2]), $owners)),
+                $table,
+                implode(' AND ', $where),
+            ),
+            'owners' => array_map(static fn (array $c): string => $c[1], $owners),
+        ];
+    }
+
+    /**
      * The join table's name as Doctrine's quote strategy writes it, with its schema: a name
      * alone is another table on a connection whose search path holds one of the same name.
      */

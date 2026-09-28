@@ -307,7 +307,8 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
     {
         // Its row deleted by the application's own statement, the manager cleared: no row the
         // history watched, no object removed, none managed -- a reference the representer finds
-        // no row for, and the identifier.
+        // no row for, and the identifier. Looked at right after its DELETE as a flush removing
+        // it would have had it looked at, so that its links going is a fact and not doubt.
         $php = $this->aTag('php');
         $db = $this->aTag('db');
         $article = $this->anArticle('One', $php, $db);
@@ -316,6 +317,7 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
 
         $this->begin();
         $this->links()->rememberTheHoldersOf($this->em, [$db], Article::class, 'tags', fn (string $of, string $id): array => $this->memory()->replayed($this->em)->linkPositionsOf($of, $id));
+        $this->statements->watch(0, \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\JoinRowMemory::associationOf(Article::class, 'tags'), 'Tag', ['id'], [(string) $dbId => true], 'SELECT article_id FROM article_tag WHERE tag_id = ?');
         $this->em->clear();
         $this->em->getConnection()->executeStatement('DELETE FROM Tag WHERE id = ?', [$dbId]);
 

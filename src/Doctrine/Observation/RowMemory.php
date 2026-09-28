@@ -239,7 +239,7 @@ final class RowMemory
      *
      * @return list<\Throwable>
      */
-    public function rememberTheLinksAboutToChange(EntityManagerInterface $em): array
+    public function rememberTheLinksAboutToChange(EntityManagerInterface $em, int $flush = 0): array
     {
         $uow = $em->getUnitOfWork();
         $includes = fn (string $of, string $id): array => $this->replayed($em)->linkPositionsOf($of, $id);
@@ -284,6 +284,7 @@ final class RowMemory
             foreach ($associations as $association => $targets) {
                 try {
                     $this->links->rememberTheHoldersOf($em, $targets, $owner, $association, $includes);
+                    $this->watchTheGoing($em, $flush, $owner, $association, $targets);
                 } catch (\Throwable $e) {
                     $failures[] = $e;
                 }
@@ -291,6 +292,43 @@ final class RowMemory
         }
 
         return $failures;
+    }
+
+    /**
+     * What to look at right after the DELETE of each target this flush removes that an owner
+     * holds: which owners still hold it once it has gone ({@see StatementLog::watch()}). A
+     * target nobody holds is not looked at, and costs nothing.
+     *
+     * @param class-string $ownerClass
+     * @param list<object> $targets
+     */
+    private function watchTheGoing(EntityManagerInterface $em, int $flush, string $ownerClass, string $association, array $targets): void
+    {
+        $owner = $em->getClassMetadata($ownerClass);
+        $of = JoinRowMemory::associationOf($owner->rootEntityName, $association);
+        $target = $em->getClassMetadata($em->getClassMetadata($owner->getAssociationTargetClass($association))->rootEntityName);
+        $held = [];
+
+        foreach ($this->links->links()[$of] ?? [] as $account) {
+            $held += $account['targets'];
+        }
+
+        $keys = [];
+
+        foreach ($targets as $going) {
+            $key = self::keyColumns($em, $going);
+            $id = $key === null || $key === [] ? null : HistoryReplay::keyOf($target, $key);
+
+            if ($id !== null && isset($held[$id])) {
+                $keys[$id] = true;
+            }
+        }
+
+        $read = $keys === [] ? null : JoinRowsQuery::ownersHolding($em->getConnection()->getDatabasePlatform(), $owner->getAssociationMapping($association), $target->getIdentifierColumnNames());
+
+        if ($read !== null) {
+            $this->log->watch($flush, $of, RowBinding::tableOf($target), $target->getIdentifierColumnNames(), $keys, $read['sql']);
+        }
     }
 
     /** What the join rows held, as last settled and as read since. */

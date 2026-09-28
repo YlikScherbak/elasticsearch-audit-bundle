@@ -66,6 +66,12 @@ final class TestConnection
     public static function reset(Connection $connection): void
     {
         if (self::isSqlite()) {
+            // With its foreign keys, as the servers have theirs: SQLite leaves them off unless
+            // asked, and then a join row outlives the row it points at -- a different database
+            // from MySQL's and Postgres's for everything a cascade decides (5.3). The tests of
+            // a schema without them ask for that themselves.
+            $connection->executeStatement('PRAGMA foreign_keys = ON');
+
             return;
         }
 

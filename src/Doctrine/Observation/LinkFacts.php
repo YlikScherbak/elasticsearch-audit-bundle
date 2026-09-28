@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
 
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Mapping\ClassMetadata;
 
 /**
  * What the statements of watched join rows did, told against what each owner's rows held: a
@@ -208,7 +209,38 @@ final class LinkFacts
                                 break;
                             }
 
-                            if (\array_key_exists($targetId, $state)) {
+                            if (!\array_key_exists($targetId, $state)) {
+                                break;
+                            }
+
+                            // By the join table's own statement: its rows, said by it.
+                            if (($event['by'] ?? null) === 'statement') {
+                                $told->facts[] = $fact($targetId, $targetKey, false, 'target');
+                                unset($state[$targetId]);
+
+                                break;
+                            }
+
+                            // By the target's own row going: whether its rows here went with it is
+                            // what was seen right after that DELETE, and nothing later. Inside a
+                            // transaction a join row goes three ways only -- the target's DELETE
+                            // cascading, the owner's DELETE cascading, or a statement of the join
+                            // table's, which the log holds -- and right after the target's DELETE
+                            // nothing else has run: so a row this owner held and no longer holds
+                            // there went with the target, its fact the DELETE's -- its position,
+                            // its flush, its fate. One it still holds did not go (no cascade; a
+                            // trigger is the database's, past what this reads). Not seen, or not
+                            // seen for failing to ask: not known.
+                            $holding = self::holdersSeenAfter($em, $log, $at, $of, $owner, $target);
+
+                            if ($holding === null) {
+                                $told->doubt($at, $root, sprintf('%s %s went, and whether %s %s still holds it was not seen', $target->name, $targetId, $of, $id));
+                                $state = null;
+
+                                break;
+                            }
+
+                            if (!isset($holding[$id])) {
                                 $told->facts[] = $fact($targetId, $targetKey, false, 'target');
                                 unset($state[$targetId]);
                             }
@@ -272,6 +304,39 @@ final class LinkFacts
     public function states(): array
     {
         return $this->states;
+    }
+
+    /**
+     * The owners seen still holding a target right after its DELETE, by id; null where it was
+     * not looked at, or asking failed.
+     *
+     * @param ClassMetadata<object> $owner  the owner's root
+     * @param ClassMetadata<object> $target the target's root
+     *
+     * @return array<string, true>|null
+     */
+    private static function holdersSeenAfter(EntityManagerInterface $em, StatementLog $log, int $at, string $of, ClassMetadata $owner, ClassMetadata $target): ?array
+    {
+        $seen = $log->observationsOf($at);
+
+        if (!isset($seen[$of])) {
+            return null;
+        }
+
+        $collection = explode('::', $of, 2)[1];
+        $read = JoinRowsQuery::ownersHolding($em->getConnection()->getDatabasePlatform(), $owner->getAssociationMapping($collection), $target->getIdentifierColumnNames());
+
+        if ($read === null) {
+            return null;
+        }
+
+        $holding = [];
+
+        foreach ($seen[$of] as $row) {
+            $holding[HistoryReplay::keyOf($owner, array_combine($read['owners'], $row))] = true;
+        }
+
+        return $holding;
     }
 
     /**

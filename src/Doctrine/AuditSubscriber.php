@@ -614,7 +614,7 @@ final class AuditSubscriber
         $this->rememberWhatIsBeingEmptied($em, $flush);
 
         // What the join rows this flush is about to change hold, read before it changes them.
-        foreach ($this->rows->rememberTheLinksAboutToChange($em) as $failure) {
+        foreach ($this->rows->rememberTheLinksAboutToChange($em, $flush) as $failure) {
             $this->writer->reportFailure($failure, null);
         }
     }
@@ -977,6 +977,10 @@ final class AuditSubscriber
             foreach (array_reverse($this->flushes) as $entry) {
                 if ($entry['level'] === $level) {
                     $this->claimTheFrameOf($entry['flush']);
+
+                    // What it said to look at after its DELETEs goes with it; one left behind
+                    // by a flush that never came here does no harm (StatementLog::watch()).
+                    $this->statements->forgetTheWatchesOf($entry['flush']);
 
                     break;
                 }

@@ -261,9 +261,12 @@ final class RowBinding
     }
 
     /**
+     * A class's table as a statement names it once read: what a watch on that table is matched
+     * against, so both say it one way.
+     *
      * @param ClassMetadata<object> $metadata
      */
-    private static function tableOf(ClassMetadata $metadata): string
+    public static function tableOf(ClassMetadata $metadata): string
     {
         return self::named($metadata->table);
     }
