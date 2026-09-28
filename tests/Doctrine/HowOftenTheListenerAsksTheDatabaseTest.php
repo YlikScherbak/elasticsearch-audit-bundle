@@ -27,12 +27,14 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
  * are questions asked or not asked, which is why they are counted here rather than
  * asserted about a record.
  *
- * The listener asks the database exactly one question of its own, and only in one
- * situation. Emptying an audited collection is the operation Doctrine reports by saying
- * nothing — it issues a DELETE and leaves no change set — so the membership has to be
- * read back, or the history cannot say what was in it. That question is worth one
- * SELECT, it is one SELECT, and it must not be asked on behalf of a collection nobody
- * audits.
+ * The listener asks the database questions of its own in two situations, and they are the
+ * same question: what rows a statement is about to change hold, where the statement will not
+ * say. Emptying an audited collection is the operation Doctrine reports by saying nothing —
+ * it issues a DELETE and leaves no change set — so the membership has to be read back, or
+ * the history cannot say what was in it. And an owning ManyToMany's join rows (5.3a): what an
+ * owner's rows hold, the first time a flush is about to touch them, and which owners hold a
+ * target about to go -- whose rows the database takes with it, writing nothing. Each is one
+ * SELECT, not one per row, and none is asked on behalf of a collection nobody audits.
  *
  * Everything else is free. Auditing what changed inside ten thousand lines of an order
  * reads what the unit of work already holds, so the cost is the application's own
@@ -79,6 +81,9 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         // publishing was swallowed, a deletion still on the schedule after it was carried
         // out -- left it describing a different moment from this one. Asking the rows
         // instead answers both questions with one SELECT and cannot be stale.
+        //
+        // The account of the owner's join rows (5.3a) asks nothing here: the flush that created
+        // the route wrote its stops, and that is its account.
         self::assertCount(1, $read, 'one question, asked once');
         self::assertStringContainsString('route_stop', $read[0], 'it reads the membership back');
     }
@@ -111,7 +116,12 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
 
         $this->em->flush();
 
-        self::assertCount(0, self::selects($this->queries), 'no SELECT added for a hundred lines');
+        // One, for all hundred: a line is a target of a catalogue's audited ManyToMany, and a
+        // target going is taken out of every list it was in by the database, with no statement --
+        // so which catalogues held these is read before they go (5.3a), in one question.
+        $selects = self::selects($this->queries);
+        self::assertCount(1, $selects, 'one SELECT added for a hundred lines, not one a line');
+        self::assertStringContainsString('catalogue_item', $selects[0], 'the holders of the lines, read before they go');
         self::assertCount(100, array_filter($this->queries, static fn (string $sql): bool => str_starts_with($sql, 'DELETE')), 'the premise: the DELETEs ran, one a line');
         self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'and every one of them went');
     }
@@ -130,7 +140,11 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         $this->em->remove($line);
         $this->em->flush();
 
-        self::assertSame([], self::selects($this->queries), 'a removal nobody contradicts is asked about by nobody');
+        // Asked about by nobody as a removal. What is asked is the one thing the rows cannot say
+        // afterwards: which catalogues held the line, whose lists lose it with it (5.3a).
+        $selects = self::selects($this->queries);
+        self::assertCount(1, $selects, 'a removal nobody contradicts is asked about by nobody');
+        self::assertStringContainsString('FROM catalogue_item j WHERE EXISTS', $selects[0], 'only who held it');
     }
 
     public function testACollectionThatDidNotMoveIsNotLoadedToFindThatOut(): void

@@ -31,8 +31,25 @@ class Shelf
     #[AuditField(represent: 'getLabel')]
     public Collection $labels;
 
+    /**
+     * Of the subclass only: a corner shelf going is a DELETE of the root's table, which does not
+     * say the row was a corner shelf.
+     *
+     * @var Collection<int, CornerShelf>
+     */
+    #[ORM\ManyToMany(targetEntity: CornerShelf::class)]
+    #[ORM\JoinTable(name: 'shelf_neighbour')]
+    #[AuditField(represent: 'getId')]
+    public Collection $neighbours;
+
     public function __construct()
     {
         $this->labels = new ArrayCollection();
+        $this->neighbours = new ArrayCollection();
+    }
+
+    public function getId(): ?int
+    {
+        return $this->id;
     }
 }

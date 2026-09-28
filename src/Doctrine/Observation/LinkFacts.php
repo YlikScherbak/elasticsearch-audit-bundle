@@ -132,6 +132,15 @@ final class LinkFacts
                                 break;
                             }
 
+                            // The join table's key lets a link in once: one its rows already held
+                            // is an account that was wrong.
+                            if (\array_key_exists($targetId, $state)) {
+                                $told->doubt($at, $root, sprintf('a link of %s %s added that what its rows held already had', $of, $id));
+                                $state = null;
+
+                                break;
+                            }
+
                             $told->facts[] = $fact($targetId, $targetKey, true, 'row');
                             $state[$targetId] = $targetKey;
 

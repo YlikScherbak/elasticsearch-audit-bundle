@@ -95,7 +95,7 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         [$three] = $this->anArticleTagged(null, null, $b);
         $before = \count($this->queries);
 
-        $this->memory->rememberTheHoldersOf($this->em, $a, Article::class, 'tags', $this->includes([]));
+        $this->memory->rememberTheHoldersOf($this->em, [$a], Article::class, 'tags', $this->includes([]));
 
         $of = JoinRowMemory::associationOf(Article::class, 'tags');
         $links = $this->memory->links()[$of] ?? [];
@@ -110,7 +110,7 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         self::assertSame([(string) $a->id], array_map('strval', array_keys($this->memory->holdersRead()[$of])));
 
         // And asked again for the same target, nothing is asked.
-        $this->memory->rememberTheHoldersOf($this->em, $a, Article::class, 'tags', $this->includes([]));
+        $this->memory->rememberTheHoldersOf($this->em, [$a], Article::class, 'tags', $this->includes([]));
         self::assertSame(1, $this->memory->asked());
     }
 
@@ -124,7 +124,7 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         $this->memory->rememberTheLinksOf($this->em, $one, 'tags', $this->includes([3]));
         $this->em->getConnection()->executeStatement('DELETE FROM article_tag WHERE tag_id = ?', [$b->id]);
 
-        $this->memory->rememberTheHoldersOf($this->em, $a, Article::class, 'tags', $this->includes([9]));
+        $this->memory->rememberTheHoldersOf($this->em, [$a], Article::class, 'tags', $this->includes([9]));
 
         $account = $this->memory->links()[JoinRowMemory::associationOf(Article::class, 'tags')][(string) $one->id];
         self::assertSame([[(string) $a->id, (string) $b->id], [3]], [self::sortedKeys($account['targets']), $account['includes']]);
@@ -145,11 +145,11 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         $otherId = (string) $other->id;
         $this->em->detach($other);
         unset($other);
-        $this->memory->rememberTheHoldersOf($this->em, $a, Article::class, 'tags', $this->includes([]));
+        $this->memory->rememberTheHoldersOf($this->em, [$a], Article::class, 'tags', $this->includes([]));
         $of = JoinRowMemory::associationOf(Article::class, 'tags');
         self::assertArrayHasKey($otherId, $this->memory->links()[$of], 'the premise: a holder was read');
 
-        $this->memory->settle([$of => [
+        $this->memory->settle($this->em, [$of => [
             (string) $held->id => ['9' => ['id' => 9]],
             (string) $followedNot->id => null,
             $otherId => [],
@@ -184,12 +184,25 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
                 'owners' => ['id'],
                 'targets' => ['id', 'kind'],
             ],
-            JoinRowsQuery::holdersOf($platform, $mapping, ['id' => 3, 'kind' => 'x']),
+            JoinRowsQuery::holdersOf($platform, $mapping, [['id' => 3, 'kind' => 'x']]),
+        );
+
+        // Several targets in one question: a conjunction each, for a key of several columns --
+        self::assertSame(
+            'SELECT j.'.$q('article id').', j.tag_id, j.tag_kind FROM '.$q('audit').'.'.$q('article tag').' j WHERE EXISTS (SELECT 1 FROM '.$q('audit').'.'.$q('article tag').' h WHERE h.'.$q('article id').' = j.'.$q('article id').' AND ((h.tag_id = ? AND h.tag_kind = ?) OR (h.tag_id = ? AND h.tag_kind = ?)))',
+            JoinRowsQuery::holdersOf($platform, $mapping, [['id' => 3, 'kind' => 'x'], ['id' => 4, 'kind' => 'y']])['sql'] ?? null,
+        );
+
+        // -- and IN, for a key of one.
+        $single = ['joinTable' => ['name' => 'article_tag', 'joinColumns' => [['name' => 'article_id', 'referencedColumnName' => 'id']], 'inverseJoinColumns' => [['name' => 'tag_id', 'referencedColumnName' => 'id']]]];
+        self::assertSame(
+            ['sql' => 'SELECT j.article_id, j.tag_id FROM article_tag j WHERE EXISTS (SELECT 1 FROM article_tag h WHERE h.article_id = j.article_id AND h.tag_id IN (?, ?, ?))', 'params' => [3, 4, 5], 'owners' => ['id'], 'targets' => ['id']],
+            JoinRowsQuery::holdersOf($platform, $single, [['id' => 3], ['id' => 4], ['id' => 5]]),
         );
 
         // And nothing, where the mapping cannot say or the key is not what the rows carry.
         self::assertNull(JoinRowsQuery::linksOf($platform, $mapping, ['uuid' => 5]));
-        self::assertNull(JoinRowsQuery::holdersOf($platform, $mapping, ['id' => 3]));
+        self::assertNull(JoinRowsQuery::holdersOf($platform, $mapping, [['id' => 3]]));
         self::assertNull(JoinRowsQuery::linksOf($platform, ['joinTable' => ['name' => 't', 'joinColumns' => [], 'inverseJoinColumns' => []]], ['id' => 5]));
         self::assertNull(JoinRowsQuery::linksOf($platform, ['mappedBy' => 'x'], ['id' => 5]));
     }

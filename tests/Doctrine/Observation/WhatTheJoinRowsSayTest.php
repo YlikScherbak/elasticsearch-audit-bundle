@@ -151,6 +151,27 @@ final class WhatTheJoinRowsSayTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testALinkAddedThatTheAccountAlreadyHeldIsDoubt(): void
+    {
+        // The join table's key lets a link in once: an INSERT of one the account holds says the
+        // account is wrong -- here, because another client took the row past this connection.
+        [$article, $php] = $this->anArticle('One', 'php');
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->seed($article);
+        $native = $this->em->getConnection()->getNativeConnection();
+        self::assertInstanceOf(\PDO::class, $native);
+        $native->exec(sprintf('DELETE FROM article_tag WHERE article_id = %d', $article->id));
+        $this->em->getConnection()->insert('article_tag', ['article_id' => $article->id, 'tag_id' => $php->id]);
+
+        $told = $this->told();
+        self::assertSame([], $this->said($told));
+        self::assertSame(['a link of '.self::tags().' '.$article->id.' added that what its rows held already had'], array_column($told->doubts(), 'doubt'));
+        self::assertNull($this->heldBy($told, $article));
+        $this->end();
+    }
+
     public function testALinkTakenBackIsNoFactAndLeavesWhatTheRowsHeld(): void
     {
         [$article] = $this->anArticle('One', 'php');
@@ -452,7 +473,7 @@ final class WhatTheJoinRowsSayTest extends DoctrineTestCase
     private function holdersOf(Tag $tag): void
     {
         foreach ((new WatchedRows())->linksTo($this->em, $this->em->getClassMetadata(Tag::class)) as [$owner, $association]) {
-            $this->links->rememberTheHoldersOf($this->em, $tag, $owner, $association, $this->includes());
+            $this->links->rememberTheHoldersOf($this->em, [$tag], $owner, $association, $this->includes());
         }
     }
 

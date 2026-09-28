@@ -63,6 +63,8 @@ final class RowMemory
 
     private readonly WatchedRows $watched;
 
+    private readonly JoinRowMemory $links;
+
     /**
      * The replay of what came after the rows were settled, kept and carried on: reading what
      * the rows hold now reads only what is new. Made again only when a rollback has reached
@@ -95,6 +97,7 @@ final class RowMemory
     public function __construct(private readonly StatementLog $log, private readonly AuditMetadataFactory $audited = new AuditMetadataFactory(), ?WatchedRows $watched = null)
     {
         $this->watched = $watched ?? new WatchedRows($audited);
+        $this->links = new JoinRowMemory($log);
 
         // From where the log stands: the rows before it are nothing this remembered.
         $this->settledAt = $log->position();
@@ -225,6 +228,102 @@ final class RowMemory
     }
 
     /**
+     * At onFlush, every flush's: what the join rows this flush is about to change hold, before
+     * it changes them -- the links of every watched collection it plans to write, the holders of
+     * every target it plans to remove, and the links of an owner it plans to remove where its
+     * join columns do not cascade and Doctrine takes them by a statement of its own. Read where
+     * the log stands, which in a nested flush is after what the outer one has written.
+     *
+     * What failed is handed back for the listener's policy: a question that fails must not take
+     * the flush with it, and the account it would have given is then not known.
+     *
+     * @return list<\Throwable>
+     */
+    public function rememberTheLinksAboutToChange(EntityManagerInterface $em): array
+    {
+        $uow = $em->getUnitOfWork();
+        $includes = fn (string $of, string $id): array => $this->replayed($em)->linkPositionsOf($of, $id);
+        $failures = [];
+
+        foreach ([...array_values($uow->getScheduledCollectionUpdates()), ...array_values($uow->getScheduledCollectionDeletions())] as $collection) {
+            try {
+                $owner = $collection->getOwner();
+                $field = CollectionRowsQuery::entry($collection->getMapping(), 'fieldName');
+
+                if ($owner !== null && \is_string($field) && $this->watched->areLinksWatched($em->getClassMetadata($owner::class), $field)) {
+                    $this->links->rememberTheLinksOf($em, $owner, $field, $includes);
+                }
+            } catch (\Throwable $e) {
+                $failures[] = $e;
+            }
+        }
+
+        // The targets going, gathered by the collection they may be in: one question for all of
+        // a collection's, however many a flush removes.
+        $going = [];
+
+        foreach ($uow->getScheduledEntityDeletions() as $entity) {
+            try {
+                $metadata = $em->getClassMetadata($entity::class);
+
+                foreach ($this->watched->linksTo($em, $metadata) as [$owner, $association]) {
+                    $going[$owner][$association][] = $entity;
+                }
+
+                foreach ($metadata->getAssociationNames() as $association) {
+                    if ($this->watched->areLinksWatched($metadata, $association) && !self::cascades($metadata->getAssociationMapping($association))) {
+                        $this->links->rememberTheLinksOf($em, $entity, $association, $includes);
+                    }
+                }
+            } catch (\Throwable $e) {
+                $failures[] = $e;
+            }
+        }
+
+        foreach ($going as $owner => $associations) {
+            foreach ($associations as $association => $targets) {
+                try {
+                    $this->links->rememberTheHoldersOf($em, $targets, $owner, $association, $includes);
+                } catch (\Throwable $e) {
+                    $failures[] = $e;
+                }
+            }
+        }
+
+        return $failures;
+    }
+
+    /** What the join rows held, as last settled and as read since. */
+    public function links(): JoinRowMemory
+    {
+        return $this->links;
+    }
+
+    /**
+     * Whether the database takes an owner's join rows with its row: every join column of the
+     * owner's side cascading on delete, which is Doctrine's default -- and then Doctrine writes
+     * no statement of the join table for it.
+     */
+    private static function cascades(mixed $mapping): bool
+    {
+        $columns = CollectionRowsQuery::entry(CollectionRowsQuery::entry($mapping, 'joinTable'), 'joinColumns');
+
+        if (!\is_array($columns) || $columns === []) {
+            return false;
+        }
+
+        foreach ($columns as $column) {
+            $onDelete = CollectionRowsQuery::entry($column, 'onDelete');
+
+            if (!\is_string($onDelete) || strtoupper($onDelete) !== 'CASCADE') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * The rows as last settled, by root class and key.
      *
      * @return array<string, array<string, array<string, mixed>>>
@@ -350,6 +449,14 @@ final class RowMemory
                 }
             }
         }
+        // And the links with them, as the replay tells them. An account it cannot tell is let go of
+        // rather than believed: it is read again the next time a flush is about to touch it.
+        try {
+            $this->links->settle($em, LinkFacts::of($em, $replay, $this->log, $this->links)->states(), $upTo);
+        } catch (\Throwable) {
+            $this->links->settle($em, [], $upTo);
+        }
+
         $this->settledAt = $upTo;
         $this->takenAt = [];
         $this->current = null;

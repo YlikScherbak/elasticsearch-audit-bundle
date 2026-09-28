@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
 
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Mapping\ClassMetadata;
 
 /**
  * What each owner's rows of an owning ManyToMany held, taken from the join table and moving
@@ -43,6 +44,9 @@ final class JoinRowMemory
     /** @var array<string, array<string, int>> by association: the targets whose holders were read, and where the log stood then */
     private array $holdersRead = [];
 
+    /** @var array<string, array<int, array{0: class-string, 1: \WeakReference<object>}>> owners with no key yet, by association: the root and the owner */
+    private array $pending = [];
+
     /** How many questions it has asked the database, for the tests of what it costs. */
     private int $asked = 0;
 
@@ -71,11 +75,16 @@ final class JoinRowMemory
         $root = $em->getClassMetadata($metadata->rootEntityName);
         $key = RowMemory::keyColumns($em, $owner);
 
+        $of = self::associationOf($root->name, $association);
+
         if ($key === null || $key === []) {
-            return; // no row yet: its INSERT, and its links', will say what it holds
+            // No row yet, and no key to keep an account under: its INSERT, and its links', will
+            // say what it holds, and settling keeps that as its account, by the key it has then.
+            $this->pending[$of][spl_object_id($owner)] = [$root->name, \WeakReference::create($owner)];
+
+            return;
         }
 
-        $of = self::associationOf($root->name, $association);
         $id = HistoryReplay::keyOf($root, $key);
 
         if (isset($this->links[$of][$id])) {
@@ -109,32 +118,52 @@ final class JoinRowMemory
     }
 
     /**
-     * The owners holding a target that is about to go, each with everything it holds -- one
-     * question, whatever the number of owners. An owner already accounted for keeps its
-     * account; one read here is held by nothing, and goes at settling.
+     * The owners holding any of some targets that are about to go, each with everything it
+     * holds -- a question for every five hundred targets, whatever the number of owners. An
+     * owner already accounted for keeps its account; one read here is held by nothing, and goes
+     * at settling.
      *
-     * @param class-string                       $ownerClass
+     * @param list<object>                        $targets
+     * @param class-string                        $ownerClass
      * @param \Closure(string, string): list<int> $includes   as for {@see rememberTheLinksOf()}
      */
-    public function rememberTheHoldersOf(EntityManagerInterface $em, object $target, string $ownerClass, string $association, \Closure $includes): void
+    public function rememberTheHoldersOf(EntityManagerInterface $em, array $targets, string $ownerClass, string $association, \Closure $includes): void
     {
         $ownerMetadata = $em->getClassMetadata($ownerClass);
         $root = $em->getClassMetadata($ownerMetadata->rootEntityName);
-        $targetRoot = $em->getClassMetadata($em->getClassMetadata($target::class)->rootEntityName);
-        $targetKey = RowMemory::keyColumns($em, $target);
-
-        if ($targetKey === null || $targetKey === []) {
-            return; // not a row yet: nothing can hold it
-        }
-
         $of = self::associationOf($root->name, $association);
-        $targetId = HistoryReplay::keyOf($targetRoot, $targetKey);
+        $keys = [];
 
-        if (isset($this->holdersRead[$of][$targetId])) {
-            return;
+        foreach ($targets as $target) {
+            $targetKey = RowMemory::keyColumns($em, $target);
+
+            if ($targetKey === null || $targetKey === []) {
+                continue; // not a row yet: nothing can hold it
+            }
+
+            $targetId = HistoryReplay::keyOf($em->getClassMetadata($em->getClassMetadata($target::class)->rootEntityName), $targetKey);
+
+            if (!isset($this->holdersRead[$of][$targetId])) {
+                $keys[$targetId] = $targetKey;
+            }
         }
 
-        $query = JoinRowsQuery::holdersOf($em->getConnection()->getDatabasePlatform(), $ownerMetadata->getAssociationMapping($association), $targetKey);
+        // In parts: a statement's parameters are bounded, on some engines to under a thousand.
+        foreach (array_chunk($keys, 500, true) as $part) {
+            $this->readTheHoldersOf($em, $ownerMetadata, $of, $association, $part, $includes);
+        }
+    }
+
+    /**
+     * @param ClassMetadata<object>                    $ownerMetadata
+     * @param non-empty-array<string, array<string, mixed>> $keys by the target's id
+     * @param \Closure(string, string): list<int>      $includes
+     */
+    private function readTheHoldersOf(EntityManagerInterface $em, ClassMetadata $ownerMetadata, string $of, string $association, array $keys, \Closure $includes): void
+    {
+        $root = $em->getClassMetadata($ownerMetadata->rootEntityName);
+        $targetRoot = $em->getClassMetadata($em->getClassMetadata($ownerMetadata->getAssociationTargetClass($association))->rootEntityName);
+        $query = JoinRowsQuery::holdersOf($em->getConnection()->getDatabasePlatform(), $ownerMetadata->getAssociationMapping($association), array_values($keys));
 
         if ($query === null) {
             return;
@@ -161,7 +190,9 @@ final class JoinRowMemory
             }
         }
 
-        $this->holdersRead[$of][$targetId] = $this->log->position();
+        foreach (array_keys($keys) as $targetId) {
+            $this->holdersRead[$of][(string) $targetId] = $this->log->position();
+        }
     }
 
     /**
@@ -185,19 +216,38 @@ final class JoinRowMemory
      * still be rolled back: an account from here on, with nothing in it to undo. What the
      * replay could not follow is let go, and so is what nothing holds.
      *
+     * An owner that had no key when a flush was about to touch its links has one now, if its
+     * INSERT ran: what the replay says it holds is its account, as for any other -- so that an
+     * owner a flush created is not read again by the next, on a database whose keys the INSERT
+     * hands out as on one whose keys are there before it.
+     *
      * @param array<string, array<string, array<string, array<string, mixed>>|null>> $states what each owner's rows hold where the
      *                                                                                     log is settled, null where it is not known
      */
-    public function settle(array $states, int $at): void
+    public function settle(EntityManagerInterface $em, array $states, int $at): void
     {
         $links = [];
         $objects = [];
+        $keys = [];
+
+        foreach ($this->pending as $of => $owners) {
+            foreach ($owners as [$root, $reference]) {
+                $owner = $reference->get();
+                $key = $owner === null ? null : RowMemory::keyColumns($em, $owner);
+
+                if ($key !== null && $key !== []) {
+                    $id = HistoryReplay::keyOf($em->getClassMetadata($root), $key);
+                    $this->objects[$of][$id] ??= $reference;
+                    $keys[$of][$id] = $key;
+                }
+            }
+        }
 
         foreach ($states as $of => $owners) {
             foreach ($owners as $id => $targets) {
                 $object = $this->objects[$of][$id] ?? null;
 
-                $owner = $this->links[$of][$id]['owner'] ?? null;
+                $owner = $this->links[$of][$id]['owner'] ?? $keys[$of][$id] ?? null;
 
                 if ($targets === null || $object?->get() === null || $owner === null) {
                     continue;
@@ -211,6 +261,7 @@ final class JoinRowMemory
         $this->links = $links;
         $this->objects = $objects;
         $this->holdersRead = [];
+        $this->pending = [];
     }
 
     public function asked(): int

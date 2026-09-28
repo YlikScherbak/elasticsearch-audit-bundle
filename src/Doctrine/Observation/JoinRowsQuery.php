@@ -71,18 +71,18 @@ final class JoinRowsQuery
     }
 
     /**
-     * Every owner that holds a target, each with everything it holds: one statement, so that a
-     * target going is read as the move of each whole list it was in -- `[a, b] -> [b]`, and not
-     * `[a] -> []`.
+     * Every owner that holds any of some targets, each with everything it holds: one statement,
+     * so that a target going is read as the move of each whole list it was in -- `[a, b] -> [b]`,
+     * and not `[a] -> []` -- and a hundred going in one flush are one question, not a hundred.
      *
-     * @param mixed                $mapping   the association's mapping, owning side
-     * @param array<string, mixed> $targetKey the target's key as the join rows carry it
+     * @param mixed                            $mapping    the association's mapping, owning side
+     * @param non-empty-list<array<string, mixed>> $targetKeys each target's key as the join rows carry it
      *
      * @return array{sql: string, params: list<mixed>, owners: list<string>, targets: list<string>}|null
      *         the owners' then the targets' referenced columns, in the order the statement
      *         selects them
      */
-    public static function holdersOf(AbstractPlatform $platform, mixed $mapping, array $targetKey): ?array
+    public static function holdersOf(AbstractPlatform $platform, mixed $mapping, array $targetKeys): ?array
     {
         $table = self::table($platform, $mapping);
         $owners = self::columns(CollectionRowsQuery::entry(CollectionRowsQuery::entry($mapping, 'joinTable'), 'joinColumns'));
@@ -99,14 +99,28 @@ final class JoinRowsQuery
             $same[] = 'h.'.self::named($platform, $name, $column).' = j.'.self::named($platform, $name, $column);
         }
 
-        foreach ($targets as [$name, $referenced, $column]) {
-            if (!\array_key_exists($referenced, $targetKey)) {
-                return null;
+        // Which targets: `h.t IN (?, ?)` for a key of one column, and a conjunction per target
+        // otherwise, since a row value list is not spelled the same everywhere.
+        $any = [];
+
+        foreach ($targetKeys as $targetKey) {
+            $one = [];
+
+            foreach ($targets as [$name, $referenced, $column]) {
+                if (!\array_key_exists($referenced, $targetKey)) {
+                    return null;
+                }
+
+                $one[] = 'h.'.self::named($platform, $name, $column).' = ?';
+                $params[] = $targetKey[$referenced];
             }
 
-            $same[] = 'h.'.self::named($platform, $name, $column).' = ?';
-            $params[] = $targetKey[$referenced];
+            $any[] = $one;
         }
+
+        $same[] = \count($targets) === 1
+            ? 'h.'.self::named($platform, $targets[0][0], $targets[0][2]).(\count($any) === 1 ? ' = ?' : ' IN ('.implode(', ', array_fill(0, \count($any), '?')).')')
+            : (\count($any) === 1 ? implode(' AND ', $any[0]) : '('.implode(' OR ', array_map(static fn (array $one): string => '('.implode(' AND ', $one).')', $any)).')');
 
         return [
             'sql' => sprintf(

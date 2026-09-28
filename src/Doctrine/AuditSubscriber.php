@@ -612,6 +612,11 @@ final class AuditSubscriber
         }
 
         $this->rememberWhatIsBeingEmptied($em, $flush);
+
+        // What the join rows this flush is about to change hold, read before it changes them.
+        foreach ($this->rows->rememberTheLinksAboutToChange($em) as $failure) {
+            $this->writer->reportFailure($failure, null);
+        }
     }
 
     /**
