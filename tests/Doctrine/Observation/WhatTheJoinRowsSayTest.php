@@ -244,6 +244,34 @@ final class WhatTheJoinRowsSayTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testWhatIsUndoneFromAnAccountIsWhatAStatementDidAndNotItsText(): void
+    {
+        // Before the account is read: a DELETE of a link that is not there, which took no row,
+        // and an INSERT of one that is, which failed on the join table's key. Undone from the
+        // account, neither gives back what it did not take nor takes what it did not give: the
+        // effect is undone, not the SQL.
+        [$article, $php] = $this->anArticle('One', 'php');
+        $db = $this->aTag('db');
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $connection = $this->em->getConnection();
+        self::assertSame(0, $connection->executeStatement('DELETE FROM article_tag WHERE article_id = ? AND tag_id = ?', [$article->id, $db->id]), 'the premise: nothing to take');
+        $connection->beginTransaction(); // a failed statement on PostgreSQL spoils its transaction: kept to a savepoint
+
+        try {
+            $connection->insert('article_tag', ['article_id' => $article->id, 'tag_id' => $php->id]);
+            self::fail('the premise: the join table\'s key refuses it');
+        } catch (\Doctrine\DBAL\Exception\UniqueConstraintViolationException) {
+        }
+
+        $connection->rollBack();
+        $this->seed($article);
+
+        self::assertSame(['php'], $this->heldBy($this->told(), $article));
+        $this->end();
+    }
+
     public function testAnAccountReadAfterATargetWentAndCameBackIsNotKnown(): void
     {
         // A tag's row deleted inside a savepoint -- its links going with it by the database, or

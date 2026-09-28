@@ -33,8 +33,10 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
  * it issues a DELETE and leaves no change set — so the membership has to be read back, or
  * the history cannot say what was in it. And an owning ManyToMany's join rows (5.3a): what an
  * owner's rows hold, the first time a flush is about to touch them, and which owners hold a
- * target about to go -- whose rows the database takes with it, writing nothing. Each is one
- * SELECT, not one per row, and none is asked on behalf of a collection nobody audits.
+ * target about to go -- whose rows the database takes with it, writing nothing. Each is read in
+ * batches, never a SELECT per row: the holders of up to five hundred targets of a collection in
+ * one, so a flush removing a hundred asks once. None is asked on behalf of a collection nobody
+ * audits.
  *
  * Everything else is free. Auditing what changed inside ten thousand lines of an order
  * reads what the unit of work already holds, so the cost is the application's own
