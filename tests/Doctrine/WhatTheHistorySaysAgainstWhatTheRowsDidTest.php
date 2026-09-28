@@ -570,10 +570,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * until 5.3 makes it the default: it is the judge 5.3 is built against, and it was built
      * before it. Measured on the listener of 5.2c, 576 of its 3000 sequences disagree with the
      * rows, every one of them about the article's tags and nothing else -- a tag a nested flush
-     * gave lost (287), a tag's move signed by the other flush's actor (194), a link taken back
-     * still recorded (90), and five of both -- the collection's snapshot at its owner's events,
-     * which 5.3 replaces with the join rows. Listed seed by seed they would be 576 entries of
-     * KNOWN for one commit's life; run on request, they are what 5.3 has to bring to none.
+     * gave lost (287), a tag's move signed by the other flush's actor (194), a tag recorded that
+     * the rows never kept (90: recorded again for the outer flush after a nested one wrote it,
+     * recorded though a listener cleared the manager before the join rows were written, or
+     * recorded though taken back), and five of both -- the collection's snapshot at its owner's
+     * events, which 5.3 replaces with the join rows. Listed seed by seed they would be 576
+     * entries of KNOWN for one commit's life; run on request, they are what 5.3 has to bring to
+     * none, and one of each way is kept in {@see self::TELLS_APART}.
      */
     private const VOCABULARY_5_2C = [
         ...self::VOCABULARY_5_2,
@@ -605,11 +608,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     /**
      * And what the tagged world was widened to reach.
      *
-     * Not a link taken back to a savepoint with the flush going on: Doctrine writes a
-     * collection's join rows after every entity's UPDATE, so a savepoint the application opens
-     * around an entity's statement never holds one, and nothing is raised between the join rows
-     * and the commit for it to be rolled back in. Its road is a nested flush that dies after
-     * writing its own -- a guard of 5.3's, written by hand, not a word of this search.
+     * Not a link taken back to a savepoint with the flush going on -- a limit of how this
+     * search opens its savepoints, around an entity's UPDATE, and not of join rows being taken
+     * back: Doctrine writes a collection's join rows after every entity's UPDATE, so a
+     * savepoint opened and closed around an entity's statement never holds one. Join rows are
+     * taken back by the application's own transaction around the flush, which this search
+     * has, and by a nested flush's savepoint when it dies after writing its own, which is a
+     * guard of 5.3's, written by hand.
      */
     private const COMBINATIONS_OF_THE_TAGS = [
         'a link of the article\'s written in a nested flush',
@@ -866,6 +871,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private array $tagLabels = [];
 
     /**
+     * The vocabulary one kept sequence runs in, over the one asked for: a sequence of the
+     * tagged world's words runs in that world whatever the default is, so that what it tells
+     * apart does not wait on the default changing.
+     */
+    private static ?string $worldOfTheSequence = null;
+
+    /**
      * Every relay the world started with and every one a step has made since.
      *
      * @var list<Relay>
@@ -911,12 +923,21 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         [$first, $last] = preg_match('~^(\d+)-(\d+)$~', $asked, $range) === 1 ? [(int) $range[1], (int) $range[2]] : [1, (int) $asked];
         $seeds = $last - $first + 1;
         $wrong = [];
+        $listing = (bool) ($_SERVER['AUDIT_MODEL_DIFFS'] ?? false);
 
         $mended = [];
 
         for ($seed = $first; $seed <= $last; ++$seed) {
             $said = $this->whatOneSequenceSaid($seed);
             $known = self::known($seed);
+
+            // Every disagreement, one line each, for a measurement of a world that is not yet
+            // right -- listed rather than failed on, and counted by what reads them.
+            if ($listing && $said !== null) {
+                fwrite(\STDERR, 'DIFF '.json_encode([$seed, $said['says'], self::drawn($seed)[2]])."\n");
+
+                continue;
+            }
 
             // Excused for the ONE way it is listed as being wrong, and in no other.
             if ($said !== null && $said['says'] !== ($known['says'] ?? null)) {
@@ -971,6 +992,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
 
         fwrite(\STDERR, $_SERVER['AUDIT_MODEL_REACHED'] ?? false ? 'REACHED '.json_encode($counted)."\n" : '');
+
+        // The seeds it ran, last: a measurement that stopped short never prints it.
+        fwrite(\STDERR, $listing ? sprintf("RAN %d-%d\n", $first, $last) : '');
 
         self::assertSame(
             [],
@@ -1109,6 +1133,27 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             // drawn by seed 32
             [6, false, ['edit the kiln\'s root', 'change a line', 'flush, and after the statement a listener removes the line', 'move a line back', 'edit the kiln\'s root', 'flush, and after the statement a nested one edits the kiln\'s subclass', 'replace the crate with a new line', 'create two relays pointing at each other', 'edit the kiln\'s root', 'flush, and after the statement a nested one edits the kiln\'s subclass', 'flush']],
         ],
+
+        // What 5.3 is for, one of each way the listener of 5.2c tells the article's tags other than
+        // the join rows say -- from the 576 of 3000 sequences of the tagged world that disagree
+        // (2026-09-27, AUDIT_MODEL_VOCABULARY=5.3), and run in that world whatever the default
+        // is. Each carries what it says today as its excuse, so that 5.3 cannot leave one of
+        // them as it is, nor mend one without taking its excuse off: the excuses go with 5.3,
+        // and the sequences stay, as what reading the join rows has to go on getting right.
+        'the article\'s tags are what its join rows say' => [
+            // a tag a nested flush gave, lost -- drawn by seed 470
+            [3, false, ['remove a line', 'edit the article', 'flush, and after the statement a nested one tags the article', 'flush'], 'missing ["article 1 tagged \\"es\\" by bob"], invented []'],
+            // a tag a nested flush wrote, signed by the outer flush's actor -- drawn by seed 716
+            [4, true, ['replace the article\'s tags', 'flush, and after the statement a nested one empties the crate', 'flush'], 'missing ["article 1 tagged \\"db\\" by bob"], invented ["article 1 tagged \\"db\\" by carol"]'],
+            // a tag a nested flush wrote, recorded again for the outer one -- drawn by seed 2089
+            [0, false, ['tag the article', 'flush, and after the statement a nested one edits the article', 'flush'], 'missing [], invented ["article 1 tagged \\"es\\" by carol"]'],
+            // a tag never written -- a listener cleared the manager before the join rows -- recorded -- drawn by seed 201
+            [2, true, ['tag the article', 'change a line', 'flush, and after the statement a listener ahead of this one clears the manager', 'flush'], 'missing [], invented ["article 1 tagged \\"es\\" by carol"]'],
+            // a tag taken back with the application's transaction, recorded -- drawn by seed 937
+            [2, false, ['move a line back', 'flush, publishing swallowed', 'empty the crate', 'edit the kiln\'s root', 'create two relays pointing at each other', 'tag the article', 'flush, inside a transaction of the application\'s it rolls back, in an atomic frame', 'flush'], 'missing [], invented ["article 1 tagged \\"es\\" by carol"]'],
+            // both ways at once: tags written lost and one not written recorded, around a savepoint taken back -- drawn by seed 2153
+            [6, false, ['replace the article\'s tags', 'flush, publishing swallowed', 'clear the article\'s tags', 'tag the article', 'change a line', 'tag the article', 'flush, and a savepoint of the application\'s around a statement is rolled back after this listener', 'flush'], 'missing ["article 1 tagged \\"db\\" by carol","article 1 untagged \\"php\\" by carol"], invented ["article 1 tagged \\"es\\" by carol"]'],
+        ],
     ];
 
     public function testTheSequencesThatTellARuleApartStillDescribeWhatTheRowsDid(): void
@@ -1119,6 +1164,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             foreach ($sequences as $sequence) {
                 [$shape, $filtered, $steps] = $sequence;
 
+                // A sequence of the tagged world's words runs in that world, whichever is asked for.
+                self::$worldOfTheSequence = array_diff($steps, [...self::VOCABULARY_5_2C, ...self::ENDINGS_5_2C, 'flush']) !== [] ? '5.3' : null;
+
                 // A sequence of step 5's words tells its rule apart in step 5's world, and is not
                 // one the vocabularies before it can draw.
                 if (!self::theWideWorld() && array_diff($steps, [...self::VOCABULARY_5_2, ...self::ENDINGS_5_2, 'flush']) !== []) {
@@ -1126,7 +1174,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 }
 
                 $excused = $sequence[3] ?? null;
-                $said = $this->whatTheseStepsSaid($shape, $filtered, $steps);
+
+                try {
+                    $said = $this->whatTheseStepsSaid($shape, $filtered, $steps);
+                } finally {
+                    self::$worldOfTheSequence = null;
+                }
 
                 // Excused for exactly one disagreement, as KNOWN is, and checked both ways:
                 // a sequence that starts describing the rows correctly has its excuse taken
@@ -1400,7 +1453,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private static function theVocabulary(): array
     {
-        return match ($_SERVER['AUDIT_MODEL_VOCABULARY'] ?? null) {
+        return match (self::$worldOfTheSequence ?? $_SERVER['AUDIT_MODEL_VOCABULARY'] ?? null) {
             '3.3' => [self::VOCABULARY_3_3, self::ENDINGS_3_3],
             '5.2' => [self::VOCABULARY_5_2, self::ENDINGS_5_2],
             '5.3' => [self::VOCABULARY, self::ENDINGS],
