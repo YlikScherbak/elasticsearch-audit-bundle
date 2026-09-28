@@ -64,7 +64,7 @@ final class StatementLog
     public const VOID = 'void';
     public const COMMITTED = 'committed';
 
-    /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int}> by sequence number */
+    /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>}> by sequence number */
     private array $statements = [];
 
     /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, open: bool, committed: bool, dead: bool}> by identity, in the order they were opened */
@@ -82,6 +82,9 @@ final class StatementLog
 
     /** Whether an observer was put in front of a driver: what audit:check asks of the audited connection. */
     private bool $watching = false;
+
+    /** @var array<string, array<string, array{label: string, flush: int, columns: list<string>, keys: array<string, true>, read: string}>> by table */
+    private array $watches = [];
 
     /** @var array<int, true> the statements after which a flush began, by sequence number */
     private array $flushesStartedAfter = [];
@@ -242,6 +245,124 @@ final class StatementLog
         ];
 
         return $this->sequence;
+    }
+
+    /**
+     * What to look at right after a DELETE, before the application goes on: for a flush about to
+     * remove rows others' join rows point at, which of those rows' holders still hold them once
+     * the DELETE has run -- the only moment at which what the database took with it by a cascade
+     * can be told from what anything later took. The listener says what (the table, the key's
+     * columns, the keys worth looking at, and the question to ask); the connection says when.
+     *
+     * A watch is a flush's, and goes with it ({@see forgetTheWatchesOf()}); one that outlives
+     * its flush does no harm -- a DELETE of the same key later is looked at and belongs to no
+     * flush, which is what the listener then says of it. It is not a right to one look: every
+     * DELETE that takes such a row gets its own, at its own position.
+     *
+     * @param list<string>        $columns the key's columns, in the order a key is joined in
+     * @param array<string, true> $keys    the keys worth looking at, each its columns' values joined with '|'
+     * @param string              $read    the question, with one placeholder per key column, in that order
+     */
+    public function watch(int $flush, string $label, string $table, array $columns, array $keys, string $read): void
+    {
+        if ($keys !== []) {
+            $this->watches[$table][$label."\0".$flush] = ['label' => $label, 'flush' => $flush, 'columns' => $columns, 'keys' => $keys, 'read' => $read];
+        }
+    }
+
+    public function forgetTheWatchesOf(int $flush): void
+    {
+        foreach ($this->watches as $table => $watches) {
+            foreach ($watches as $name => $watch) {
+                if ($watch['flush'] === $flush) {
+                    unset($this->watches[$table][$name]);
+                }
+            }
+
+            if ($this->watches[$table] === []) {
+                unset($this->watches[$table]);
+            }
+        }
+    }
+
+    /**
+     * What to ask right after a statement that ran: nothing, unless it is a DELETE that took a
+     * row of a watched key -- one that took none took nothing with it.
+     *
+     * @param array<array-key, mixed> $params
+     *
+     * @return list<array{label: string, read: string, params: list<mixed>}>
+     */
+    public function toObserveAfter(string $sql, array $params, int|string|null $affected): array
+    {
+        if ($this->watches === [] || (int) $affected === 0 || preg_match('/^\s*DELETE\b/i', $sql) !== 1) {
+            return [];
+        }
+
+        $shape = StatementShape::read($sql);
+
+        if ($shape === null || !$shape->exact || !isset($this->watches[$shape->table])) {
+            return [];
+        }
+
+        $asks = [];
+
+        foreach ($this->watches[$shape->table] as $watch) {
+            if (!self::sameColumns(array_keys($shape->where), $watch['columns'])) {
+                continue;
+            }
+
+            $values = array_map(static fn (string $column): mixed => $params[$shape->where[$column]] ?? null, $watch['columns']);
+            $key = implode('|', array_map(static fn (mixed $value): string => \is_scalar($value) ? (string) $value : '', $values));
+
+            if (isset($watch['keys'][$key])) {
+                $asks[] = ['label' => $watch['label'], 'read' => $watch['read'], 'params' => $values];
+            }
+        }
+
+        return $asks;
+    }
+
+    /**
+     * What was seen right after a statement, under the label it was asked for: the rows the
+     * question gave, or null where asking it failed -- not known, never nothing.
+     *
+     * @param list<list<mixed>>|null $rows
+     */
+    public function observed(int $statement, string $label, ?array $rows): void
+    {
+        if (isset($this->statements[$statement])) {
+            $this->statements[$statement]['observed'][$label] = $rows;
+        }
+    }
+
+    /**
+     * What was seen right after a statement, by label; kept with the statement and forgotten
+     * with it, so that it shares its fate -- a statement rolled back takes what was seen of it.
+     *
+     * @return array<string, list<list<mixed>>|null>
+     */
+    public function observationsOf(int $statement): array
+    {
+        return $this->statements[$statement]['observed'] ?? [];
+    }
+
+    /** How many watches are held, for the tests that pin that they go with their flush. */
+    public function watches(): int
+    {
+        return array_sum(array_map('count', $this->watches));
+    }
+
+    /**
+     * @param list<string> $named
+     * @param list<string> $columns
+     */
+    private static function sameColumns(array $named, array $columns): bool
+    {
+        sort($named);
+        sort($columns);
+
+        return $named === $columns;
     }
 
     /**
