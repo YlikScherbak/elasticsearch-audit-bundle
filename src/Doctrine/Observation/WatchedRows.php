@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\CollectionRowsQuery;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
@@ -22,6 +23,12 @@ final class WatchedRows
     /** @var array<string, bool> */
     private array $watched = [];
 
+    /** @var array<string, array<string, bool>> by owner class and association */
+    private array $links = [];
+
+    /** @var array<string, list<array{0: class-string, 1: string}>> by target class */
+    private array $linksTo = [];
+
     public function __construct(private readonly AuditMetadataFactory $audited = new AuditMetadataFactory())
     {
     }
@@ -32,6 +39,82 @@ final class WatchedRows
     public function areWatched(EntityManagerInterface $em, ClassMetadata $metadata): bool
     {
         return $this->watched[$metadata->name] ??= $this->decide($em, $metadata);
+    }
+
+    /**
+     * Whether an owner's links are history: an owning ManyToMany of an audited entity, among
+     * its audited fields. Its join rows are the facts of that field.
+     *
+     * @param ClassMetadata<object> $owner
+     */
+    public function areLinksWatched(ClassMetadata $owner, string $association): bool
+    {
+        return $this->links[$owner->name][$association] ??= $this->decideLinks($owner, $association);
+    }
+
+    /**
+     * The watched links a class is the target of, by owner and association: what a row of it
+     * going takes out of -- the whole mapping asked once, as {@see RowBinding} asks it of every
+     * statement, and kept by class.
+     *
+     * @param ClassMetadata<object> $target
+     *
+     * @return list<array{0: class-string, 1: string}>
+     */
+    public function linksTo(EntityManagerInterface $em, ClassMetadata $target): array
+    {
+        if (isset($this->linksTo[$target->name])) {
+            return $this->linksTo[$target->name];
+        }
+
+        $found = [];
+
+        foreach ($em->getMetadataFactory()->getAllMetadata() as $owner) {
+            // A mapped superclass has no rows of its own: its entities' mappings carry what it
+            // declares. No fixture has one -- a rule nothing here can see fail.
+            if (!$owner instanceof ClassMetadata || $owner->isMappedSuperclass) {
+                continue;
+            }
+
+            foreach ($owner->getAssociationNames() as $association) {
+                // Declared once, on the class that declares it: a subclass inherits the mapping
+                // and the join rows are the same.
+                if ($owner->isInheritedAssociation($association)
+                    || !is_a($target->name, $owner->getAssociationTargetClass($association), true)
+                    || !$this->areLinksWatched($owner, $association)
+                ) {
+                    continue;
+                }
+
+                $found[] = [$owner->name, $association];
+            }
+        }
+
+        return $this->linksTo[$target->name] = $found;
+    }
+
+    /**
+     * @param ClassMetadata<object> $owner
+     */
+    private function decideLinks(ClassMetadata $owner, string $association): bool
+    {
+        try {
+            // An owning ManyToMany's: a single target is a column of the owner's own row, and an
+            // inverse side's rows are the other side's -- asked outright, since on ORM 2 an
+            // inverse side's mapping carries a joinTable too, an empty one. A name that is no
+            // association at all throws, and is no link either.
+            if ($owner->isAssociationInverseSide($association)
+                || CollectionRowsQuery::entry($owner->getAssociationMapping($association), 'joinTable') === null
+            ) {
+                return false;
+            }
+
+            $audited = $this->audited->for($owner->newInstance());
+
+            return $audited !== null && \array_key_exists($association, $audited->fields);
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**

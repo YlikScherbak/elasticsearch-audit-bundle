@@ -84,6 +84,10 @@ final class RowBindingTest extends DoctrineTestCase
         yield 'a join row added' => ['INSERT INTO catalogue_item (catalogue_code, item_id) VALUES (?, ?)', [1 => 'K-1', 2 => 2], ['kind' => 'join row', 'class' => Catalogue::class, 'key' => ['code' => 'K-1'], 'association' => 'items', 'element' => ['id' => 2]]];
         yield 'a join row removed' => ['DELETE FROM catalogue_item WHERE catalogue_code = ? AND item_id = ?', [1 => 'K-1', 2 => 1], ['kind' => 'join row', 'class' => Catalogue::class, 'key' => ['code' => 'K-1'], 'association' => 'items', 'element' => ['id' => 1]]];
         yield 'a many-to-many cleared' => ['DELETE FROM catalogue_item WHERE catalogue_code = ?', [1 => 'K-1'], ['kind' => 'join rows of owner', 'class' => Catalogue::class, 'key' => ['code' => 'K-1'], 'association' => 'items']];
+        // What Doctrine writes when a target of a collection whose join columns do not cascade
+        // is removed from the other side: every owner's row of it, and no owner named.
+        yield 'a target taken out of every owner\'s many-to-many' => ['DELETE FROM catalogue_item WHERE item_id = ?', [1 => 2], ['kind' => 'join rows of target', 'class' => Catalogue::class, 'association' => 'items', 'element' => ['id' => 2]]];
+        yield 'a join table named by neither side\'s key' => ['DELETE FROM catalogue_item WHERE item_id = ? AND position = ?', [1 => 2, 2 => 3], ['kind' => 'unbound']];
         yield 'DQL by a column that is not the key' => ['DELETE FROM CrateItem WHERE sku = ?', [1 => 'S'], ['kind' => 'unbound']];
         yield 'the key and another condition do not prove the row' => ['DELETE FROM CrateItem WHERE id = ? AND quantity = ?', [1 => 5, 2 => 1], ['kind' => 'unbound']];
         yield 'an inexact WHERE' => ['DELETE FROM CrateItem WHERE id = ? OR id = ?', [1 => 5, 2 => 6], ['kind' => 'unbound']];

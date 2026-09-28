@@ -23,7 +23,9 @@ use Doctrine\ORM\Mapping\ClassMetadata;
  * table; every table of it binds to the root class, which is what an entity's identity is.
  * A DELETE by the one join column of an association is the persister emptying that owner's
  * collection, and it binds to the owner -- which rows it took is not in the statement, and
- * comes from what the listener read of the collection before it ran.
+ * comes from what the listener read of the collection before it ran. One by the other join
+ * column is a target going, taking its rows in every owner's collection: it binds to the
+ * association, with the target as its element and no owner.
  */
 final class RowBinding
 {
@@ -31,6 +33,7 @@ final class RowBinding
     public const ROWS_OF_OWNER = 'rows of owner';
     public const JOIN_ROW = 'join row';
     public const JOIN_ROWS_OF_OWNER = 'join rows of owner';
+    public const JOIN_ROWS_OF_TARGET = 'join rows of target';
     public const UNBOUND = 'unbound';
 
     /**
@@ -207,6 +210,10 @@ final class RowBinding
 
         if ($shape->kind === StatementShape::DELETE && $ownerKey !== null && self::sameColumns($named, array_keys($ownerColumns))) {
             return new self(self::JOIN_ROWS_OF_OWNER, $root, $ownerKey, $association);
+        }
+
+        if ($shape->kind === StatementShape::DELETE && $elementKey !== null && self::sameColumns($named, array_keys($elementColumns))) {
+            return new self(self::JOIN_ROWS_OF_TARGET, $root, null, $association, $elementKey);
         }
 
         return new self(self::UNBOUND, reason: 'the join table of '.$root.'::'.$association.' is not named by the key of its rows');
