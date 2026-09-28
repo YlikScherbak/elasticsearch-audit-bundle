@@ -220,6 +220,124 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
         $this->logs = []; // the warning it says so with, which is today's too
     }
 
+    public function testTheLinksOfANestedFlushTakenBackAreNotRecordedAndTheOuterChangeIs(): void
+    {
+        // The outer flush changes an article's title; a listener ahead of this one, after that
+        // UPDATE, tags the article and runs a nested flush inside a savepoint of the
+        // application's, which it rolls back once the nested flush has written its join row. The
+        // title commits and the link does not -- and Doctrine, whose nested flush succeeded,
+        // believes it written. A savepoint the application opens around an entity's statement
+        // never holds a join row, which Doctrine writes after every UPDATE; one it opens around
+        // a nested flush does.
+        $php = new Tag('php');
+        $this->em->persist($php);
+        $article = $this->persisted(new Article('One'));
+        $connection = $this->em->getConnection();
+
+        $nested = new class($this->em, $article, $php) {
+            public int $linksWritten = -1;
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Article $article, private readonly Tag $php)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->article || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $connection = $this->em->getConnection();
+                $connection->beginTransaction();
+                $this->article->tags->add($this->php);
+                $this->em->flush();
+                $this->linksWritten = (int) $connection->fetchOne('SELECT COUNT(*) FROM article_tag WHERE article_id = ?', [$this->article->id]);
+                $connection->rollBack();
+            }
+        };
+        $this->ahead([Events::postUpdate], $nested);
+
+        $article->title = 'Two';
+        $this->em->flush();
+
+        self::assertSame(1, $nested->linksWritten, 'the premise: the nested flush wrote its join row');
+        self::assertSame(
+            ['Two', 0],
+            [$connection->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), (int) $connection->fetchOne('SELECT COUNT(*) FROM article_tag WHERE article_id = ?', [$article->id])],
+            'the premise: the title committed, and the join row was taken back',
+        );
+
+        // Already so, by the collection's snapshot. 5.3 reads the link from the join rows, where
+        // the nested flush's INSERT is, and what keeps it out then is the savepoint it ran in
+        // being taken back -- the guard is of that.
+        $this->pinned(
+            expected: [['title' => ['old' => 'One', 'new' => 'Two'], 'status' => ['old' => 'draft', 'new' => 'draft']]],
+            today: null,
+        );
+    }
+
+    public function testAfterALinkTakenBackTheNextOneStartsFromWhatTheRowsHold(): void
+    {
+        // A tag 'a' is added in a flush whose join row a savepoint of the application's takes
+        // back -- opened after a title's UPDATE, rolled back in a removal's postRemove, as
+        // above -- and a tag 'b' in the next flush. The collection holds both and the rows only
+        // 'b': the second record is of a list that went from none to 'b', not from 'a' to both.
+        // Not only is the taken-back link left out; the list the next one starts from is the
+        // rows', not Doctrine's.
+        $a = new Tag('a');
+        $b = new Tag('b');
+        $this->em->persist($a);
+        $this->em->persist($b);
+        $titled = $this->persisted(new Article('Titled'));
+        $linked = $this->persisted(new Article('Linked'));
+        $removed = $this->persisted(new Article('Removed'));
+        $connection = $this->em->getConnection();
+
+        $taking = new class($connection, $titled) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly Article $titled)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->titled) {
+                    $this->connection->beginTransaction();
+                }
+            }
+
+            public function postRemove(LifecycleEventArgs $args): void
+            {
+                $this->connection->rollBack();
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postUpdate, Events::postRemove], $taking);
+
+        $titled->title = 'Titled, again';
+        $linked->tags->add($a);
+        $this->em->remove($removed);
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate, Events::postRemove], $taking);
+
+        self::assertSame(0, (int) $connection->fetchOne('SELECT COUNT(*) FROM article_tag WHERE article_id = ?', [$linked->id]), 'the premise: the first link was taken back');
+        $this->gateway->documents = [];
+
+        $linked->tags->add($b);
+        $this->em->flush();
+
+        self::assertSame(['b'], array_map(
+            static fn (mixed $id): mixed => $connection->fetchOne('SELECT label FROM Tag WHERE id = ?', [$id]),
+            $connection->fetchFirstColumn('SELECT tag_id FROM article_tag WHERE article_id = ?', [$linked->id]),
+        ), 'the premise: the rows hold the second link and only it');
+
+        $this->pinned(
+            expected: [['tags' => ['old' => [], 'new' => ['b']], 'status' => ['old' => 'draft', 'new' => 'draft']]],
+            // From the collection's snapshot, which holds the link the rows do not.
+            today: [['tags' => ['old' => ['a'], 'new' => ['a', 'b']], 'status' => ['old' => 'draft', 'new' => 'draft']]],
+        );
+    }
+
     /**
      * @return iterable<string, array{bool}>
      */
