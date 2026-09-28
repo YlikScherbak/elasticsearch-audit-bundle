@@ -69,8 +69,9 @@ final class TestConnection
             // With its foreign keys, as the servers have theirs: SQLite leaves them off unless
             // asked, and then a join row outlives the row it points at -- a different database
             // from MySQL's and Postgres's for everything a cascade decides (5.3). The tests of
-            // a schema without them ask for that themselves.
-            $connection->executeStatement('PRAGMA foreign_keys = ON');
+            // a schema without them ask for that themselves; AUDIT_SQLITE_FOREIGN_KEYS=off runs
+            // everything without, to tell what the keys change from what the code does.
+            $connection->executeStatement(getenv('AUDIT_SQLITE_FOREIGN_KEYS') === 'off' ? 'PRAGMA foreign_keys = OFF' : 'PRAGMA foreign_keys = ON');
 
             return;
         }

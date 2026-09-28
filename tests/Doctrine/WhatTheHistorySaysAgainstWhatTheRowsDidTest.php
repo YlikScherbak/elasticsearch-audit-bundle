@@ -1402,6 +1402,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             sort($history);
         }
 
+        // What the sequence published and what it cost, for a measurement that holds two runs of
+        // a corpus against each other -- the documents, and the statements run for them.
+        fwrite(\STDERR, $_SERVER['AUDIT_MODEL_FINGERPRINTS'] ?? false ? sprintf("FP %d %s %d %d\n", $seed, self::fingerprintOf($this->documents()), \count($this->queries), \count($this->documents())) : '');
+
         if ($rows === $history) {
             return null;
         }
