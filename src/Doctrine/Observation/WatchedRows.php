@@ -79,8 +79,12 @@ final class WatchedRows
             foreach ($owner->getAssociationNames() as $association) {
                 // Declared once, on the class that declares it: a subclass inherits the mapping
                 // and the join rows are the same.
+                // Of the target's class or of one in its hierarchy: a row is deleted by its root's
+                // table, and which class of it the row was is not in the statement.
+                $of = $owner->getAssociationTargetClass($association);
+
                 if ($owner->isInheritedAssociation($association)
-                    || !is_a($target->name, $owner->getAssociationTargetClass($association), true)
+                    || !is_a($target->name, $of, true) && !is_a($of, $target->name, true)
                     || !$this->areLinksWatched($owner, $association)
                 ) {
                     continue;

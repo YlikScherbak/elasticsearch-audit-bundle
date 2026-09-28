@@ -77,6 +77,9 @@ final class HistoryReplay
      */
     private array $rowFacts = [];
 
+    /** @var array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int, by: string}>}> */
+    private array $links = [];
+
     /** @var list<string> */
     private array $doubts = [];
 
@@ -208,14 +211,26 @@ final class HistoryReplay
                 continue;
             }
 
-            if ($binding->kind === RowBinding::JOIN_ROW || $binding->kind === RowBinding::JOIN_ROWS_OF_OWNER) {
-                continue; // an owning collection's rows: recorded from its owner's change set
+            if ($binding->kind === RowBinding::JOIN_ROW || $binding->kind === RowBinding::JOIN_ROWS_OF_OWNER || $binding->kind === RowBinding::JOIN_ROWS_OF_TARGET) {
+                // An owning collection's rows: kept as they ran, and told against what the owner's
+                // rows held by {@see LinkFacts} -- which needs every statement of an owner before
+                // it can say what any one of them did.
+                $this->linkStatement($shape, $binding, $statement['affected']);
+
+                continue;
             }
 
             if ($binding->kind !== RowBinding::ROW || $binding->class === null) {
                 $this->doubt('not replayed: '.$binding->kind.' '.$statement['sql'], $binding->class);
 
                 continue;
+            }
+
+            // A row going takes it out of every collection it was in, whether or not a history
+            // is written about the row itself: by the database, for join columns that cascade,
+            // with no statement of the join table's at all.
+            if ($shape->kind === StatementShape::DELETE && $binding->key !== null && (int) $statement['affected'] > 0) {
+                $this->aTargetWent($binding->class, $binding->key);
             }
 
             $table = $this->mappingOfTable($binding->class, $shape->table);
@@ -234,6 +249,35 @@ final class HistoryReplay
                 default => $this->deleted($table, $binding->key ?? [], $statement['affected']),
             };
         }
+    }
+
+    /**
+     * The statements of watched join rows it has read, as they ran: by association, each
+     * owner's own -- a link added or removed, or all of its links taken -- and the targets that
+     * went, by a join table's statement or by their own row's DELETE.
+     *
+     * @return array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int, by: string}>}>
+     */
+    public function linkStatements(): array
+    {
+        return $this->links;
+    }
+
+    /**
+     * Where the statements an account of an owner's links already holds are: the owner's own,
+     * and every target of the association that went -- the ones read so far.
+     *
+     * @return list<int>
+     */
+    public function linkPositionsOf(string $association, string $owner): array
+    {
+        $at = [
+            ...array_column($this->links[$association]['owners'][$owner] ?? [], 'at'),
+            ...array_column($this->links[$association]['targets'] ?? [], 'at'),
+        ];
+        sort($at);
+
+        return $at;
     }
 
     /** How far it has read. */
@@ -445,6 +489,58 @@ final class HistoryReplay
     public function doubtsAfter(int $at): array
     {
         return array_values(array_filter($this->doubtsAt, static fn (array $doubt): bool => $doubt['at'] > $at));
+    }
+
+    /**
+     * A statement of a join table, kept if the association's links are watched.
+     */
+    private function linkStatement(StatementShape $shape, RowBinding $binding, int|string|null $affected): void
+    {
+        if ($binding->class === null || $binding->association === null) {
+            return;
+        }
+
+        $owner = $this->em()->getClassMetadata($binding->class);
+
+        if (!$this->watched->areLinksWatched($owner, $binding->association)) {
+            return;
+        }
+
+        $target = $this->em()->getClassMetadata($this->em()->getClassMetadata($owner->getAssociationTargetClass($binding->association))->rootEntityName);
+        $of = JoinRowMemory::associationOf($owner->rootEntityName, $binding->association);
+
+        if ($binding->kind === RowBinding::JOIN_ROWS_OF_TARGET) {
+            $key = $binding->element ?? [];
+            $this->links[$of]['targets'][] = ['at' => $this->at, 'target' => self::keyOf($target, $key), 'key' => $key, 'affected' => (int) $affected, 'by' => 'statement'];
+
+            return;
+        }
+
+        $ownerKey = $binding->key ?? [];
+        $this->links[$of]['owners'][self::keyOf($this->em()->getClassMetadata($owner->rootEntityName), $ownerKey)][] = [
+            'at' => $this->at,
+            'kind' => $binding->kind === RowBinding::JOIN_ROWS_OF_OWNER ? 'all' : ($shape->kind === StatementShape::INSERT ? 'add' : 'remove'),
+            'owner' => $ownerKey,
+            'target' => $binding->element === null ? null : self::keyOf($target, $binding->element),
+            'key' => $binding->element,
+            'affected' => (int) $affected,
+        ];
+    }
+
+    /**
+     * A row that went, taken out of every watched collection its class is a target of.
+     *
+     * @param class-string         $root
+     * @param array<string, mixed> $key
+     */
+    private function aTargetWent(string $root, array $key): void
+    {
+        $metadata = $this->em()->getClassMetadata($root);
+
+        foreach ($this->watched->linksTo($this->em(), $metadata) as [$owner, $association]) {
+            $of = JoinRowMemory::associationOf($this->em()->getClassMetadata($owner)->rootEntityName, $association);
+            $this->links[$of]['targets'][] = ['at' => $this->at, 'target' => self::keyOf($metadata, $key), 'key' => $key, 'affected' => 1, 'by' => 'row'];
+        }
     }
 
     private function forgetWhatWasTakenAfter(string $root, string $id, int $at): void

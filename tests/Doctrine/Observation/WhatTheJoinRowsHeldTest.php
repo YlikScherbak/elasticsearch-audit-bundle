@@ -42,7 +42,7 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         $this->memory->rememberTheLinksOf($this->em, $article, 'tags', $this->includes([7]));
 
         self::assertSame(
-            ['targets' => [(string) $phpId => ['id' => $phpId], (string) $dbId => ['id' => $dbId]], 'takenAt' => $position, 'includes' => [7]],
+            ['owner' => ['id' => $id], 'targets' => [(string) $phpId => ['id' => $phpId], (string) $dbId => ['id' => $dbId]], 'takenAt' => $position, 'includes' => [7]],
             self::normalised($this->memory->links()[JoinRowMemory::associationOf(Article::class, 'tags')][(string) $id]),
         );
         self::assertSame([[JoinRowMemory::associationOf(Article::class, 'tags'), (string) $id]], $this->includesAskedFor, 'the statements it already holds, asked where it was taken');
@@ -155,7 +155,7 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
             $otherId => [],
         ]], 42);
 
-        self::assertSame([$of => [(string) $held->id => ['targets' => ['9' => ['id' => 9]], 'takenAt' => 42, 'includes' => []]]], $this->memory->links());
+        self::assertSame([$of => [(string) $held->id => ['owner' => ['id' => $held->id], 'targets' => ['9' => ['id' => 9]], 'takenAt' => 42, 'includes' => []]]], $this->memory->links());
         self::assertSame([], $this->memory->holdersRead());
         self::assertSame(1, $this->memory->size());
     }
@@ -236,15 +236,16 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
     /**
      * A key as a database hands it back may be a string where the statement bound an integer.
      *
-     * @param array{targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>} $account
+     * @param array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>} $account
      *
-     * @return array{targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}
+     * @return array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}
      */
     private static function normalised(array $account): array
     {
         $targets = array_map(static fn (array $key): array => array_map(static fn (mixed $v): mixed => is_numeric($v) ? (int) $v : $v, $key), $account['targets']);
         ksort($targets);
         $account['targets'] = $targets;
+        $account['owner'] = array_map(static fn (mixed $v): mixed => is_numeric($v) ? (int) $v : $v, $account['owner']);
 
         return $account;
     }

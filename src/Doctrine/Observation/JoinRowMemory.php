@@ -33,7 +33,7 @@ final class JoinRowMemory
     /**
      * By association -- the owner's root class and the association's name -- and owner.
      *
-     * @var array<string, array<string, array{targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}>>
+     * @var array<string, array<string, array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}>>
      */
     private array $links = [];
 
@@ -104,7 +104,7 @@ final class JoinRowMemory
             }
         }
 
-        $this->links[$of][$id] = ['targets' => $targets, 'takenAt' => $this->log->position(), 'includes' => $includes($of, $id)];
+        $this->links[$of][$id] = ['owner' => $key, 'targets' => $targets, 'takenAt' => $this->log->position(), 'includes' => $includes($of, $id)];
         $this->objects[$of][$id] = \WeakReference::create($owner);
     }
 
@@ -150,12 +150,13 @@ final class JoinRowMemory
             $id = HistoryReplay::keyOf($root, $ownerKey);
             // The id kept beside the key: a key of digits is an integer to an array.
             $held[$id]['id'] = $id;
+            $held[$id]['owner'] = $ownerKey;
             $held[$id]['targets'][HistoryReplay::keyOf($targetRoot, $heldKey)] = $heldKey;
         }
 
-        foreach ($held as ['id' => $id, 'targets' => $targets]) {
+        foreach ($held as ['id' => $id, 'owner' => $ownerKey, 'targets' => $targets]) {
             if (!isset($this->links[$of][$id])) {
-                $this->links[$of][$id] = ['targets' => $targets, 'takenAt' => $this->log->position(), 'includes' => $includes($of, $id)];
+                $this->links[$of][$id] = ['owner' => $ownerKey, 'targets' => $targets, 'takenAt' => $this->log->position(), 'includes' => $includes($of, $id)];
                 $this->objects[$of][$id] ??= null;
             }
         }
@@ -164,7 +165,7 @@ final class JoinRowMemory
     }
 
     /**
-     * @return array<string, array<string, array{targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}>>
+     * @return array<string, array<string, array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}>>
      */
     public function links(): array
     {
@@ -196,11 +197,13 @@ final class JoinRowMemory
             foreach ($owners as $id => $targets) {
                 $object = $this->objects[$of][$id] ?? null;
 
-                if ($targets === null || $object?->get() === null) {
+                $owner = $this->links[$of][$id]['owner'] ?? null;
+
+                if ($targets === null || $object?->get() === null || $owner === null) {
                     continue;
                 }
 
-                $links[$of][$id] = ['targets' => $targets, 'takenAt' => $at, 'includes' => []];
+                $links[$of][$id] = ['owner' => $owner, 'targets' => $targets, 'takenAt' => $at, 'includes' => []];
                 $objects[$of][$id] = $object;
             }
         }
