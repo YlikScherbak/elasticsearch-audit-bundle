@@ -43,6 +43,18 @@ final class LinkFacts
     /** @var array<string, array<string, array<string, array<string, mixed>>|null>> by association and owner: what its rows hold, null where not known */
     private array $states = [];
 
+    /**
+     * By association and owner: where what its rows held was established -- where the replay
+     * began, and where its row was inserted or went -- and what it was there. What its rows held
+     * before any fact is the last of these at or before it, with the facts since carried out over
+     * it. Where it stops being known is none of them: no fact follows until one of these again.
+     * Its row going is one only a link written for an owner that is not there can follow -- which
+     * a join table whose foreign keys are enforced refuses, and so no test here reaches.
+     *
+     * @var array<string, array<string, list<array{at: int, targets: array<string, array<string, mixed>>|null}>>>
+     */
+    private array $starts = [];
+
     private function __construct()
     {
     }
@@ -105,6 +117,8 @@ final class LinkFacts
 
                 usort($events, static fn (array $one, array $other): int => [$one[0], $one[1]] <=> [$other[0], $other[1]]);
 
+                $told->starts[$of][$id][] = ['at' => 0, 'targets' => $state];
+
                 foreach ($events as [$at, , $event]) {
                     $targetId = $event['target'] ?? '';
                     $targetKey = isset($event['key']) && \is_array($event['key']) ? $event['key'] : [];
@@ -117,11 +131,13 @@ final class LinkFacts
                     switch ($event['kind']) {
                         case 'row':
                             $state = [];
+                            $told->starts[$of][$id][] = ['at' => $at, 'targets' => $state];
 
                             break;
 
                         case 'row gone':
                             $state = null === $state ? null : [];
+                            $told->starts[$of][$id][] = ['at' => $at, 'targets' => $state];
 
                             break;
 
@@ -237,6 +253,14 @@ final class LinkFacts
     public function doubts(): array
     {
         return $this->doubts;
+    }
+
+    /**
+     * @return array<string, array<string, list<array{at: int, targets: array<string, array<string, mixed>>|null}>>>
+     */
+    public function starts(): array
+    {
+        return $this->starts;
     }
 
     /**
