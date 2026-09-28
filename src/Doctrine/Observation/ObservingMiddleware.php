@@ -12,8 +12,12 @@ use Doctrine\DBAL\Driver\Middleware\AbstractDriverMiddleware;
 /**
  * Tells a {@see StatementLog} what the connection does, and changes nothing about it.
  *
- * An observer, and held to that: it runs no statement of its own, alters no parameter,
- * returns what the driver returned, and lets every exception through as it came. What it
+ * An observer, and held to that: it alters no parameter, returns what the driver returned,
+ * and lets every exception through as it came. It runs one kind of statement of its own, and
+ * only when told to: the look right after a DELETE a flush said to watch
+ * ({@see LookRightAfter}), through the connection underneath, never logged as the
+ * application's and never able to reach it -- the one moment at which what a cascade took
+ * can be seen, and which no event of the ORM's offers. What it
  * does NOT do is as deliberate -- it leaves the connection's options alone. MySQL counts an
  * UPDATE that writes the value a row already holds as touching nothing, unless
  * FOUND_ROWS is set; setting it would change what executeStatement() returns to the whole

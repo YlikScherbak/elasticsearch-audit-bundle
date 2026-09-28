@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation\Dbal4;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\LookRightAfter;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Doctrine\DBAL\Driver\Connection;
 use Doctrine\DBAL\Driver\Middleware\AbstractConnectionMiddleware;
@@ -17,14 +18,14 @@ use Doctrine\DBAL\Driver\Statement;
  */
 final class ObservedConnection extends AbstractConnectionMiddleware
 {
-    public function __construct(Connection $connection, private readonly StatementLog $log)
+    public function __construct(private readonly Connection $inner, private readonly StatementLog $log)
     {
-        parent::__construct($connection);
+        parent::__construct($inner);
     }
 
     public function prepare(string $sql): Statement
     {
-        return new ObservedStatement(parent::prepare($sql), $sql, $this->log);
+        return new ObservedStatement(parent::prepare($sql), $sql, $this->log, $this->inner);
     }
 
     public function query(string $sql): Result
@@ -38,7 +39,7 @@ final class ObservedConnection extends AbstractConnectionMiddleware
         }
 
         if (!StatementLog::onlyReads($sql)) {
-            $this->log->executed($sql, [], $result->rowCount());
+            LookRightAfter::aStatement($this->log, $this->inner, $this->log->executed($sql, [], $result->rowCount()), $sql, [], $result->rowCount());
         }
 
         return $result;
@@ -54,7 +55,7 @@ final class ObservedConnection extends AbstractConnectionMiddleware
             throw $e;
         }
 
-        $this->log->executed($sql, [], $affected);
+        LookRightAfter::aStatement($this->log, $this->inner, $this->log->executed($sql, [], $affected), $sql, [], $affected);
 
         return $affected;
     }

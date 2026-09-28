@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation\Dbal3;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\LookRightAfter;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
+use Doctrine\DBAL\Driver\Connection;
 use Doctrine\DBAL\Driver\Middleware\AbstractStatementMiddleware;
 use Doctrine\DBAL\Driver\Result;
 use Doctrine\DBAL\Driver\Statement;
@@ -21,7 +23,7 @@ final class ObservedStatement extends AbstractStatementMiddleware
     /** @var array<int|string, mixed> bound by reference, read when the statement runs */
     private array $references = [];
 
-    public function __construct(Statement $statement, private readonly string $sql, private readonly StatementLog $log)
+    public function __construct(Statement $statement, private readonly string $sql, private readonly StatementLog $log, private readonly Connection $inner)
     {
         parent::__construct($statement);
     }
@@ -75,7 +77,7 @@ final class ObservedStatement extends AbstractStatementMiddleware
         }
 
         if (!StatementLog::onlyReads($this->sql)) {
-            $this->log->executed($this->sql, $bound, $result->rowCount());
+            LookRightAfter::aStatement($this->log, $this->inner, $this->log->executed($this->sql, $bound, $result->rowCount()), $this->sql, $bound, $result->rowCount());
         }
 
         return $result;
