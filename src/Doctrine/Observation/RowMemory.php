@@ -105,12 +105,21 @@ final class RowMemory
      */
     public function rememberWhatIsManaged(EntityManagerInterface $em): void
     {
-        foreach ($em->getUnitOfWork()->getIdentityMap() as $entities) {
+        $uow = $em->getUnitOfWork();
+
+        foreach ($uow->getIdentityMap() as $entities) {
             foreach ($entities as $entity) {
                 if (\is_object($entity)) {
                     $this->remember($em, $entity);
                 }
             }
+        }
+
+        // And what is about to be removed, which ORM 2.19 has already taken out of the identity
+        // map at remove() -- 2.20 and 3 keep it there until the commit. A row loaded and removed
+        // before any flush saw it was otherwise a DELETE of a row nothing said was there.
+        foreach ($uow->getScheduledEntityDeletions() as $entity) {
+            $this->remember($em, $entity);
         }
     }
 

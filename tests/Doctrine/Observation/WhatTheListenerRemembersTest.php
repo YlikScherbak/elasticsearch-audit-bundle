@@ -201,6 +201,27 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         self::assertCount(1, array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did')), 'once, not at every reading');
     }
 
+    public function testARowLoadedAndRemovedBeforeAnyFlushSawItIsRememberedAndItsRemovalRecorded(): void
+    {
+        // A row this process never wrote, loaded and removed: its row is remembered at preFlush
+        // like any row Doctrine manages -- and ORM 2.19 has already taken a removed entity out of
+        // the identity map by then (2.20 and 3 keep it there until the commit), so it is asked of
+        // the scheduled deletions too. Without that the DELETE was of a row nothing said was
+        // there, and the removal had no record at all, on ORM 2.19 alone.
+        $this->log = $this->watchTheConnection(FailurePolicy::Log);
+        $native = $this->em->getConnection()->getNativeConnection();
+        self::assertInstanceOf(\PDO::class, $native);
+        $native->exec("INSERT INTO Article (id, title, status, views) VALUES (900201, 'Loaded', 'draft', 0)");
+
+        $article = $this->em->find(Article::class, 900201);
+        self::assertInstanceOf(Article::class, $article);
+        $this->em->remove($article);
+        $this->em->flush();
+
+        self::assertSame([['article', 900201, 'remove']], array_map(static fn (array $d): array => [$d['objectType'], $d['objectId'], $d['event']], $this->documents()));
+        self::assertSame([], $this->logs);
+    }
+
     public function testAFlushOfNothingAuditedRemembersNothing(): void
     {
         $this->log = $this->watchTheConnection(FailurePolicy::Log, letsGo: true);
