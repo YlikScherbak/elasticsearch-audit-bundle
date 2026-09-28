@@ -16,7 +16,6 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Pouch;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Preference;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Sku;
-use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Switchboard;
@@ -163,37 +162,6 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
 
         self::assertSame([[1, 2], [2, 3]], array_map(static fn (array $fact): array => [$fact['old'], $fact['new']], $facts), 'the premise: the two changes of the line');
         self::assertSame([['status' => 'packed'], ['status' => 'raw']], array_column($facts, 'ownerContext'));
-
-        $this->end();
-    }
-
-    public function testAnOwningCollectionsJoinRowsAreNoFactsYet(): void
-    {
-        // What an owning many-to-many went through is read from the collection's snapshot, at
-        // its owner's post* events (AuditSubscriber::$collectionSnapshots), because its join
-        // rows are not facts of the log yet. The day they are -- step 5.3 -- this fails: take
-        // the snapshots out of the listener, and this test with them.
-        $this->em->persist($php = new Tag('php'));
-        $this->em->persist($article = new Article('Hello'));
-        $this->em->flush();
-
-        $this->begin();
-        $article->tags->add($php);
-        $this->em->flush();
-
-        $replay = $this->memory()->replayed($this->em);
-        $theirs = array_filter($replay->facts(), fn (array $fact): bool => $fact['at'] > $this->from);
-
-        self::assertNotSame([], array_filter(
-            iterator_to_array((function (): \Generator {
-                for ($at = $this->from + 1; $at <= $this->log->position(); ++$at) {
-                    yield $this->log->statement($at)['sql'] ?? '';
-                }
-            })()),
-            static fn (string $sql): bool => str_contains($sql, 'article_tag'),
-        ), 'the premise: the join row was written');
-        self::assertSame([], $theirs, 'the join rows are facts now (5.3): take AuditSubscriber::$collectionSnapshots out, and this test with it');
-        self::assertSame([], array_filter($this->facts(), static fn (array $fact): bool => $fact['class'] !== Article::class), 'nor are they a fact of any row');
 
         $this->end();
     }

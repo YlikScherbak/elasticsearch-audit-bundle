@@ -186,7 +186,10 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $other->title = 'Other, again';
         $this->em->flush();
 
-        self::assertSame([['One', ['x'], ['x', 'a']], ['One', ['x', 'a'], []], ['One', [], ['b']]], $this->said());
+        // The links deleted by the article's key right before its row's DELETE are that removal's --
+        // what Doctrine itself writes where join columns do not cascade -- and no move of a list;
+        // the one written after the row came back starts from nothing.
+        self::assertSame([['One', ['x'], ['x', 'a']], ['One', [], ['b']]], $this->said());
         $this->end();
     }
 

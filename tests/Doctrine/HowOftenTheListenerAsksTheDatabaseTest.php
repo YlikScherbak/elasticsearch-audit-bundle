@@ -45,7 +45,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
  */
 final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
 {
-    public function testTheOldMembershipIsReadBackOnlyForACollectionSomebodyAudits(): void
+    public function testTheOldMembershipIsReadBackOnlyForACollectionSomebodyAuditsAndOnlyWhereNothingKnowsIt(): void
     {
         $route = new Route('R-1');
         $route->stops->add($first = new Stop('a'));
@@ -58,36 +58,42 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         $this->em->persist($route);
         $this->em->flush();
 
-        $this->queries = [];
-        $route->detours->clear();
-        $this->em->flush();
-
-        self::assertSame([], self::selects($this->queries), 'a collection nobody audits is emptied without a question');
-
+        // What its join rows hold is known from the flush that wrote them: emptied now, the
+        // route asks nothing (5.3). Until 5.3 this was one question, read in onFlush before the
+        // DELETE; before that two, a COUNT and a read of Doctrine's snapshot -- which is the
+        // membership as of the last time Doctrine synchronised it, and was the mistake.
         $this->queries = [];
         $route->stops->clear();
         $this->em->flush();
 
-        $read = self::selects($this->queries);
+        self::assertSame([], self::selects($this->queries), 'what the flush that created it wrote is its account');
 
-        // One question, and it is the only one. It reads what the rows hold for this
-        // owner, which is both of the things this needs to know: which elements the
-        // DELETE is about to take, and -- by coming back empty -- that there is nothing
-        // left to take at all.
-        //
-        // It was two for a while: a COUNT asking whether the rows were still there, and
-        // this SELECT only where the collection had no snapshot to read. The snapshot was
-        // the mistake. It is Doctrine's record of the collection as of the last time it
-        // was synchronised with the database, and every road that changes the membership
-        // without re-synchronising it -- a line moved by its own side, a flush whose
-        // publishing was swallowed, a deletion still on the schedule after it was carried
-        // out -- left it describing a different moment from this one. Asking the rows
-        // instead answers both questions with one SELECT and cannot be stale.
-        //
-        // The account of the owner's join rows (5.3a) asks nothing here: the flush that created
-        // the route wrote its stops, and that is its account.
-        self::assertCount(1, $read, 'one question, asked once');
-        self::assertStringContainsString('route_stop', $read[0], 'it reads the membership back');
+        // A route written past this process, which nothing here has an account of: its rows are
+        // read once, in onFlush, before the DELETE -- and a collection nobody audits is emptied
+        // without a question at all. The one other question is the stop's own row, which its
+        // representer reads for the name it records, as it would read it for any record.
+        $native = $this->em->getConnection()->getNativeConnection();
+        self::assertInstanceOf(\PDO::class, $native);
+        $native->exec("INSERT INTO Stop (id, name) VALUES (900301, 'far'), (900302, 'further')");
+        $native->exec("INSERT INTO Route (id, code) VALUES (900301, 'R-far')");
+        $native->exec('INSERT INTO route_stop (route_id, stop_id) VALUES (900301, 900301)');
+        $native->exec('INSERT INTO route_detours (route_id, stop_id) VALUES (900301, 900302)');
+        $far = $this->em->find(Route::class, 900301);
+        self::assertInstanceOf(Route::class, $far);
+
+        $far->detours->clear();
+        $this->queries = [];
+        $this->em->flush();
+
+        self::assertSame([], self::selects($this->queries), 'a collection nobody audits is emptied without a question');
+
+        $far->stops->clear();
+        $this->queries = [];
+        $this->em->flush();
+
+        $read = self::selects($this->queries);
+        self::assertCount(1, array_filter($read, static fn (string $sql): bool => str_contains($sql, 'route_stop')), 'its membership read back once');
+        self::assertSame([], array_values(array_filter($read, static fn (string $sql): bool => !str_contains($sql, 'route_stop') && !str_contains($sql, 'FROM Stop'))), 'and nothing else but the stop the record names');
     }
 
     public function testRemovingManyLinesTheMakerWayAddsNoSelect(): void

@@ -258,11 +258,30 @@ final class RowMemory
             }
         }
 
+        return [...$failures, ...$this->rememberTheGoing($em, array_values($uow->getScheduledEntityDeletions()), $flush)];
+    }
+
+    /**
+     * What the rows about to go hold, read before they go, and each watched right after its
+     * DELETE: the holders of every target among them, and the links of an owner among them
+     * whose join columns do not cascade. From onFlush for all the flush plans, and from
+     * preRemove for one a listener removes while the flush runs -- after onFlush, and so
+     * planned where nothing else would read it.
+     *
+     * @param list<object> $entities
+     *
+     * @return list<\Throwable>
+     */
+    public function rememberTheGoing(EntityManagerInterface $em, array $entities, int $flush): array
+    {
+        $includes = fn (string $of, string $id): array => $this->replayed($em)->linkPositionsOf($of, $id);
+        $failures = [];
+
         // The targets going, gathered by the collection they may be in: one question for all of
         // a collection's, however many a flush removes.
         $going = [];
 
-        foreach ($uow->getScheduledEntityDeletions() as $entity) {
+        foreach ($entities as $entity) {
             try {
                 $metadata = $em->getClassMetadata($entity::class);
 

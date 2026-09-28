@@ -74,6 +74,42 @@ final class WhatTheListenerSeesOfACascadeTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testWhatIsPublishedOfATargetGoneIsEachOwnersWholeListOnceAndAsTheFlushs(): void
+    {
+        // Published, not only told: each article that held the tag has a record of its list
+        // moving -- the whole list, before and after -- signed and timed as the flush that removed
+        // the tag, as the other record of that flush is; and the next flush publishes nothing of
+        // it again.
+        $a = $this->aTag('a');
+        $b = $this->aTag('b');
+        $one = $this->anArticle('One', $a, $b);
+        $two = $this->anArticle('Two', $a);
+        $three = $this->anArticle('Three');
+        $this->gateway->documents = [];
+
+        $this->em->remove($a);
+        $three->title = 'Three, again';
+        $this->em->flush();
+
+        $documents = $this->documents();
+        $tags = array_values(array_filter($documents, static fn (array $d): bool => isset($d['changes']['tags'])));
+        self::assertSame(
+            [[(string) $one->id, ['old' => ['a', 'b'], 'new' => ['b']]], [(string) $two->id, ['old' => ['a'], 'new' => []]]],
+            array_map(static fn (array $d): array => [(string) $d['objectId'], $d['changes']['tags']], $tags),
+        );
+        self::assertSame(['update', 'update'], array_column($tags, 'event'));
+        $provenance = static fn (array $d): array => array_diff_key($d, array_flip(['objectId', 'changes', 'id']));
+        $title = array_values(array_filter($documents, static fn (array $d): bool => isset($d['changes']['title'])))[0] ?? null;
+        self::assertNotNull($title, 'the premise: the flush had another record');
+        self::assertSame([$provenance($title), $provenance($title)], array_map($provenance, $tags), 'signed and timed as the flush that removed the tag');
+
+        $this->gateway->documents = [];
+        $one->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame([['title', 'status']], array_map(static fn (array $d): array => array_keys($d['changes']), $this->documents()), 'nothing of the tag published again');
+    }
+
     public function testWhereTheDatabaseKeepsTheRowTheLinkStaysAndNothingIsSaid(): void
     {
         // No cascade: the tag's row goes and its join rows stay, pointing at nothing. What the

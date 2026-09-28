@@ -137,6 +137,11 @@ final class LinkFacts
                             break;
 
                         case 'row gone':
+                            // What the owner's removal took is its removal's: the links Doctrine
+                            // deletes by the owner's key right before its row's DELETE are part of
+                            // that execution, no move of a list of their own. What ran before --
+                            // a link added, or taken with a target -- keeps its facts.
+                            $told->facts = array_values(array_filter($told->facts, static fn (array $fact): bool => !($fact['association'] === $of && $fact['ownerId'] === $id && $fact['cause'] === 'emptied' && $fact['at'] === $at - 1)));
                             $state = null === $state ? null : [];
                             $told->starts[$of][$id][] = ['at' => $at, 'targets' => $state];
 

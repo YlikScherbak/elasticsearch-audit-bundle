@@ -80,6 +80,16 @@ final class HistoryReplay
     /** @var array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int, by: string}>}> */
     private array $links = [];
 
+    /**
+     * What each watched row that moved while this read held after each statement that moved it,
+     * by root class and key, the first entry what it held when it was taken: what shows a link's
+     * target at the moment of the link ({@see copyAt()}) rather than as the rows stand once
+     * everything ran. Only the rows that moved, and only since the rows were settled.
+     *
+     * @var array<string, array<string, list<array{0: int, 1: array<string, mixed>|null}>>>
+     */
+    private array $versions = [];
+
     /** @var list<string> */
     private array $doubts = [];
 
@@ -584,9 +594,11 @@ final class HistoryReplay
         // A row deleted and inserted again under its key starts over; a row already there --
         // the root table's, when a JOINED child writes its own -- is added to, the new columns
         // winning, and it arrived once.
-        $there = isset($this->gone[$root][$id]) ? [] : ($this->rows[$root][$id] ?? []);
+        $before = isset($this->gone[$root][$id]) ? null : ($this->rows[$root][$id] ?? null);
+        $there = $before ?? [];
         $this->rows[$root][$id] = $row + $there;
         unset($this->gone[$root][$id]);
+        $this->moved($root, $id, $before);
 
         foreach ($there === [] ? $this->ownersOf($metadata, $this->rows[$root][$id]) : [] as $owner) {
             $this->member($metadata, $owner, $id, self::keyColumnsOf($metadata, $this->rows[$root][$id]), $this->rows[$root][$id], arrived: true);
@@ -629,6 +641,7 @@ final class HistoryReplay
         }
 
         $this->rows[$root][$id] = $after;
+        $this->moved($root, $id, $before);
 
         // The change, from what this statement wrote: the audited columns it set, each from the
         // row's value -- a foreign key as the key it names -- and only those that moved.
@@ -874,6 +887,114 @@ final class HistoryReplay
 
         $this->gone[$root][$id] = true;
         $this->goneAt[$root][$id] = $this->at;
+        $this->moved($root, $id, $gone);
+    }
+
+    /**
+     * A row as it stood at a position of the log -- before the statement there, or once it ran
+     * -- as a copy of its class: what a link's target is shown as at the moment of the link,
+     * where the replay knows the row. Null where it does not: a row it holds no account of from
+     * that point, or one that was not there.
+     *
+     * @param class-string         $class a class of the row's hierarchy
+     * @param array<string, mixed> $key   its identifier columns and their database values
+     */
+    public function copyAt(string $class, array $key, int $position, bool $once): ?object
+    {
+        $em = $this->em();
+        $root = $em->getClassMetadata($em->getClassMetadata($class)->rootEntityName);
+        $row = $this->rowAt($root->name, self::keyOf($root, $key), $position, $once);
+
+        if ($row === null) {
+            return null;
+        }
+
+        $metadata = $this->classOfRow($root, $row);
+        $copy = $this->copyOf($metadata, $row);
+
+        // And what it points at, by the key its row held there -- so that a representer reading
+        // the row's own association reads the one the row pointed at. What that entity holds is
+        // the manager's: the row is shown as it stood, not everything it leads to.
+        foreach ($metadata->getAssociationNames() as $association) {
+            if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {
+                continue;
+            }
+
+            $columns = CollectionRowsQuery::entry($metadata->getAssociationMapping($association), 'joinColumns');
+            $column = \is_array($columns) && \count($columns) === 1 ? CollectionRowsQuery::entry(reset($columns), 'name') : null;
+
+            if (!\is_string($column) || !\array_key_exists($column, $row)) {
+                continue;
+            }
+
+            $metadata->setFieldValue($copy, $association, $row[$column] === null ? null : $this->referenceTo($metadata->getAssociationTargetClass($association), $row[$column]));
+        }
+
+        return $copy;
+    }
+
+    /**
+     * The entity a foreign key names: the one the manager holds, or a reference to it.
+     *
+     * @param class-string $class
+     */
+    private function referenceTo(string $class, mixed $key): ?object
+    {
+        $metadata = $this->em()->getClassMetadata($class);
+        $fields = $metadata->getIdentifierFieldNames();
+
+        if (\count($fields) !== 1) {
+            return null;
+        }
+
+        $id = [$fields[0] => $metadata->hasAssociation($fields[0]) ? $key : $this->php($metadata, $fields[0], $key)];
+        $found = $this->em()->getUnitOfWork()->tryGetById($id, $metadata->rootEntityName);
+
+        return \is_object($found) ? $found : $this->em()->getReference($metadata->name, $id);
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function rowAt(string $root, string $id, int $position, bool $once): ?array
+    {
+        $versions = $this->versions[$root][$id] ?? null;
+
+        if ($versions === null) {
+            // Unmoved since it was taken: as it is, from where it was taken on.
+            $known = !isset($this->takenAt[$root][$id]) || $this->takenAt[$root][$id] <= $position;
+
+            return $known && !isset($this->gone[$root][$id]) ? ($this->rows[$root][$id] ?? null) : null;
+        }
+
+        $row = null;
+        $found = false;
+
+        foreach ($versions as [$at, $held]) {
+            if ($at > $position || (!$once && $at === $position && $found)) {
+                break;
+            }
+
+            $row = $held;
+            $found = true;
+        }
+
+        return $found ? $row : null;
+    }
+
+    /**
+     * A row moved by the statement being read: what it holds now, and -- the first time -- what
+     * it held before, where it was taken.
+     *
+     * @param array<string, mixed>|null $before
+     */
+    private function moved(string $root, string $id, ?array $before): void
+    {
+        if (!isset($this->versions[$root][$id])) {
+            $this->versions[$root][$id][] = [$this->takenAt[$root][$id] ?? 0, $before];
+        }
+
+        $this->versions[$root][$id][] = [$this->at, isset($this->gone[$root][$id]) ? null : ($this->rows[$root][$id] ?? null)];
     }
 
     /**
@@ -984,6 +1105,7 @@ final class HistoryReplay
             }
 
             $this->gone[$root][$id] = true;
+            $this->moved($root, (string) $id, $row);
         }
 
         if ($collection !== null && $held !== []) {

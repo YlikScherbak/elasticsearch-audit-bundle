@@ -564,19 +564,20 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     ];
 
     /**
-     * Step 5's first world (5.2c, 2026-09-27): a kiln and relays -- the one run by default.
+     * Step 5's first world (5.2c, 2026-09-27): a kiln and relays -- run on request,
+     * AUDIT_MODEL_VOCABULARY=5.2c, with its corpus, since the tagged world is the default.
      *
-     * The tagged world ({@see self::VOCABULARY}) is run on request, AUDIT_MODEL_VOCABULARY=5.3,
-     * until 5.3 makes it the default: it is the judge 5.3 is built against, and it was built
-     * before it. Measured on the listener of 5.2c, 576 of its 3000 sequences disagree with the
-     * rows, every one of them about the article's tags and nothing else -- a tag a nested flush
-     * gave lost (287), a tag's move signed by the other flush's actor (194), a tag recorded that
-     * the rows never kept (90: recorded again for the outer flush after a nested one wrote it,
-     * recorded though a listener cleared the manager before the join rows were written, or
-     * recorded though taken back), and five of both -- the collection's snapshot at its owner's
-     * events, which 5.3 replaces with the join rows. Listed seed by seed they would be 576
-     * entries of KNOWN for one commit's life; run on request, they are what 5.3 has to bring to
-     * none, and one of each way is kept in {@see self::TELLS_APART}.
+     * The tagged world ({@see self::VOCABULARY}) was the judge 5.3 was built against, and was
+     * built before it: on the listener of 5.2c, 576 of its 3000 sequences disagreed with the
+     * rows, every one about the article's tags -- a tag a nested flush gave lost (287), a tag's
+     * move signed by the other flush's actor (194), a tag recorded that the rows never kept (90),
+     * and five of both -- the collection's snapshot at its owner's events. Read from the join
+     * rows (5.3), none does, and it is the default; one of each way is kept in
+     * {@see self::TELLS_APART}.
+     *
+     * What it does not reach: no word removes a tag, or an article that holds one, so no cascade
+     * a target's DELETE takes with it is in any of its sequences -- that is held by the
+     * scenarios of WhatTheListenerSeesOfACascadeTest, and words for it are 5.3's next step.
      */
     private const VOCABULARY_5_2C = [
         ...self::VOCABULARY_5_2,
@@ -1134,25 +1135,24 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             [6, false, ['edit the kiln\'s root', 'change a line', 'flush, and after the statement a listener removes the line', 'move a line back', 'edit the kiln\'s root', 'flush, and after the statement a nested one edits the kiln\'s subclass', 'replace the crate with a new line', 'create two relays pointing at each other', 'edit the kiln\'s root', 'flush, and after the statement a nested one edits the kiln\'s subclass', 'flush']],
         ],
 
-        // What 5.3 is for, one of each way the listener of 5.2c tells the article's tags other than
-        // the join rows say -- from the 576 of 3000 sequences of the tagged world that disagree
-        // (2026-09-27, AUDIT_MODEL_VOCABULARY=5.3), and run in that world whatever the default
-        // is. Each carries what it says today as its excuse, so that 5.3 cannot leave one of
-        // them as it is, nor mend one without taking its excuse off: the excuses go with 5.3,
-        // and the sequences stay, as what reading the join rows has to go on getting right.
+        // What 5.3 was for, one of each way the listener of 5.2c told the article's tags other than
+        // the join rows said -- from the 576 of 3000 sequences of the tagged world that disagreed
+        // (2026-09-27), and run in that world whatever the default is. Each carried what it said
+        // then as its excuse until 5.3 read the join rows, and the excuses came off together; the
+        // sequences stay, as what reading the join rows has to go on getting right.
         'the article\'s tags are what its join rows say' => [
             // a tag a nested flush gave, lost -- drawn by seed 470
-            [3, false, ['remove a line', 'edit the article', 'flush, and after the statement a nested one tags the article', 'flush'], 'missing ["article 1 tagged \\"es\\" by bob"], invented []'],
+            [3, false, ['remove a line', 'edit the article', 'flush, and after the statement a nested one tags the article', 'flush']],
             // a tag a nested flush wrote, signed by the outer flush's actor -- drawn by seed 716
-            [4, true, ['replace the article\'s tags', 'flush, and after the statement a nested one empties the crate', 'flush'], 'missing ["article 1 tagged \\"db\\" by bob"], invented ["article 1 tagged \\"db\\" by carol"]'],
+            [4, true, ['replace the article\'s tags', 'flush, and after the statement a nested one empties the crate', 'flush']],
             // a tag a nested flush wrote, recorded again for the outer one -- drawn by seed 2089
-            [0, false, ['tag the article', 'flush, and after the statement a nested one edits the article', 'flush'], 'missing [], invented ["article 1 tagged \\"es\\" by carol"]'],
+            [0, false, ['tag the article', 'flush, and after the statement a nested one edits the article', 'flush']],
             // a tag never written -- a listener cleared the manager before the join rows -- recorded -- drawn by seed 201
-            [2, true, ['tag the article', 'change a line', 'flush, and after the statement a listener ahead of this one clears the manager', 'flush'], 'missing [], invented ["article 1 tagged \\"es\\" by carol"]'],
+            [2, true, ['tag the article', 'change a line', 'flush, and after the statement a listener ahead of this one clears the manager', 'flush']],
             // a tag taken back with the application's transaction, recorded -- drawn by seed 937
-            [2, false, ['move a line back', 'flush, publishing swallowed', 'empty the crate', 'edit the kiln\'s root', 'create two relays pointing at each other', 'tag the article', 'flush, inside a transaction of the application\'s it rolls back, in an atomic frame', 'flush'], 'missing [], invented ["article 1 tagged \\"es\\" by carol"]'],
+            [2, false, ['move a line back', 'flush, publishing swallowed', 'empty the crate', 'edit the kiln\'s root', 'create two relays pointing at each other', 'tag the article', 'flush, inside a transaction of the application\'s it rolls back, in an atomic frame', 'flush']],
             // both ways at once: tags written lost and one not written recorded, around a savepoint taken back -- drawn by seed 2153
-            [6, false, ['replace the article\'s tags', 'flush, publishing swallowed', 'clear the article\'s tags', 'tag the article', 'change a line', 'tag the article', 'flush, and a savepoint of the application\'s around a statement is rolled back after this listener', 'flush'], 'missing ["article 1 tagged \\"db\\" by carol","article 1 untagged \\"php\\" by carol"], invented ["article 1 tagged \\"es\\" by carol"]'],
+            [6, false, ['replace the article\'s tags', 'flush, publishing swallowed', 'clear the article\'s tags', 'tag the article', 'change a line', 'tag the article', 'flush, and a savepoint of the application\'s around a statement is rolled back after this listener', 'flush']],
         ],
     ];
 
@@ -1450,8 +1450,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * @return list<string>
      */
     /**
-     * The words a sequence is drawn from: 5.2c's by default, or those of 5.3, 5.2 or 3.3 on
-     * request.
+     * The words a sequence is drawn from: the tagged world's by default (5.3), or those of
+     * 5.2c, 5.2 or 3.3 on request -- each corpus run in the world it was drawn in.
      *
      * @return array{0: list<string>, 1: list<string>}
      */
@@ -1460,8 +1460,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         return match (self::$worldOfTheSequence ?? $_SERVER['AUDIT_MODEL_VOCABULARY'] ?? null) {
             '3.3' => [self::VOCABULARY_3_3, self::ENDINGS_3_3],
             '5.2' => [self::VOCABULARY_5_2, self::ENDINGS_5_2],
-            '5.3' => [self::VOCABULARY, self::ENDINGS],
-            default => [self::VOCABULARY_5_2C, self::ENDINGS_5_2C],
+            '5.2c' => [self::VOCABULARY_5_2C, self::ENDINGS_5_2C],
+            default => [self::VOCABULARY, self::ENDINGS],
         };
     }
 

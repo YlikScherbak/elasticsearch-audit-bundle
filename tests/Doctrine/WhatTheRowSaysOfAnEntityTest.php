@@ -6,6 +6,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Switchboard;
@@ -20,8 +21,8 @@ use Doctrine\Persistence\Event\LifecycleEventArgs;
  * Written before step 5 reads an entity's fields from the connection's log instead of
  * Doctrine's change set, so that the step was handed its targets: where the two agreed, the
  * test says it and step 5 had to keep it; where they did not, the test said what was recorded
- * then and what has to be, pinned, and mending it took the pin off. What is still pinned is an
- * owning collection's, whose join rows become facts in 5.3.
+ * then and what has to be, pinned, and mending it took the pin off. The last pins, an owning
+ * collection's, came off when its join rows became the facts it is told from (5.3).
  */
 final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
 {
@@ -167,10 +168,10 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
 
         $this->pinned(
             expected: [['article', (string) $titledId, 'update']],
-            // The removal is already right: its DELETE was taken back, and the record tied to
-            // it goes. The link is not: the collection's change is read from Doctrine, which
-            // believes the join row written -- step 5 reads it from the log.
-            today: [['article', (string) $titledId, 'update'], ['article', (string) $linked->id, 'update']],
+            // The removal: its DELETE was taken back, and the record tied to it goes. The link:
+            // its join row was taken back too, and is no fact (5.3; until then the collection's
+            // change was read from Doctrine, which believed the row written).
+            today: null,
             said: $this->events(),
         );
     }
@@ -209,12 +210,12 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
         self::assertSame(1, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM article_tag WHERE article_id = ?', [$article->id]), 'the premise: one link');
         self::assertSame('Two', $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), 'the premise: and the title');
 
-        // Today there is none at all: the nested flush's postCommitCleanup() emptied the outer
-        // flush's collection updates, and the collection's change was read from there. The
-        // join row is in the log -- step 5 reads the collection from it.
+        // The join row is in the log, and the collection is read from it (5.3). Until then there
+        // was none at all: the nested flush's postCommitCleanup() emptied the outer flush's
+        // collection updates, and the collection's change was read from there.
         $this->pinned(
             expected: [['old' => [], 'new' => ['php']]],
-            today: [],
+            today: null,
             said: array_values(array_filter(array_map(static fn (array $d): mixed => $d['changes']['tags'] ?? null, $this->documents()))),
         );
         $this->logs = []; // the warning it says so with, which is today's too
@@ -333,8 +334,50 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
 
         $this->pinned(
             expected: [['tags' => ['old' => [], 'new' => ['b']], 'status' => ['old' => 'draft', 'new' => 'draft']]],
-            // From the collection's snapshot, which holds the link the rows do not.
-            today: [['tags' => ['old' => ['a'], 'new' => ['a', 'b']], 'status' => ['old' => 'draft', 'new' => 'draft']]],
+            // From the join rows (5.3); until then from the collection's snapshot, which held the
+            // link the rows did not, and said a -> a, b.
+            today: null,
+        );
+    }
+
+    public function testAReferenceIsShownAsItsRowStoodWhereTheReferenceWasWritten(): void
+    {
+        // A relay pointed at another, which a listener ahead of this one renames in a nested flush
+        // after the first relay's UPDATE: the relay pointed at was called "second" when it was
+        // pointed at. An owning ManyToMany's target is shown so (5.3c); a ManyToOne's is shown as
+        // the object the manager holds -- the name it was given after -- and the same rule is to
+        // come to it, pinned until it does.
+        $this->em->persist($first = new Relay('first'));
+        $this->em->persist($second = new Relay('second'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $this->ahead([Events::postUpdate], new class($this->em, $first, $second) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Relay $first, private readonly Relay $second)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->first || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->second->name = 'renamed after';
+                $this->em->flush();
+            }
+        });
+
+        $first->next = $second;
+        $this->em->flush();
+
+        $this->pinned(
+            expected: [['old' => null, 'new' => 'second']],
+            today: [['old' => null, 'new' => 'renamed after']],
+            said: array_values(array_filter(array_map(static fn (array $d): mixed => $d['changes']['next'] ?? null, $this->documents()))),
         );
     }
 

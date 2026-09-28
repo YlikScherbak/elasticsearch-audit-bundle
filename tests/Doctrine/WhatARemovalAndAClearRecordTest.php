@@ -223,12 +223,17 @@ final class WhatARemovalAndAClearRecordTest extends DoctrineTestCase
         $rack->name = 'R-2';
         $this->em->flush();
 
-        $changes = $this->lastDocument()['changes'];
+        // Two moves of the list, from the join rows (5.3): Doctrine deletes every row of the rack
+        // and inserts b's again, and a link met twice is two moves -- the first joining the
+        // rack's own record, the second a record of its own. Until 5.3 it was one move, from
+        // the collection's snapshot to what the field held.
+        $moves = array_values(array_filter(array_map(static fn (array $d): mixed => $d['changes']['slots'] ?? null, $this->documents())));
 
-        self::assertSame([0, 1], array_keys($changes['slots']['old'] ?? []), 'the old side went into the record keyed');
-        self::assertSame([0], array_keys($changes['slots']['new'] ?? []), 'the new side went into the record keyed');
-        self::assertSame(['a', 'b'], $changes['slots']['old'] ?? null);
-        self::assertSame(['b'], $changes['slots']['new'] ?? null);
+        self::assertSame([['old' => ['a', 'b'], 'new' => []], ['old' => [], 'new' => ['b']]], $moves);
+
+        foreach ($moves as $move) {
+            self::assertTrue(array_is_list($move['old']) && array_is_list($move['new']), 'both sides lists, never keyed');
+        }
     }
 
     public function testEmptyingAnAuditedCollectionIsRecordedWithNothingElseToRideOn(): void

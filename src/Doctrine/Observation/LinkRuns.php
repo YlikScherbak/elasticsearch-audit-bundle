@@ -29,11 +29,14 @@ use Doctrine\ORM\EntityNotFoundException;
  * as numbers where both are, as text otherwise -- and not by the order the identity map or the
  * collection held them in.
  *
- * **As what.** Each target by the collection's representer, shown the same object as a
- * ManyToOne's is: the row as it stood before its DELETE for a watched class, the object the
- * application removed for another, and otherwise the entity the manager holds or a reference to
- * it -- named by its identifier when the representer finds the row gone. Anything else a
- * representer throws is the application's failure, and the contribution is not written.
+ * **As what.** Each target by the collection's representer, as it stood at the moment of the
+ * contribution -- the old list before its first statement, the new one once its last ran: for
+ * a class the history watches, a copy of the row as the replay holds it there, pointing where
+ * the row pointed (what it points at is the manager's: the row is shown as it stood, not all
+ * it leads to); for another, whose rows are not read, the object the application removed, or
+ * the entity the manager holds, or a reference to it -- named by its identifier when the
+ * representer finds the row gone. Anything else a representer throws is the application's
+ * failure, and the contribution is not written.
  *
  * Nothing publishes these yet.
  */
@@ -144,8 +147,8 @@ final class LinkRuns
                     'collection' => $fact['collection'],
                     'flush' => $run['flush'],
                     'at' => $run['at'],
-                    'old' => $this->listOf($em, $replay, $departed, $fact['owner'], $fact['collection'], $fact['target'], $run['old']),
-                    'new' => $this->listOf($em, $replay, $departed, $fact['owner'], $fact['collection'], $fact['target'], $run['new']),
+                    'old' => $this->listOf($em, $replay, $departed, $fact['owner'], $fact['collection'], $fact['target'], $run['old'], $run['at'][0], false),
+                    'new' => $this->listOf($em, $replay, $departed, $fact['owner'], $fact['collection'], $fact['target'], $run['new'], $run['at'][\count($run['at']) - 1], true),
                 ];
             } catch (\Throwable $e) {
                 if ($failed === null) {
@@ -180,7 +183,7 @@ final class LinkRuns
      *
      * @return list<mixed>
      */
-    private function listOf(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, string $owner, string $collection, string $target, array $targets): array
+    private function listOf(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, string $owner, string $collection, string $target, array $targets, int $at, bool $once): array
     {
         $represent = $this->audited->for($em->getClassMetadata($owner)->newInstance())?->fields[$collection] ?? null;
 
@@ -204,8 +207,8 @@ final class LinkRuns
             return 0;
         });
 
-        return array_map(function (array $key) use ($em, $replay, $departed, $target, $represent): mixed {
-            $object = $replay->asItStoodBeforeItWent($target, $key)
+        return array_map(function (array $key) use ($em, $replay, $departed, $target, $represent, $at, $once): mixed {
+            $object = $replay->copyAt($target, $key, $at, $once)
                 ?? $departed?->find($em, $target, $key)
                 ?? $this->identity->managed($em, $target, $key);
 
