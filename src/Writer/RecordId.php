@@ -9,15 +9,16 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
  * timestamp, and a stable, unique tiebreaker behind loggedAt, so no two records share a
  * sort position and a cursor never sees the same pair twice.
  *
- * **In the order they were built, within a millisecond of one process** (1.3). The bits
- * after the timestamp are a counter ({@see IdSequence}): the records a process builds in
- * one millisecond sort by id in the order it built them -- one flush's in the order their
- * facts ran, a flush nested in another and the outer one's, and two flushes one after the
- * other in one millisecond; a flush written late keeps its own millisecond's counter until
- * it is. A record a frame merged keeps the id and the moment of its first part. What is
- * not promised: an
- * order between processes, whose counters begin at random points; and an order in a
- * millisecond the process has left and come back to with no moment of it still alive --
+ * **In the order they were built, within a millisecond of one writer** (1.3). The bits
+ * after the timestamp are a counter ({@see IdSequence}): one flush's records of one
+ * millisecond sort by id in the order their facts ran, and the counter goes on across the
+ * records the writer builds for other flushes while that millisecond's counter is held -- a
+ * flush nested in another and the outer one, two flushes one after the other. A flush written
+ * late keeps its own millisecond's counter until it is; that is the order its records were
+ * built in, not an order among all the SQL of that millisecond. A record a frame merged keeps
+ * the id and the moment of its first part. What is not promised: an order between writers --
+ * two processes, or two writers in one -- whose counters begin at random points; and an order
+ * in a millisecond the writer has left and come back to with no moment of it still alive --
  * that one begins again from a random point.
  *
  * 48 bits of milliseconds, 4 of version, 42 of counter around the 2 of variant, 32 random:

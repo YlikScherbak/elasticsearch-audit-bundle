@@ -62,9 +62,11 @@ final class InWhatOrderIdsAreGivenTest extends TestCase
 
         self::assertSame($outer->ids, $nested->ids, 'one counter for the millisecond');
 
-        $writer->writeAll([new AuditRecord('order', 1, AuditEvent::UPDATE)], $outer);
-        $writer->writeAll([new AuditRecord('order', 2, AuditEvent::UPDATE)], $nested);
-        $writer->writeAll([new AuditRecord('order', 3, AuditEvent::UPDATE)], $outer);
+        // Twelve, turn and turn about: ids random in the millisecond would be in this order one
+        // time in twelve factorial.
+        for ($i = 1; $i <= 12; ++$i) {
+            $writer->writeAll([new AuditRecord('order', $i, AuditEvent::UPDATE)], $i % 2 === 1 ? $outer : $nested);
+        }
 
         $this->assertSortedAsWritten();
     }
@@ -72,41 +74,25 @@ final class InWhatOrderIdsAreGivenTest extends TestCase
     public function testAMomentKeepsItsCounterHoweverManyMillisecondsComeBetween(): void
     {
         // A flush whose publishing was swallowed has its records written later, by another
-        // flush, dated where they happened. Twenty such moments, each of its own millisecond,
-        // write a record; a thousand moments of other milliseconds come and go -- more than any
-        // cache of recent ones would hold; then each of the twenty writes another. Each second
-        // record sorts after its moment's first. A counter begun again at random would put it
-        // before about one time in two: twenty in a row, one time in a million.
-        $clock = new TickingClock(new \DateTimeImmutable('2026-08-26 12:00:00.000', new \DateTimeZone('UTC')));
-        $writer = $this->writer($clock);
-        $late = [];
-
-        for ($j = 0; $j < 20; ++$j) {
-            $late[$j] = $writer->provenance();
-            $writer->writeAll([new AuditRecord('late', $j, AuditEvent::UPDATE)], $late[$j]);
-        }
+        // flush, dated where they happened. Its moment writes a record; a thousand moments of
+        // other milliseconds come and go -- more than any cache of recent ones would hold; then it
+        // writes another. Every counter begins below the ones before it, so a
+        // counter begun again for it would sort its second record before its first: certainly,
+        // not one time in two.
+        $writer = $this->writer(new TickingClock(new \DateTimeImmutable('2026-08-26 12:00:00.000', new \DateTimeZone('UTC'))));
+        $this->beginningEachBelowTheLast($writer);
+        $late = $writer->provenance();
+        $writer->writeAll([new AuditRecord('late', 1, AuditEvent::UPDATE)], $late);
 
         for ($i = 1; $i <= 1000; ++$i) {
             $writer->writeAll([new AuditRecord('noise', $i, AuditEvent::UPDATE)], $writer->provenance());
         }
 
-        foreach ($late as $j => $moment) {
-            $writer->writeAll([new AuditRecord('late', $j, AuditEvent::UPDATE)], $moment);
-        }
+        $writer->writeAll([new AuditRecord('late', 1, AuditEvent::UPDATE)], $late);
 
-        $ids = [];
-
-        foreach ($this->gateway->documents['audit_log'] as $document) {
-            if ($document['objectType'] === 'late') {
-                $ids[$document['objectId']][] = $document['id'];
-            }
-        }
-
-        self::assertCount(20, $ids);
-
-        foreach ($ids as $j => [$first, $second]) {
-            self::assertLessThan(0, strcmp($first, $second), sprintf('moment %d: its late record sorts after its first', $j));
-        }
+        $ids = array_column(array_values(array_filter($this->gateway->documents['audit_log'], static fn (array $d): bool => $d['objectType'] === 'late')), 'id');
+        self::assertCount(2, $ids);
+        self::assertLessThan(0, strcmp($ids[0], $ids[1]), 'the late record sorts after its moment\'s first');
     }
 
     public function testACounterNoMomentHoldsIsLetGo(): void
@@ -129,14 +115,13 @@ final class InWhatOrderIdsAreGivenTest extends TestCase
     {
         // Two flushes one after the other, fast: the first's moment is let go of once its records
         // are handed on -- into a frame, say -- before the second's is settled, in the same
-        // millisecond. Twenty such pairs, for the same reason as above: a counter begun again at
-        // random would put the second before the first about one time in two.
+        // millisecond. Every counter begins below the ones before it: a second begun for the
+        // second flush would sort its record before the first's, certainly.
         $writer = $this->writer(new FrozenClock(new \DateTimeImmutable('2026-08-26 12:00:00.000', new \DateTimeZone('UTC'))));
+        $this->beginningEachBelowTheLast($writer);
 
-        for ($j = 0; $j < 20; ++$j) {
-            $writer->writeAll([new AuditRecord('pair', $j, AuditEvent::UPDATE)], $writer->provenance());
-            $writer->writeAll([new AuditRecord('pair', $j, AuditEvent::UPDATE)], $writer->provenance());
-        }
+        $writer->writeAll([new AuditRecord('pair', 1, AuditEvent::UPDATE)], $writer->provenance());
+        $writer->writeAll([new AuditRecord('pair', 2, AuditEvent::UPDATE)], $writer->provenance());
 
         $this->assertSortedAsWritten();
     }
@@ -190,6 +175,19 @@ final class InWhatOrderIdsAreGivenTest extends TestCase
         $probe = new IdSequence($moment->ids->millisecond, $next - 1);
 
         return substr(RecordId::v7($moment->at, $probe), 0, 28);
+    }
+
+    /**
+     * Every counter the writer begins begins below every one before it, a million apart: one
+     * begun again for a millisecond that had one sorts what it gives before what the first gave,
+     * whatever came between -- never by the luck of a random start.
+     */
+    private function beginningEachBelowTheLast(AuditWriter $writer): void
+    {
+        $begun = 0;
+        (new \ReflectionProperty(AuditWriter::class, 'startOf'))->setValue($writer, static function (int $ms) use (&$begun): int {
+            return 2 ** (IdSequence::BITS - 1) - 1_000_000 * ++$begun;
+        });
     }
 
     private function assertSortedAsWritten(): void

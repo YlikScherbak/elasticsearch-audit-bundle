@@ -90,6 +90,7 @@ final class AuditWriter
         // declared no sensitive fields" says nothing about whether they are safe.
         // Repeating a foreign message is a decision, and it is made in one place.
         $this->failureDetails = $failureDetails ?? FailureDetails::Cause;
+        $this->startOf = static fn (int $millisecond): ?int => null;
     }
 
     /** @var iterable<DeclaresAuditFieldsInterface> */
@@ -114,6 +115,14 @@ final class AuditWriter
      * One, whatever the process has seen: an older millisecond is held by its moments alone.
      */
     private ?IdSequence $latest = null;
+
+    /**
+     * Where a new counter begins: at random, unless a test says where -- a guard that a counter
+     * was kept is only certain when one begun again would begin below it.
+     *
+     * @var \Closure(int): (int|null)
+     */
+    private \Closure $startOf;
 
     /**
      * Records a domain action that is not a Doctrine change: a call made, a login
@@ -713,7 +722,7 @@ final class AuditWriter
             }
         }
 
-        $sequence = new IdSequence($ms);
+        $sequence = new IdSequence($ms, ($this->startOf)($ms));
         $this->sequences[$ms] = \WeakReference::create($sequence);
 
         return $this->latest = $sequence;
