@@ -70,15 +70,15 @@ final class DoctrineCanariesTest extends TestCase
     }
 
     /**
-     * Backs `AuditSubscriber::sidesFrom()`, and the reason it exists.
+     * The fact `RowMemory` stands on when it remembers a row at preFlush.
      *
      * `computeChangeSet()` ends by writing the current values into
      * `originalEntityData`. So a preUpdate listener that corrects a field and calls
      * `recomputeSingleEntityChangeSet()` is handed a change set whose "old" is the value
-     * that was *planned* a moment ago — a value that was never in the database. Taking
-     * the recomputed set whole wrote a record saying the row went from something it
-     * never held, which is why the listener keeps the onFlush snapshot and merges only
-     * the new sides in.
+     * that was *planned* a moment ago — a value that was never in the database. Doctrine's
+     * memory of a row, once a flush has planned it, is the plan: which is why what a row
+     * held is taken at preFlush, before computeChangeSets(), and read on from the
+     * statements the connection ran -- and never from the unit of work after that.
      */
     public function testRecomputingAChangeSetReportsThePlannedValueAsTheOldOne(): void
     {
@@ -117,7 +117,7 @@ final class DoctrineCanariesTest extends TestCase
         self::assertSame(
             ['second', 'corrected'],
             [$seen['label'][0], $seen['label'][1]],
-            'the recomputed change set no longer reports the planned value as the old one — sidesFrom() may be working around something Doctrine has fixed',
+            'the recomputed change set no longer reports the planned value as the old one — what RowMemory takes at preFlush may be guarding against something Doctrine has fixed',
         );
 
         // And the row really did go from "first": that is what the audit record has to say.

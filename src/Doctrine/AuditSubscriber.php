@@ -200,79 +200,16 @@ final class AuditSubscriber
     private ?\WeakReference $flushingManager = null;
 
     /**
-     * Doctrine's change sets as they stood in onFlush, keyed by object id.
+     * The entities whose change set was not empty when a flush's onFlush saw them, by the flush
+     * that saw each first ({@see rememberWhatWasPlanned()}): for the warning about a lost change
+     * set, and for nothing else. Only that it had one -- none of its values.
      *
-     * A record is built in postUpdate, and by then the unit of work may no longer hold
-     * the change set: a flush inside any lifecycle listener ends in
-     * postCommitCleanup(), which empties entityChangeSets — of the flush still running
-     * too. The listener that did it need not be ours, need not be aware of us, and
-     * leaves nothing in any log. Whoever reads the history simply finds an update whose
-     * "changes" are empty.
+     * Weakly, by the object: an entity nobody holds any more takes its entry with it, and PHP
+     * hands a freed object's id to the next one.
      *
-     * What this is, and what it is not: the listener keeps its own state across the
-     * reentrant flushes it has met, so a trail does not go blank because somebody's
-     * listener saved something. It is not a claim that reentrant flushes work —
-     * Doctrine's own documentation calls flushing from a flush event strongly
-     * discouraged, says the UnitOfWork was not designed for it, and warns that updates
-     * can be lost or half-applied. The bundle defends its own records; the entities in
-     * that flush are between the application and Doctrine, and the warning below says
-     * where to move the work.
-     *
-     * @var array<int, array<string, mixed>>
+     * @var \WeakMap<object, int>
      */
-    private array $changeSets = [];
-
-    /**
-     * Which flush computed each of those change sets, and the entity it was about, by
-     * the same object id.
-     *
-     * Only ever read when a flush turns out never to have happened -- to know whose
-     * snapshot is whose, and to reach the entity the row belongs to, which an object id
-     * cannot do. Beside the map rather than inside it because every reader of a change
-     * set wants the change set, and a shape that makes them all unwrap something is a
-     * shape that spreads.
-     *
-     * The claim lasts until the owning flush writes the row; {@see
-     * theRowNowMatchesTheObject()} lets it go.
-     *
-     * @var array<int, array{entity: object, flush: int}>
-     */
-    private array $changeSetFlush = [];
-
-    /**
-     * What the row still held, for an entity a flush computed a change set for and then
-     * never wrote.
-     *
-     * Computing a change set is not free of consequence: Doctrine takes the new values to
-     * be the entity's original data from then on. So a flush refused in its own onFlush
-     * leaves the unit of work believing the row holds what it was about to write, and the
-     * flush that really carries the change out a moment later reports it as starting from
-     * there. Measured: a title the column took straight from "One" to "Three" was recorded
-     * as going from "Two", a value the column never held — and the same for a line inside
-     * a tracked collection, the two roads meeting here because both are built from the
-     * change set above.
-     *
-     * Kept when the flush is discarded, where its snapshot is still the latest one, and
-     * spent field by field by whichever flush computes a change set naming that field
-     * next. Field by field because a flush plans several and the flush that recovers may
-     * change only one: taking the whole entry then threw away a correction nobody had
-     * used, and the next change to that other field started from a value the column never
-     * held.
-     *
-     * **Not per flush, and not let go with one.** This is what the ROW holds, and a row
-     * does not care which flush is collecting: an application that catches a refusal and
-     * retries at the top level ends its first flush entirely before the second begins, and
-     * a correction let go in between is a correction that was needed one line later. It
-     * lives until something writes the entity or the manager is cleared.
-     *
-     * A WeakMap rather than a map keyed by object id, because it now outlives the
-     * operation that filled it: PHP hands a freed object's id to the next one, and an
-     * entry that outlived its entity would correct a different row entirely. It also
-     * means an entity nobody holds any more takes its entry with it.
-     *
-     * @var \WeakMap<object, array<string, mixed>>
-     */
-    private \WeakMap $neverWritten;
+    private \WeakMap $plannedChanges;
 
     /**
      * The transaction nesting level each flush that is still open started at.
@@ -347,7 +284,7 @@ final class AuditSubscriber
         ?LoggerInterface $logger = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
-        $this->neverWritten = new \WeakMap();
+        $this->plannedChanges = new \WeakMap();
         $this->rows = new RowMemory($statements);
 
         // What ran before this listener existed is nobody's history it can account for: it
@@ -462,13 +399,7 @@ final class AuditSubscriber
             && ($uow->getScheduledCollectionDeletions() !== [] || $uow->getScheduledCollectionUpdates() !== []);
 
         foreach ($uow->getScheduledEntityUpdates() as $element) {
-            // Taken for every update, not only the audited ones: deciding that here
-            // would mean reading each entity's declaration first. What it costs is
-            // measured rather than assumed - about 60 bytes per entity, the array's own
-            // structure, because PHP shares the values rather than copying them. The
-            // figure and the flush it came from are in the README.
-            $this->rememberChangeSet($element, $uow->getEntityChangeSet($element), $flush);
-
+            $this->rememberWhatWasPlanned($em, $element, $flush);
             $this->aboutTheOwnersOf($em, $element, $flush);
         }
 
@@ -476,11 +407,7 @@ final class AuditSubscriber
         // itself dirty — Doctrine tracks the owning side, which is the line's own
         // reference back. The unit of work knows about it all the same.
         foreach ($uow->getScheduledEntityInsertions() as $element) {
-            // An insertion's change set dies in the same cleanup as an update's: a
-            // create whose postPersist runs after somebody's nested flush would
-            // otherwise say an entity appeared with no values at all.
-            $this->rememberChangeSet($element, $uow->getEntityChangeSet($element), $flush);
-
+            $this->rememberWhatWasPlanned($em, $element, $flush);
             $this->aboutTheOwnersOf($em, $element, $flush);
         }
 
@@ -564,7 +491,6 @@ final class AuditSubscriber
 
         $this->rows->rememberPersisted($manager, $args->getObject());
         $this->collectingNowAfterAStatement($manager);
-        $this->theRowNowMatchesTheObject($args->getObject());
         $this->announced($manager, $args->getObject());
     }
     public function postUpdate(PostUpdateEventArgs $args): void
@@ -577,7 +503,6 @@ final class AuditSubscriber
         }
 
         $this->collectingNowAfterAStatement($manager);
-        $this->theRowNowMatchesTheObject($args->getObject());
         $this->announced($manager, $args->getObject());
     }
 
@@ -611,14 +536,15 @@ final class AuditSubscriber
      * still to do -- is said as a risk, not as a loss this listener could confirm. Said once per
      * flush, by class, with where to move the work: finding such a listener once took three days.
      *
-     * The only reading of Doctrine's change sets left here, and a diagnostic only: it changes no
-     * record, and it is logged, not put through the failure policy -- it is about Doctrine and
-     * the application's listener, not about this bundle's history.
+     * With {@see rememberWhatWasPlanned()}, the only reading of Doctrine's change sets in this
+     * listener, and a diagnostic only: no record depends on it -- what a row went through is read
+     * from what the connection ran -- and it is logged, not put through the failure policy: it is
+     * about Doctrine and the application's listener, not about this bundle's history.
      */
     private function warnOfALostChangeSet(EntityManagerInterface $em, object $entity): void
     {
         if ($this->reportedLostChangeSets
-            || ($this->changeSets[spl_object_id($entity)] ?? []) === []
+            || !isset($this->plannedChanges[$entity])
             || $em->getUnitOfWork()->getEntityChangeSet($entity) !== []
         ) {
             return;
@@ -682,7 +608,6 @@ final class AuditSubscriber
             $this->collectingNowAfterAStatement($manager);
         }
 
-        $this->theRowNowMatchesTheObject($args->getObject());
         $this->departed->gone($args->getObject(), $this->statements->position());
     }
     /**
@@ -1355,116 +1280,33 @@ final class AuditSubscriber
     }
 
     /**
+     * Whether the flush had a change set for the entity when its onFlush saw it -- that it had
+     * one, and nothing of what was in it: for the warning ({@see warnOfALostChangeSet()}).
+     *
+     * By the flush that saw it first. A flush nested in a lifecycle listener is handed the outer
+     * flush's entities still scheduled -- executeUpdates() takes one off the list only after its
+     * statement -- and must not take the outer's evidence for its own.
+     */
+    private function rememberWhatWasPlanned(EntityManagerInterface $em, object $entity, int $flush): void
+    {
+        if (!isset($this->plannedChanges[$entity]) && $em->getUnitOfWork()->getEntityChangeSet($entity) !== []) {
+            $this->plannedChanges[$entity] = $flush;
+        }
+    }
+
+    /**
      * Everything one flush collected, taken away without touching what the others did.
      *
-     * The finished records are not among it, and that is the invariant rather than an
-     * oversight: every one of them is taken in a post-statement event, which is the very
-     * event that marks the flush as having run, so a flush being discarded here has none.
-     * What it does have is what it collected in its onFlush, before Doctrine wrote
-     * anything — the three element maps — and the moment and context filed under its
-     * number.
-     *
-     * Which flush first saw an owner is rebuilt rather than patched: it is the lowest
-     * bucket that owner has left, and deriving it again cannot fall out of step with the
-     * buckets the way a second rule about it would.
+     * No record is among it: records are built from the log, and a flush discarded here ran
+     * nothing of its own. What it has is filed under its number -- its moment, the marks of its
+     * frame -- and what its onFlush saw planned.
      */
-    /**
-     * Keeps a change set, under the flush that computed it and corrected for whatever a
-     * flush before it planned and never wrote.
-     *
-     * The two together so they cannot drift: a snapshot whose number is somebody else's
-     * is a snapshot that will be handed forward as the wrong row's history.
-     *
-     * @param array<string, mixed> $set
-     */
-    private function rememberChangeSet(object $entity, array $set, int $flush): void
-    {
-        $key = spl_object_id($entity);
-
-        // Not ours to re-file. A flush started from a lifecycle listener shares the outer
-        // flush's unit of work, and getScheduledEntityUpdates() there still holds the
-        // outer flush's own entities: executeUpdates() takes one off the list only after
-        // its statement. So the inner flush's onFlush is handed rows it will never write,
-        // and filing them under its number meant its discarding threw away the correction
-        // the outer flush had made and handed the outer's own old side forward as if it
-        // were unwritten.
-        //
-        // Ownership lasts until the owning flush writes the row, and post* below says
-        // when that is. Until then the snapshot is what that flush computed, and neither
-        // the values nor the number move.
-        if (($this->changeSetFlush[$key]['flush'] ?? $flush) !== $flush) {
-            return;
-        }
-
-        $held = $this->neverWritten[$entity] ?? [];
-
-        foreach ($set as $field => $sides) {
-            if (!\is_array($sides) || !\array_key_exists(1, $sides) || !\array_key_exists($field, $held)) {
-                continue;
-            }
-
-            // The side the column really came from, in place of the one the unit of work
-            // believes because a flush that never happened told it so. The new side is
-            // left alone: that one is about to be written, and it is the only part of
-            // this Doctrine is right about.
-            $set[$field] = [$held[$field], $sides[1]];
-
-            unset($held[$field]);
-        }
-
-        // Spent, and only what was spent. What a flush that never happened left behind is
-        // true of the column until something writes it, and the flush computing this
-        // change set is the one that will -- for the fields it names, and for no others.
-        // If this flush is refused as well, its own discarding puts the same answers back,
-        // because the sides it is being corrected to are the sides it hands forward.
-        if ($held === []) {
-            unset($this->neverWritten[$entity]);
-        } else {
-            $this->neverWritten[$entity] = $held;
-        }
-
-        $this->changeSets[$key] = $set;
-        $this->changeSetFlush[$key] = ['entity' => $entity, 'flush' => $flush];
-    }
-
-    /**
-     * Doctrine has written this entity: whatever flush computed the change set it was
-     * written from has no further claim on it.
-     *
-     * The snapshot itself stays -- publishing reads it after the commit -- but it stops
-     * being evidence of what the row still holds, which is the only thing the number is
-     * for. A flush discarded after this must not hand the old side forward, because the
-     * statement already moved the row past it; and the next flush to compute a change set
-     * for this entity is describing a later state and owns it.
-     */
-    private function theRowNowMatchesTheObject(object $entity): void
-    {
-        unset($this->changeSetFlush[spl_object_id($entity)]);
-    }
-
     private function forgetWhatThisFlushCollected(int $flush): void
     {
-        foreach ($this->changeSetFlush as $key => $its) {
-            if ($its['flush'] !== $flush) {
-                continue;
+        foreach ($this->plannedChanges as $entity => $by) {
+            if ($by === $flush) {
+                unset($this->plannedChanges[$entity]);
             }
-
-            // Its snapshot is the latest one for that entity — a flush discarded here was
-            // refused before it wrote anything, so nothing has computed a change set for
-            // it since — which makes the side it came from what the column still holds.
-            $held = $this->neverWritten[$its['entity']] ?? [];
-
-            foreach ($this->changeSets[$key] ?? [] as $field => $sides) {
-                if (\is_array($sides) && \array_key_exists(0, $sides)) {
-                    $held[$field] ??= $sides[0];
-                }
-            }
-
-            if ($held !== []) {
-                $this->neverWritten[$its['entity']] = $held;
-            }
-
-            unset($this->changeSets[$key], $this->changeSetFlush[$key]);
         }
 
         unset($this->provenance[$flush], $this->statementMarks[$flush], $this->claimedThrough[$flush], $this->collectionsOnly[$flush]);
@@ -1491,8 +1333,7 @@ final class AuditSubscriber
         // publish. Removing only the current one and then emptying the map anyway was
         // two rules for one thing, and the second made the first unobservable.
         $this->provenance = [];
-        $this->changeSets = [];
-        $this->changeSetFlush = [];
+        $this->plannedChanges = new \WeakMap();
         $this->statementMarks = [];
         $this->claimedThrough = [];
         $this->collectionsOnly = [];

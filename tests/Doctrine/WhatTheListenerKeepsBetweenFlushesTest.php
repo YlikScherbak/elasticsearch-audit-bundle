@@ -48,7 +48,6 @@ final class WhatTheListenerKeepsBetweenFlushesTest extends TestCase
         'checkedTracking' => 'a cache of what a class declared, which is fixed for the life of the process: the same names, the same representers, the same tracked fields for every instance.',
         'flush' => 'the counter that hands out the numbers. It only ever goes up, and a number given twice is the whole problem it exists to prevent.',
         'flushingManager' => 'a weak reference to the manager of the flush on the stack, replaced by every flush that begins and read only to tell an abandoned flush from a swallowed one.',
-        'neverWritten' => 'what a ROW holds, which is not a fact about any flush: an application that catches a refusal and retries at the top level ends its first flush before the second begins, and a correction let go in between is one that was needed a line later. Released field by field as something writes the field, and wholesale by onClear(), where a cleared manager makes every such claim unanswerable.',
     ];
 
     public function testEveryFieldIsEitherLetGoWithItsFlushOrSaysWhyNot(): void
