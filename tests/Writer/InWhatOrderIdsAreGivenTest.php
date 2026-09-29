@@ -125,6 +125,22 @@ final class InWhatOrderIdsAreGivenTest extends TestCase
         self::assertLessThanOrEqual(2, \count($held), 'and the dead ones are cleared as new ones come');
     }
 
+    public function testTwoMomentsOneAfterTheOtherInOneMillisecondContinueOneCounter(): void
+    {
+        // Two flushes one after the other, fast: the first's moment is let go of once its records
+        // are handed on -- into a frame, say -- before the second's is settled, in the same
+        // millisecond. Twenty such pairs, for the same reason as above: a counter begun again at
+        // random would put the second before the first about one time in two.
+        $writer = $this->writer(new FrozenClock(new \DateTimeImmutable('2026-08-26 12:00:00.000', new \DateTimeZone('UTC'))));
+
+        for ($j = 0; $j < 20; ++$j) {
+            $writer->writeAll([new AuditRecord('pair', $j, AuditEvent::UPDATE)], $writer->provenance());
+            $writer->writeAll([new AuditRecord('pair', $j, AuditEvent::UPDATE)], $writer->provenance());
+        }
+
+        $this->assertSortedAsWritten();
+    }
+
     public function testACounterThatRunsOutCostsTheRecordThroughThePolicyAndNotTheOthers(): void
     {
         // Past 2^41 ids of one millisecond: the record gets no id that could sort before the

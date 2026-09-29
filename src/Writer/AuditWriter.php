@@ -108,6 +108,14 @@ final class AuditWriter
     private array $sequences = [];
 
     /**
+     * And the counter of the latest millisecond asked about, held: two flushes one after the
+     * other in one millisecond are not alive together -- the first let go of its moment once its
+     * records were handed on, into a frame say -- and the second continues the first's counter.
+     * One, whatever the process has seen: an older millisecond is held by its moments alone.
+     */
+    private ?IdSequence $latest = null;
+
+    /**
      * Records a domain action that is not a Doctrine change: a call made, a login
      * failed, a file shared. $changes may hold Change objects or any JSON-able data
      * you want to show alongside the event.
@@ -676,21 +684,27 @@ final class AuditWriter
     }
 
     /**
-     * The counter of a millisecond: the one a moment still alive holds, or a new one.
+     * The counter of a millisecond: the latest one's, or the one a moment still alive holds, or
+     * a new one.
      *
      * By the millisecond's value and not by how recent it is: a flush whose publishing was
      * swallowed has its records written by a later one, dated where they happened, and its
      * moment keeps its counter until they are. Held weakly here, so the moments are what keep
-     * a counter -- one no moment holds any more is gone, and its millisecond, met again, begins
-     * from a random point: an order between moments not alive together is not promised.
+     * a counter -- the latest millisecond's aside ({@see self::$latest}). One neither is gone,
+     * and its millisecond, met again, begins from a random point: an order there is not promised.
      */
     private function sequenceOf(\DateTimeImmutable $at): IdSequence
     {
         $ms = RecordId::millisecondOf($at);
+
+        if ($this->latest?->millisecond === $ms) {
+            return $this->latest;
+        }
+
         $live = ($this->sequences[$ms] ?? null)?->get();
 
         if ($live !== null) {
-            return $live;
+            return $this->latest = $live;
         }
 
         foreach ($this->sequences as $one => $reference) {
@@ -702,7 +716,7 @@ final class AuditWriter
         $sequence = new IdSequence($ms);
         $this->sequences[$ms] = \WeakReference::create($sequence);
 
-        return $sequence;
+        return $this->latest = $sequence;
     }
 
     /**
