@@ -46,18 +46,19 @@ use Psr\Log\NullLogger;
 use Doctrine\Persistence\ObjectManager;
 
 /**
- * Records entity lifecycle events during flush().
+ * The history of what a flush did, read from what its connection ran (1.3; ARCHITECTURE.md).
  *
- * The records are built while the unit of work still knows the change sets —
- * postPersist, postUpdate, and for removals preRemove (while the entity has its
- * identifier) — but written only in postFlush, once the transaction committed.
- * A flush that fails half-way rolls its INSERTs back and closes the manager;
- * onClear then drops what was collected, so the history never describes a state
- * the database did not reach.
+ * Doctrine's events say when: which flush is collecting, whose moment it has, and when to
+ * read the connection's log into records -- at the outermost postFlush, once the
+ * transaction committed. What each record says is the log's: one execution of a row, its
+ * values from the rows before and after it, its fate the statement's. A statement rolled
+ * back -- with the transaction, to a savepoint, with a nested flush that died -- takes its
+ * record with it, and a clear of the manager decides nothing.
  *
- * A flush inside an outer transaction (wrapInTransaction) is the one case where
- * postFlush still precedes the real commit; the records are sent then anyway,
- * since nothing later would tell the listener the transaction ended.
+ * A flush inside an outer transaction of the application's (wrapInTransaction) is the one
+ * case where postFlush still precedes the real commit; the records are sent then anyway,
+ * since nothing later would tell the listener the transaction ended -- the outbox, and an
+ * atomic frame, are the roads that close it.
  *
  * What goes wrong while building a record — a declaration naming an unknown
  * field, an identifier the listener cannot represent — is handed to the writer's

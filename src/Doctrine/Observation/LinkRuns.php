@@ -38,7 +38,8 @@ use Doctrine\ORM\EntityNotFoundException;
  * representer finds the row gone. Anything else a representer throws is the application's
  * failure, and the contribution is not written.
  *
- * Nothing publishes these yet.
+ * The listener publishes these: the first contribution of an owner's collection in a flush
+ * joins the owner's record of that flush, and each after it is a record of its own.
  */
 final class LinkRuns
 {

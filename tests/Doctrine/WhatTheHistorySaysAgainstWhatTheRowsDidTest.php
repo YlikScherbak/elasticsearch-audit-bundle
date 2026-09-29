@@ -103,10 +103,9 @@ use Psr\Log\AbstractLogger;
  *      inside a flush makes the transaction rollback-only and the manager closes under the
  *      rest of the sequence; `nested_flush_provenance: outer` is held there by
  *      `WhoWroteItTest` and `WhoseMomentALateRecordCarriesTest`.
- *   5. **An owning many-to-many.** Emptying one deletes join rows and leaves the elements
- *      where they are, which is a different road through Doctrine and the only one that
- *      reads a join table. Covered by hand in
- *      `WhatAnEmptiedCollectionSaysAboutItsLinesTest`, not by this.
+ *   5. **An owning many-to-many** -- closed: the tagged world (5.3) has the article's tags,
+ *      and the removals' world (the default) removes a tag and the article, so the cascade a
+ *      target's DELETE takes the join rows with is in its sequences.
  *   6. **More than one owner of the same kind.** There is one crate whose lines are
  *      tracked, so nothing here can produce two owners disagreeing about one line.
  *

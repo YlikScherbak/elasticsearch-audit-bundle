@@ -22,12 +22,10 @@ use Psr\Log\NullLogger;
  * connection's log into what the listener's records say: the event, the entity, the flush,
  * the statements it was, and the changes keyed as the history names them.
  *
- * Read by nothing yet: step 5 switches the listener's entity records to it (5.2c), and until
- * then the records are built from Doctrine's events.
+ * The listener's records of an entity's own row are these ({@see \Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber}).
  *
  * What an owning collection went through is not here: its join rows are no fact of the
- * entity's row, and until the log's facts of them are read (5.3) it is taken from the object
- * while Doctrine still has the collection's snapshot, which it replaces before postFlush.
+ * entity's row, and are told by {@see LinkFacts} and put together by {@see LinkRuns}.
  *
  * @internal the listener's reader of the log, kept apart from it
  */

@@ -834,9 +834,7 @@ final class AuditWriter
      * The point of a moment enricher is that an ordinary one running at write time
      * describes the wrong request, so letting the ordinary one win here would undo the
      * whole thing quietly — the attribute would be there, it would look right, and it
-     * would name the request that did the writing. The application is told instead:
-     * both values are in the message, because which of the two is wanted is a decision
-     * only the application can make, and it cannot make it without seeing them.
+     * would name the request that did the writing. The application is told instead.
      *
      * Neither value is in the message. Redaction happens on the way out, in prepare(),
      * and this runs before it — so the one place that knew both values was putting both
