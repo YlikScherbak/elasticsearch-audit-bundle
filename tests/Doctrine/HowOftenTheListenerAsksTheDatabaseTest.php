@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -11,6 +12,9 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
+use Doctrine\ORM\Events;
+use Doctrine\Persistence\Event\LifecycleEventArgs;
 
 /**
  * What auditing costs the database.
@@ -33,10 +37,15 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
  * it issues a DELETE and leaves no change set — so the membership has to be read back, or
  * the history cannot say what was in it. And an owning ManyToMany's join rows (5.3a): what an
  * owner's rows hold, the first time a flush is about to touch them, and which owners hold a
- * target about to go -- whose rows the database takes with it, writing nothing. Each is read in
- * batches, never a SELECT per row: the holders of up to five hundred targets of a collection in
- * one, so a flush removing a hundred asks once. None is asked on behalf of a collection nobody
- * audits.
+ * target about to go -- whose rows the database takes with it, writing nothing. None is asked on
+ * behalf of a collection nobody audits, and all three prices are paid on paths that remove:
+ *
+ *  - what onFlush sees removed is read in batches, never a SELECT per row: the holders of up to
+ *    five hundred targets of a collection in one, so a flush removing a hundred asks once;
+ *  - what a listener removes while the flush runs comes after that read, and is asked about in
+ *    its preRemove -- one SELECT a removal, per collection that can hold it;
+ *  - a target's DELETE while somebody holds it is looked at right after, to see the cascade
+ *    took the links: a SELECT, and within a transaction the SAVEPOINT and RELEASE around it.
  *
  * Everything else is free. Auditing what changed inside ten thousand lines of an order
  * reads what the unit of work already holds, so the cost is the application's own
@@ -153,6 +162,88 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
         $selects = self::selects($this->queries);
         self::assertCount(1, $selects, 'a removal nobody contradicts is asked about by nobody');
         self::assertStringContainsString('FROM catalogue_item j WHERE EXISTS', $selects[0], 'only who held it');
+    }
+
+    public function testALineRemovedByAListenerInsideTheFlushIsAskedAboutOnItsOwn(): void
+    {
+        // The batch is the plan onFlush sees. A listener that removes a line while the flush runs
+        // removes it after that read, and which catalogues hold it is asked then, in its
+        // preRemove, before its DELETE: one question a removal, not one for all of them. Paid only
+        // on that path -- the same hundred lines removed before the flush ask once, above.
+        $this->attachListener(FailurePolicy::Log);
+
+        $this->em->persist($crate = new Crate('C-1'));
+        $lines = [];
+
+        for ($i = 0; $i < 3; ++$i) {
+            $crate->add($lines[] = new CrateItem('SKU-'.$i));
+        }
+
+        $this->em->flush();
+
+        $removing = new class($crate, $lines) {
+            /** @param list<CrateItem> $lines */
+            public function __construct(private readonly Crate $crate, private readonly array $lines)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->crate) {
+                    foreach ($this->lines as $line) {
+                        $args->getObjectManager()->remove($line);
+                    }
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $removing);
+        $crate->status = 'shipped';
+        $this->queries = [];
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $removing);
+
+        $selects = self::selects($this->queries);
+        self::assertCount(3, $selects, 'one SELECT a line removed inside the flush: '.implode(' | ', $selects));
+        self::assertSame($selects, array_values(array_filter($selects, static fn (string $sql): bool => str_contains($sql, 'FROM catalogue_item j WHERE EXISTS'))), 'each of them who held it');
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM CrateItem'), 'the premise: the lines went in that flush');
+    }
+
+    public function testATargetRemovedWhileHeldIsLookedAtRightAfterItsDelete(): void
+    {
+        // A tag some article holds: its join rows go with its row, by the database's cascade and
+        // with no statement of their own. Who held it is read before (onFlush, one question for
+        // the flush's), and whether they went is looked at right after its DELETE -- inside the
+        // flush's transaction, within a savepoint of the bundle's, so that a failed look cannot
+        // break the application's transaction. Three statements a DELETE of a held target: the
+        // SELECT, its SAVEPOINT and the RELEASE. A tag nobody holds costs the first questions only.
+        $this->attachListener(FailurePolicy::Log);
+
+        $this->em->persist($held = new Tag('held'));
+        $this->em->persist($loose = new Tag('loose'));
+        $this->em->persist($article = new Article('One'));
+        $article->tags->add($held);
+        $this->em->flush();
+
+        $this->queries = [];
+        $this->em->remove($loose);
+        $this->em->flush();
+
+        // One question for each collection that can hold a tag -- an article's, a shelf's, and
+        // the fixture's misdeclared one -- and nothing after its DELETE.
+        self::assertCount(3, self::selects($this->queries), 'a tag nobody holds: who held it, and nothing after: '.implode(' | ', $this->queries));
+        self::assertSame([], array_values(array_filter($this->queries, static fn (string $sql): bool => str_contains($sql, 'borsche_audit_look'))), 'and no savepoint of the look');
+
+        $this->queries = [];
+        $this->em->remove($held);
+        $this->em->flush();
+
+        $ours = array_values(array_filter($this->queries, static fn (string $sql): bool => str_contains($sql, 'article_tag') || str_contains($sql, 'borsche_audit_look')));
+        self::assertCount(4, $ours, 'who held it, then SAVEPOINT, the look and RELEASE: '.implode(' | ', $this->queries));
+        self::assertStringStartsWith('SELECT', $ours[0]);
+        self::assertStringStartsWith('SAVEPOINT', $ours[1]);
+        self::assertStringStartsWith('SELECT', $ours[2]);
+        self::assertStringStartsWith('RELEASE', $ours[3]);
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM article_tag'), 'the premise: the cascade took the link');
     }
 
     public function testACollectionThatDidNotMoveIsNotLoadedToFindThatOut(): void

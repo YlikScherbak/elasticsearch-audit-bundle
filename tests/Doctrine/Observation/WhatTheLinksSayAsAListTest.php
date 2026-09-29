@@ -193,6 +193,35 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testLinksTakenRightBeforeAnOwnersDeleteTakenBackStayTheirOwnMove(): void
+    {
+        // The same form as a removal's -- the article's links deleted by its key, its row's DELETE
+        // right after -- but a savepoint of the application's takes the row's DELETE back and
+        // leaves the links' standing: the article is there and holds nothing, and that is a move
+        // of its list. What belongs to a removal is decided by what stood, not by the shape.
+        $x = $this->aTag('x');
+        $article = $this->anArticle('One', $x);
+        $other = $this->anArticle('Other');
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->afterTheUpdateOf($other, function () use ($article): void {
+            $connection = $this->em->getConnection();
+            $connection->executeStatement('DELETE FROM article_tag WHERE article_id = ?', [$article->id]);
+            $connection->beginTransaction();
+            $connection->executeStatement('DELETE FROM Article WHERE id = ?', [$article->id]);
+            $connection->rollBack();
+        });
+        $other->title = 'Other, again';
+        $this->em->flush();
+
+        $connection = $this->em->getConnection();
+        self::assertSame(1, (int) $connection->fetchOne('SELECT COUNT(*) FROM Article WHERE id = ?', [$article->id]), 'the premise: the row stands');
+        self::assertSame(0, (int) $connection->fetchOne('SELECT COUNT(*) FROM article_tag WHERE article_id = ?', [$article->id]), 'the premise: its links do not');
+        self::assertSame([['One', ['x'], []]], $this->said());
+        $this->end();
+    }
+
     public function testALinkTakenBackIsInNeitherListOfTheNextContribution(): void
     {
         // a added in a flush whose join row a savepoint of the application's takes back, then b
