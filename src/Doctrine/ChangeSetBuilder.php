@@ -9,25 +9,25 @@ use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
-use Doctrine\Common\Collections\Collection;
 use Doctrine\ORM\EntityManagerInterface;
-use Doctrine\ORM\PersistentCollection;
 
 /**
- * Turns Doctrine's change set into the Changes an audit record stores.
+ * Turns the sides of what a row's statement changed into the Changes an audit record stores.
  *
- * - a scalar field is recorded when the unit of work says it changed, unless the
- *   comparators call the two sides the same value — Doctrine compares objects by
- *   identity, so two dates for the same instant look changed to it
- * - a to-one association is recorded through its representer: old from the change
- *   set, new from the current value
- * - a to-many association is recorded when the collection is dirty, as the
- *   represented snapshot against the represented current contents
+ * - a scalar field is recorded when its sides differ, unless the comparators call them
+ *   the same value — two dates for the same instant, say
+ * - a to-one association is recorded through its representer, both sides as the caller
+ *   hands them in
+ * - a to-many association is not this: an owning collection's history is its join rows'
+ *   ({@see Observation\LinkRuns}), and what happened inside one its elements' rows'
+ *   ({@see Observation\ElementFieldRuns})
  * - an "always recorded" field appears as old == new when it did not change
  *
- * Values are read through ClassMetadata, so entities need no getters.
+ * The sides are read from the connection by the caller, never from Doctrine's change set, which
+ * a flush nested inside another empties, fills from a refused flush, or describes as it was
+ * planned rather than as it was written.
  *
- * @internal used by AuditSubscriber while a flush is running
+ * @internal used by the history built from the connection's log
  */
 final class ChangeSetBuilder
 {
@@ -38,68 +38,20 @@ final class ChangeSetBuilder
     }
 
     /**
-     * @param array<string, mixed>|null   $changeSet
-     * @param array<string, array<int|string, object>> $emptied   what an owning collection held before this flush
-     *                                               emptied it, by field: the one source left once
-     *                                               clear() has taken its own empty snapshot
-     * @param array<string, mixed>        $asFlushed what the always-recorded fields held when the
-     *                                               flush began, for the ones it did not write Doctrine's change set, when the caller
-     *                                             already holds one; read from the unit of
-     *                                             work when null
+     * @param array<string, mixed> $changeSet what the statement changed, by field: [old, new], the
+     *                                        sides as the row held them -- required, and never
+     *                                        read from the unit of work
      *
      * @return array<string, Change>
      */
-    public function build(object $entity, AuditMetadata $metadata, ?array $changeSet = null, array $emptied = [], array $asFlushed = []): array
+    public function build(object $entity, AuditMetadata $metadata, array $changeSet): array
     {
         $classMetadata = $this->em->getClassMetadata($entity::class);
-
-        // The caller may hand in the change set it captured earlier: by postUpdate the
-        // unit of work may no longer have it. See AuditSubscriber::changeSetFor().
-        $changeSet ??= $this->em->getUnitOfWork()->getEntityChangeSet($entity);
         $changes = [];
 
         foreach ($metadata->fields as $field => $represent) {
             if ($classMetadata->isCollectionValuedAssociation($field)) {
-                // Only an owning collection is compared as a whole. An inverse one is
-                // not what Doctrine persists — the element's own reference back is —
-                // so it can be dirty in memory while the database keeps nothing, and it
-                // is dirty in memory whenever an element was added properly, which the
-                // membership path already records. Comparing it here told the same
-                // change twice, and invented one for a relation that was never saved.
-                // A collection the flush is emptying answers from what it held, which
-                // the listener took before this flush could destroy it: clear() leaves an
-                // empty snapshot and a collection that says it is not dirty, and a
-                // replaced collection leaves a new one whose snapshot never held the old
-                // members. Both produced a record that said nothing while the join rows
-                // were deleted, or one whose "old" side was empty.
-                $change = match (true) {
-                // The emptying comes first, including for an inverse side. The skip
-                // below is right about an inverse collection in general -- what the
-                // database took is the element's own reference back, and the
-                // membership path records that -- but an emptying is the case where
-                // the membership path may have nothing to record: replacing an inverse
-                // collection that has orphanRemoval deletes its rows with one statement
-                // and no lifecycle event at all. Ordered the other way round, the arm
-                // this branch exists for was never reached, and a replaced collection
-                // came back as an update with nothing in it while its rows were gone.
-                // The caller drops this whole-collection form when the elements did
-                // speak, so the two cannot both describe one emptying.
-                    \array_key_exists($field, $emptied) => new Change(
-                        self::representAll($emptied[$field], $represent),
-                        // What the property holds is the new side of an OWNING collection,
-                        // whose rows Doctrine writes from it. For an inverse one it is not:
-                        // the rows belong to the elements, so an element left in the
-                        // replacement is deleted with the rest and never put back -- the
-                        // record said it had survived -- and an element newly added
-                        // arrives through its own insertion, which the membership road
-                        // records, so reading it here described one arrival twice.
-                        $classMetadata->isAssociationInverseSide($field)
-                            ? []
-                            : self::representAll(self::contentsOf($classMetadata->getFieldValue($entity, $field)), $represent),
-                    ),
-                    $classMetadata->isAssociationInverseSide($field) => null,
-                    default => $this->collectionChange($classMetadata->getFieldValue($entity, $field), $represent),
-                };
+                continue; // the rows' own history, not a row's field
             } elseif ($classMetadata->isSingleValuedAssociation($field)) {
                 // Both sides out of the change set, like a scalar. The new side used to be
                 // read off the entity, which is not the same thing after postUpdate: a
@@ -128,7 +80,7 @@ final class ChangeSetBuilder
             }
         }
 
-        return $this->withAlwaysRecorded($entity, $metadata, $changes, $asFlushed, $changeSet);
+        return $this->withAlwaysRecorded($entity, $metadata, $changes, [], $changeSet);
     }
 
     /**
@@ -207,58 +159,6 @@ final class ChangeSetBuilder
         }
 
         return [ElementKey::field($collectionField, $elementId, $field), new Change($old, $new)];
-    }
-
-    /**
-     * @param (callable(object): mixed)|null $represent
-     */
-    /**
-     * Each element as the history should show it.
-     *
-     * @param list<object>                 $elements
-     * @param array<int|string, object> $elements
-     * @param (callable(object): mixed)|null $represent
-     *
-     * @return list<mixed>
-     */
-    private static function representAll(array $elements, ?callable $represent): array
-    {
-        return array_values(array_map(static fn (object $element): mixed => self::represent($element, $represent), $elements));
-    }
-
-    /**
-     * What a to-many field holds right now, whatever kind of collection it is.
-     *
-     * @return list<object>
-     */
-    private static function contentsOf(mixed $collection): array
-    {
-        if (!$collection instanceof Collection) {
-            return [];
-        }
-
-        return array_values(array_filter($collection->toArray(), static fn (mixed $element): bool => \is_object($element)));
-    }
-
-    private function collectionChange(mixed $collection, ?callable $represent): ?Change
-    {
-        if (!$collection instanceof PersistentCollection || !$collection->isDirty()) {
-            return null;
-        }
-
-        // Adding to a lazy collection does not load it, so its snapshot would be
-        // empty and the record would claim every element is new. Loading it here
-        // costs one query — only for dirty, audited collections.
-        if (!$collection->isInitialized()) {
-            $collection->initialize();
-        }
-
-        $map = static fn (iterable $items): array => array_values(array_map(
-            static fn (object $item): mixed => self::represent($item, $represent),
-            \is_array($items) ? $items : iterator_to_array($items, false),
-        ));
-
-        return new Change($map($collection->getSnapshot()), $map($collection));
     }
 
     /**
