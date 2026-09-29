@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * The records of a flush reach the writer in the order their facts ran in the connection's
@@ -50,12 +51,30 @@ final class InWhatOrderTheRecordsAreWrittenTest extends DoctrineTestCase
         self::assertSame($ran, $this->said());
     }
 
-    public function testEveryKindOfRecordGoesWhereItsFirstFactRanAcrossANestedFlush(): void
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function withAndWithoutSavepoints(): iterable
+    {
+        yield 'a nested flush in a savepoint of its own' => [true];
+        // DBAL 3 only: DBAL 4 always nests in savepoints, and this is the case above there.
+        yield 'a nested flush in the outer one\'s transaction (outer provenance)' => [false];
+    }
+
+    #[DataProvider('withAndWithoutSavepoints')]
+    public function testEveryKindOfRecordGoesWhereItsFirstFactRanAcrossANestedFlush(bool $savepoints): void
     {
         // One flush writes a crate's line and a relay; the relay's postUpdate runs a nested flush
         // that writes another crate's line; then the outer flush writes an article's join row.
         // Four records -- an owner's lines, an entity's row, a nested flush's line, an owner's
         // links -- and three moments: the outer flush's, the nested one's, the outer's again.
+        // The clock does not move: the ids the writer builds sort as the records were handed it.
+        $this->watchTheConnection(savepoints: $savepoints);
+
+        if (!$savepoints && $this->em->getConnection()->getNestTransactionsWithSavepoints()) {
+            self::markTestSkipped('DBAL 4 always nests in savepoints: the case with them, run above.');
+        }
+
         $this->em->persist($first = new Crate('C-1'));
         $first->add($line = new CrateItem('apple'));
         $this->em->persist($second = new Crate('C-2'));
@@ -94,7 +113,17 @@ final class InWhatOrderTheRecordsAreWrittenTest extends DoctrineTestCase
         $ran = $this->recordsInTheOrderTheyRan($from, ['line' => ['C-1' => $line, 'C-2' => $other]]);
         self::assertCount(4, $ran, 'the premise: all four ran');
         self::assertSame('article', end($ran), 'the premise: the join row ran after the nested flush');
+
+        if (!$savepoints) {
+            self::assertSame([], array_values(array_filter($this->queries, static fn (string $sql): bool => str_contains(strtoupper($sql), 'SAVEPOINT'))), 'the premise: no savepoint, the nested flush in the outer one\'s transaction');
+        }
+
         self::assertSame($ran, $this->said());
+
+        $ids = array_column($this->documents(), 'id');
+        $sorted = $ids;
+        sort($sorted, \SORT_STRING);
+        self::assertSame($sorted, $ids, 'and their ids sort in that order: one millisecond, one counter');
     }
 
     public function testTheRecordsOfAFlushWrittenLateKeepTheOrderTheirFactsRanIn(): void

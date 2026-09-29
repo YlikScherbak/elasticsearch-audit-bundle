@@ -719,6 +719,59 @@ final class DoctrineCanariesTest extends TestCase
     }
 
     /**
+     * In what order one flush runs one class's UPDATEs -- which the order of its records follows
+     * (they are put where their statements ran), and the guards of that order and of the ids built
+     * from it read from the log rather than write down, for this reason: ORM 3 runs them by the
+     * identifier as text -- 1, 10, 11, 12, 2, 3 -- and ORM 2 in the order the entities came to be
+     * managed. Red here is the ORM changing it: InWhatOrderTheRecordsAreWrittenTest and
+     * IdOrderOnLiveClusterTest take whatever order the log shows, and nothing of the bundle
+     * depends on either.
+     */
+    public function testInWhatOrderOneClasssUpdatesRun(): void
+    {
+        $articles = [];
+
+        for ($i = 1; $i <= 12; ++$i) {
+            $this->em->persist($articles[] = new Article('A'.$i));
+        }
+
+        $this->em->flush();
+
+        $ran = new \ArrayObject();
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($ran) {
+            public function __construct(private readonly \ArrayObject $ran)
+            {
+            }
+
+            public function postUpdate(\Doctrine\Persistence\Event\LifecycleEventArgs $args): void
+            {
+                $object = $args->getObject();
+
+                if ($object instanceof Article) {
+                    $this->ran[] = $object->id;
+                }
+            }
+        });
+
+        foreach ($articles as $article) {
+            $article->title .= '-2';
+        }
+
+        $this->em->flush();
+
+        $ids = array_map(static fn (Article $a): ?int => $a->id, $articles);
+        $major = (int) explode('.', \Composer\InstalledVersions::getPrettyVersion('doctrine/orm') ?? '3')[0];
+
+        if ($major >= 3) {
+            $asText = $ids;
+            sort($asText, \SORT_STRING);
+            self::assertSame($asText, $ran->getArrayCopy(), 'ORM 3 no longer runs one class\'s UPDATEs by the identifier as text');
+        } else {
+            self::assertSame($ids, $ran->getArrayCopy(), 'ORM 2 no longer runs one class\'s UPDATEs in the order the entities came to be managed');
+        }
+    }
+
+    /**
      * What a reference is worth on a manager that is closed -- which is what publishing a
      * nested flush's outer records works with, after the nested one died. Step 5 represents
      * an association from the key the log holds, through a reference; this is whether the
