@@ -344,9 +344,8 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
     {
         // A relay pointed at another, which a listener ahead of this one renames in a nested flush
         // after the first relay's UPDATE: the relay pointed at was called "second" when it was
-        // pointed at. An owning ManyToMany's target is shown so (5.3c); a ManyToOne's is shown as
-        // the object the manager holds -- the name it was given after -- and the same rule is to
-        // come to it, pinned until it does.
+        // pointed at, and is shown so -- as an owning ManyToMany's target is (5.3c), and not as
+        // the object the manager holds, which has the name it was given after.
         $this->em->persist($first = new Relay('first'));
         $this->em->persist($second = new Relay('second'));
         $this->em->flush();
@@ -376,8 +375,49 @@ final class WhatTheRowSaysOfAnEntityTest extends DoctrineTestCase
 
         $this->pinned(
             expected: [['old' => null, 'new' => 'second']],
-            today: [['old' => null, 'new' => 'renamed after']],
+            today: null,
             said: array_values(array_filter(array_map(static fn (array $d): mixed => $d['changes']['next'] ?? null, $this->documents()))),
+        );
+    }
+
+    public function testTheReferenceLeftIsShownAsItsRowStoodBeforeItWasLeft(): void
+    {
+        // The other side of the same rule. The first relay leaves the second for a third, and a
+        // listener ahead of this one renames the second in a nested flush after the first relay's
+        // UPDATE: the relay left was called "second" when it was left, whatever it is called by
+        // the time the record is built.
+        $this->em->persist($first = new Relay('first'));
+        $this->em->persist($second = new Relay('second'));
+        $this->em->persist($third = new Relay('third'));
+        $first->next = $second;
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $this->ahead([Events::postUpdate], new class($this->em, $first, $second) {
+            private bool $ran = false;
+
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Relay $first, private readonly Relay $second)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->first || $this->ran) {
+                    return;
+                }
+
+                $this->ran = true;
+                $this->second->name = 'renamed after';
+                $this->em->flush();
+            }
+        });
+
+        $first->next = $third;
+        $this->em->flush();
+
+        self::assertSame(
+            [['old' => 'second', 'new' => 'third']],
+            array_values(array_filter(array_map(static fn (array $d): mixed => $d['changes']['next'] ?? null, $this->documents()))),
         );
     }
 

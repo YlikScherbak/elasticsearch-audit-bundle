@@ -341,7 +341,10 @@ final class EntityRowRuns
 
             foreach ($execution['fields'] as $field => $sides) {
                 $changeSet[$field] = $metadata->isSingleValuedAssociation($field)
-                    ? [$this->related($em, $replay, $departed, $metadata, $field, $sides['old']), $this->related($em, $replay, $departed, $metadata, $field, $sides['new'])]
+                    ? [
+                        $this->related($em, $replay, $departed, $metadata, $field, $sides['old'], $execution['at'][0], false),
+                        $this->related($em, $replay, $departed, $metadata, $field, $sides['new'], $execution['at'][\count($execution['at']) - 1], true),
+                    ]
                     : [$sides['old'], $sides['new']];
             }
 
@@ -366,11 +369,16 @@ final class EntityRowRuns
     }
 
     /**
-     * The entity a foreign key the row holds names, as a representer is handed one. In order:
+     * The entity a foreign key the row holds names, as a representer is handed one -- the same
+     * rule as for an owning ManyToMany's targets ({@see LinkRuns}). In order:
      *
-     * - for a row of a watched class that a DELETE this replay read took, a copy of it as the
-     *   row stood before it went ({@see HistoryReplay::asItStoodBeforeItWent()}) -- what the row
-     *   held, whatever the object was changed to and never wrote;
+     * - for a row of a watched class the replay knows there, a copy of it as it stood at the
+     *   moment of the execution ({@see HistoryReplay::copyAt()}): the old side before its first
+     *   statement, the new one once its last ran -- whatever the object was changed to after,
+     *   and pointing where that row pointed (what it points at is the manager's: the row is
+     *   shown as it stood, not all it leads to);
+     * - for one a DELETE this replay read took before that moment, a copy of it as the row
+     *   stood before it went ({@see HistoryReplay::asItStoodBeforeItWent()});
      * - for one of any other class the application removed, the object it held
      *   ({@see DepartedObjects}), as it left it: the bundle does not read those rows;
      * - and otherwise the object the manager holds, or a reference, which the representer loads
@@ -379,7 +387,7 @@ final class EntityRowRuns
      *
      * @param ClassMetadata<object> $metadata
      */
-    private function related(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, ClassMetadata $metadata, string $association, mixed $key): ?object
+    private function related(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, ClassMetadata $metadata, string $association, mixed $key, int $at, bool $once): ?object
     {
         if ($key === null) {
             return null;
@@ -389,7 +397,8 @@ final class EntityRowRuns
         $columns = $em->getClassMetadata($target)->getIdentifierColumnNames();
         $row = \count($columns) === 1 ? [$columns[0] => $key] : null;
 
-        return ($row === null ? null : $replay->asItStoodBeforeItWent($target, $row))
+        return ($row === null ? null : $replay->copyAt($target, $row, $at, $once))
+            ?? ($row === null ? null : $replay->asItStoodBeforeItWent($target, $row))
             ?? ($row === null ? null : $departed?->find($em, $target, $row))
             ?? $this->identity->byForeignKey($em, $target, $key, orReference: true);
     }
