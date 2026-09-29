@@ -31,7 +31,6 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
-use Doctrine\ORM\PersistentCollection;
 use Doctrine\ORM\Event\OnClearEventArgs;
 use Doctrine\ORM\Event\OnFlushEventArgs;
 use Doctrine\ORM\Event\PostFlushEventArgs;
@@ -102,59 +101,6 @@ final class AuditSubscriber
      */
     private array $checkedTracking = [];
 
-    /** @var list<AuditRecord> records built during the current flush, written after its commit */
-    private array $pending = [];
-
-    /**
-     * Where the connection's log stood when each pending record was taken, and the class of
-     * the row it is about, by the same index.
-     *
-     * Whether a record stands is the fate of the execution it describes, not its flush's: an
-     * application may roll back to a savepoint of its own inside a flush that goes on to
-     * commit, and a flush that dies inside one that commits leaves the other's statements
-     * where they were. A clear decides neither. So each record is tied, when it is taken, to
-     * the positions of its statements in the log ({@see self::statementBehind()}) -- one per
-     * table of its class, for a hierarchy that writes several.
-     *
-     * @var list<list<int>|null>
-     */
-    private array $pendingAt = [];
-
-    /**
-     * The statements of each flush's window of the log, by the row they wrote, for
-     * {@see self::statementBehind()}: read once, as far as the log had got, and read on from
-     * there -- a flush writing a thousand rows is not a thousand readings of its log.
-     *
-     * @var array<int, array{read: int, rows: array<string, list<int>>, tables: array<string, list<int>>}>
-     */
-    private array $executions = [];
-
-    /** @var array<int, true> the statements a record has been tied to: no two records share one */
-    private array $claimedExecutions = [];
-
-    /**
-     * The key of each row a removal drafted in preRemove is about, by the entity's object id:
-     * a generated identifier is cleared once the DELETE has run, before postRemove, and the
-     * record needs it to find its statement ({@see self::$pendingAt}).
-     *
-     * @var array<int, array<string, mixed>|null>
-     */
-    private array $pendingRemovalKeys = [];
-
-    /**
-     * Which flush collected each pending record, by the same index.
-     *
-     * Parallel to $pending rather than folded into it: publish() replaces entries by
-     * index when it merges what happened inside a collection into its owner's record,
-     * and an index that means two things is an index that drifts.
-     *
-     * @var list<int>
-     */
-    private array $pendingFlush = [];
-
-    /** @var array<int, AuditRecord> records for entities being removed, keyed by object id */
-    private array $pendingRemovals = [];
-
     /** Said once per flush: a hundred entities would otherwise say the same thing a hundred times. */
     private bool $reportedLostChangeSets = false;
 
@@ -190,19 +136,6 @@ final class AuditSubscriber
      * @var list<array{0: int, 1: int|null}>
      */
     private array $windows = [];
-
-    /**
-     * The pending lifecycle record of an entity -- create or update -- by the entity, so what
-     * its elements did can be folded into it.
-     *
-     * Only an index: the record is in {@see self::$pending} and goes nowhere if the entity
-     * does. By the object, weakly, and not by its object id -- PHP hands a freed object's id to
-     * the next one, and after a clear the entity a record was taken for may be gone while the
-     * record waits, so an id could fold another owner's news into it.
-     *
-     * @var \WeakMap<object, int>
-     */
-    private \WeakMap $pendingIndexByEntity;
 
     /**
      * The first failure raised while this flush's records were being assembled.
@@ -415,7 +348,6 @@ final class AuditSubscriber
     ) {
         $this->logger = $logger ?? new NullLogger();
         $this->neverWritten = new \WeakMap();
-        $this->pendingIndexByEntity = new \WeakMap();
         $this->rows = new RowMemory($statements);
 
         // What ran before this listener existed is nobody's history it can account for: it
@@ -631,31 +563,29 @@ final class AuditSubscriber
         }
 
         $this->rows->rememberPersisted($manager, $args->getObject());
-        $collecting = $this->collectingNowAfterAStatement($manager);
+        $this->collectingNowAfterAStatement($manager);
         $this->theRowNowMatchesTheObject($args->getObject());
-        $this->announced($manager, $args->getObject(), $collecting, StatementShape::INSERT);
+        $this->announced($manager, $args->getObject());
     }
     public function postUpdate(PostUpdateEventArgs $args): void
     {
-        // What the row went through is the log's; this is the flush claiming what it ran, and
-        // what an owning collection's snapshot says while Doctrine still has it.
+        // What the row went through is the log's; this is the flush claiming what it ran.
         $manager = self::entityManagerOf($args->getObjectManager());
 
         if ($manager === null) {
             return;
         }
 
-        $collecting = $this->collectingNowAfterAStatement($manager);
+        $this->collectingNowAfterAStatement($manager);
         $this->theRowNowMatchesTheObject($args->getObject());
-        $this->announced($manager, $args->getObject(), $collecting, StatementShape::UPDATE);
+        $this->announced($manager, $args->getObject());
     }
 
     /**
-     * The declaration checked, and the execution the event announces tied to it. What the
-     * entity's owning collections went through is its join rows', read from the log (5.3), and
-     * nothing of the collection is taken here.
+     * The declaration checked. What the entity's row went through is the log's, and what its
+     * owning collections went through is its join rows' (5.3): nothing is taken here.
      */
-    private function announced(EntityManagerInterface $em, object $entity, int $flush, string $kind): void
+    private function announced(EntityManagerInterface $em, object $entity): void
     {
         try {
             $metadata = $this->checkTheDeclaration($em, $entity);
@@ -665,10 +595,6 @@ final class AuditSubscriber
             }
 
             $this->warnOfALostChangeSet($em, $entity);
-
-            // Tied to the execution it announces: an announcement is of one execution, and the next
-            // one of the same row is of the next.
-            $this->statementBehind($em, $entity, $flush, $kind);
         } catch (\Throwable $e) {
             $this->writer->reportFailure($e, null);
         }
@@ -1545,27 +1471,17 @@ final class AuditSubscriber
     }
 
     /**
-     * @param bool $keepingWhatWasDraftedForTheNextFlush whether a removal's record taken
-     *        in preRemove survives this. It does when the forgetting is a flush STARTING
-     *        and finding the last one's state behind it: `$em->remove()` fires preRemove
-     *        where it is called, before any flush exists, so a record drafted there
-     *        belongs to the flush about to run and not to the one that left. Swept up
-     *        with the rest, the deletion was committed with no history of it at all —
-     *        and the more so on the road that publishes late, where an operation's first
-     *        act is to write somebody else's records and its second was to lose its own.
+     * @param bool $keepingTheUnwrittenRemovals whether what the application removed, and whose
+     *        DELETE has not run, survives this. It does when the forgetting is a flush STARTING
+     *        and finding the last one's state behind it: `$em->remove()` fires preRemove where
+     *        it is called, before any flush exists, so the object taken there belongs to the
+     *        flush about to run and not to the one that left. Swept up with the rest, the
+     *        record of the deletion lost the object the application removed -- and the more so
+     *        on the road that publishes late, where an operation's first act is to write
+     *        somebody else's records.
      */
-    private function forgetThisFlush(bool $keepingWhatWasDraftedForTheNextFlush = false): void
+    private function forgetThisFlush(bool $keepingTheUnwrittenRemovals = false): void
     {
-        $drafts = $keepingWhatWasDraftedForTheNextFlush ? $this->pendingRemovals : [];
-
-        $this->pending = [];
-        $this->pendingFlush = [];
-        $this->pendingAt = [];
-        $this->executions = [];
-        $this->claimedExecutions = [];
-        $this->pendingRemovalKeys = array_intersect_key($this->pendingRemovalKeys, $drafts);
-        $this->pendingRemovals = $drafts;
-        $this->pendingIndexByEntity = new \WeakMap();
         $this->flushes = [];
         $this->failureWhileBuilding = null;
 
@@ -1586,7 +1502,7 @@ final class AuditSubscriber
         // ending, or dropped with the one that was found abandoned -- and in both cases not
         // the business of the next flush, which would otherwise write it as its own.
         $this->factsReadThrough = max($this->factsReadThrough, $this->statements->position());
-        $this->departed->forgetThrough($this->factsReadThrough, $keepingWhatWasDraftedForTheNextFlush);
+        $this->departed->forgetThrough($this->factsReadThrough, $keepingTheUnwrittenRemovals);
 
         $last = array_key_last($this->windows);
 
@@ -1614,151 +1530,6 @@ final class AuditSubscriber
     }
 
     /**
-     * The execution a record about to be taken describes: its positions in the log.
-     *
-     * A record is about one execution, and a row is written more than once: a listener ahead
-     * of this one in the same event can run a flush nested there that writes the same row --
-     * same table, same key, the same values even -- and that flush may succeed, or die before
-     * claiming what it ran, or succeed inside a savepoint of the application's that is rolled
-     * back after this listener. Neither the row nor the owner tells the executions apart, and
-     * neither does which one is alive when the record is taken, nor which is last: all three
-     * depend on the order of the listeners.
-     *
-     * Doctrine announces a change after running its statements, and not necessarily to this
-     * listener at once: a flush nested in an earlier listener fits in between. What holds is
-     * the bookkeeping. The record's own execution is the EARLIEST statement of its kind and
-     * row, since its flush began, that no record has been tied to yet: whatever lies after it
-     * is somebody else's, and a nested flush announced first has already taken its own. Where
-     * no key binds a statement -- an INSERT whose key the database handed out -- it is the
-     * earliest of the kind and table nobody has taken.
-     *
-     * A class of a JOINED hierarchy writes one change as a statement per table it touches, and
-     * the persister runs them back to back: so the execution is that first statement and the
-     * ones right after it, of the same kind and row, in other tables of the hierarchy and the
-     * same frame. Not one per table wherever each is: a change of the root alone, followed by a
-     * nested flush's change of the subclass alone, is two executions, and the nested one ran in
-     * a savepoint of its own.
-     *
-     * Ownership is not asked. It answers whose moment and context a record carries, and a
-     * frame nobody lived to claim is lent to the one around it -- right for that question,
-     * and wrong for this one.
-     *
-     * @param string                    $kind the statement a record of this event is about: an
-     *                                        INSERT, UPDATE or DELETE ({@see StatementShape})
-     * @param array<string, mixed>|null $key the row's key as the statements carry it, when the
-     *                                        entity no longer has it -- a removal's, taken before
-     *                                        the DELETE cleared a generated identifier
-     *
-     * @return list<int>
-     */
-    private function statementBehind(EntityManagerInterface $em, object $entity, int $flush, string $kind, ?array $key = null): array
-    {
-        $metadata = $em->getClassMetadata($entity::class);
-        $key ??= RowMemory::keyColumns($em, $entity);
-        $row = $key === null ? null : self::rowOf($key);
-        $index = $this->executionsOf($em, $flush);
-        $tables = [];
-
-        foreach ([$metadata->name, ...array_values($metadata->parentClasses)] as $name) {
-            $tables[$em->getClassMetadata($name)->getTableName()] = true;
-        }
-
-        // The first statement of the execution: the earliest of its kind and row, in any of
-        // the hierarchy's tables, that nobody has taken.
-        $first = null;
-
-        foreach (array_keys($tables) as $table) {
-            $candidate = $row === null ? null : $this->firstUnclaimed($index['rows'][$kind.'|'.$table.'|'.$row] ?? []);
-            $candidate ??= $this->firstUnclaimed($index['tables'][$kind.'|'.$table] ?? []);
-
-            if ($candidate !== null && ($first === null || $candidate < $first)) {
-                $first = $candidate;
-            }
-        }
-
-        if ($first === null) {
-            return [];
-        }
-
-        // And the ones the persister ran right after it for the same change.
-        $tied = [$first];
-        $frame = $this->statements->frameOf($first);
-        $used = [StatementShape::read($this->statements->statement($first)['sql'] ?? '')?->table => true];
-
-        for ($statement = $first + 1, $to = $this->statements->position(); $statement <= $to; ++$statement) {
-            $entry = $this->statements->statement($statement);
-            $shape = $entry === null ? null : StatementShape::read($entry['sql']);
-
-            if ($entry === null || $shape === null || $shape->kind !== $kind || !isset($tables[$shape->table]) || isset($used[$shape->table])
-                || $this->statements->frameOf($statement) !== $frame || isset($this->claimedExecutions[$statement])
-            ) {
-                break;
-            }
-
-            $binding = RowBinding::of($em, $shape, $entry['params']);
-            $keyed = $binding->kind === RowBinding::ROW && $binding->key !== null;
-
-            if ($keyed && ($row === null || self::rowOf($binding->key) !== $row)) {
-                break;
-            }
-
-            $tied[] = $statement;
-            $used[$shape->table] = true;
-        }
-
-        foreach ($tied as $statement) {
-            $this->claimedExecutions[$statement] = true;
-        }
-
-        return $tied;
-    }
-
-    /**
-     * A flush's window of the log, read on to where the log stands now.
-     *
-     * @return array{read: int, rows: array<string, list<int>>, tables: array<string, list<int>>}
-     */
-    private function executionsOf(EntityManagerInterface $em, int $flush): array
-    {
-        $index = $this->executions[$flush] ?? ['read' => $this->statementMarks[$flush][2] ?? 0, 'rows' => [], 'tables' => []];
-
-        for ($statement = $index['read'] + 1, $to = $this->statements->position(); $statement <= $to; ++$statement) {
-            $entry = $this->statements->statement($statement);
-            $shape = $entry === null ? null : StatementShape::read($entry['sql']);
-
-            if ($entry === null || $shape === null) {
-                continue;
-            }
-
-            $binding = RowBinding::of($em, $shape, $entry['params']);
-
-            if ($binding->kind === RowBinding::ROW && $binding->key !== null) {
-                $index['rows'][$shape->kind.'|'.$shape->table.'|'.self::rowOf($binding->key)][] = $statement;
-            } else {
-                $index['tables'][$shape->kind.'|'.$shape->table][] = $statement;
-            }
-        }
-
-        $index['read'] = $this->statements->position();
-
-        return $this->executions[$flush] = $index;
-    }
-
-    /**
-     * @param list<int> $statements
-     */
-    private function firstUnclaimed(array $statements): ?int
-    {
-        foreach ($statements as $statement) {
-            if (!isset($this->claimedExecutions[$statement])) {
-                return $statement;
-            }
-        }
-
-        return null;
-    }
-
-    /**
      * A row's key as one string, whatever order its columns came in.
      *
      * @param array<string, mixed> $key
@@ -1768,60 +1539,6 @@ final class AuditSubscriber
         ksort($key);
 
         return implode('|', array_map(static fn (mixed $value): string => \is_scalar($value) ? (string) $value : '', $key));
-    }
-
-    /**
-     * Takes out every pending record whose statement the log says was taken back.
-     *
-     * By the execution each was tied to when it was taken ({@see self::statementBehind()}): a
-     * record goes when the log has voided any of its statements. A statement the log no longer
-     * holds was folded in once no transaction could still roll it back, so it stood.
-     */
-    /**
-     * @param list<int>|null $execution
-     */
-    private function theLogTookBack(?array $execution): bool
-    {
-        foreach ($execution ?? [] as $statement) {
-            if ($this->statements->statement($statement) !== null && $this->statements->fate($statement) === StatementLog::VOID) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function dropWhatTheLogTookBack(?EntityManagerInterface $em): void
-    {
-        if ($em === null || $this->pending === []) {
-            return;
-        }
-
-        $kept = [];
-
-        foreach (array_keys($this->pending) as $index) {
-            if (!$this->theLogTookBack($this->pendingAt[$index] ?? null)) {
-                $kept[] = $index;
-            }
-        }
-
-        if (\count($kept) === \count($this->pending)) {
-            return;
-        }
-
-        $renumbered = array_flip($kept);
-        $this->pending = array_values(array_map(fn (int $index): AuditRecord => $this->pending[$index], $kept));
-        $this->pendingFlush = array_values(array_map(fn (int $index): int => $this->pendingFlush[$index], $kept));
-        $this->pendingAt = array_values(array_map(fn (int $index): ?array => $this->pendingAt[$index] ?? null, $kept));
-        $indexes = new \WeakMap();
-
-        foreach ($this->pendingIndexByEntity as $entity => $index) {
-            if (isset($renumbered[$index])) {
-                $indexes[$entity] = $renumbered[$index];
-            }
-        }
-
-        $this->pendingIndexByEntity = $indexes;
     }
 
     /**
@@ -1854,11 +1571,9 @@ final class AuditSubscriber
             $abandoned = $abandoned instanceof EntityManagerInterface ? $abandoned : null;
 
             // Whatever the flushes that unwound left: the ones that ran nothing have
-            // already taken their share away, and what the log says was taken back goes
-            // now -- a flush that died rolled its statements back, and that, not its manager
-            // being closed or cleared on the way out, is what says so. What is left is
-            // really there.
-            $this->dropWhatTheLogTookBack($abandoned ?? $em);
+            // already taken their share away, and what the log says was taken back is in no
+            // record built from it -- a flush that died rolled its statements back, and that,
+            // not its manager being closed or cleared on the way out, is what says so.
             $collected = $this->collectedSoFar($abandoned ?? $em);
             $before = $collected + $this->executionsTheLogTookBack($abandoned ?? $em);
 
@@ -1876,7 +1591,7 @@ final class AuditSubscriber
                 } catch (\Throwable $e) {
                     $this->writer->reportFailure($e, null);
                 } finally {
-                    $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
+                    $this->forgetThisFlush(keepingTheUnwrittenRemovals: true);
                 }
             } else {
                 // Nothing was collected; or the flush never reached a statement, because a
@@ -1885,7 +1600,7 @@ final class AuditSubscriber
                 // that describes rows nobody has is worse than history that is missing.
                 $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => $before]);
 
-                $this->forgetThisFlush(keepingWhatWasDraftedForTheNextFlush: true);
+                $this->forgetThisFlush(keepingTheUnwrittenRemovals: true);
             }
         }
 

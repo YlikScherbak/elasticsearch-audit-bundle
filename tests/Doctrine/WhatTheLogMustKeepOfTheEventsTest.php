@@ -55,6 +55,31 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
         self::assertSame([['article', 'update', ['author' => ['old' => 'Ada', 'new' => 'Bea'], 'status' => ['old' => 'draft', 'new' => 'draft']]]], $this->said());
     }
 
+    public function testAnAuthorRemovedBeforeAFlushThatWritesAnotherLateIsStillNamed(): void
+    {
+        // `$em->remove()` fires preRemove where it is called, before the flush that deletes the
+        // row: the object is held from there. The flush then finds the last one behind it, its
+        // publishing swallowed, writes that one's records late and forgets what it left -- and
+        // not what was removed for itself, whose DELETE has yet to run. Forgotten with the rest,
+        // the author was named by an identifier, the object the application removed gone.
+        [$article, $ada, $bea] = $this->anArticleBy('Ada', 'Bea');
+        $listener = $this->silenceOurPostFlush();
+
+        $article->title = 'Hi';
+        $this->em->flush();
+        self::assertSame([], $this->documents(), 'the premise: publishing never ran for that flush');
+        $this->em->getEventManager()->addEventListener([Events::postFlush], $listener);
+
+        $article->author = $bea;
+        $this->em->remove($ada);
+        $this->em->flush();
+
+        self::assertSame([
+            ['article', 'update', ['status' => ['old' => 'draft', 'new' => 'draft'], 'title' => ['old' => 'Hello', 'new' => 'Hi']]],
+            ['article', 'update', ['author' => ['old' => 'Ada', 'new' => 'Bea'], 'status' => ['old' => 'draft', 'new' => 'draft']]],
+        ], $this->said());
+    }
+
     public function testAnAuthorTheFlushRemovedIsNamedByEveryArticleThatLeftIt(): void
     {
         // One author, the old side of two records: named by both, not only by the first.
