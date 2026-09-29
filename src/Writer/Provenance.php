@@ -42,11 +42,18 @@ final class Provenance
 {
     /**
      * @param array<string, mixed> $attributes what the moment enrichers said about this moment
+     * @param IdSequence|null      $ids        the counter of its millisecond, which the ids of its
+     *                                         records are taken from ({@see RecordId}): shared by
+     *                                         every moment of that millisecond alive at once, and
+     *                                         held here for as long as this moment can still have
+     *                                         records written -- a flush's, until they are, however
+     *                                         late. Never part of a record.
      */
     public function __construct(
         public readonly \DateTimeImmutable $at,
         public readonly ?string $actor,
         public readonly array $attributes = [],
+        public readonly ?IdSequence $ids = null,
     ) {
     }
 }

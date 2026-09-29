@@ -100,6 +100,14 @@ final class AuditWriter
     private readonly FailureDetails $failureDetails;
 
     /**
+     * The counters of the milliseconds whose moments are alive, by the millisecond, weakly
+     * ({@see sequenceOf()}).
+     *
+     * @var array<int, \WeakReference<IdSequence>>
+     */
+    private array $sequences = [];
+
+    /**
      * Records a domain action that is not a Doctrine change: a call made, a login
      * failed, a file shared. $changes may hold Change objects or any JSON-able data
      * you want to show alongside the event.
@@ -664,7 +672,37 @@ final class AuditWriter
             $actor = null;
         }
 
-        return new Provenance($at, $actor, $this->describeTheMoment());
+        return new Provenance($at, $actor, $this->describeTheMoment(), $this->sequenceOf($at));
+    }
+
+    /**
+     * The counter of a millisecond: the one a moment still alive holds, or a new one.
+     *
+     * By the millisecond's value and not by how recent it is: a flush whose publishing was
+     * swallowed has its records written by a later one, dated where they happened, and its
+     * moment keeps its counter until they are. Held weakly here, so the moments are what keep
+     * a counter -- one no moment holds any more is gone, and its millisecond, met again, begins
+     * from a random point: an order between moments not alive together is not promised.
+     */
+    private function sequenceOf(\DateTimeImmutable $at): IdSequence
+    {
+        $ms = RecordId::millisecondOf($at);
+        $live = ($this->sequences[$ms] ?? null)?->get();
+
+        if ($live !== null) {
+            return $live;
+        }
+
+        foreach ($this->sequences as $one => $reference) {
+            if ($reference->get() === null) {
+                unset($this->sequences[$one]);
+            }
+        }
+
+        $sequence = new IdSequence($ms);
+        $this->sequences[$ms] = \WeakReference::create($sequence);
+
+        return $sequence;
     }
 
     /**
@@ -689,7 +727,7 @@ final class AuditWriter
         }
 
         if ($record->id === null) {
-            $record = $record->withId(RecordId::v7($record->loggedAt ?? throw new \LogicException('unreachable: the timestamp was just set')));
+            $record = $record->withId(RecordId::v7($record->loggedAt ?? throw new \LogicException('unreachable: the timestamp was just set'), $provenance?->ids));
         }
 
         // What the moment looked like: from the provenance when there is one, because
