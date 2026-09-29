@@ -14,8 +14,9 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
  * new start: a new random start is exactly the id that sorts before the ones already given.
  *
  * Held by the moments that use it ({@see Provenance}) and by nothing else for long: the writer
- * hands every moment of a millisecond the same one while any of them is alive, and a millisecond
- * none of them holds any more begins again from a random point.
+ * hands every moment of a millisecond the same one while any of them is alive, or while it is the
+ * latest millisecond the writer was asked about; one that is neither begins again from a random
+ * point.
  *
  * @internal the writer keeps these; nothing outside it builds one but a test
  */

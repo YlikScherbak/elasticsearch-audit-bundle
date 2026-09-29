@@ -12,11 +12,13 @@ namespace Borsche\ElasticsearchAuditBundle\Writer;
  * **In the order they were built, within a millisecond of one process** (1.3). The bits
  * after the timestamp are a counter ({@see IdSequence}): the records a process builds in
  * one millisecond sort by id in the order it built them -- one flush's in the order their
- * facts ran, and a flush nested in another and the outer one's too, when both are alive
- * in the same millisecond. A record a frame merged keeps the id and the moment of its
- * first part. What is not promised: an order between processes, whose counters begin at
- * random points; and an order between moments that are not alive together -- a millisecond
- * no moment of this writer holds any more begins again from a random point.
+ * facts ran, a flush nested in another and the outer one's, and two flushes one after the
+ * other in one millisecond; a flush written late keeps its own millisecond's counter until
+ * it is. A record a frame merged keeps the id and the moment of its first part. What is
+ * not promised: an
+ * order between processes, whose counters begin at random points; and an order in a
+ * millisecond the process has left and come back to with no moment of it still alive --
+ * that one begins again from a random point.
  *
  * 48 bits of milliseconds, 4 of version, 42 of counter around the 2 of variant, 32 random:
  * the counter begins at a random point of its lower half, so it runs out only past 2^41
