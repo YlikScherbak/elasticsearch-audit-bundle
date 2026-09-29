@@ -227,6 +227,16 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     private array $checkpointTables = [];
 
     /**
+     * Which of the removals the widened world is for each reading was taken before, by the same
+     * index: a tag's row, the article's row, or all of the article's links by its key alone;
+     * null for any other statement. Read, like the tables, by what a rollback took back, and by
+     * what a removal is reached as and what it is said to have taken.
+     *
+     * @var list<string|null>
+     */
+    private array $checkpointShapes = [];
+
+    /**
      * How many times each combination of step 5's world was reached, across the sequences run
      * so far -- reached, not drawn: a statement of the kind it names ran, in the circumstance it
      * names, on a row the history is written about; for one taken back, a statement that ran and
@@ -320,7 +330,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
         }
         $by = $this->whoWritesNow();
-        $this->read($by, $table);
+        $this->read($by, $table, match (true) {
+            $words[0] !== 'DELETE' => null,
+            strcasecmp($table, 'Tag') === 0 => 'DELETE Tag', // no history table: named as the SQL has it
+            $table === 'Article' => 'DELETE Article',
+            $table === 'article_tag' && \in_array('ARTICLE_ID', $words, true) && !\in_array('TAG_ID', $words, true) => 'DELETE the article\'s links',
+            default => null,
+        });
 
         if (!self::theWideWorld() || !\in_array($table, self::HISTORY_TABLES, true)) {
             return;
@@ -374,14 +390,28 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * What a rollback took back: the statements behind the readings it drops.
      *
      * @param list<string|null> $tables
+     * @param list<string|null> $shapes
      */
-    private function takenBack(array $tables, bool $theWholeTransaction): void
+    private function takenBack(array $tables, bool $theWholeTransaction, array $shapes = []): void
     {
         if (!self::theWideWorld()) {
             return;
         }
 
         $how = $theWholeTransaction ? 'with the whole transaction' : 'to a savepoint';
+
+        // A removal that ran and was undone is counted as that, and never as one that stood.
+        if (self::theVocabulary()[0] === self::VOCABULARY) {
+            foreach ($shapes as $shape) {
+                if ($shape === 'DELETE Tag') {
+                    $this->reach('a tag\'s removal taken back '.$how);
+                }
+
+                if ($shape === 'DELETE Article') {
+                    $this->reach('the article\'s removal taken back '.$how);
+                }
+            }
+        }
 
         foreach ($tables as $table) {
             if ($table === 'Oven' || $table === 'Kiln') {
@@ -398,7 +428,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
     }
 
-    private function read(?string $by, ?string $table = null): void
+    private function read(?string $by, ?string $table = null, ?string $shape = null): void
     {
         $this->reading = true;
 
@@ -406,6 +436,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->checkpoints[] = $this->snapshot();
             $this->checkpointActors[] = $by;
             $this->checkpointTables[] = $table;
+            $this->checkpointShapes[] = $shape;
         } finally {
             $this->reading = false;
         }
@@ -470,10 +501,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     {
         for ($i = \count($this->open) - 1; $i >= 0; --$i) {
             if ($this->open[$i][0] === $name) {
-                $this->takenBack(\array_slice($this->checkpointTables, $this->open[$i][1]), theWholeTransaction: false);
+                $this->takenBack(\array_slice($this->checkpointTables, $this->open[$i][1]), theWholeTransaction: false, shapes: \array_slice($this->checkpointShapes, $this->open[$i][1]));
                 $this->checkpoints = \array_slice($this->checkpoints, 0, $this->open[$i][1]);
                 $this->checkpointActors = \array_slice($this->checkpointActors, 0, $this->open[$i][1]);
                 $this->checkpointTables = \array_slice($this->checkpointTables, 0, $this->open[$i][1]);
+                $this->checkpointShapes = \array_slice($this->checkpointShapes, 0, $this->open[$i][1]);
                 array_splice($this->open, $i + 1); // the savepoint itself stays open
 
                 return;
@@ -483,10 +515,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
     private function undoTo(int $readings, bool $all): void
     {
-        $this->takenBack(\array_slice($this->checkpointTables, $readings), theWholeTransaction: $all);
+        $this->takenBack(\array_slice($this->checkpointTables, $readings), theWholeTransaction: $all, shapes: \array_slice($this->checkpointShapes, $readings));
         $this->checkpoints = \array_slice($this->checkpoints, 0, $readings);
         $this->checkpointActors = \array_slice($this->checkpointActors, 0, $readings);
         $this->checkpointTables = \array_slice($this->checkpointTables, 0, $readings);
+        $this->checkpointShapes = \array_slice($this->checkpointShapes, 0, $readings);
 
         if ($all) {
             $this->open = [];
@@ -553,9 +586,26 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * three tables has no hierarchy to write a table at a time and no reference Doctrine has to
      * complete. The vocabularies before it are kept, so that the corpora they drew -- three
      * thousand sequences each, green on DBAL 3 and 4 -- can still be run as they were:
-     * AUDIT_MODEL_VOCABULARY=5.2 (step 4's, with the world it ran in) and 3.3.
+     * AUDIT_MODEL_VOCABULARY=5.3, 5.2c, 5.2 (step 4's, with the world it ran in) and 3.3.
+     *
+     * And by removals (2026-09-29), for the cascades a target's or an owner's DELETE takes the
+     * join rows with: a tag removed -- one the article holds, where there is one -- with the
+     * article's collection in memory left as it is, which Doctrine takes the tag out of at the
+     * commit (a canary); and the article removed, its links with it. Reached is counted from this
+     * test's own readings ({@see self::COMBINATIONS_OF_THE_REMOVALS}), not from the words: a word
+     * removing a tag nobody holds reaches nothing of what it is for.
      */
     private const VOCABULARY = [
+        ...self::VOCABULARY_5_3,
+        'remove a tag',
+        'remove the article',
+    ];
+
+    /**
+     * The tagged world, before the removals (5.3c's default, 2026-09-28): run on request,
+     * AUDIT_MODEL_VOCABULARY=5.3, with its corpus.
+     */
+    private const VOCABULARY_5_3 = [
         ...self::VOCABULARY_5_2C,
         'tag the article',
         'untag the article',
@@ -567,7 +617,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * Step 5's first world (5.2c, 2026-09-27): a kiln and relays -- run on request,
      * AUDIT_MODEL_VOCABULARY=5.2c, with its corpus, since the tagged world is the default.
      *
-     * The tagged world ({@see self::VOCABULARY}) was the judge 5.3 was built against, and was
+     * The tagged world ({@see self::VOCABULARY_5_3}) was the judge 5.3 was built against, and was
      * built before it: on the listener of 5.2c, 576 of its 3000 sequences disagreed with the
      * rows, every one about the article's tags -- a tag a nested flush gave lost (287), a tag's
      * move signed by the other flush's actor (194), a tag recorded that the rows never kept (90),
@@ -576,8 +626,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * {@see self::TELLS_APART}.
      *
      * What it does not reach: no word removes a tag, or an article that holds one, so no cascade
-     * a target's DELETE takes with it is in any of its sequences -- that is held by the
-     * scenarios of WhatTheListenerSeesOfACascadeTest, and words for it are 5.3's next step.
+     * a target's DELETE takes with it is in any of its sequences -- the words that do are the
+     * default's ({@see self::VOCABULARY}).
      */
     private const VOCABULARY_5_2C = [
         ...self::VOCABULARY_5_2,
@@ -621,6 +671,17 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         'a link of the article\'s written in a nested flush',
         'a link of the article\'s taken back with the whole transaction',
         'a link of the article\'s written in a flush that changed the kiln',
+    ];
+
+    /**
+     * And what the removals were added to reach, from this test's readings around each DELETE: a
+     * tag the article held, its link gone with it; the article, with links it held; a removal of
+     * either taken back with the application's transaction.
+     */
+    private const COMBINATIONS_OF_THE_REMOVALS = [
+        'a tag the article held removed, its link taken by the database',
+        'an article removed while it held tags',
+        'a tag\'s removal taken back with the whole transaction',
     ];
 
     /** The tables of the rows the history is written about, entities', lines' and links'. */
@@ -868,6 +929,25 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private array $tags = [];
 
+    /**
+     * The tags whose rows were gone when the step before ended, and are still: a link to one of
+     * them -- one the database kept, with no foreign key to take it -- is said by the tag's
+     * identifier. What names a target is the row as it stood, or the object the application
+     * removed, and both are held until the flush that removed it is over; past it, a target whose
+     * row is gone and which nothing holds is named by its identifier
+     * (testATargetWhoseRowIsGoneAndWhichNothingHoldsIsNamedByItsIdentifier). Known here from the
+     * steps, not from the listener.
+     *
+     * @var array<string, true>
+     */
+    private array $tagsGone = [];
+
+    /** The article's identifier, and the tags': what the world is found again by after a removal taken back. */
+    private ?int $articleId = null;
+
+    /** @var list<int> */
+    private array $tagIds = [];
+
     /** @var array<string, string> what every tag is called, by its id */
     private array $tagLabels = [];
 
@@ -974,6 +1054,14 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         if (self::theTaggedWorld()) {
             $words = [...$words, ...self::COMBINATIONS_OF_THE_TAGS];
+        }
+
+        if (self::theVocabulary()[0] === self::VOCABULARY) {
+            // A database without foreign keys takes no link with its target: there, what the
+            // removal reaches is a link left behind.
+            $words = [...$words, ...(($_SERVER['AUDIT_SQLITE_FOREIGN_KEYS'] ?? null) === 'off' && \Borsche\ElasticsearchAuditBundle\Tests\TestConnection::isSqlite()
+                ? str_replace('its link taken by the database', 'its link left behind', self::COMBINATIONS_OF_THE_REMOVALS)
+                : self::COMBINATIONS_OF_THE_REMOVALS)];
         }
 
         if ($seeds >= 60) {
@@ -1357,6 +1445,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         $this->skus = [];
         $this->relayNames = [];
         $this->tagLabels = [];
+        $this->tagsGone = [];
         $this->kilnWrittenThisFlush = false;
         $this->aReplacementIsWaiting = false;
 
@@ -1369,18 +1458,34 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->checkpoints = [];
             $this->checkpointActors = [];
             $this->checkpointTables = [];
+            $this->checkpointShapes = [];
             $this->open = [];
             $points = [$this->snapshot()];
             $this->apply($step, $world);
             $world = $this->theWorldAfter($world);
+            $world = $this->theWorldAsTheRowsHaveIt($world);
             $points = [...$points, ...$this->checkpoints, $this->snapshot()];
             $by = [null, ...$this->checkpointActors, null];
+            $shapes = [null, ...$this->checkpointShapes, null];
 
             // What changed between two readings is the statement's the first was taken before,
             // and the flush running it is whose record it is.
+            $facts = [];
+
             for ($i = 1, $n = \count($points); $i < $n; ++$i) {
-                $rows = array_merge($rows, $this->statementsBetween($points[$i - 1], $points[$i], $by[$i - 1]));
+                $facts[$i] = $this->statementsBetween($points[$i - 1], $points[$i], $by[$i - 1]);
             }
+
+            if (self::theVocabulary()[0] === self::VOCABULARY) {
+                $facts = $this->withWhatARemovalTook($points, $shapes, $facts);
+            }
+
+            foreach ($facts as $one) {
+                $rows = array_merge($rows, $one);
+            }
+
+            // Past this step, a tag whose row is gone is named by its identifier.
+            $this->tagsGone = array_map(static fn (): bool => true, array_diff_key($this->tagLabels, $points[\count($points) - 1]['Tag'] ?? []));
         }
 
         sort($rows);
@@ -1461,6 +1566,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             '3.3' => [self::VOCABULARY_3_3, self::ENDINGS_3_3],
             '5.2' => [self::VOCABULARY_5_2, self::ENDINGS_5_2],
             '5.2c' => [self::VOCABULARY_5_2C, self::ENDINGS_5_2C],
+            '5.3' => [self::VOCABULARY_5_3, self::ENDINGS],
             default => [self::VOCABULARY, self::ENDINGS],
         };
     }
@@ -1471,13 +1577,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      */
     private static function theWideWorld(): bool
     {
-        return self::theVocabulary()[0] === self::VOCABULARY || self::theVocabulary()[0] === self::VOCABULARY_5_2C;
+        return \in_array(self::theVocabulary()[0], [self::VOCABULARY, self::VOCABULARY_5_3, self::VOCABULARY_5_2C], true);
     }
 
-    /** Whether the world has the article's tags too: today's, and not 5.2c's. */
+    /** Whether the world has the article's tags too: today's and 5.3's, and not 5.2c's. */
     private static function theTaggedWorld(): bool
     {
-        return self::theVocabulary()[0] === self::VOCABULARY;
+        return self::theVocabulary()[0] === self::VOCABULARY || self::theVocabulary()[0] === self::VOCABULARY_5_3;
     }
 
     private function aSequence(): array
@@ -1533,6 +1639,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
                 if ($endings === self::ENDINGS) {
                     $steps[] = 'tag the article';
+                }
+
+                // And a tag's removal to take back with them, the cascade's join row too.
+                if ($vocabulary === self::VOCABULARY) {
+                    $steps[] = 'remove a tag';
                 }
             }
 
@@ -1619,6 +1730,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
 
         $this->em->flush();
+        $this->articleId = $article->id;
+        $this->tagIds = array_values(array_filter(array_map(static fn (Tag $tag): ?int => $tag->id, $this->tags), static fn (?int $id): bool => $id !== null));
 
         $this->lines = $lines;
 
@@ -1662,7 +1775,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
 
         // Each says whether it did what it is named for: {@see self::$acted}.
         $acted = match ($step) {
-            'edit the article' => (bool) ($world['article']->title = 'title '.\count($this->documents())),
+            'edit the article' => $world['article'] !== null && (bool) ($world['article']->title = 'title '.\count($this->documents())),
             'change a line' => $lines !== [] && (bool) ($lines[0]->quantity = ($lines[0]->quantity ?? 0) + 1),
             'move a line' => $lines !== [] && (bool) ($lines[0]->crate = $world['other']),
             'move a line back' => $elsewhere !== [] && !$this->aReplacementIsWaiting && (bool) ($elsewhere[0]->crate = $crate),
@@ -1676,8 +1789,12 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             'flush' => $this->did(fn () => $this->flush()),
             'flush, refused' => $this->did(fn () => $this->flushRefused()),
             'flush, publishing swallowed' => $this->did(fn () => $this->flushWithTheirPostFlushThrowing()),
-            'flush, with one nested inside' => $this->flushWithOneNestedInside($world['article']),
+            'flush, with one nested inside' => $this->flushWithOneNestedInside($world['article'] ?? new Article('gone')),
             'flush, and after the statement a nested one edits the article' => $this->flushWithOneNestedAfter(static function () use ($world): bool {
+                if ($world['article'] === null) {
+                    return false;
+                }
+
                 $world['article']->title = 'from after';
 
                 return true;
@@ -1720,9 +1837,11 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }),
             'point a relay elsewhere' => $this->pointARelayElsewhere(),
             'tag the article' => $this->tagTheArticle($world['article']),
-            'untag the article' => self::theTaggedWorld() && !$world['article']->tags->isEmpty() && (bool) $world['article']->tags->removeElement($world['article']->tags->first()),
-            'clear the article\'s tags' => self::theTaggedWorld() && !$world['article']->tags->isEmpty() && $this->did(fn () => $world['article']->tags->clear()),
-            'replace the article\'s tags' => self::theTaggedWorld() && $this->tags !== [] && $this->did(function () use ($world): void {
+            'remove a tag' => $this->removeATag($world['article']),
+            'remove the article' => $world['article'] !== null && $this->em->contains($world['article']) && $this->did(fn () => $this->em->remove($world['article'])),
+            'untag the article' => self::theTaggedWorld() && $world['article'] !== null && !$world['article']->tags->isEmpty() && (bool) $world['article']->tags->removeElement($world['article']->tags->first()),
+            'clear the article\'s tags' => self::theTaggedWorld() && $world['article'] !== null && !$world['article']->tags->isEmpty() && $this->did(fn () => $world['article']->tags->clear()),
+            'replace the article\'s tags' => self::theTaggedWorld() && $world['article'] !== null && $this->tags !== [] && $this->did(function () use ($world): void {
                 $world['article']->tags = new ArrayCollection([$this->tags[\count($this->tags) - 1]]);
             }),
             'flush, and after the statement a nested one tags the article' => $this->flushWithOneNestedAfter(fn (): bool => $this->tagTheArticle($world['article']), refused: false, itWrites: ['article_tag']),
@@ -1804,9 +1923,9 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     }
 
     /** The article gains the first tag of the world it does not carry. Acted when there was one. */
-    private function tagTheArticle(Article $article): bool
+    private function tagTheArticle(?Article $article): bool
     {
-        if (!self::theTaggedWorld()) {
+        if (!self::theTaggedWorld() || $article === null) {
             return false;
         }
 
@@ -1819,6 +1938,72 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
 
         return false;
+    }
+
+    /**
+     * A tag removed -- one the article holds, where there is one -- and nothing else: the
+     * article's collection in memory is left as it is, and its join row is the database's to
+     * take. Acted when there was a tag to remove.
+     */
+    private function removeATag(?Article $article): bool
+    {
+        if (self::theVocabulary()[0] !== self::VOCABULARY) {
+            return false;
+        }
+
+        $alive = array_values(array_filter($this->tags, fn (Tag $tag): bool => $this->em->contains($tag)));
+        $held = array_values(array_filter($alive, static fn (Tag $tag): bool => $article !== null && $article->tags->contains($tag)));
+        $tag = $held[0] ?? $alive[0] ?? null;
+
+        if ($tag === null) {
+            return false;
+        }
+
+        $this->em->remove($tag);
+
+        return true;
+    }
+
+    /**
+     * The world as the rows have it (the removals' world only): a row a removal took and a
+     * rollback put back is the world's again, found by its identifier, and one the removal
+     * took for good is gone from it. Doctrine forgets an entity it removed at the commit that
+     * carried the removal out, whether or not the application's transaction then took it back.
+     *
+     * @param array{article: Article|null, crate: Crate, other: Crate, lines: list<CrateItem>, kiln: Kiln|null} $world
+     *
+     * @return array{article: Article|null, crate: Crate, other: Crate, lines: list<CrateItem>, kiln: Kiln|null}
+     */
+    private function theWorldAsTheRowsHaveIt(array $world): array
+    {
+        if (self::theVocabulary()[0] !== self::VOCABULARY || !$this->em->isOpen()) {
+            return $world;
+        }
+
+        $uow = $this->em->getUnitOfWork();
+
+        if ($this->articleId !== null && ($world['article'] === null || !$uow->isInIdentityMap($world['article']))) {
+            $found = $this->em->find(Article::class, $this->articleId);
+            $world['article'] = $found instanceof Article ? $found : null;
+        }
+
+        $tags = [];
+
+        foreach ($this->tagIds as $id) {
+            $tag = array_values(array_filter($this->tags, static fn (Tag $one): bool => $one->id === $id))[0] ?? null;
+
+            if ($tag === null || !$uow->isInIdentityMap($tag)) {
+                $tag = $this->em->find(Tag::class, $id);
+            }
+
+            if ($tag instanceof Tag) {
+                $tags[] = $tag;
+            }
+        }
+
+        $this->tags = $tags;
+
+        return $world;
     }
 
     /**
@@ -2013,6 +2198,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         $this->checkpoints[] = $this->snapshot();
         $this->checkpointActors[] = null;
         $this->checkpointTables[] = null;
+        $this->checkpointShapes[] = null;
         $outer = $this->acting->actor;
         $this->theNestedFlushWrites = $itWrites;
 
@@ -2031,6 +2217,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->checkpoints[] = $this->snapshot();
             $this->checkpointActors[] = null;
             $this->checkpointTables[] = null;
+            $this->checkpointShapes[] = null;
         }
     }
 
@@ -2197,7 +2384,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         }
 
         try {
-            $article = $this->em->find(Article::class, $world['article']->id);
+            // By the identifier the world was built with: Doctrine clears a generated one off the
+            // object it removed.
+            $articleId = $this->articleId ?? $world['article']?->id;
+            $article = $articleId === null ? null : $this->em->find(Article::class, $articleId);
             $crate = $this->em->find(Crate::class, 'C-1');
             $other = $this->em->find(Crate::class, 'C-2');
             $lines = [];
@@ -2235,7 +2425,10 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             }
         }
 
-        if (!$article instanceof Article || !$crate instanceof Crate || !$other instanceof Crate || ($world['kiln'] !== null && !$kiln instanceof Kiln)) {
+        // The article is the one row a word removes (the removals' world): gone, it is gone.
+        $theArticleMayGo = self::theVocabulary()[0] === self::VOCABULARY;
+
+        if ((!$article instanceof Article && !$theArticleMayGo) || !$crate instanceof Crate || !$other instanceof Crate || ($world['kiln'] !== null && !$kiln instanceof Kiln)) {
             throw new \LogicException('the world lost a row it never deletes');
         }
 
@@ -2244,7 +2437,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         $this->tags = $tags;
         $this->aReplacementIsWaiting = false; // a clear takes a waiting replacement with it
 
-        return ['article' => $article, 'crate' => $crate, 'other' => $other, 'lines' => $lines, 'kiln' => $kiln instanceof Kiln ? $kiln : null];
+        return ['article' => $article instanceof Article ? $article : null, 'crate' => $crate, 'other' => $other, 'lines' => $lines, 'kiln' => $kiln instanceof Kiln ? $kiln : null];
     }
 
     /**
@@ -2482,6 +2675,77 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     }
 
     /**
+     * What an owner's removal took is its removal's (5.3c): the article's links its row's DELETE
+     * took with it -- the cascade, in the same statement -- and the ones a statement taking all of
+     * them by the article's key alone took right before it, as Doctrine does where its join
+     * columns do not cascade. Nothing else: a link taken earlier, by a target's DELETE or on its
+     * own, or by such a statement whose owner's DELETE did not stand -- a rollback dropped its
+     * reading -- stays a fact of its own. The guards of the rule are the listener's own:
+     * testAnOwnersRowGoneAndBackInOneFlushStartsItsListAgain and
+     * testLinksTakenRightBeforeAnOwnersDeleteTakenBackStayTheirOwnMove.
+     *
+     * And what the removals reach, counted from the same readings.
+     *
+     * @param list<array<string, array<string, array<string, mixed>>>> $points
+     * @param list<string|null>                                        $shapes the removal each reading was taken before
+     * @param array<int, list<string>>                                 $facts  what each statement did, by the reading after it
+     *
+     * @return array<int, list<string>>
+     */
+    private function withWhatARemovalTook(array $points, array $shapes, array $facts): array
+    {
+        $linksOf = static function (array $point, string $column, string $id): array {
+            return array_filter($point['article_tag'] ?? [], static fn (array $row): bool => (string) $row[$column] === $id);
+        };
+
+        foreach ($facts as $i => $said) {
+            $before = $points[$i - 1];
+            $after = $points[$i];
+            $shape = $shapes[$i - 1] ?? null;
+
+            if ($shape === 'DELETE Tag') {
+                foreach (array_diff_key($before['Tag'] ?? [], $after['Tag'] ?? []) as $tag => $ignored) {
+                    $held = $linksOf($before, 'tag_id', (string) $tag);
+
+                    if ($held !== []) {
+                        $this->reach(array_intersect_key($held, $after['article_tag'] ?? []) === []
+                            ? 'a tag the article held removed, its link taken by the database'
+                            : 'a tag the article held removed, its link left behind');
+                    }
+                }
+            }
+
+            if ($shape !== 'DELETE Article') {
+                continue;
+            }
+
+            foreach (array_diff_key($before['Article'] ?? [], $after['Article'] ?? []) as $article => $ignored) {
+                $untagged = sprintf('article %s untagged ', $article);
+                $mine = static fn (string $fact): bool => str_starts_with($fact, $untagged);
+
+                if ($linksOf($before, 'article_id', (string) $article) !== []) {
+                    $this->reach('an article removed while it held tags');
+                }
+
+                $facts[$i] = array_values(array_filter($facts[$i], static fn (string $fact): bool => !$mine($fact)));
+
+                // All of its links by its key alone, the statement right before, and what that
+                // statement did nothing but that: the removal's too.
+                if ($i >= 2 && ($shapes[$i - 2] ?? null) === 'DELETE the article\'s links'
+                    && $linksOf($before, 'article_id', (string) $article) === []
+                    && $linksOf($points[$i - 2], 'article_id', (string) $article) !== []
+                    && array_filter($facts[$i - 1], static fn (string $fact): bool => !$mine($fact)) === []
+                ) {
+                    $facts[$i - 1] = [];
+                    $this->reach('an article removed right after all its links were taken');
+                }
+            }
+        }
+
+        return $facts;
+    }
+
+    /**
      * What the rows did, as statements.
      *
      * Each with who wrote it: a fact is its value and its author together, or Alice and Bob
@@ -2516,7 +2780,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $was = $before['Article'][$id]['title'] ?? null;
             $is = $after['Article'][$id]['title'] ?? null;
 
-            if ($was !== $is) {
+            // A removal is its row going, and no value of it: a remove record carries none.
+            if ($was !== $is && isset($after['Article'][$id])) {
                 $said[] = sprintf('article %s title %s -> %s', $id, json_encode($was), json_encode($is));
             }
         }
@@ -2557,7 +2822,8 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $is = isset($after['article_tag'][$link]);
 
             if ($was !== $is) {
-                $said[] = sprintf('article %s %s %s', $row['article_id'], $is ? 'tagged' : 'untagged', json_encode($this->tagLabels[(string) $row['tag_id']] ?? '?'));
+                $tag = (string) $row['tag_id'];
+                $said[] = sprintf('article %s %s %s', $row['article_id'], $is ? 'tagged' : 'untagged', json_encode(isset($this->tagsGone[$tag]) ? $tag : ($this->tagLabels[$tag] ?? '?')));
             }
         }
 

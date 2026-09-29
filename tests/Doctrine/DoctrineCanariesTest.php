@@ -772,6 +772,37 @@ final class DoctrineCanariesTest extends TestCase
     }
 
     /**
+     * What an owner holding a target the flush removes is left with: the generator's 'remove a
+     * tag' removes the tag alone and leaves the article's collection in memory as it is, which is
+     * what an application relying on the join columns' cascade does. Measured on ORM 2.19, 2.20
+     * and 3: at the commit Doctrine takes the tag out of the loaded collection -- the same object,
+     * nothing left of it -- and writes no DELETE of the join row, which the database takes; the
+     * next flush of the article writes nothing about it either. Red here is a later flush meeting
+     * a removed entity in a collection, which the word would have to take out itself.
+     */
+    public function testATargetTheFlushRemovesLeavesTheCollectionsThatHeldIt(): void
+    {
+        $this->connection->executeStatement('PRAGMA foreign_keys = ON');
+        $this->em->persist($php = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag('php'));
+        $this->em->persist($article = new Article('One'));
+        $article->tags->add($php);
+        $this->em->flush();
+        $collection = $article->tags;
+
+        $this->em->remove($php);
+        $this->em->flush();
+
+        self::assertSame($collection, $article->tags, 'the premise: the same collection');
+        self::assertFalse($article->tags->contains($php), 'the ORM no longer takes a removed target out of a loaded collection that held it');
+        self::assertSame(0, (int) $this->connection->fetchOne('SELECT COUNT(*) FROM article_tag'), 'the premise: the database took the join row');
+
+        $article->title = 'Two';
+        $this->em->flush();
+
+        self::assertSame('Two', $this->connection->fetchOne('SELECT title FROM Article'), 'and the article goes on being written');
+    }
+
+    /**
      * What a reference is worth on a manager that is closed -- which is what publishing a
      * nested flush's outer records works with, after the nested one died. Step 5 represents
      * an association from the key the log holds, through a reference; this is whether the
