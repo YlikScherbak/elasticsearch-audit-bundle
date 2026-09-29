@@ -918,6 +918,7 @@ final class AuditSubscriber
 
                 if (!isset($seen[$name]) && $index !== null && $drafts[$index]['flush'] === $run['flush']) {
                     $seen[$name] = true;
+                    $since[$index] = min($since[$index] ?? $run['since'], $run['since']);
                     $draft = $drafts[$index];
                     $draft['changes'] = array_replace($draft['changes'], $run['changes']);
 
@@ -943,6 +944,7 @@ final class AuditSubscriber
                     'context' => $run['context'],
                     'at' => $run['at'],
                 ];
+                $since[array_key_last($drafts)] = $run['since'];
                 // The owner's record for this flush from here on, for its links to join: an owner
                 // with no event of its own is one record of both kinds of news, not two.
                 $byOwner[$name] ??= array_key_last($drafts);
@@ -957,7 +959,6 @@ final class AuditSubscriber
         // back into an earlier record. What an owner's removal itself took is its removal's
         // (LinkFacts); what ran before it is said, before it.
         $links = [];
-        $ownRecords = false;
 
         try {
             $links = $this->linkRuns($em, $replay, $consume, $failed);
@@ -982,6 +983,7 @@ final class AuditSubscriber
 
                 if (!isset($joined[$first]) && $index !== null && $drafts[$index]['flush'] === $run['flush']) {
                     $joined[$first] = true;
+                    $since[$index] = min($since[$index] ?? $run['since'], $run['since']);
                     $draft = $drafts[$index];
                     $draft['changes'] = array_replace($draft['changes'], $run['changes']);
 
@@ -1009,19 +1011,19 @@ final class AuditSubscriber
                 ];
                 $since[array_key_last($drafts)] = $run['since'];
                 $byOwner[$name] ??= array_key_last($drafts);
-                $ownRecords = true;
             } catch (\Throwable $e) {
                 $failed($e);
             }
         }
 
-        // A record of links of its own goes where its links ran: before the owner's removal that
-        // came after them, say. Only then -- where none was made, the order is what it was.
-        if ($ownRecords) {
-            $order = array_keys($drafts);
-            usort($order, static fn (int $one, int $other): int => [$since[$one] ?? $drafts[$one]['at'], $one] <=> [$since[$other] ?? $drafts[$other]['at'], $other]);
-            $drafts = array_map(static fn (int $index): array => $drafts[$index], $order);
-        }
+        // Every record where its first fact ran, whatever kind of news it is: an entity's row, what
+        // happened inside its collection, what its join rows went through -- one made of an owner's
+        // lines alone before the next entity's UPDATE, a record of links before the owner's removal
+        // that came after them. The order the writer is handed is the order the ids it builds
+        // keep, and one record's place is never decided by what kind of record came first.
+        $order = array_keys($drafts);
+        usort($order, static fn (int $one, int $other): int => [$since[$one] ?? $drafts[$one]['at'], $one] <=> [$since[$other] ?? $drafts[$other]['at'], $other]);
+        $drafts = array_map(static fn (int $index): array => $drafts[$index], $order);
 
         return $drafts;
     }
@@ -1777,7 +1779,7 @@ final class AuditSubscriber
      * What changed inside the elements of tracked collections since the log was last read
      * into the history: {@see ElementFieldRuns::of()}.
      *
-     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>, at: int, context: array<string, mixed>}>
+     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>, since: int, at: int, context: array<string, mixed>}>
      */
     private function elementFieldRuns(EntityManagerInterface $em, bool $consume = false): array
     {
