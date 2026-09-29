@@ -83,7 +83,7 @@ final class StatementLog
     /** Whether an observer was put in front of a driver: what audit:check asks of the audited connection. */
     private bool $watching = false;
 
-    /** @var array<string, array<string, array{label: string, flush: int, columns: list<string>, keys: array<string, true>, read: string}>> by table */
+    /** @var array<string, array<string, array{label: string, flush: int, columns: list<string>, keys: array<string, true>, going: array<string, true>, linkedBy: array{table: string, columns: list<string>}|null, read: string}>> by table */
     private array $watches = [];
 
     /** @var array<int, true> the statements after which a flush began, by sequence number */
@@ -235,6 +235,10 @@ final class StatementLog
             return null;
         }
 
+        if (!$failed && (int) $affected > 0) {
+            $this->aJoinRowWritten($sql, $params);
+        }
+
         $this->statements[++$this->sequence] = [
             'sql' => $sql,
             'params' => $params,
@@ -257,17 +261,42 @@ final class StatementLog
      * A watch is a flush's, and goes with it ({@see forgetTheWatchesOf()}); one that outlives
      * its flush does no harm -- a DELETE of the same key later is looked at and belongs to no
      * flush, which is what the listener then says of it. It is not a right to one look: every
-     * DELETE that takes such a row gets its own, at its own position.
+     * DELETE that takes such a row gets its own, at its own position. A flush that watches again
+     * -- a target a listener removes after onFlush -- adds to what it watched.
      *
-     * @param list<string>        $columns the key's columns, in the order a key is joined in
-     * @param array<string, true> $keys    the keys worth looking at, each its columns' values joined with '|'
-     * @param string              $read    the question, with one placeholder per key column, in that order
+     * Which keys are worth a look is not settled where the watch is set. A key is watched from
+     * there -- every target about to go -- and looked at once something says a row may point at
+     * it: that it was held when the flush began ($keys), or a join row written for it since, an
+     * INSERT of the join table that ran ($going, $linkedBy) -- the flush's own, or a flush's
+     * nested in it, or the application's. That says when to look, never what happened: what the
+     * look sees is the fact, and a join row taken back before the DELETE leaves a look at nothing.
+     *
+     * @param list<string>                                         $columns  the key's columns, in the order a key is joined in
+     * @param array<string, true>                                  $keys     the keys to look at, each its columns' values joined with '|'
+     * @param string                                               $read     the question, with one placeholder per key column, in that order
+     * @param array<string, true>                                  $going    every key the flush is about to take, $keys among them
+     * @param array{table: string, columns: list<string>}|null $linkedBy the join table, and its columns that point at the key, in $columns' order
      */
-    public function watch(int $flush, string $label, string $table, array $columns, array $keys, string $read): void
+    public function watch(int $flush, string $label, string $table, array $columns, array $keys, string $read, array $going = [], ?array $linkedBy = null): void
     {
-        if ($keys !== []) {
-            $this->watches[$table][$label."\0".$flush] = ['label' => $label, 'flush' => $flush, 'columns' => $columns, 'keys' => $keys, 'read' => $read];
+        $going += $keys;
+
+        if ($going === []) {
+            return;
         }
+
+        $name = $label."\0".$flush;
+        $before = $this->watches[$table][$name] ?? null;
+
+        $this->watches[$table][$name] = [
+            'label' => $label,
+            'flush' => $flush,
+            'columns' => $columns,
+            'keys' => ($before['keys'] ?? []) + $keys,
+            'going' => ($before['going'] ?? []) + $going,
+            'linkedBy' => $linkedBy ?? $before['linkedBy'] ?? null,
+            'read' => $read,
+        ];
     }
 
     public function forgetTheWatchesOf(int $flush): void
@@ -345,6 +374,52 @@ final class StatementLog
     public function observationsOf(int $statement): array
     {
         return $this->statements[$statement]['observed'] ?? [];
+    }
+
+    /**
+     * A join row an INSERT wrote, for a watched key about to go: that key is looked at when its
+     * DELETE runs ({@see watch()}).
+     *
+     * @param array<array-key, mixed> $params
+     */
+    private function aJoinRowWritten(string $sql, array $params): void
+    {
+        if ($this->watches === [] || preg_match('/^\s*INSERT\b/i', $sql) !== 1) {
+            return;
+        }
+
+        $shape = StatementShape::read($sql);
+
+        if ($shape === null) {
+            return;
+        }
+
+        foreach ($this->watches as $table => $watches) {
+            foreach ($watches as $name => $watch) {
+                if ($watch['linkedBy'] === null || strcasecmp($watch['linkedBy']['table'], $shape->table) !== 0) {
+                    continue;
+                }
+
+                $values = [];
+
+                foreach ($watch['linkedBy']['columns'] as $column) {
+                    $at = $shape->assigned[$column] ?? null;
+
+                    if ($at === null) {
+                        continue 2;
+                    }
+
+                    $values[] = $params[$at] ?? null;
+                }
+
+                $key = implode('|', array_map(static fn (mixed $value): string => \is_scalar($value) ? (string) $value : '', $values));
+
+                if (isset($watch['going'][$key])) {
+                    $watch['keys'][$key] = true;
+                    $this->watches[$table][$name] = $watch;
+                }
+            }
+        }
     }
 
     /** How many watches are held, for the tests that pin that they go with their flush. */

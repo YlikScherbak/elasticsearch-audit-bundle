@@ -333,20 +333,31 @@ final class RowMemory
         }
 
         $keys = [];
+        $going = [];
 
-        foreach ($targets as $going) {
-            $key = self::keyColumns($em, $going);
+        foreach ($targets as $one) {
+            $key = self::keyColumns($em, $one);
             $id = $key === null || $key === [] ? null : HistoryReplay::keyOf($target, $key);
 
-            if ($id !== null && isset($held[$id])) {
+            if ($id === null) {
+                continue;
+            }
+
+            // Every target about to go is watched; the ones held now are looked at, and one a join
+            // row is written for before its DELETE is looked at from then ({@see StatementLog::watch()}).
+            $going[$id] = true;
+
+            if (isset($held[$id])) {
                 $keys[$id] = true;
             }
         }
 
-        $read = $keys === [] ? null : JoinRowsQuery::ownersHolding($em->getConnection()->getDatabasePlatform(), $owner->getAssociationMapping($association), $target->getIdentifierColumnNames());
+        $mapping = $owner->getAssociationMapping($association);
+        $columns = $target->getIdentifierColumnNames();
+        $read = $going === [] ? null : JoinRowsQuery::ownersHolding($em->getConnection()->getDatabasePlatform(), $mapping, $columns);
 
         if ($read !== null) {
-            $this->log->watch($flush, $of, RowBinding::tableOf($target), $target->getIdentifierColumnNames(), $keys, $read['sql']);
+            $this->log->watch($flush, $of, RowBinding::tableOf($target), $columns, $keys, $read['sql'], $going, JoinRowsQuery::pointingAt($mapping, $columns));
         }
     }
 

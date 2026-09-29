@@ -110,6 +110,212 @@ final class WhatTheListenerSeesOfACascadeTest extends DoctrineTestCase
         self::assertSame([['title', 'status']], array_map(static fn (array $d): array => array_keys($d['changes']), $this->documents()), 'nothing of the tag published again');
     }
 
+    public function testATargetLinkedAndRemovedInOneFlushIsLookedAtAfterItsDelete(): void
+    {
+        // Seed 250 of the removals' world: the article gains a tag nobody held when the flush
+        // began, and the same flush removes the tag. The join row is INSERTed, then the tag's
+        // DELETE takes it by the cascade. Who held the tag was read in onFlush, before the INSERT:
+        // the INSERT is what says to look after the DELETE, and what was seen there is the fact.
+        $a = $this->aTag('a');
+        $one = $this->anArticle('One');
+        $other = $this->anArticle('Other');
+        $this->gateway->documents = [];
+        $from = $this->statements->position();
+
+        $one->tags->add($a);
+        $this->em->remove($a);
+        $other->title = 'Other, again';
+        $this->em->flush();
+
+        $ran = [];
+
+        for ($at = $from + 1; $at <= $this->statements->position(); ++$at) {
+            $sql = $this->statements->statement($at)['sql'] ?? '';
+
+            if (str_starts_with($sql, 'INSERT INTO article_tag') || str_starts_with($sql, 'DELETE FROM Tag')) {
+                $ran[] = strtok($sql, '(');
+            }
+        }
+
+        self::assertSame(['INSERT INTO article_tag ', 'DELETE FROM Tag WHERE id = ?'], $ran, 'the premise: the link written, then the tag deleted');
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM article_tag'), 'the premise: the database took the link with the tag');
+
+        $documents = $this->documents();
+        $tags = array_values(array_filter($documents, static fn (array $d): bool => isset($d['changes']['tags'])));
+        self::assertSame([['old' => [], 'new' => ['a']], ['old' => ['a'], 'new' => []]], array_column(array_column($tags, 'changes'), 'tags'), 'the link gained, and gone with its target');
+
+        $provenance = static fn (array $d): array => array_diff_key($d, array_flip(['objectId', 'changes', 'id']));
+        $title = array_values(array_filter($documents, static fn (array $d): bool => isset($d['changes']['title'])))[0] ?? null;
+        self::assertNotNull($title, 'the premise: the flush had another record');
+        self::assertSame([$provenance($title), $provenance($title)], array_map($provenance, $tags), 'both the flush\'s');
+    }
+
+    public function testALinkWrittenAndTakenBackBeforeItsTargetsDeleteIsNoFactOfEither(): void
+    {
+        // A join row the application writes inside a savepoint of its own and takes back, then the
+        // tag's DELETE: the INSERT says to look, and the look sees nothing held -- no link gained,
+        // and none gone. What says to look is never what says what happened.
+        $a = $this->aTag('a');
+        // Created with a tag, so that what its rows hold is known: the application's own join rows
+        // are told against it.
+        $one = $this->anArticle('One', $this->aTag('x'));
+        $other = $this->anArticle('Other');
+        $connection = $this->em->getConnection();
+        $this->unownedStatementsAreExpected = true;
+        $this->gateway->documents = [];
+
+        $taking = new class($connection, $other, $one, $a) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly Article $other, private readonly Article $one, private readonly Tag $tag)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->other) {
+                    $this->connection->beginTransaction();
+                    $this->connection->insert('article_tag', ['article_id' => $this->one->id, 'tag_id' => $this->tag->id]);
+                    $this->connection->rollBack();
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $taking);
+        $other->title = 'Other, again';
+        $this->em->remove($a);
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $taking);
+
+        self::assertSame(0, (int) $connection->fetchOne('SELECT COUNT(*) FROM article_tag WHERE tag_id = ?', [$a->id ?? $this->idOf('a')]), 'the premise: nothing held the tag');
+        self::assertSame([], array_values(array_filter($this->documents(), static fn (array $d): bool => isset($d['changes']['tags']))), 'no tag gained, none gone');
+    }
+
+    public function testALinkWrittenAndTakenAwayBeforeItsTargetsDeleteIsTwoMovesAndNoThird(): void
+    {
+        // The application writes a join row for the tag and deletes it again, before the flush's
+        // DELETE of the tag: two moves of the list, the rows' own; the DELETE is looked at, and
+        // what was seen holds nothing, so it took nothing.
+        $a = $this->aTag('a');
+        // Created with a tag, so that what its rows hold is known: the application's own join rows
+        // are told against it.
+        $one = $this->anArticle('One', $this->aTag('x'));
+        $other = $this->anArticle('Other');
+        $connection = $this->em->getConnection();
+        $this->unownedStatementsAreExpected = true;
+        $this->gateway->documents = [];
+
+        $writing = new class($connection, $other, $one, $a) {
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly Article $other, private readonly Article $one, private readonly Tag $tag)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->other) {
+                    $this->connection->insert('article_tag', ['article_id' => $this->one->id, 'tag_id' => $this->tag->id]);
+                    $this->connection->delete('article_tag', ['article_id' => $this->one->id, 'tag_id' => $this->tag->id]);
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $writing);
+        $other->title = 'Other, again';
+        $this->em->remove($a);
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $writing);
+
+        self::assertSame(
+            [['old' => ['x'], 'new' => ['a', 'x']], ['old' => ['a', 'x'], 'new' => ['x']]],
+            array_column(array_column(array_values(array_filter($this->documents(), static fn (array $d): bool => isset($d['changes']['tags']))), 'changes'), 'tags'),
+            'two moves, and nothing of the DELETE',
+        );
+    }
+
+    public function testAJoinRowThatFailedToBeWrittenSaysNotToLook(): void
+    {
+        // An INSERT of the join table that failed -- a link to an article that is not there, which
+        // the foreign key refuses -- wrote nothing, and is not a row the tag's DELETE may take: no
+        // look after it, and nothing said.
+        $a = $this->aTag('a');
+        $other = $this->anArticle('Other');
+        $connection = $this->em->getConnection();
+        $this->unownedStatementsAreExpected = true;
+        $from = $this->statements->position();
+
+        $failing = new class($connection, $other, $a) {
+            public bool $refused = false;
+
+            public function __construct(private readonly \Doctrine\DBAL\Connection $connection, private readonly Article $other, private readonly Tag $tag)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() !== $this->other) {
+                    return;
+                }
+
+                $this->connection->beginTransaction();
+
+                try {
+                    $this->connection->insert('article_tag', ['article_id' => 900001, 'tag_id' => $this->tag->id]);
+                } catch (\Doctrine\DBAL\Exception) {
+                    $this->refused = true;
+                }
+
+                $this->connection->rollBack();
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $failing);
+        $other->title = 'Other, again';
+        $this->em->remove($a);
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $failing);
+
+        self::assertTrue($failing->refused, 'the premise: the INSERT failed');
+        $looked = 0;
+
+        for ($at = $from + 1; $at <= $this->statements->position(); ++$at) {
+            $looked += \count($this->statements->observationsOf($at));
+        }
+
+        self::assertSame(0, $looked, 'no look after the tag\'s DELETE');
+    }
+
+    public function testATargetALaterRemovalWatchesDoesNotTakeTheWatchOfOneOnFlushSaw(): void
+    {
+        // The tag a is removed before the flush, and onFlush watches it; a listener removes the tag
+        // b while the flush runs, and its preRemove watches b for the same flush. Doctrine runs
+        // every DELETE after the UPDATEs: both are looked at, each its own fact -- b's watch adds
+        // to a's, it does not take its place.
+        $a = $this->aTag('a');
+        $b = $this->aTag('b');
+        $this->anArticle('One', $a, $b);
+        $other = $this->anArticle('Other');
+
+        $removing = new class($other, $b) {
+            public function __construct(private readonly Article $other, private readonly Tag $tag)
+            {
+            }
+
+            public function postUpdate(LifecycleEventArgs $args): void
+            {
+                if ($args->getObject() === $this->other) {
+                    $args->getObjectManager()->remove($this->tag);
+                }
+            }
+        };
+
+        $this->begin();
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], $removing);
+        $other->title = 'Other, again';
+        $this->em->remove($a);
+        $this->em->flush();
+        $this->em->getEventManager()->removeEventListener([Events::postUpdate], $removing);
+
+        $told = $this->told();
+        self::assertSame(['One -a (target)', 'One -b (target)'], $this->said($told));
+        self::assertSame([], $told->doubts());
+        $this->end();
+    }
+
     public function testWhereTheDatabaseKeepsTheRowTheLinkStaysAndNothingIsSaid(): void
     {
         // No cascade: the tag's row goes and its join rows stay, pointing at nothing. What the

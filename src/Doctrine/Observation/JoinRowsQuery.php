@@ -188,6 +188,46 @@ final class JoinRowsQuery
     }
 
     /**
+     * The join table as a statement names it -- its schema and name, unquoted, as StatementShape
+     * reads them -- and its columns that point at the target, in the order of the target's key
+     * columns given: what an INSERT of a link to one target is recognised by.
+     *
+     * @param mixed        $mapping the association's mapping, owning side
+     * @param list<string> $columns the target's key columns
+     *
+     * @return array{table: string, columns: list<string>}|null
+     */
+    public static function pointingAt(mixed $mapping, array $columns): ?array
+    {
+        $joinTable = CollectionRowsQuery::entry($mapping, 'joinTable');
+        $name = CollectionRowsQuery::entry($joinTable, 'name');
+        $schema = CollectionRowsQuery::entry($joinTable, 'schema');
+        $targets = self::columns(CollectionRowsQuery::entry($joinTable, 'inverseJoinColumns'));
+
+        if (!\is_string($name) || $name === '' || $targets === null) {
+            return null;
+        }
+
+        $byReferenced = [];
+
+        foreach ($targets as [$column, $referenced]) {
+            $byReferenced[$referenced] = $column;
+        }
+
+        $pointing = [];
+
+        foreach ($columns as $column) {
+            if (!isset($byReferenced[$column])) {
+                return null;
+            }
+
+            $pointing[] = $byReferenced[$column];
+        }
+
+        return ['table' => (\is_string($schema) && $schema !== '' ? $schema.'.' : '').$name, 'columns' => $pointing];
+    }
+
+    /**
      * The join table's name as Doctrine's quote strategy writes it, with its schema: a name
      * alone is another table on a connection whose search path holds one of the same name.
      */
