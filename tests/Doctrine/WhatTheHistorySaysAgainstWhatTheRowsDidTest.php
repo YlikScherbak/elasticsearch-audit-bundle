@@ -721,7 +721,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
      * it appears, without anyone adding it here.
      */
     public const NOT_FINGERPRINTED = [
-        'id' => 'a UUID v7 whose bits after the timestamp are random: two runs of one sequence give two',
+        'id' => 'a UUID v7 whose counter begins at a random point, with random bits after it: two runs of one sequence give two',
         'writtenAt' => 'when the transport wrote it, by the wall clock and not the change\'s (WrittenAt): two runs, two moments',
     ];
 
