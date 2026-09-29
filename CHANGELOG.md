@@ -23,8 +23,9 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   still held.
   <br>Two answers that "what was written" cannot give. **`vetoed()`**: a record a listener stopped
   reaches no transport and is not logged, because a veto is a feature, so a test for one had
-  nowhere to look; the collector is registered as the last listener on `RecordCreatedEvent`, which
-  is where the final verdict is known. **`held()`**: how many records a frame that is still open
+  nowhere to look; the writer tells the collector about it after the event's dispatch is over,
+  which is where the final verdict is known — a veto set by a listener behind a test's is still
+  a veto. **`held()`**: how many records a frame that is still open
   is holding — the reason a correct test can look empty, asked rather than answered by an
   assertion that closes the frame, since closing it is the behaviour under test.
   <br>`ChangeRedactor::redacts()` is now public, and the collector exposes it: a redacted value is
@@ -56,8 +57,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   `DeclaresAuditFieldsInterface`, which is where `mapping()` moved to. Nothing that implements
   `AuditEnricherInterface` has to change: it already had that method.
   <br>Two rules come with it. What it describes is **not overwritten**: an ordinary enricher
-  setting the same attribute has its value discarded and the attempt logged with both values,
-  because the alternative is the write-time enricher quietly putting the later request back under
+  setting the same attribute has its value discarded and the attempt logged — the enricher and
+  the attribute, never the values, see below — because the alternative is the write-time enricher quietly putting the later request back under
   a name that promises the earlier one. An attribute the **caller** set on the record is a
   different matter and wins — the moment fills in what is missing. And it **must not throw**:
   there is no record to report a failure against, so a failure is logged and that enricher
@@ -110,157 +111,164 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   back to its savepoint instead of the whole transaction, and that is the application's call.
   <br>`audit:check` also fails when the audited connection was built without the middleware.
 
+- **Whether a record stands is the connection's to say, per execution, not Doctrine's events'.**
+  `onClear` does nothing: whether what a flush wrote stands is the connection's log's — a
+  savepoint rolled back, a transaction rolled back, a statement that failed. Each record is one
+  execution and is written or dropped with it. A flush found abandoned is written late or dropped
+  by the same rule; the manager being closed or replaced is no longer asked.
+- **An entity's records are read from what the connection ran, not from Doctrine's change sets.**
+  Each record is one execution of its row — its values, its fate, its place in the order, its
+  moment, actor and context all from that execution:
+  - a value the column cannot hold is no change: half a second more in a column held to the
+    second, another zone in a datetime column that keeps none. Doctrine writes it; the row holds
+    what it held, and nothing is recorded (it used to say what the object said);
+  - the always-recorded context beside a change is the row once the change is in the database —
+    not the object as the flush began. For a change of a JOINED entity, the whole row once the
+    last of its tables is written; for a record of what a collection's elements did, the owner's
+    row where the element's statement ran. SQL a listener runs before the statement — in
+    `onFlush`, say — now shows in the context of the record it precedes;
+  - a change the application makes itself inside a flush — a listener's own SQL, in the flush's
+    transaction — is that flush's history when it is recognised and bound without doubt: a
+    statement of the persister's own form, bound to one row of an audited class, whose row the
+    bundle knows well enough to say what it did. It carries the flush's moment and actor, as the
+    rows of a tracked collection's elements already did. This is not auditing SQL in general: a
+    statement outside every flush is not audited, and a warning says so; one that cannot be bound
+    — a DQL `UPDATE … WHERE sku = ?` on an audited table — is reported as a statement the history
+    could not follow, not taken for "no change". A listener calling `$connection->update()` in a
+    loop now gives a record per row;
+  - `nested_flush_provenance: outer` limits more than whose name and moment a nested flush's
+    changes carry: without savepoints nothing on the wire tells a nested flush's statements from
+    the outer flush's, so where an execution ends can read differently too. The values are all
+    there; how many records they make, and where one ends, can differ from `strict` with
+    savepoints;
+  - a change a flush nested in another carries out on the outer flush's behalf — Doctrine runs
+    whatever it finds scheduled, the outer flush's remaining updates too — is signed by the flush
+    that ran it: the nested one's moment and actor (with savepoints; without them, the outer
+    flush's, as documented). It used to be signed by the outer flush, which announced the row
+    again afterwards;
+  - Doctrine's own completion of a creation — the `UPDATE` it runs, announced to nobody, to give a
+    new row a reference no order of `INSERT`s could (two new entities pointing at each other) — is
+    part of the creation: one record, pointing where it points, when it runs in the same flush
+    with no flush begun since and writes nothing but references the `INSERT` left empty. A
+    reference another flush carried out is a change of its own. The application's own SQL of
+    exactly that shape, in the same flush, reads as the same completion; the log holds nothing
+    that tells the two apart;
+  - an entity a record points at and that the same flush removed is named, for a class the bundle
+    watches, as its row stood before the `DELETE`; for any other class, by the object the
+    application removed, as it left it; and when its row has gone some other way, by its
+    identifier, where it used to fail the record.
+- **The warning about a nested flush emptying the running flush's change sets says what it sees
+  and what it may cost**: not the history, which is read from the connection and does not depend
+  on it, but what the running flush had still to write, which the same cleanup puts at risk. A
+  diagnostic only: it changes no record and goes through no failure policy.
+- **An owning many-to-many's history is read from its join rows.** What a collection like
+  `Article::$tags` went through is what the connection wrote to its join table, not the
+  collection's snapshot at its owner's events. `changes.<collection>` keeps its form,
+  `old […] → new […]`: the whole list before the first statement of a change and after its last.
+  <br>Each list is in the order of the targets' keys — column by column for a composite key,
+  numbers as numbers — not in the order the collection held them in memory.
+  <br>One record is one run of an owner's links changing within one flush. A run ends where
+  another flush begins (a flush nested in it has its own records), where the owner's own row is
+  inserted or deleted, or where the same link is met again. So replacing `[a, b]` with `[b]` —
+  which Doctrine writes as taking every link and writing `b` back — is two records,
+  `[a, b] → []` and `[] → [b]`, and a link added and taken away in one flush is two records,
+  not one that says nothing. A frame folds them as it folds any two records of one owner.
+  <br>A target is shown as its row stood at that moment, where the bundle watches its class —
+  the old list before the change, the new one after it, whatever the object was changed to
+  later; otherwise by the object the application holds, and by its identifier where the row is
+  gone and nothing the bundle holds names it.
+- **A target's `DELETE` that takes join rows with it is recorded.** Doctrine's default mapping
+  cascades the join columns on delete, so removing a tag deletes its join rows with no statement
+  of their own. Every owner that held it now gets a record of its list losing it, signed and
+  timed as the flush that ran the `DELETE`. Until 1.3 nothing was said.
+  <br>That the database took them is not assumed: it is looked at right after the `DELETE`, on
+  the connection underneath the application. Where the rows are still there — a schema without
+  the foreign key — the link stays and nothing is said. Where the look could not be made, the
+  history says so in a warning and the owner's list is read again the next time a flush touches
+  it, rather than being filled in.
+  <br>Who holds a target about to go is read before it goes, in batches: the holders of up to
+  five hundred targets of one collection in one `SELECT`, so a flush removing a hundred asks
+  once. A target a listener removes while the flush runs is asked about in its own `preRemove`,
+  one `SELECT` for each collection that can hold it. And a `DELETE` of a target something holds —
+  held when the flush began, or linked since — costs a `SELECT` right after it, inside a
+  savepoint when there is a transaction: `SELECT`, `SAVEPOINT` and `RELEASE`. All three are paid
+  on paths that remove, and none for a collection nobody audits.
+- **An owner removed in a flush: what its row took with it is its removal's.** The links the
+  owner's `DELETE` took — by the cascade, or by Doctrine taking all of them by the owner's key
+  right before, where the join columns do not cascade — are part of its `remove` record, not a
+  move of its list. What happened to its links before, in the same flush — a link added, one
+  taken with its target — keeps its own record. If the owner's `DELETE` is rolled back and the
+  taking of its links is not, the list emptied is a record of its own.
+- **A `ManyToOne`'s target is shown as its row stood when the reference was written**, as a
+  many-to-many's is: the old side as it stood before the change, the new one once it ran —
+  where the bundle watches the target's class. It used to be the object the manager held, which
+  could carry a name given later in the same operation.
+- **The records of a flush reach the writer in the order their first facts ran, and within a
+  millisecond their ids sort that way.** Records of one flush share a millisecond — they carry
+  the moment the change happened — and until 1.3 their ids were random within it, so a reader
+  sorting by `loggedAt` and id met them in no particular order. The bits after the timestamp are
+  now a counter: 48 bits of milliseconds, 4 of version, 42 of counter around the 2 of variant,
+  32 random. Records one writer builds in one millisecond sort by id in the order it built them
+  — one flush's in the order their facts ran, a flush nested in another and the outer one's, two
+  flushes one after the other. A record a frame merged keeps the id and moment of its first
+  part.
+  <br>Not promised: an order between writers (two processes, or two writers in one), and an
+  order in a millisecond a writer has left and come back to with no moment of it still alive.
+  The counter begins at a random point of its lower half and runs out only past 2^41 records of
+  one millisecond, and then the record is refused through the failure policy rather than given
+  an id that sorts before the others. The sort and the cursor format are unchanged.
+- **Doctrine's change sets are no longer kept.** The history does not read them, so the listener
+  no longer holds a copy of every entity's change set for the length of a flush (the "about 60
+  bytes per entity" the README used to state). What is left is one flag per entity, for the
+  warning about a nested flush emptying the running flush's change sets.
+
 ### Fixed
-- **What an emptied collection says about its lines now comes from the rows, and nineteen things it
-  used to say are gone.** Emptying an audited collection is the operation Doctrine reports by
-  saying nothing, so the membership has to be read back — and it was read out of Doctrine's
-  snapshot of the collection, which is what that collection held when it was last synchronised
-  with the database. Every road that changes a membership without re-synchronising it left the
-  snapshot describing a different moment: a line moved to another owner by its own side never
-  dirties the collection it left, and a collection deletion still on the schedule is handed to the
-  next flush with the membership of the one before — which is what a `postFlush` listener that
-  throws leaves behind, since `postFlush` is dispatched before `postCommitCleanup()` with nothing
-  between them. A history that says
-  a line was lost from a collection it left two flushes ago, or says nothing at all about one that
-  joined since, is worse than a thin one. **It asks the rows now** — one `SELECT` per emptied
-  collection, which is what the question it replaced already cost, and it answers more: an empty
-  result is "nothing left to empty" and needs no second query to establish it.
-  <br>**Which owner a departure belongs to** is asked of four things in the order of how close
-  each stands to the row. What a refused flush left unwritten comes first, because a refusal is
-  the one event that moves Doctrine's record of a row without moving the row — computing a change
-  set refreshes the original data, and then nothing is written, so a line re-pointed by a refused
-  flush and deleted afterwards had its departure recorded against the owner it was going to. Then
-  the original data, which is Doctrine's record of the row as the database last had it. Then the
-  change set, which answers only when this flush itself overwrote the original data — the
-  Maker-style `removeItem()`, where the back-ref is nulled and `orphanRemoval` schedules the
-  delete. Read change-set-first, which is where this started, a line moved by a flush whose
-  publishing was swallowed and deleted by the next one was recorded as leaving the owner it had
-  already left, while the owner whose row actually went was never told. A change set that names
-  nothing no longer ends the question either: an element inserted by a swallowed flush and deleted
-  by the next one read "arrived from nowhere" as where it departed from, and the departure was
-  written nowhere at all while the row went.
-  <br>**Nothing else a flush says about a line whose row that flush's `DELETE` takes** is written
-  any more. Doctrine carries out a collection's deletion before it writes entity updates, so an
-  `UPDATE` for such a line matches nothing — and Doctrine reports it as having happened, because
-  its own state has the line alive and only the database knows otherwise. Both the arrival at the
-  new owner and the change inside the line were recorded. Elements being inserted are untouched by
-  this: their row is not there for the `DELETE` to take and their `INSERT` runs after it, so a
-  collection replaced by one holding a new line really does gain it.
-  <br>**The whole-collection form subtracts only departures, and it subtracts by identifier.** It
-  leaves out what the element form already said, and what the two forms can both describe is a
-  departure — counting an arrival as already said took a line out of the emptying because a
-  namesake was joining. It used to match by what an element is *shown* as, because a deleted
-  element has had its generated identifier cleared by the time a record is built. Two lines of one
-  crate may carry the same name, so one departure named for one of them took both out and a row
-  went with nothing said. The identifiers are read in `onFlush`, where they are still there, and
-  the two forms meet on those.
-  <br>**A departure has no owner when the row had none.** The reader that knows what a refused
-  flush left unwritten is asked whether it *has* an answer, not what its answer is: for a line
-  whose row has no owner at all, offered one by a flush that was then refused and deleted
-  afterwards, that answer is `null` — and reading `null` as silence sent the question on to the
-  original data, which the refused flush had already moved to the owner the line never reached.
-  Only that first reader is key-aware; the original data answers `null` under a key that is there
-  too, and there it means "this flush has just overwritten me", which is exactly when the change
-  set is the one that knows.
-  <br>**Emptying a many-to-many says nothing about the lines themselves.** The rule above — that
-  nothing else a flush says about a line whose row it is taking is written — applies only where
-  the `DELETE` takes the *elements'* rows, which is the inverse side with `orphanRemoval`. An
-  owning many-to-many has its join rows deleted and leaves every line where it was, alive and
-  writable, so an `UPDATE` after that deletion reaches its row; applied there, the rule threw away
-  a change that really happened. A change inside an element is also named by the collection's
-  field and the element's identifier and by nothing that says which class it is, so two owners
-  with same-named collections of different classes wrote the same string — matched now only where
-  the owner's collection really holds the class the emptying is about.
-  <br>**An emptying names what the row held, not what the object is about to hold.** Reading the
-  rows says which elements the `DELETE` takes; it does not say what they hold, because Doctrine
-  hands back the objects it already has rather than overwriting their fields with what the
-  `SELECT` read — the only thing it could do without discarding the application's unsaved work. A
-  line renamed and never written was named in the history of its own deletion by a value no row
-  ever held: the collection's `DELETE` takes the row first, so the `UPDATE` finds nothing. The
-  representer is run against an object carrying what the columns hold, built with the metadata's
-  own instantiator and only where something really is unsaved.
-  <br>**Whose row is going, when two readers contradict each other, is asked of the row.**
-  A line re-pointed and then deleted leaves the change set naming one owner and the original
-  data naming the other, and which of them is right depends on something neither of them
-  knows: whether the `UPDATE` ran. It did when an earlier flush wrote the move and only its
-  publishing was swallowed, and it did not when the deletion is in the same flush and takes
-  the row first. Both read change set `[A, B]` with original data `B`. One `SELECT` of one
-  column settles it, asked underneath the application's filters and only where the two
-  contradict — which needs the same element to be re-pointed and deleted.
-  <br>**A line put back where its row already is moves nowhere.** A flush that was refused
-  leaves Doctrine believing the line moved while the column never did, so putting it back
-  writes an `UPDATE` that changes nothing — and Doctrine reports the change, because its own
-  idea of the row went away and came back. The corrected old side and the new side are the
-  same owner, and that owner both lost and gained the line under one key: whichever was
-  written second is what the history said happened.
-  <br>**A change inside a line no crate owns belongs to no crate.** The same reader, on the
-  road an ordinary change takes. Nothing about the association changed in that flush, so the
-  object is normally right about who owns the line — except after a refusal, where the flush
-  that offered it an owner wrote nothing, and what changed inside the line was recorded
-  against a collection that has never held it.
-  <br>**An emptying is collected once per operation, by the flush that saw it first.** A
-  collection deletion stays on Doctrine's schedule until `postCommitCleanup()`, and a flush
-  started from inside another shares the outer one's unit of work — so the inner flush is
-  handed a deletion the outer one has already carried out, and asking the rows then reads a
-  table the `DELETE` has been through. Both were collected and the later answer replaced the
-  earlier: a crate that really lost two lines was recorded as losing a third that had been
-  inserted in between and was gone by the end.
-  <br>**What a flush says about a line whose row is going is dropped whichever flush said
-  it.** That sweep ran over the current flush only, and a flush nested inside another files
-  its arrival, its change and the deletion that takes the row under different numbers. Both
-  directions go now: dropping only the arrival leaves the departure of a row that was never
-  there to depart from.
-  <br>**And the rows an emptying takes are remembered, not swept once.** The sweep saw
-  whatever happened to be written down when it ran, which with a nested flush is a matter of
-  ordering; the set is consulted whenever something new is about to be recorded, and an
-  arrival that turns up afterwards takes the line out of the emptying as well.
-  <br>Five of the nine were found by a generated search — a thousand sequences of ordinary
-  operations, each checked against what the tables actually did before and after every commit —
-  after the same search at sixty sequences had passed. Twenty of the next hundred and forty
-  failed, and every one was real. Four more were found by review and confirmed by running
-  them, and widening what the search may generate — namesakes, a line no crate owns, several
-  operations before one flush, a filter over the rows under test rather than over a table the
-  search never touches — found three more. Teaching it to start a flush from inside another
-  found the last three on its first run: four rounds of this candidate's review had lived in
-  that shape and the search could not reach any of it. It now runs at three thousand
-  sequences in a CI job of its own.
-  <br>**A flush nested inside another that dies no longer takes the outer flush's history with
-  it.** Dropping what a flush says about a line whose row is going reaches every flush of the
-  operation, which made it the one place a flush changes what ANOTHER flush collected -- and a
-  nested flush can be refused after doing it. The outer flush's "1 -> 2" was swept away, the
-  outer flush went on to write that UPDATE, and the row changed with no history of it. A
-  dying flush now puts back what it swept, and takes with it what it concluded about rows
-  being taken: its DELETE never ran.
-  <br>**What is shown of a deleted line no longer comes from a change set Doctrine has already
-  written.** The unit of work does not clear a change set when a postFlush listener throws, so
-  a rename that WAS written, followed by an emptying, named the row by the name it had before
-  the rename. Whose row is going had already stopped trusting that leftover; the fields of the
-  same element were still trusting it. Both now ask only what this listener knows about the
-  column.
-  <br>**"Nobody" is an answer on every reader of whose row is going.** The reader that asks the
-  database was consulted only when two readers both named somebody, so a detach that was
-  written, followed by a delete, took the change set's leftover owner and described the same
-  departure twice. And a stored NULL is a value: a nullable column that held nothing, given
-  something in the same flush as its row went, was shown with what it never received.
-  <br>The sequences that tell each of these rules apart are run on every build as regressions,
-  not only in the long job -- measured by taking each rule out and seeing which of three
-  thousand sequences fail, rather than kept from memory. One seed that found a defect in the
-  morning had stopped telling anything apart by the afternoon.
-  <br>**An emptying run from inside the outer flush's postUpdate names the row by what it holds.**
-  This listener's own change set outlives its statement on purpose -- publishing reads it after
-  the commit -- and it was read as if its presence meant "not yet written". A flush nested after
-  a rename had reached the row emptied the collection and named the line by the name the UPDATE
-  had just replaced. What says a statement is still to run is the flush number beside the set.
-  <br>**Putting a line back where its row already is records what changed inside it.** That is
-  not a move, and it no longer takes the move's road -- which records no fields of the line,
-  because an owner a line arrives at never held its old values. The quantity changed in the same
-  flush as the line was put back was written to the row and to nobody's history.
-- **Removing many lines the way Maker generates it asks the database once, not once per line.**
-  `removeItem()` nulls the back-reference and lets orphanRemoval delete the row, so the change set
-  names the owner and the original data names nobody -- the one condition on which the listener
-  asks the row whose it is. It asked line by line, inside the application's transaction: a
-  thousand lines removed was a thousand SELECTs. It is one per class and association now, asked
-  in onFlush before any deletion is walked, underneath the application's filters as before.
+- **What a collection's lines went through is read from their rows, and nineteen things the history
+  used to say are gone.** Until 1.3 what happened to the lines of an audited collection was put
+  together from Doctrine's snapshot of the collection, its change sets and its record of each row
+  — three accounts of the same row, each describing a different moment, and every road that moves
+  a row without re-synchronising them made the history say something the rows never did. It is
+  read now from the statements that wrote the lines' rows, each at its own position, with its
+  fate. What it no longer says:
+  - a line lost from a collection it had left two flushes before, and nothing about one that
+    joined since — a line moved by its own side never dirties the collection it left, and a
+    collection deletion a failed `postFlush` left on the schedule was handed to the next flush;
+  - a departure against the owner a line was going to, not the one it left — after a flush that
+    re-pointed it and was refused, or one whose publishing was swallowed;
+  - a departure written nowhere, for a line inserted by a swallowed flush and deleted by the next;
+  - an arrival, or a change inside a line, for a line whose row the same flush's collection
+    `DELETE` had already taken — Doctrine reports the `UPDATE` that matched nothing;
+  - one departure taking two lines of the same name out of an emptying, with a row gone and
+    nothing said;
+  - a departure with an owner, for a line whose row had none;
+  - a change inside an element thrown away where an owning many-to-many was emptied, which
+    leaves every line where it was; and two owners with same-named collections of different
+    classes sharing one change;
+  - a line named in the history of its own deletion by a value no row ever held — renamed and
+    never written — or by the name a written rename had replaced;
+  - a line put back where its row already was, recorded as having moved, or without what changed
+    inside it in the same flush;
+  - a change inside a line no crate owns, recorded against a crate that never held it;
+  - an emptying collected twice — a flush nested in another shares its unit of work — and a
+    crate that lost two lines said to have lost a third, inserted in between and gone by the end;
+  - what a flush nested in another said about a line, swept away by the outer flush, or the
+    outer flush's history swept away by a nested one that died;
+  - a detach that was written, followed by a delete, described twice; and a column that held
+    `NULL`, given a value in the flush its row went, shown with the value it never received.
+  <br>Emptying a collection whose rows nothing had read costs one `SELECT` before its `DELETE`,
+  underneath the application's filters; a collection whose rows are known costs nothing.
+  <br>Most of these were found by a generated search — sequences of ordinary operations, each
+  checked against what the tables did before and after every statement — which now runs at three
+  thousand sequences in a CI job of its own, with the sequences that tell each rule apart run on
+  every build.
+- **Removing many lines the way Maker generates it asks the database nothing, not once per line.**
+  `removeItem()` nulls the back-reference and lets orphanRemoval delete the row, and whose row it
+  was is a question two of Doctrine's accounts answer differently. The listener asked the row,
+  line by line, inside the application's transaction: a thousand lines removed was a thousand
+  SELECTs. Whose row each `DELETE` took is what the connection's log says now, from the rows the
+  listener remembers, and nothing is asked. (A line that is also the target of an audited
+  many-to-many costs the one question of that: who held it, in one `SELECT` for up to five
+  hundred of them.)
 - **One stretch of records failing no longer throws away the ones after it, and the collision
   report no longer repeats any value at all.** Publishing walks the records of a flush in
   stretches that share a moment, and under `on_failure: throw` a refused record leaves
@@ -283,7 +291,7 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   next flush's first record — at position zero, where the leftover number was — went out with
   the moment of the records that had just been thrown away. A new change written as somebody
   else, at a time before it happened, which is worse than the loss the clear was already
-  causing. It forgets through the one method now.
+  causing. `onClear` decides nothing now: a moment is kept per flush and let go of with it.
 - **A flush that died without saying so no longer owns what the next one does, and a removal
   belongs to the flush that made it.** Two stacks were keeping one answer between them — the
   transaction levels of the flushes in progress, and their numbers — and they came off by
@@ -302,8 +310,7 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   the number, and there is no version of the question that takes no manager.
   <br>`preRemove` runs at `$em->remove()`, before any flush exists, so the number it recorded
   was "no flush at all" — and a removal published late then took the moment of whatever request
-  published it. It is asked in `postRemove` instead, which is inside the flush that did the
-  deleting.
+  published it. A removal is now the flush's that ran its `DELETE`, as the connection's log says.
   <br>The unwinding is now the same rule wherever it is read. A flush *starting* had one of its
   own — "not deeper than the top entry" — and the two agree while the stack holds one entry and
   disagree the moment it holds two, which is what a listener refusing an inner flush and the
@@ -319,16 +326,12 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   held 1 — and where both flushes had touched the same field, the refused one's answer had
   written over the live one's, because `lines.42.quantity` names a column rather than an
   occasion.
-  <br>Whether a flush ran is now kept per flush rather than as one flag for all of them, and what
-  a tracked collection collected is kept per flush with it, so a flush that ran nothing takes its
-  own share away and the live flush's answer about the same line comes back. What "ran" means is
-  Doctrine's statements and not this listener's `postFlush`: an inner flush whose own `postFlush`
-  a stranger's listener swallowed had nonetheless written its row, and judging it by whether we
-  saw it finish would throw away history that agrees with the database. A flush whose only news
-  was an emptied collection has no statement to show and is asked about its collections instead,
-  and a flush in its own `postFlush` says so outright — `postFlush` is dispatched by a commit
-  that went through, and dispatched *before* `postCommitCleanup()` clears the schedules the
-  other question reads.
+  <br>What a collection's lines did is read now from the statements that wrote their rows, each
+  the flush's that ran it, so a flush that ran nothing has nothing to publish and the live flush's
+  answer about the same line is its own. What "ran" means is the connection's statements and not
+  this listener's `postFlush`: an inner flush whose own `postFlush` a stranger's listener
+  swallowed had nonetheless written its row, and judging it by whether we saw it finish would
+  throw away history that agrees with the database.
 - **A change now starts from where the column was, not from where a refused flush left it.**
   Computing a change set is not free of consequence: Doctrine takes the new values to be the
   entity's original data from then on. So a flush refused in its own `onFlush` leaves the unit of
@@ -336,12 +339,9 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   carries the change out a moment later reports it as starting from there. A title the column
   took straight from `One` to `Three` was recorded as going from `Two`; a line whose quantity
   went from 1 to 3 was recorded as going from 9. Neither value was ever in the database.
-  <br>A flush being discarded now hands forward what it had found the row holding, and the next
-  flush to compute a change set for that entity spends it — spends, because what a flush that
-  never happened left behind is true of the column only until something writes it. Only its own
-  change sets travel that way: handing the live flush's forward as well corrects a step that
-  needs no correcting, and the history then reads as two changes from the same value rather than
-  one after the other.
+  <br>What a row held is taken before a flush plans anything — at `preFlush`, before Doctrine
+  computes a change set — and read on from the statements the connection ran, so what a refused
+  flush did to Doctrine's record of a row moves nothing of the history's.
 - **A flush whose only news was an emptied collection, and whose publishing another
   listener swallowed, no longer loses that history — and no longer leaves a phantom
   behind** (in the field since **1.2.4**, where recording an emptied collection was
@@ -354,9 +354,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   would: the two are indistinguishable from the listener, and one of them has the rows
   deleted. Measured with an audited join table — the rows gone, the history dropped, and
   the warning saying nothing could vouch for the flush.
-  <br>The rows are asked instead, and only on that branch: a collection the owner still
-  has rows for was not emptied. One query per owner, on the road where a flush left state
-  behind without a single statement to show for it.
+  <br>Whether it ran is what the connection's log says: the collection's `DELETE` is a statement
+  of its own, with its fate, whatever became of the flush's `postFlush`.
   <br>The same stale schedule was then collected again by the next flush and published as
   an update with no changes at all, against a row nobody in that operation had touched. An
   emptying with nothing to show for it is no longer recorded, which also covers a
@@ -366,18 +365,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   there, including the outer flush's own remaining updates. When the outer flush resumed its
   list, Doctrine dispatched `postUpdate` for a row somebody else had already written, and the
   change went into the history a second time — two documents for one statement, signed by two
-  different people, because the two announcements arrive under two flushes. The second
-  announcement is told apart by the unit of work having nothing left to say about the entity,
-  and the one record kept goes under the flush that is collecting now, whose commit the row
-  hangs off. A real second update of the same entity still has a change set, and is still two
-  records.
-- **A removal drafted before a flush survives that flush finding an older one's state behind
-  it.** `$em->remove()` fires `preRemove` where it is called, so the record it takes belongs to
-  the flush about to run. A flush whose first act was to publish an earlier flush's records
-  late — or to drop them — forgot everything on the way, and that record with it: the row was
-  deleted and the history said nothing at all about the deletion. Such a draft is also no longer
-  counted among the records being written late, since `publish()` never writes one; the warning
-  was naming a record that was not going anywhere.
+  different people, because the two announcements arrive under two flushes. A record is one
+  statement the connection ran now, whatever announced it and how many times: the one record is
+  the flush's that ran the statement — with savepoints, the nested flush's, signed as it. A real
+  second update of the same entity is a second statement, and still two records.
+- **A removal made before a flush survives that flush finding an older one's state behind
+  it.** `$em->remove()` fires `preRemove` where it is called, so what the listener keeps of the
+  removed object belongs to the flush about to run. A flush whose first act was to publish an
+  earlier flush's records late — or to drop them — forgot everything on the way, that removal
+  with it: the row was deleted and the history said nothing about the deletion. A removal's
+  record is read now from its `DELETE`, and the object the application removed is kept for the
+  flush that runs it.
 - **A clock that throws is stood in for where the change is, rather than leaving the record to
   whoever writes it.** Answering with no moment at all meant the records of that flush were
   completed wherever they were finally written, which for a flush whose publishing was swallowed
@@ -397,8 +395,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   `on_failure: log` that is the oldest promise this bundle makes, broken the wrong way round: an
   audit log that can take the business operation down is worse than a gap in the history.
   <br>Each part is behind the policy now, and what survives a failure is kept. The clock first:
-  without a timestamp there is no moment at all, so the flush settles none and the writer falls
-  back to asking per record, inside the guard it has always had. The actor next, and its failure
+  a clock that throws is stood in for by the system clock, read where the change is (below). The
+  actor next, and its failure
   costs the actor only — a record dated correctly with no actor is better history than no
   record. The moment's enrichers last, and they run whether or not the actor answered, because
   what they describe does not depend on who was acting.
@@ -432,8 +430,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   enricher had described, the writer keeps the moment's value and logs the attempt with both
   values — and that runs before redaction, so for a field under a rule the one place holding both
   in the clear was a log line, while the document had only the placeholder. It now names the
-  attribute and says the values are withheld, asking the redactor rather than guessing from the
-  value. And a `describe()` that throws is repeated through `redact.failure_details` like every
+  enricher and the attribute, and neither value: a rule names a field and redaction walks into the
+  values, so no rule of the log's own could have told which were safe to show. And a `describe()` that throws is repeated through `redact.failure_details` like every
   other foreign cause: an enricher asked to read the request is as likely to quote a token as a
   cluster is to quote a document.
   <br>Both have a scenario in the sweep that checks every channel at once, which is where they
@@ -446,12 +444,11 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   with the inner request's actor, clock and route. The defect this release exists to remove,
   arriving by a different road — and one no test could see, because none of them held two flushes
   open at the same time.
-  <br>The flushes are a stack now. Each record remembers which of them collected it, so
+  <br>The flushes are a stack now. Each record is the flush's that ran its first statement, so
   publishing hands every stretch of records the moment its own flush settled — stretches rather
   than groups, because reordering an audit trail to tidy up the writing would be its own kind of
-  wrong. An owner whose record is built after the commit remembers it too, and its
-  always-recorded context is read under the flush that saw it rather than the one doing the
-  writing.
+  wrong. The always-recorded context beside a record is the owner's row where its statement ran,
+  not anything the flush doing the writing saw.
   <br>Found by a review of the release candidate and reproduced at once: an inner flush under
   another actor, and the outer flush's record came back signed by them.
 - **A record published late is stamped with the moment it happened, not the moment it was
@@ -466,11 +463,11 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   <br>The moment is now settled in `onFlush`, where the change is seen, and carried with the
   records to wherever they are eventually written. A flush that had no actor keeps none: "nobody
   was logged in" is an answer that flush gave, not a question left open for whoever is around
-  later. The always-recorded context beside such a record is likewise the one its own flush saw,
-  including for an owner that had no lifecycle event of its own and so was never asked before.
+  later. The always-recorded context beside such a record is the owner's row where its statement
+  ran, including for an owner that had no lifecycle event of its own.
   <br>**Enrichers are not covered by this.** They run when the record is written, which is where
   the bundle's public contract puts them, and moving somebody else's enricher to a different
-  moment is not something a patch release may do: an enricher that reads the request's route will
+  moment is not something a minor release may do: an enricher that reads the request's route will
   still describe the later request. `MomentEnricherInterface`, above, is the opt-in way to move
   one — a new interface rather than a changed meaning for the old one.
   <br>**Since when, and what this does not do.** The road that publishes a swallowed flush's
@@ -486,6 +483,47 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   <br>It needs a `postFlush` listener registered before this bundle's, and one that throws, so an
   installation with none has nothing to look for — the warning this listener logs when it
   publishes late is the sign that there was one.
+- **A nested flush that died no longer takes the outer flush's history with it.** A flush nested
+  in another that died (a listener in its post-statement event threw) cleared the manager on its
+  way out, and the listener forgot everything the outer flush had collected: its records, its
+  moment and context, the flush stack, and the log it had not read yet. The outer flush then
+  committed with no history of what it wrote. The code responsible — `onClear` forgetting
+  everything — dates from 0.3.0; an application reaches it by starting a flush from a lifecycle
+  listener and catching its failure.
+- **`$em->clear()` no longer throws away history that committed.** In the middle of a flush it
+  threw away what that flush had already written, and between two operations a flush whose
+  publishing somebody swallowed. It is now written late, under the moment and actor of the flush
+  it describes. The code responsible dates from 0.3.0.
+- **A removal is no longer lost to a listener that clears the manager in `postRemove`.** A
+  listener ahead of the audit listener doing that dropped the removal's record before it was
+  taken up, though the `DELETE` had run. The code responsible dates from 0.3.0.
+- **A change the application rolled back to a savepoint of its own is no longer recorded.**
+  Inside a flush that committed, such a change to an audited entity was recorded as if the row
+  had taken it. The records it concerns were taken in Doctrine's lifecycle events, which the
+  bundle has done since 0.2.0.
+- **A flush whose manager was replaced before its publishing ran is no longer dropped.** After
+  `ManagerRegistry::resetManager()` its records were dropped as "nothing can vouch for this
+  flush"; the log vouches for it, and they are written late. The branch that dropped them dates
+  from 1.0.0.
+- **Where the history said what the rows never did** — read from Doctrine's change sets, which the
+  listener did since 0.2.0:
+
+  | What happened | What the history said | What it says now |
+  |---|---|---|
+  | An update the application rolled back to a savepoint of its own, then another change (`One` → `title 0` taken back, then `title 1`) | `title 0` → `title 1`: from a value the row never held | `One` → `title 1` |
+  | A nested flush in a listener writes the same row again and dies (`One` → `Two` stands, `Two` → `Five` taken back) | `One` → `Five` | `One` → `Two` |
+  | A JOINED entity changed a table at a time by a flush and a flush nested in it, without savepoints | the nested record also said the other table's change: one change, twice | each record, what its own statement did |
+  | The context of a record after `clear()` of the manager: what a tracked collection's elements did, its owner holding an always-recorded field | the owner's field as `null` → `null`, read off a reference Doctrine had not loaded | what the owner's row held |
+- **An owning many-to-many said what its snapshot said, not what its join rows did.** Read from
+  the collection at its owner's events, the history of a collection like `Article::$tags` could
+  lose a link a flush nested in a listener wrote; sign a link's move with the other flush's actor;
+  record a link the rows never kept — a listener cleared the manager before Doctrine wrote the
+  join rows; and record a link the application's transaction rolled back. Measured on the model
+  test's tagged world: 576 of 3000 generated sequences, none since. The code responsible dates
+  from 0.2.0.
+- **Removing a target left every owner that held it without a record.** The join rows went with
+  the target's row, by the cascade, and no owner's list said so. The code responsible dates from
+  0.2.0.
 
 ## [1.2.4] - 2026-09-21
 

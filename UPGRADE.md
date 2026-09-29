@@ -37,6 +37,31 @@ outer flush's moment, actor and context. Choose one:
 Run `audit:check` afterwards: it asks the connection itself, which is where a setting that comes
 from an environment variable is finally readable, and it says whether the connection is watched.
 
+**What the history says differently.** Nothing in the document's shape changes; what it says is
+now what the connection ran, and a screen or a report reading it may meet these:
+
+- **An owning many-to-many's lists are in the order of the targets' keys**, not the order the
+  collection held them in memory. A screen that showed them as stored shows them sorted.
+- **Replacing a many-to-many collection is two records**, `[a, b] → []` and `[] → [b]`, where it
+  used to be one `[a, b] → [b]` — Doctrine writes it as taking every link and writing `b` back.
+  A frame folds them into one, as it folds any two records of one owner.
+- **Removing a target adds records for its owners**: every owner whose join rows went with it has
+  a record of its list losing it. Until 1.3 nothing was said.
+- **A related entity is shown as its row stood at the change** — for a `ManyToOne` and a
+  many-to-many alike, where the bundle watches its class — so a label is the one it had then,
+  not one given later in the same operation.
+- **The records of one flush sort by id in the order their changes ran**, within the millisecond
+  they share: a reader sorting by `loggedAt` and id — the reader's own sort — meets them in that
+  order. Only within one writer; across processes, as before, no order within a millisecond.
+- **SQL a listener of yours runs inside a flush is recorded** where it has the persister's form
+  and is bound to one row of an audited class, as the flush's own; SQL outside every flush is
+  not, and a warning says so. Two new warnings are worth routing to whoever reads the logs: a
+  statement no flush claimed, and statements the history could not follow.
+- **A flush that removes a target something holds asks the database a little more**: who holds
+  it, before it goes, in batches; and right after its `DELETE`, whether the database took the
+  join rows — a `SELECT`, inside a savepoint when there is a transaction. The README's
+  performance section has the numbers.
+
 ## To 1.2.0
 
 **Nothing is required.** Both changes below are additive, and an application that changes nothing

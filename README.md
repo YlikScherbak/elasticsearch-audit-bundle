@@ -38,7 +38,7 @@ Every word in it is explained below; the order is the part worth having up front
 
 ```mermaid
 flowchart TD
-    D["a Doctrine flush<br/>the listener reads the change set"] --> C
+    D["a Doctrine flush<br/>the listener reads what the connection ran"] --> C
     A["$writer->record(...)<br/>anything that is not an entity change"] --> C
 
     C["the record is completed<br/>timestamp · actor · id · enrichers"] --> F{"a frame open?"}
@@ -305,18 +305,23 @@ on state.
 
 What gets recorded, and what deliberately does not:
 
-- **A record describes the row the flush wrote.** Both sides of every change come from Doctrine's
-  change set, so a listener that touches the entity in `postUpdate` — where nothing reaches the
-  database any more — cannot put a value into the history that the database does not hold. The
-  listener also registers ahead of the application's own (priority 512) so that it reads the entity
-  before anybody else rearranges it.
+- **A record describes what the connection ran** (**since 1.3**). Each record is one execution of
+  its row — an `INSERT`, `UPDATE` or `DELETE` a flush ran — and both sides of every change are the
+  row before it and after it, read through the column's type: what the database holds, not what
+  Doctrine's change set planned. A listener that touches the entity in `postUpdate` — where
+  nothing reaches the database any more — cannot put a value into the history, and a value the
+  column cannot hold (half a second more in a column kept to the second) is no change. A
+  statement rolled back — to a savepoint of the application's, with a nested flush that died, with
+  the transaction — takes its record with it.
 - **Associations are stored through their representer** — a name, an id, a small array. Storing
-  the related entity itself is neither possible nor useful in a history. Represent by something
-  that does not move: a representer runs when the record is built, at the end of the flush, and
-  Doctrine's collection snapshot holds the *objects* that were in the collection rather than a
-  copy of how they looked. Rename a tag and re-tag an article in one operation and both sides of
-  that change read `["php 9"]` — the label as it is now, on both. An id or a reference is true
-  whenever the record is read; a label is a description of today.
+  the related entity itself is neither possible nor useful in a history. The representer is handed
+  the related entity as its row stood at the change (**since 1.3**), for a class the bundle watches:
+  the old side as it stood before, the new one once the statement ran, whatever it was renamed to
+  later in the same operation — for a `ManyToOne` and for a many-to-many alike. For a class it does
+  not watch it is the object the application holds, and a row that is gone with nothing holding it
+  is named by its identifier. What the related row points at is the manager's: the row is shown as
+  it stood, not everything it leads to. An id is true whenever the record is read; a label is a
+  description of that moment.
 - **Two dates for the same instant are not a change.** Doctrine compares objects by identity, so
   re-assigning `new DateTimeImmutable('2026-08-26 10:00')` looks like a change to it; the record
   skips it.
@@ -324,14 +329,21 @@ What gets recorded, and what deliberately does not:
   readable on its own (the order's status next to the field that changed). They give context to
   a change; they do not make one — an update that touched only unaudited fields records nothing
   (`doctrine.skip_empty_updates`, default `true`).
-- **Collections** are recorded as the snapshot against the current contents, only when dirty. A
-  lazy collection is loaded first, so the `old` side is real, not empty.
-- **An emptied collection is read back from the rows**, not from Doctrine's snapshot of it.
-  Clearing or replacing a collection is the operation Doctrine reports by saying nothing — a
-  `DELETE` and no change set — so what it held has to be asked for, and the snapshot is what the
-  collection held when it was last synchronised with the database rather than now. That is one
-  `SELECT` per emptied audited collection, underneath any ORM filters, and it is the only question
-  this listener asks the database on its own. (since 1.3.0)
+- **An owning many-to-many is its join rows** (**since 1.3**): `old […] → new […]`, the whole list
+  before a change and after it, as the join table held it — in the order of the targets' keys,
+  not the order the collection held them in memory. One record is one run of an owner's links
+  changing in one flush; replacing `[a, b]` with `[b]`, which Doctrine writes as taking every link
+  and writing `b` back, is two records: `[a, b] → []` and `[] → [b]`. A frame folds them.
+- **A target removed takes its links with it, and that is said.** Doctrine's default mapping
+  cascades the join columns on delete, so removing a tag deletes its join rows with no statement
+  of their own: every owner that held it gets a record of its list losing it. That the database
+  took them is looked at right after the target's `DELETE`, not assumed — a schema without the
+  foreign key keeps the rows, and then the link stays and nothing is said. An owner removed takes
+  its own links with its `remove` record.
+- **An inverse collection, and what happened inside a tracked one's elements, are their rows**:
+  a line added, taken away, moved from one owner to another, or changed — each read from the
+  statement that did it. Clearing or replacing a collection the rows of which nothing had read is
+  one `SELECT` before its `DELETE`, underneath any ORM filters.
 - **Removes carry no changes**, only the identifier — which is captured in `preRemove`, while the
   entity still has one.
 
@@ -377,8 +389,8 @@ doctrine:
     use_savepoints: true       # DBAL 3 only; DBAL 4 always uses savepoints
 ```
 
-Records are built during `flush()`, while Doctrine still knows the change sets, and **written
-once the transaction has committed** (`postFlush`). A flush that fails half-way leaves no trace
+Records are built from what the flush's connection ran and **written once the transaction has
+committed** (`postFlush`). A flush that fails half-way leaves no trace
 in the history, and a rolled-back order never shows up as created. With the default
 `on_failure: log` an unreachable cluster costs you a history entry, never the transaction.
 
@@ -1854,17 +1866,25 @@ audited rows is, and `transport: messenger` is how.
 
 Honest list, so nothing surprises you in production:
 
-- **Doctrine events are the only source of automatic records.** A DQL `UPDATE`/`DELETE`, a raw SQL
-  statement or `Query::getResult()` with a bulk update bypasses the unit of work, and nothing is
-  recorded. Audit those paths explicitly with `AuditWriter::record()`.
+- **A flush is the only source of automatic records.** What the history is read from is what the
+  audited connection runs while a flush does: the persister's statements, and SQL a listener of
+  yours runs inside the flush in the persister's own form, bound to one row of an audited class
+  (**since 1.3**). A DQL `UPDATE`/`DELETE`, a raw SQL statement or a bulk update run outside
+  every flush is not audited — a warning says so — and one run inside a flush that cannot be bound
+  to a row (a DQL `UPDATE … WHERE sku = ?`) is reported as a statement the history could not
+  follow, never taken for "no change". Audit those paths explicitly with `AuditWriter::record()`.
+- **What the database does on its own is not seen, with one exception.** A trigger, a default
+  filled in by the database, an `ON UPDATE` column, a cascade the bundle does not know of: none of
+  them is a statement the connection ran, and the history does not say it. The exception is the
+  join rows a target's `DELETE` takes with it, which are looked at right after that `DELETE`. On a
+  database without the foreign key, a link to a target whose row is gone stays in the join table,
+  and the history names that target by its identifier.
 - **Embeddables are not audited** as fields of their owner; audit the owning entity's scalar
   fields, or record the change yourself.
-- **Only the owning side of an association is dirty-tracked.** A `OneToMany` inverse collection
-  never reports changes of its own; declare the owning side (`ManyToOne`, or the owning
-  `ManyToMany`) — or track its elements (**since 0.9**), which is answered from the unit of work
-  and so does not depend on which side is dirty. An element that moves from one owner to another is
-  recorded on both sides (**since 0.9.3**) — the one it left and the one it joined — read from the
-  owning association's change set, which is where Doctrine keeps it.
+- **A `OneToMany` inverse collection is its elements' rows.** What it gained, lost and what
+  changed inside it are read from the statements that wrote the elements' rows (**since 1.3**):
+  declare it, or track its elements (**since 0.9**). An element that moves from one owner to
+  another is recorded on both sides (**since 0.9.3**) — the one it left and the one it joined.
 - **A point in time costs the cluster memory while it is open.** `iterate()` holds one for the
   duration of the export; an export that is abandoned without the generator being destroyed keeps
   it until `reader.point_in_time_keep_alive` runs out. Iterate to the end, or let the generator go.
