@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stamp;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
@@ -217,6 +218,21 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         $this->attachListener(FailurePolicy::Log);
 
         $shipment->reference = 'SH-11';
+        $this->em->flush();
+
+        self::assertSame([], array_values(array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'had no change set left')
+        )), 'nothing lost, nothing to say');
+    }
+
+    public function testACreationPlannedWithNothingToWriteIsNotTakenForALoss(): void
+    {
+        // An entity with nothing but a key the INSERT hands out is planned with an empty change
+        // set, and has one at postPersist too. Nothing was lost: the warning is about a change
+        // set the flush had in onFlush and not after, and "scheduled" is not "had one".
+        $this->attachListener(FailurePolicy::Log);
+        $this->em->persist(new Stamp());
         $this->em->flush();
 
         self::assertSame([], array_values(array_filter(
