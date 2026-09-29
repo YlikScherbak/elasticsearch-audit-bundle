@@ -193,6 +193,34 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testWhatWasTakenBackBetweenTheLinksAndTheOwnersDeleteLeavesThemTheRemovals(): void
+    {
+        // The article's links deleted by its key, then a statement a savepoint of the
+        // application's takes back, then the article's row's DELETE: what stood is the links'
+        // DELETE right before the row's, and they are the removal's. Seed 2765 of the removals'
+        // world, where the statement between was a relay's.
+        $x = $this->aTag('x');
+        $article = $this->anArticle('One', $x);
+        $other = $this->anArticle('Other');
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->afterTheUpdateOf($other, function () use ($article, $other): void {
+            $connection = $this->em->getConnection();
+            $connection->executeStatement('DELETE FROM article_tag WHERE article_id = ?', [$article->id]);
+            $connection->beginTransaction();
+            $connection->executeStatement('UPDATE Article SET title = ? WHERE id = ?', ['Other, taken back', $other->id]);
+            $connection->rollBack();
+            $connection->executeStatement('DELETE FROM Article WHERE id = ?', [$article->id]);
+        });
+        $other->title = 'Other, again';
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM Article WHERE id = ?', [$article->id]), 'the premise: the row went');
+        self::assertSame([], $this->said());
+        $this->end();
+    }
+
     public function testLinksTakenRightBeforeAnOwnersDeleteTakenBackStayTheirOwnMove(): void
     {
         // The same form as a removal's -- the article's links deleted by its key, its row's DELETE
