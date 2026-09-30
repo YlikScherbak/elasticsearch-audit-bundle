@@ -696,6 +696,17 @@ final class HistoryReplay
     }
 
     /**
+     * Whether the connection counts the rows an UPDATE changed rather than those it reached:
+     * MySQL's, and MariaDB's, unless told otherwise -- which the replay does not assume.
+     */
+    private function countsTheRowsItChanged(): bool
+    {
+        return $this->countsChanged ??= $this->em()->getConnection()->getDatabasePlatform() instanceof \Doctrine\DBAL\Platforms\AbstractMySQLPlatform;
+    }
+
+    private ?bool $countsChanged = null;
+
+    /**
      * @param ClassMetadata<object>   $metadata
      * @param array<array-key, mixed> $params
      * @param array<string, mixed>    $key
@@ -709,12 +720,14 @@ final class HistoryReplay
             return; // an UPDATE of a row a DELETE that stayed done had taken reached nothing
         }
 
-        // An UPDATE the database says changed no row changed nothing, whatever is remembered of
-        // the row: there was none -- ORM 2.19 writes the changes of an entity it has just removed,
-        // and the row it is remembered by at the next preFlush is Doctrine's, not the database's --
-        // or, on MySQL, which counts the rows it changed, none took a new value. A count the
-        // driver did not give says neither.
-        if ($affected !== null && (int) $affected === 0) {
+        // An UPDATE the database says reached no row: none was there, whatever is remembered of
+        // it -- ORM 2.19 writes the changes of an entity it has just removed, and the row it is
+        // remembered by at the next preFlush is Doctrine's, not the database's. MySQL counts the
+        // rows it changed instead, and there none may be a row that took no new value: told apart
+        // below. A count the driver did not give says nothing.
+        $reachedNothing = $affected !== null && (int) $affected === 0;
+
+        if ($reachedNothing && !$this->countsTheRowsItChanged()) {
             return;
         }
 
@@ -732,9 +745,6 @@ final class HistoryReplay
             $after[$column] = $parameter === null ? null : $params[$parameter] ?? null;
         }
 
-        $this->rows[$root][$id] = $after;
-        $this->moved($root, $id, $before);
-
         // The change, from what this statement wrote: the audited columns it set, each from the
         // row's value -- a foreign key as the key it names -- and only those that moved.
         $was = $this->auditedColumns($metadata, $before, array_keys($shape->assigned));
@@ -747,6 +757,19 @@ final class HistoryReplay
             }
         }
 
+        // On MySQL: the database says no row took a new value where what is remembered says one
+        // did -- the row that was not there, or one whose value the column held already. The
+        // database is believed: the statement ran and said nothing, and the row is as it was. Where
+        // what is remembered agrees that nothing moved, the statement is read as any other, as on
+        // every other engine.
+        if ($reachedNothing && $changed !== []) {
+            $this->rowFact(StatementShape::UPDATE, $metadata, $before, []);
+
+            return;
+        }
+
+        $this->rows[$root][$id] = $after;
+        $this->moved($root, $id, $before);
         $this->rowFact(StatementShape::UPDATE, $metadata, $after, $changed);
 
         $ownersBefore = self::byColumn($this->ownersOf($metadata, $before));
