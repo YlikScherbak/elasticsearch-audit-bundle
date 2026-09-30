@@ -98,6 +98,46 @@ final class WatchedRows
     }
 
     /**
+     * Whether a row of a class may be shown as it stood at a position ({@see HistoryReplay::copyAt()}):
+     * a class some audited entity's audited association points at, to one or to many -- what a
+     * representer is handed. The replay keeps the versions of these rows and of no others: a
+     * flush of twenty thousand rows nothing points at keeps none.
+     *
+     * Every class the manager knows is asked once, the first time, and kept by root class.
+     *
+     * @param ClassMetadata<object> $metadata
+     */
+    public function areShownAsTheyStood(EntityManagerInterface $em, ClassMetadata $metadata): bool
+    {
+        if ($this->pointedAt === null) {
+            $this->pointedAt = [];
+
+            foreach ($em->getMetadataFactory()->getAllMetadata() as $owner) {
+                if (!$owner instanceof ClassMetadata || $owner->isMappedSuperclass || $owner->getReflectionClass()->isAbstract()) {
+                    continue;
+                }
+
+                try {
+                    $audited = $this->audited->for($owner->newInstance());
+                } catch (\Throwable) {
+                    continue; // a declaration that cannot be read is the listener's to refuse
+                }
+
+                foreach ($audited === null ? [] : array_keys($audited->fields) as $field) {
+                    if ($owner->hasAssociation($field)) {
+                        $this->pointedAt[$em->getClassMetadata($owner->getAssociationTargetClass($field))->rootEntityName] = true;
+                    }
+                }
+            }
+        }
+
+        return isset($this->pointedAt[$metadata->rootEntityName]);
+    }
+
+    /** @var array<string, true>|null the root classes audited associations point at, once asked */
+    private ?array $pointedAt = null;
+
+    /**
      * @param ClassMetadata<object> $owner
      */
     private function decideLinks(ClassMetadata $owner, string $association): bool

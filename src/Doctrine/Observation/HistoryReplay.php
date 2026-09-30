@@ -903,6 +903,12 @@ final class HistoryReplay
     {
         $em = $this->em();
         $root = $em->getClassMetadata($em->getClassMetadata($class)->rootEntityName);
+
+        // A row of a class no audited association points at keeps no versions, and is not shown
+        // at a position: where it stood is not known.
+        if (!$this->shownAsItStood($root->name)) {
+            return null;
+        }
         $row = $this->rowAt($root->name, self::keyOf($root, $key), $position, $once);
 
         if ($row === null) {
@@ -984,17 +990,30 @@ final class HistoryReplay
 
     /**
      * A row moved by the statement being read: what it holds now, and -- the first time -- what
-     * it held before, where it was taken.
+     * it held before, where it was taken. Only for a row that may be shown as it stood
+     * ({@see WatchedRows::areShownAsTheyStood()}): nothing asks after the versions of any other.
      *
      * @param array<string, mixed>|null $before
      */
     private function moved(string $root, string $id, ?array $before): void
     {
+        if (!$this->shownAsItStood($root)) {
+            return;
+        }
+
         if (!isset($this->versions[$root][$id])) {
             $this->versions[$root][$id][] = [$this->takenAt[$root][$id] ?? 0, $before];
         }
 
         $this->versions[$root][$id][] = [$this->at, isset($this->gone[$root][$id]) ? null : ($this->rows[$root][$id] ?? null)];
+    }
+
+    /** @var array<string, bool> by root class */
+    private array $shown = [];
+
+    private function shownAsItStood(string $root): bool
+    {
+        return $this->shown[$root] ??= $this->watched->areShownAsTheyStood($this->em(), $this->em()->getClassMetadata($root));
     }
 
     /**
