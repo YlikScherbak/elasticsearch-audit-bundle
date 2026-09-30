@@ -95,6 +95,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   read back rather than somebody's value.
 
 ### Changed
+- **A flush of many audited entities costs more than on 1.2.** Twenty thousand audited entities in
+  one flush (PHP 8.3, SQLite in memory, `tools/flush-cost.php`) take about 3.8–3.9 KB of peak
+  memory each, where 1.2.4 took about 1.5–2 KB, and about twice the time: inserting, 973 ms and
+  136 MB allocated at the peak against 431 ms and 84 MB; updating, 1043 ms and 158 MB against
+  394 ms and 86 MB. Under `memory_limit: 128M` 1.2.4 runs both and 1.3 does not. It is the price of
+  reading the history from the connection: inside a transaction the log and the facts read from
+  it live until the transaction ends, since the history is rebuilt from the log when it rolls back.
+  Rows nobody audits cost next to nothing: 262 ms against 192 ms, and the log keeps no text of
+  their statements. README: «Performance», with the recipe for imports.
 - **The audited connection is watched, and on DBAL 3 it has to tell a nested flush apart.** The
   bundle registers a DBAL driver middleware on `doctrine.connection` that records what the
   connection runs and changes nothing about it: no statement of its own, no option set, every

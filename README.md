@@ -410,6 +410,15 @@ so a rollback of `wrapInTransaction()` (or a hand-rolled `beginTransaction()`) l
 describing a state the database rolled back. There is an executable test that asserts exactly
 this — it exists to fail the day the behaviour changes, not to bless it.
 
+**When `postFlush` never reaches the bundle** — a listener registered before it threw, and the
+application caught the exception — the flush has committed and its records are written **late**,
+by the next flush on the connection's outermost level, with the actor and the moment of the flush
+that made them. Until such a flush runs they are neither written nor dropped: a process that ends
+first ends without them, and a worker that never flushes again never writes them. Written inside a
+frame, a late record is held by it like any other record: a step of the same actor on the same
+object merges with it, one record for the two operations. Give the audit listener a higher
+priority than listeners that may fail, and the late road is never taken.
+
 When the application owns the wider transaction, close the gap with a frame — the same
 `AuditFrame` that coalesces, used here for its other property, that nothing leaves until the
 frame does. **Ask for that property**; it is not what an ordinary frame promises (**since 1.1**):
@@ -1794,23 +1803,35 @@ decide once, at the start. For numeric identifiers reach for **`long`** (**since
 
 ## Performance
 
-**What the listener costs a flush**, measured rather than reasoned about: PHP 8.3, SQLite in
-memory, a gateway that keeps nothing, 20 000 entities in one flush, peak memory during the
-flush itself.
+**What the listener costs a flush**, measured rather than reasoned about with
+`tools/flush-cost.php`: PHP 8.3.11 (NTS, x64), Doctrine ORM 3.6.8 and DBAL 4.4.4, SQLite in memory, a
+transport that keeps nothing, 20 000 entities in one flush, the median of three runs. For each
+case: the flush's time, the peak memory it added, and the process's peak through it — what PHP
+used, and what it allocated from the system, which is what `memory_limit` is held against.
 
-| The flush | Without the listener | With it |
-|---|---|---|
-| inserting 20 000 **audited** entities | 511 ms, +58 MB | 966 ms, +95 MB |
-| updating 20 000 **audited** entities | 328 ms, +16 MB | 727 ms, +57 MB |
-| updating 20 000 entities **nobody audits** | 242 ms, +16 MB | 276 ms, +17 MB |
+| The flush | Without the listener | 1.2.4 | 1.3 |
+|---|---|---|---|
+| inserting 20 000 **audited** entities | 213 ms, +37 MB (48 used, 50 allocated) | 431 ms, +66 MB (76 used, 84 allocated) | 973 ms, +113 MB (125 used, 136 allocated) |
+| updating 20 000 **audited** entities | 161 ms, +16 MB (44 used, 50 allocated) | 394 ms, +48 MB (76 used, 86 allocated) | 1043 ms, +91 MB (139 used, 158 allocated) |
+| updating 20 000 entities **nobody audits** | 166 ms, +16 MB (44 used, 50 allocated) | 192 ms, +17 MB (45 used, 60 allocated) | 262 ms, +21 MB (52 used, 76 allocated) |
 
-Roughly **2 KB and one flush's worth of time again, per audited entity** — that is the feature,
-not overhead: a record is being built for each one. The last row is the one worth knowing: the
-listener snapshots the change set of *every* entity in the flush, audited or not, because
-deciding otherwise would mean reading each one's declaration first — and that snapshot costs
-about **60 bytes per entity**, since PHP shares the values rather than copying them. A bulk
-import of rows nobody audits is not something to route around the bundle for; a bulk import of
-audited rows is, and `transport: messenger` is how.
+**1.3 costs more than 1.2 for a flush of many audited entities**: about **3.8–3.9 KB of peak
+memory per audited entity** in this benchmark, where 1.2 took about 1.5–2 KB, and about twice the
+time. Under `memory_limit: 128M` 1.2.4 runs all three cases and 1.3 runs out of memory inserting or
+updating 20 000 audited entities in one flush. The reason is what 1.3 is for: the history is read
+from what the connection ran, not from Doctrine's change sets, and inside a transaction the log
+and the facts read from it live until the transaction ends — the history is rebuilt from the log
+when it rolls back. Rows nobody audits are next to free: the log keeps no text of their statements.
+
+For an import of many audited rows:
+
+- **Commit in bounded portions**, a transaction of a few thousand rows each, if the application
+  accepts that the import is not one atomic change. Several small flushes inside **one** long
+  transaction do not help: what the transaction holds lives until it ends.
+- **Keep the portions' flushes short.** Each flush's peak is its own entities' cost; one of
+  20 000 is the one that does not fit.
+- `transport: messenger` or the outbox takes the round-trip to Elasticsearch out of the request;
+  it does not change what a flush holds while its history is read.
 
 - **A flush is one request.** The records one `flush()` produces — or one frame releases — travel
   together: one `_bulk` call with the `sync` transport, one message that becomes one `_bulk` call

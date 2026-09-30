@@ -61,6 +61,16 @@ now what the connection ran, and a screen or a report reading it may meet these:
   it, before it goes, in batches; and right after its `DELETE`, whether the database took the
   join rows — a `SELECT`, inside a savepoint when there is a transaction. The README's
   performance section has the numbers.
+- **A flush of many audited entities costs more memory and time than on 1.2.** The history is read
+  from what the connection ran, and inside a transaction the log and the facts read from it live
+  until the transaction ends. Measured with `tools/flush-cost.php` on PHP 8.3, SQLite in memory:
+  20 000 audited entities in one flush take about 3.8–3.9 KB of peak memory each (1.2: about
+  1.5–2 KB) and about twice the time. On 1.2.4 the process peaks at 84–86 MB allocated. On 1.3 it
+  peaks at 136 MB allocated when inserting and 158 MB when updating, so under
+  `memory_limit: 128M` such a flush no longer fits. An import that did fit may need
+  committing in bounded portions, if the application accepts that the import is not one atomic
+  change. Several flushes inside one long transaction do not help. Rows nobody audits cost next
+  to nothing.
 
 ## To 1.2.0
 
