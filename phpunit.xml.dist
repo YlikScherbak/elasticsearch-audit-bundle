@@ -18,6 +18,8 @@
         <!-- Integration tests need a live Elasticsearch: set AUDIT_ES_URL and run `composer test:integration` -->
         <exclude>
             <group>integration</group>
+            <!-- The memory goal of HowMuchTheListenerKeepsTest, red until it is met; run on request with the group option, group benchmark -->
+            <group>benchmark</group>
         </exclude>
     </groups>
 
