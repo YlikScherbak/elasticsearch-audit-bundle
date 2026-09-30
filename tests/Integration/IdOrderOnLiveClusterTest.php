@@ -106,7 +106,7 @@ final class IdOrderOnLiveClusterTest extends ElasticsearchTestCase
         // changes twelve of them again. The frame merges each of those twelve's two records into
         // one, with the id and the moment of the first part -- so every record reads where the
         // first UPDATE of its article ran in the first flush, merged or not. Doctrine runs one
-        // class's UPDATEs in an order of its own (ORM 3 by the identifier as text), so the order
+        // class's UPDATEs in an order of its own (ORM 3.7 by the identifier as text, ORM 2 and 3.6 as they came to be managed), so the order
         // expected is read from the log. Random ids would put some of them out of it nearly
         // always.
         $this->connect(new TickingClock(new \DateTimeImmutable('2026-08-26 12:00:00.000', new \DateTimeZone('UTC'))));

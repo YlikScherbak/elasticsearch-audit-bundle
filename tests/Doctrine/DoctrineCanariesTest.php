@@ -719,15 +719,22 @@ final class DoctrineCanariesTest extends TestCase
     }
 
     /**
-     * In what order one flush runs one class's UPDATEs -- which the order of its records follows
-     * (they are put where their statements ran), and the guards of that order and of the ids built
-     * from it read from the log rather than write down, for this reason: ORM 3 runs them by the
-     * identifier as text -- 1, 10, 11, 12, 2, 3 -- and ORM 2 in the order the entities came to be
-     * managed. Red here is the ORM changing it: InWhatOrderTheRecordsAreWrittenTest and
-     * IdOrderOnLiveClusterTest take whatever order the log shows, and nothing of the bundle
-     * depends on either.
+     * In what order one flush runs one class's UPDATEs. The order of its records follows it, since a
+     * record is put where its statement ran. It is not the same on every ORM, and not even within
+     * one major version. Measured on 2026-09-30, SQLite, twelve entities persisted in order:
+     *
+     * - ORM 2.19.0 and 2.20.13 (DBAL 3.10.6, PHP 8.3.33): in the order the entities came to be
+     *   managed -- 1, 2, 3 ... 12;
+     * - ORM 3.6.8 (DBAL 4.4.4, PHP 8.3.11): the same;
+     * - ORM 3.7.1 (DBAL 3.10.6 and 4.4.4, PHP 8.3.33): by the identifier as text -- 1, 10, 11, 12, 2 ...
+     *
+     * So nothing of the bundle depends on the order, and no test of it writes one down: the order
+     * guards (InWhatOrderTheRecordsAreWrittenTest, IdOrderOnLiveClusterTest) take the one the log
+     * shows. What is pinned here is what they need of it: that it is the same flush after flush on
+     * one ORM, and one of the orders measured. A third one is red here as a reason to measure again,
+     * not as a fault of the bundle's.
      */
-    public function testInWhatOrderOneClasssUpdatesRun(): void
+    public function testOneClasssUpdatesRunInOneOfTheOrdersMeasuredTheSameEveryTime(): void
     {
         $articles = [];
 
@@ -753,22 +760,26 @@ final class DoctrineCanariesTest extends TestCase
             }
         });
 
-        foreach ($articles as $article) {
-            $article->title .= '-2';
+        $orders = [];
+
+        foreach (['-2', '-3'] as $suffix) {
+            $ran->exchangeArray([]);
+
+            foreach ($articles as $article) {
+                $article->title .= $suffix;
+            }
+
+            $this->em->flush();
+            $orders[] = $ran->getArrayCopy();
         }
 
-        $this->em->flush();
+        $managed = array_map(static fn (Article $a): ?int => $a->id, $articles);
+        $asText = $managed;
+        sort($asText, \SORT_STRING);
+        $orm = \Composer\InstalledVersions::getPrettyVersion('doctrine/orm');
 
-        $ids = array_map(static fn (Article $a): ?int => $a->id, $articles);
-        $major = (int) explode('.', \Composer\InstalledVersions::getPrettyVersion('doctrine/orm') ?? '3')[0];
-
-        if ($major >= 3) {
-            $asText = $ids;
-            sort($asText, \SORT_STRING);
-            self::assertSame($asText, $ran->getArrayCopy(), 'ORM 3 no longer runs one class\'s UPDATEs by the identifier as text');
-        } else {
-            self::assertSame($ids, $ran->getArrayCopy(), 'ORM 2 no longer runs one class\'s UPDATEs in the order the entities came to be managed');
-        }
+        self::assertSame($orders[0], $orders[1], sprintf('ORM %s ran the same UPDATEs in two orders', $orm));
+        self::assertContains($orders[0], [$managed, $asText], sprintf('ORM %s runs one class\'s UPDATEs in an order not measured before: %s', $orm, implode(', ', $orders[0])));
     }
 
     /**
