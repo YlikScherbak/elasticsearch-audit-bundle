@@ -119,7 +119,12 @@ final class EntityRowRuns
         $builder = new ChangeSetBuilder($em, $this->comparator);
         $runs = [];
 
-        foreach ($executions as $execution) {
+        // Each execution let go as its record is made: the two lists of twenty thousand are
+        // never held at once.
+        foreach (array_keys($executions) as $index) {
+            $execution = $executions[$index];
+            unset($executions[$index]);
+
             if ($execution['flush'] === null) {
                 // What it did that the history would have said, if anything: a statement of
                 // nothing audited is nothing to say.

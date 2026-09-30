@@ -887,7 +887,12 @@ final class AuditSubscriber
         // Ordered by where each happened: an execution by its first statement.
         $ordered = [];
 
-        foreach ($this->entityRuns->of($em, $replay, $this->statements, $this->factsReadThrough, $this->departed, $consume, $this->ranDuringAFlush(...), $failed) as $run) {
+        $entityRuns = $this->entityRuns->of($em, $replay, $this->statements, $this->factsReadThrough, $this->departed, $consume, $this->ranDuringAFlush(...), $failed);
+
+        // Each run let go as its draft is made, as each execution was as its run was.
+        foreach (array_keys($entityRuns) as $index) {
+            $run = $entityRuns[$index];
+            unset($entityRuns[$index]);
             $changes = $run['bare'];
 
             if ($run['event'] === AuditEvent::UPDATE && $this->skipEmptyUpdates && $changes === []) {

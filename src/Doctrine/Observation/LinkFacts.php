@@ -79,17 +79,27 @@ final class LinkFacts
         $holdersRead = $memory->holdersRead();
         $statements = $replay->linkStatements();
 
-        // An owner's row inserted or gone, by root class and key, where it was.
+        $collections = array_unique([...array_keys($accounts), ...array_keys($statements)]);
+        $owning = [];
+
+        foreach ($collections as $of) {
+            $owning[explode('::', $of, 2)[0]] = true;
+        }
+
+        // An owner's row inserted or gone, by root class and key, where it was -- of the classes
+        // whose links are in play: a flush of twenty thousand rows of a class with no links
+        // indexed every one of them to find none.
         $rows = [];
 
-        foreach ($replay->rowFacts() as $fact) {
-            if ($fact['statement'] !== StatementShape::UPDATE) {
-                $root = $em->getClassMetadata($fact['class'])->rootEntityName;
+        foreach ($owning === [] ? [] : $replay->rowFacts() as $fact) {
+            if ($fact['statement'] !== StatementShape::UPDATE
+                && isset($owning[$root = $em->getClassMetadata($fact['class'])->rootEntityName])
+            ) {
                 $rows[$root][$fact['id']][$fact['at']] = $fact['statement'];
             }
         }
 
-        foreach (array_unique([...array_keys($accounts), ...array_keys($statements)]) as $of) {
+        foreach ($collections as $of) {
             [$root, $collection] = explode('::', $of, 2);
             /** @var class-string $root */
             $owner = $em->getClassMetadata($root);
