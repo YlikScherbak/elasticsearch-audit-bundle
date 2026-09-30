@@ -1461,6 +1461,15 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $this->open = [];
             $points = [$this->snapshot()];
             $this->apply($step, $world);
+
+            // A flush the application could not complete closes the manager, and an application
+            // goes on with a fresh one (ManagerRegistry::resetManager()): ORM 2.19 fails the flush
+            // of a collection it re-inserts a row of, which ORM 3 does not. The world is found
+            // again below, by the rows' ids.
+            if (!$this->em->isOpen()) {
+                $this->reopen();
+            }
+
             $world = $this->theWorldAfter($world);
             $world = $this->theWorldAsTheRowsHaveIt($world);
             $points = [...$points, ...$this->checkpoints, $this->snapshot()];
@@ -1964,6 +1973,20 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
     }
 
     /**
+     * Whether a row is there, asked past the connection: nothing the listener's log sees, and no
+     * statement the sequence is measured by.
+     */
+    private function rowIsThere(string $table, int $id): bool
+    {
+        $native = $this->em->getConnection()->getNativeConnection();
+        self::assertInstanceOf(\PDO::class, $native);
+        $statement = $native->prepare('SELECT COUNT(*) FROM '.$table.' WHERE id = ?');
+        $statement->execute([$id]);
+
+        return (int) $statement->fetchColumn() > 0;
+    }
+
+    /**
      * The world as the rows have it (the removals' world only): a row a removal took and a
      * rollback put back is the world's again, found by its identifier, and one the removal
      * took for good is gone from it. Doctrine forgets an entity it removed at the commit that
@@ -1986,6 +2009,13 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
             $world['article'] = $found instanceof Article ? $found : null;
         }
 
+        // And by the rows, not by Doctrine's memory of them: ORM 2.19 keeps an entity it removed
+        // in the identity map when a postFlush listener threw before it cleaned up, and a step
+        // that tagged it wrote a join row to a row that is gone.
+        if ($this->articleId !== null && $world['article'] !== null && !$this->rowIsThere('Article', $this->articleId)) {
+            $world['article'] = null;
+        }
+
         $tags = [];
 
         foreach ($this->tagIds as $id) {
@@ -1995,7 +2025,7 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
                 $tag = $this->em->find(Tag::class, $id);
             }
 
-            if ($tag instanceof Tag) {
+            if ($tag instanceof Tag && $this->rowIsThere('Tag', $id)) {
                 $tags[] = $tag;
             }
         }
