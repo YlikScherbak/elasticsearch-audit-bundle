@@ -223,6 +223,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   warning about a nested flush emptying the running flush's change sets.
 
 ### Fixed
+- **An `UPDATE` that reached no row is no change.** Doctrine writes the changes of an entity whose row is
+  already gone. ORM 2.19 keeps an entity it has just removed managed, and a later flush updates it.
+  A row deleted behind Doctrine's back gives the same result on every ORM. The history recorded a
+  change no row ever had. The defect is older than 1.3: 1.2.4 records it on ORM 2.19 and ORM 3.7
+  alike (measured against the tag), because it wrote from Doctrine's change sets. 1.3 met it again
+  when it started reading the rows: the listener remembers such a row from Doctrine's own data.
+  An `UPDATE` the database reports as having changed no row now records nothing, and the values it
+  set are not taken as the row's. On MySQL, which counts the rows it changed rather than the rows
+  it matched, an `UPDATE` that changes no value still reads as before, as on every other engine.
+  The defect was found in the 1.3 cycle by the model test's new "remove the article" step, in the
+  ORM 2.19 image. That step revealed the defect; it did not cause it.
 - **What a collection's lines went through is read from their rows, and nineteen things the history
   used to say are gone.** Until 1.3 what happened to the lines of an audited collection was put
   together from Doctrine's snapshot of the collection, its change sets and its record of each row
