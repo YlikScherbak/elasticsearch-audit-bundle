@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
+use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Events;
 
 /**
@@ -23,17 +26,25 @@ use Doctrine\ORM\Events;
 final class ALateFlushBehindAFailedOneTest extends DoctrineTestCase
 {
     /**
-     * @return iterable<string, array{bool}>
+     * @return iterable<string, array{bool, bool}>
      */
     public static function whereTheNextFlushFails(): iterable
     {
-        yield 'with no transaction open' => [false];
-        yield 'inside a transaction of the application\'s, which it then rolls back' => [true];
+        yield 'with no transaction open' => [false, false];
+        yield 'inside a transaction of the application\'s, which it then rolls back' => [true, false];
+        yield 'inside an atomic frame and a transaction of the application\'s, both let go' => [true, true];
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('whereTheNextFlushFails')]
-    public function testWhatACommittedFlushCollectedIsWrittenThoughTheFlushAfterItFailed(bool $inATransaction): void
+    public function testWhatACommittedFlushCollectedIsWrittenThoughTheFlushAfterItFailed(bool $inATransaction, bool $inAFrame): void
     {
+        $frame = null;
+
+        if ($inAFrame) {
+            $buffer = new FrameBuffer();
+            $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer, FailurePolicy::Log));
+        }
+
         $article = new Article('One');
         $tag = new Tag('x');
         $this->em->persist($article);
@@ -55,7 +66,13 @@ final class ALateFlushBehindAFailedOneTest extends DoctrineTestCase
         self::assertInstanceOf(\PDO::class, $native);
         $native->exec(sprintf('INSERT INTO article_tag (article_id, tag_id) VALUES (%d, %d)', $article->id, $tag->id));
         $article->tags->add($tag);
+
+        // And work of its own that runs before the statement it fails on: an audited row
+        // inserted, taken back with the rest.
+        $this->em->persist(new Article('Taken back'));
         $connection = $this->em->getConnection();
+
+        $frame?->begin(atomic: true);
 
         if ($inATransaction) {
             $connection->beginTransaction();
@@ -68,6 +85,12 @@ final class ALateFlushBehindAFailedOneTest extends DoctrineTestCase
         } finally {
             while ($connection->isTransactionActive()) {
                 $connection->rollBack();
+            }
+
+            // As the model test's step does after the application takes its operation back.
+            if ($frame !== null) {
+                $this->em->clear();
+                $frame->reset();
             }
         }
 
