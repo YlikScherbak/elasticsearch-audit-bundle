@@ -125,6 +125,38 @@ final class ALatePublicationInsideAnotherFrameTest extends DoctrineTestCase
         self::assertSame($expected, $said, 'the committed change once, as Alice made it; Bob\'s apart, and only when his operation stood');
     }
 
+    public function testALateRecordOfTheSameActorAndObjectMergesWithTheFramesStep(): void
+    {
+        // A frame knows a record by its object and its actor, and a late record written inside
+        // one is held by it as any other: Alice's late record about the article, written inside a
+        // frame of Alice's that changes the article too, merges with the frame's step -- one record
+        // of two operations, the actor the same. What the README says beside late publication;
+        // pinned so that a change to it is a decision.
+        $buffer = new FrameBuffer();
+        $frame = new AuditFrame($buffer, $this->attachListenerWithFrame($buffer, FailurePolicy::Log));
+        $article = new Article('One');
+        $this->em->persist($article);
+        $this->em->flush();
+        $written = \count($this->documents());
+
+        $article->title = 'Two';
+        $this->swallowingPostFlush(function (): void {
+            $this->em->flush();
+        });
+
+        $frame->begin();
+        $article->title = 'Three';
+        $this->em->flush();
+        $frame->end();
+
+        $said = array_map(
+            static fn (array $d): array => [$d['changes']['title']['old'] ?? null, $d['changes']['title']['new'] ?? null],
+            \array_slice($this->documents(), $written),
+        );
+
+        self::assertSame([['One', 'Three']], $said, 'the committed change and the frame\'s step, one record');
+    }
+
     private function swallowingPostFlush(\Closure $flush): void
     {
         $breaker = new class {

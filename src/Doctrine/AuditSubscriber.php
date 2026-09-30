@@ -948,13 +948,21 @@ final class AuditSubscriber
         foreach ($runs as $run) {
             $owner = $run['owner'];
 
-            if ($owner === null) {
-                continue;
-            }
-
             try {
-                $metadata = $this->metadataFactory->for($owner);
-                $id = $this->identifierOf($em, $owner);
+                // An owner the manager does not hold is named by its class and its key, as a
+                // link's is: a reading that only counts loads nothing to find it, and the one
+                // that writes is handed a reference. The two read one road, so that what is
+                // counted is what is written -- a count that left such an owner out took a
+                // committed change's late records for nothing collected, and dropped them.
+                if ($owner === null) {
+                    $ownerMetadata = $em->getClassMetadata($run['class']);
+                    $columns = $ownerMetadata->getIdentifierColumnNames();
+                    $metadata = $this->metadataFactory->forClass($ownerMetadata->name, $ownerMetadata->newInstance(...));
+                    $id = \count($columns) === 1 ? $this->identity->historyId($em, $ownerMetadata->name, [$columns[0] => $run['key']]) : null;
+                } else {
+                    $metadata = $this->metadataFactory->for($owner);
+                    $id = $this->identifierOf($em, $owner);
+                }
 
                 if ($metadata === null || $id === null) {
                     continue;
@@ -986,7 +994,7 @@ final class AuditSubscriber
                     'event' => AuditEvent::UPDATE,
                     'flush' => $run['flush'],
                     'owner' => $owner,
-                    'class' => $owner::class,
+                    'class' => $owner === null ? $em->getClassMetadata($run['class'])->name : $owner::class,
                     'changes' => $run['changes'],
                     'context' => $run['context'],
                     'at' => $run['at'],
@@ -1826,7 +1834,7 @@ final class AuditSubscriber
      * What changed inside the elements of tracked collections since the log was last read
      * into the history: {@see ElementFieldRuns::of()}.
      *
-     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>, since: int, at: int, context: array<string, mixed>}>
+     * @return list<array{owner: object|null, class: class-string, key: mixed, flush: int, changes: array<string, Change>, since: int, at: int, context: array<string, mixed>}>
      */
     private function elementFieldRuns(EntityManagerInterface $em, bool $consume = false): array
     {

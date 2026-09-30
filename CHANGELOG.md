@@ -223,6 +223,18 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   warning about a nested flush emptying the running flush's change sets.
 
 ### Fixed
+- **The late records of a committed change inside a collection are written behind a flush that
+  failed.** A flush whose publishing was swallowed (a `postFlush` listener registered before this
+  bundle's threw) has its records written late, by the next flush. When the flush in between
+  failed inside a frame and a transaction of the application's, and the application went on with
+  a cleared or fresh manager, the change inside a collection lost its history: the count of what
+  was owed looked for the collection's owner in a manager that no longer held it, found none, and
+  the records were dropped as nothing collected, though writing them would have found it. The
+  owner is now named by its class and key when no manager holds it, as a link's owner already
+  was, so what is counted is what is written. 1.2.4 lost more on this road: a plain change of an
+  entity's row was dropped behind a flush that failed inside a transaction. Found by the model
+  test's seed 395 in the ORM 2.19 image, whose own failure closes the manager there; any ORM's
+  failing flush does the same.
 - **An `UPDATE` that reached no row is no change.** Doctrine writes the changes of an entity whose row is
   already gone. ORM 2.19 keeps an entity it has just removed managed, and a later flush updates it.
   A row deleted behind Doctrine's back gives the same result on every ORM. The history recorded a

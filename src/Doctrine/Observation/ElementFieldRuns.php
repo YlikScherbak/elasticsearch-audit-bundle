@@ -57,7 +57,7 @@ final class ElementFieldRuns
      *
      * @param (\Closure(int): bool)|null $duringAFlush whether the statement at a position ran while a flush of the listener's did
      *
-     * @return list<array{owner: object|null, flush: int, changes: array<string, Change>, since: int, at: int, context: array<string, mixed>}>
+     * @return list<array{owner: object|null, class: class-string, key: mixed, flush: int, changes: array<string, Change>, since: int, at: int, context: array<string, mixed>}>
      */
     public function of(EntityManagerInterface $em, HistoryReplay $replay, int $readThrough, bool $consume = false, ?\Closure $duringAFlush = null): array
     {
@@ -135,7 +135,7 @@ final class ElementFieldRuns
             $at = $last[$who] ?? null;
 
             if ($at === null || $runs[$at]['flush'] !== $fact['flush'] || isset($changes[$at][$name])) {
-                $runs[] = ['owner' => $owner, 'flush' => $fact['flush']];
+                $runs[] = ['owner' => $owner, 'class' => $element['owner'], 'key' => $element['ownerKey'], 'flush' => $fact['flush']];
                 $at = $last[$who] = array_key_last($runs);
                 $ranFrom[$at] = $fact['at'];
             }
@@ -149,7 +149,7 @@ final class ElementFieldRuns
         $read = [];
 
         foreach ($runs as $at => $run) {
-            $read[] = ['owner' => $run['owner'], 'flush' => $run['flush'], 'changes' => $changes[$at] ?? [], 'since' => $ranFrom[$at] ?? 0, 'at' => $ranTo[$at] ?? 0, 'context' => $contexts[$at] ?? []];
+            $read[] = ['owner' => $run['owner'], 'class' => $run['class'], 'key' => $run['key'], 'flush' => $run['flush'], 'changes' => $changes[$at] ?? [], 'since' => $ranFrom[$at] ?? 0, 'at' => $ranTo[$at] ?? 0, 'context' => $contexts[$at] ?? []];
         }
 
         // What the log could not be followed through, said once for the reading and by class
