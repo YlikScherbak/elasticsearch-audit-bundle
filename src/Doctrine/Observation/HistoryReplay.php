@@ -259,7 +259,7 @@ final class HistoryReplay
 
             match ($shape->kind) {
                 StatementShape::INSERT => $this->inserted($table, $shape, $statement['params'], $binding->key, $nth === null ? null : ($persisted[$binding->class][$nth] ?? null)),
-                StatementShape::UPDATE => $this->updated($table, $shape, $statement['params'], $binding->key ?? []),
+                StatementShape::UPDATE => $this->updated($table, $shape, $statement['params'], $binding->key ?? [], $statement['affected']),
                 default => $this->deleted($table, $binding->key ?? [], $statement['affected']),
             };
         }
@@ -700,13 +700,22 @@ final class HistoryReplay
      * @param array<array-key, mixed> $params
      * @param array<string, mixed>    $key
      */
-    private function updated(ClassMetadata $metadata, StatementShape $shape, array $params, array $key): void
+    private function updated(ClassMetadata $metadata, StatementShape $shape, array $params, array $key, int|string|null $affected = null): void
     {
         $root = $metadata->rootEntityName;
         $id = self::keyOf($metadata, $key);
 
         if (isset($this->gone[$root][$id])) {
             return; // an UPDATE of a row a DELETE that stayed done had taken reached nothing
+        }
+
+        // An UPDATE the database says changed no row changed nothing, whatever is remembered of
+        // the row: there was none -- ORM 2.19 writes the changes of an entity it has just removed,
+        // and the row it is remembered by at the next preFlush is Doctrine's, not the database's --
+        // or, on MySQL, which counts the rows it changed, none took a new value. A count the
+        // driver did not give says neither.
+        if ($affected !== null && (int) $affected === 0) {
+            return;
         }
 
         if (!isset($this->rows[$root][$id])) {
