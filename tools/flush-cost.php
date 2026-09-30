@@ -53,19 +53,32 @@ if ($case === null) {
     $release = class_exists(\Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog::class) ? '1.3 or later' : 'before 1.3';
     printf("%d entities in one flush, the bundle %s, PHP %s, memory_limit %s, median of %d\n\n| The flush | Without the listener | With it |\n|---|---|---|\n", $entities, $release, \PHP_VERSION, $limit, $repeats);
 
+    // A driver this process was given on its command line, and a process of its own would not
+    // have: the cases run under the same PHP as the table says.
+    $php = escapeshellarg(\PHP_BINARY);
+    $given = preg_match('/^pdo_sqlite$/mi', (string) shell_exec($php.' -m')) === 1;
+    $driver = \extension_loaded('pdo_sqlite') && !$given ? ' -d extension=pdo_sqlite' : '';
+
     foreach ($cases as $name => [$what, $whose]) {
         $cells = [];
 
         foreach (['without', 'with'] as $listener) {
             $runs = [];
+            $failure = null;
 
             for ($i = 0; $i < $repeats; ++$i) {
-                $out = trim((string) shell_exec(sprintf('%s -d memory_limit=%s %s %d %d %s %s 2>&1', escapeshellarg(\PHP_BINARY), escapeshellarg($limit), escapeshellarg(__FILE__), $entities, 1, escapeshellarg($limit), escapeshellarg("$what:$whose:$listener"))));
-                $runs[] = preg_match('/^(\d+) (\d+)$/', $out, $m) === 1 ? [(int) $m[1], (int) $m[2]] : null;
+                $out = trim((string) shell_exec(sprintf('%s%s -d memory_limit=%s %s %d %d %s %s 2>&1', $php, $driver, escapeshellarg($limit), escapeshellarg(__FILE__), $entities, 1, escapeshellarg($limit), escapeshellarg("$what:$whose:$listener"))));
+
+                if (preg_match('/^(\d+) (\d+)$/', $out, $m) === 1) {
+                    $runs[] = [(int) $m[1], (int) $m[2]];
+                } else {
+                    // Out of memory is a result; anything else is the benchmark failing, and says what.
+                    $failure ??= str_contains($out, 'Allowed memory size') ? 'out of memory' : 'failed: '.strtok($out, "\n");
+                }
             }
 
-            if (\in_array(null, $runs, true)) {
-                $cells[] = 'out of memory';
+            if ($failure !== null) {
+                $cells[] = $failure;
 
                 continue;
             }

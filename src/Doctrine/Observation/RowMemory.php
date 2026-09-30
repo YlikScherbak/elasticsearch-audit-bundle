@@ -361,6 +361,12 @@ final class RowMemory
         }
     }
 
+    /** Whether a statement of a table may be history ({@see WatchedRows::isAHistoryTable()}). */
+    public function isAHistoryTable(EntityManagerInterface $em, string $table): bool
+    {
+        return $this->watched->isAHistoryTable($em, $table);
+    }
+
     /** What the join rows held, as last settled and as read since. */
     public function links(): JoinRowMemory
     {

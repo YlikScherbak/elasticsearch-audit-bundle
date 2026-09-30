@@ -83,6 +83,27 @@ final class StatementLog
     /** Whether an observer was put in front of a driver: what audit:check asks of the audited connection. */
     private bool $watching = false;
 
+    /**
+     * Which tables' statements are kept, once the listener has said ({@see keepingOnly()}); until
+     * then, every statement's.
+     *
+     * @var (\Closure(string): bool)|null
+     */
+    private ?\Closure $keeps = null;
+
+    /**
+     * Keeps from here on the statements of the tables the closure says, and the connection's
+     * transactions and savepoints always -- the statements that cannot be read too, since those
+     * may be of any table. The listener says which tables a history is about: the watched classes',
+     * the join tables of the links it watches, and their targets'.
+     *
+     * @param \Closure(string): bool $tables
+     */
+    public function keepingOnly(\Closure $tables): void
+    {
+        $this->keeps = $tables;
+    }
+
     /** @var array<string, array<string, array{label: string, flush: int, columns: list<string>, keys: array<string, true>, going: array<string, true>, linkedBy: array{table: string, columns: list<string>}|null, read: string}>> by table */
     private array $watches = [];
 
@@ -233,6 +254,17 @@ final class StatementLog
             $this->rollBackTo($m[1]);
 
             return null;
+        }
+
+        // A statement of a table no history is about is not kept: an import of rows nobody
+        // audits is no work of the listener's. One that cannot be read is kept -- it may be of
+        // any table, and is doubt where it writes.
+        if ($this->keeps !== null) {
+            $shape = StatementShape::read($sql);
+
+            if ($shape !== null && !($this->keeps)($shape->table)) {
+                return null;
+            }
         }
 
         if (!$failed && (int) $affected > 0) {

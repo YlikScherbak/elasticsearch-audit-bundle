@@ -29,8 +29,17 @@ final class WatchedRows
     /** @var array<string, list<array{0: class-string, 1: string}>> by target class */
     private array $linksTo = [];
 
+    /**
+     * What is read of the whole mapping, by the manager's metadata factory: managers that share a
+     * connection share the listener, and each maps classes of its own.
+     *
+     * @var \WeakMap<object, array{pointedAt?: array<string, true>, tables?: array<string, true>}>
+     */
+    private \WeakMap $ofTheMapping;
+
     public function __construct(private readonly AuditMetadataFactory $audited = new AuditMetadataFactory())
     {
+        $this->ofTheMapping = new \WeakMap();
     }
 
     /**
@@ -109,10 +118,13 @@ final class WatchedRows
      */
     public function areShownAsTheyStood(EntityManagerInterface $em, ClassMetadata $metadata): bool
     {
-        if ($this->pointedAt === null) {
-            $this->pointedAt = [];
+        $mapping = $em->getMetadataFactory();
+        $read = $this->ofTheMapping[$mapping] ?? [];
 
-            foreach ($em->getMetadataFactory()->getAllMetadata() as $owner) {
+        if (!isset($read['pointedAt'])) {
+            $pointedAt = [];
+
+            foreach ($mapping->getAllMetadata() as $owner) {
                 if (!$owner instanceof ClassMetadata || $owner->isMappedSuperclass || $owner->getReflectionClass()->isAbstract()) {
                     continue;
                 }
@@ -125,17 +137,69 @@ final class WatchedRows
 
                 foreach ($audited === null ? [] : array_keys($audited->fields) as $field) {
                     if ($owner->hasAssociation($field)) {
-                        $this->pointedAt[$em->getClassMetadata($owner->getAssociationTargetClass($field))->rootEntityName] = true;
+                        $pointedAt[$em->getClassMetadata($owner->getAssociationTargetClass($field))->rootEntityName] = true;
                     }
                 }
             }
+
+            $read['pointedAt'] = $pointedAt;
+            $this->ofTheMapping[$mapping] = $read;
         }
 
-        return isset($this->pointedAt[$metadata->rootEntityName]);
+        return isset($read['pointedAt'][$metadata->rootEntityName]);
     }
 
-    /** @var array<string, true>|null the root classes audited associations point at, once asked */
-    private ?array $pointedAt = null;
+    /**
+     * Whether a statement of this table may be history: a table of a watched class -- any class
+     * of its hierarchy, whose statements write a table at a time -- a join table of a watched
+     * link, a table of a watched link's target, whose DELETE the history looks after, or a table
+     * of a class a representer may be handed as it stood ({@see areShownAsTheyStood()}). What
+     * the connection's log keeps ({@see StatementLog::keepingOnly()}).
+     *
+     * The mapping is read once, the first time, and kept by table name, compared as the database
+     * compares an unquoted name: without regard to case.
+     */
+    public function isAHistoryTable(EntityManagerInterface $em, string $table): bool
+    {
+        $mapping = $em->getMetadataFactory();
+
+        if (!isset($this->ofTheMapping[$mapping]['tables'])) {
+            $tables = [];
+            $all = array_values(array_filter($mapping->getAllMetadata(), static fn (mixed $one): bool => $one instanceof ClassMetadata && !$one->isMappedSuperclass));
+            $roots = [];
+
+            foreach ($all as $metadata) {
+                if ($this->areWatched($em, $metadata) || $this->linksTo($em, $metadata) !== [] || $this->areShownAsTheyStood($em, $metadata)) {
+                    $roots[$metadata->rootEntityName] = true;
+                }
+
+                foreach ($metadata->getAssociationNames() as $association) {
+                    if (!$metadata->isInheritedAssociation($association) && $this->areLinksWatched($metadata, $association)) {
+                        $joinTable = CollectionRowsQuery::entry($metadata->getAssociationMapping($association), 'joinTable');
+                        $name = CollectionRowsQuery::entry($joinTable, 'name');
+                        $schema = CollectionRowsQuery::entry($joinTable, 'schema');
+
+                        if (\is_string($name) && $name !== '') {
+                            $tables[strtolower((\is_string($schema) && $schema !== '' ? $schema.'.' : '').$name)] = true;
+                        }
+                    }
+                }
+            }
+
+            foreach ($all as $metadata) {
+                if (isset($roots[$metadata->rootEntityName])) {
+                    $tables[strtolower(RowBinding::tableOf($metadata))] = true;
+                }
+            }
+
+            // Read again: the roots above asked areShownAsTheyStood(), which keeps its own.
+            $read = $this->ofTheMapping[$mapping] ?? [];
+            $read['tables'] = $tables;
+            $this->ofTheMapping[$mapping] = $read;
+        }
+
+        return isset($this->ofTheMapping[$mapping]['tables'][strtolower($table)]);
+    }
 
     /**
      * @param ClassMetadata<object> $owner

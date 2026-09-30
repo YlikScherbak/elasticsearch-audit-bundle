@@ -286,6 +286,7 @@ final class AuditSubscriber
     ) {
         $this->logger = $logger ?? new NullLogger();
         $this->plannedChanges = new \WeakMap();
+        $this->keptFor = new \WeakMap();
         $this->rows = new RowMemory($statements);
 
         // What ran before this listener existed is nobody's history it can account for: it
@@ -327,9 +328,44 @@ final class AuditSubscriber
         $em = self::entityManagerOf($args->getObjectManager());
 
         if ($em !== null) {
+            $this->keepingOnlyTheHistorysTables($em);
             $this->rows->rememberWhatIsManaged($em);
         }
     }
+
+    /**
+     * From the first flush on, the log keeps the statements of the tables a history is about, and
+     * no others: an import of rows nobody audits is no work of the listener's. Managers that
+     * share the connection share the log, and a statement between their flushes may be any one's:
+     * a table is kept if a manager that has flushed says it is history. Held weakly -- the last
+     * one gone, the log keeps everything again rather than ask a closed one.
+     */
+    private function keepingOnlyTheHistorysTables(EntityManagerInterface $em): void
+    {
+        if (isset($this->keptFor[$em])) {
+            return;
+        }
+
+        $this->keptFor[$em] = true;
+        $managers = $this->keptFor;
+        $rows = $this->rows;
+        $this->statements->keepingOnly(static function (string $table) use ($managers, $rows): bool {
+            if (\count($managers) === 0) {
+                return true;
+            }
+
+            foreach ($managers as $manager => $_) {
+                if ($rows->isAHistoryTable($manager, $table)) {
+                    return true;
+                }
+            }
+
+            return false;
+        });
+    }
+
+    /** @var \WeakMap<EntityManagerInterface, true> the managers the log's tables were asked of */
+    private \WeakMap $keptFor;
 
     /**
      * A row loaded while a flush runs -- found again after a clear(), from inside a listener --

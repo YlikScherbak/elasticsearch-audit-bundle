@@ -47,6 +47,7 @@ final class WhatTheListenerKeepsBetweenFlushesTest extends TestCase
     private const OUTLIVES_A_FLUSH = [
         'checkedTracking' => 'a cache of what a class declared, which is fixed for the life of the process: the same names, the same representers, the same tracked fields for every instance.',
         'flush' => 'the counter that hands out the numbers. It only ever goes up, and a number given twice is the whole problem it exists to prevent.',
+        'keptFor' => 'the managers that have flushed, held weakly, whose mappings say which tables the log keeps: a mapping is fixed for the life of its manager, and a manager gone is let go by the map itself.',
         'flushingManager' => 'a weak reference to the manager of the flush on the stack, replaced by every flush that begins and read only to tell an abandoned flush from a swallowed one.',
     ];
 
