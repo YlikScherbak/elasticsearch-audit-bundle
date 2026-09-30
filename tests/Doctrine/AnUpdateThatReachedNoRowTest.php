@@ -37,6 +37,32 @@ final class AnUpdateThatReachedNoRowTest extends DoctrineTestCase
         self::assertSame([], \array_slice($this->documents(), $written), 'no history of a change no row had');
     }
 
+    public function testAnUpdateThatReachedNoRowLeavesTheRowAsItWasForTheNextOne(): void
+    {
+        // What the UPDATE of nothing set is not what the row holds: the next UPDATE that does
+        // reach it changes it from what it was, and not from what nothing was set to.
+        $article = new Article('One');
+        $this->em->persist($article);
+        $this->em->flush();
+        $id = (int) $article->id;
+        $native = $this->em->getConnection()->getNativeConnection();
+        self::assertInstanceOf(\PDO::class, $native);
+
+        $native->exec('DELETE FROM Article WHERE id = '.$id);
+        $article->title = 'Two';
+        $this->em->flush();
+
+        // The row back as it was, as far behind the log as it went.
+        $native->exec("INSERT INTO Article (id, title, status, views) VALUES ($id, 'One', 'draft', 0)");
+        $written = \count($this->documents());
+        $article->title = 'Three';
+        $this->em->flush();
+
+        $said = \array_slice($this->documents(), $written);
+        self::assertCount(1, $said, 'the premise: this one reached the row');
+        self::assertSame(['old' => 'One', 'new' => 'Three'], $said[0]['changes']['title'] ?? null);
+    }
+
     public function testAnUpdateThatReachedTheRowIsAChange(): void
     {
         // The mirror: the same UPDATE, the row there.
