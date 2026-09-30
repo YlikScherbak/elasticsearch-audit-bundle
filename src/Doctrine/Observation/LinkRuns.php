@@ -186,7 +186,7 @@ final class LinkRuns
      */
     private function listOf(EntityManagerInterface $em, HistoryReplay $replay, ?DepartedObjects $departed, string $owner, string $collection, string $target, array $targets, int $at, bool $once): array
     {
-        $represent = $this->audited->for($em->getClassMetadata($owner)->newInstance())?->fields[$collection] ?? null;
+        $represent = $this->audited->forClass($em->getClassMetadata($owner)->name, $em->getClassMetadata($owner)->newInstance(...))?->fields[$collection] ?? null;
 
         if ($represent === null) {
             throw new DeclarationMistake(sprintf('An audited association needs a representer (a callable turning %s into what to store).', $target));

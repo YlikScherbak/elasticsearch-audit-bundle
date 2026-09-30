@@ -137,6 +137,40 @@ final class AuditMetadataFactoryTest extends TestCase
 
         new AuditMetadata('shipment', ['lines' => null], [], ['lines' => []]);
     }
+
+    public function testAClassDeclaredByAttributesIsReadWithoutAnInstance(): void
+    {
+        $factory = new AuditMetadataFactory();
+        $made = 0;
+        $instance = static function () use (&$made): object {
+            ++$made;
+
+            return new Comment('1', 'x');
+        };
+
+        $fromTheClass = $factory->forClass(Comment::class, $instance);
+
+        self::assertSame(0, $made, 'the attributes are the class\'s: nothing is made to read them');
+        self::assertSame($factory->for(new Comment('2', 'y')), $fromTheClass, 'and they are the same declaration an entity of it has');
+        self::assertNull($factory->forClass(Author::class, $instance), 'a class that declares nothing');
+        self::assertSame(0, $made);
+    }
+
+    public function testAClassDeclaredByTheInterfaceIsAskedOfAnInstanceEveryTime(): void
+    {
+        // Its answer may depend on the instance, and is not kept: asked twice, made twice.
+        $factory = new AuditMetadataFactory();
+        $made = 0;
+        $instance = static function () use (&$made): object {
+            ++$made;
+
+            return new Article('x');
+        };
+
+        self::assertSame('article', $factory->forClass(Article::class, $instance)?->objectType);
+        self::assertSame('article', $factory->forClass(Article::class, $instance)?->objectType);
+        self::assertSame(2, $made);
+    }
 }
 
 /**

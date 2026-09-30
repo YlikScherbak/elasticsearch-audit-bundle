@@ -659,7 +659,7 @@ final class HistoryReplay
 
         $ownersBefore = self::byColumn($this->ownersOf($metadata, $before));
         $ownersAfter = self::byColumn($this->ownersOf($metadata, $after));
-        $audited = $this->audited->for($metadata->newInstance());
+        $audited = $this->audited->forClass($metadata->name, $metadata->newInstance(...));
 
         // A row this statement points at another owner left the one it had, as it was, and
         // arrived at the new one, as it is: the representer is given the row on each side of
@@ -732,7 +732,7 @@ final class HistoryReplay
     {
         $class = $this->classOfRow($metadata, $row);
 
-        if ($this->audited->for($class->newInstance()) === null) {
+        if ($this->audited->forClass($class->name, $class->newInstance(...)) === null) {
             return;
         }
 
@@ -761,7 +761,7 @@ final class HistoryReplay
     {
         $context = [];
 
-        foreach ($this->audited->for($class->newInstance())->alwaysRecorded ?? [] as $field) {
+        foreach ($this->audited->forClass($class->name, $class->newInstance(...))->alwaysRecorded ?? [] as $field) {
             if ($class->hasField($field) && \array_key_exists($column = $class->getColumnName($field), $row)) {
                 $context[$field] = $this->php($class, $field, $row[$column]);
             }
@@ -802,7 +802,7 @@ final class HistoryReplay
     private function auditedColumns(ClassMetadata $metadata, array $row, array $columns): array
     {
         $class = $this->classOfRow($metadata, $row);
-        $declaration = $this->audited->for($class->newInstance());
+        $declaration = $this->audited->forClass($class->name, $class->newInstance(...));
 
         if ($declaration === null) {
             return [];
@@ -1189,7 +1189,7 @@ final class HistoryReplay
      */
     private function collectionOf(ClassMetadata $owner, ClassMetadata $elements, string $association): ?array
     {
-        $audited = $this->audited->for($owner->newInstance());
+        $audited = $this->audited->forClass($owner->name, $owner->newInstance(...));
 
         if ($audited === null) {
             return null;
@@ -1223,7 +1223,7 @@ final class HistoryReplay
     {
         $this->representFailed = false;
         $copy = $this->copyOf($metadata, $row);
-        $represent = $this->audited->for($owner->newInstance())?->fields[$collection] ?? null;
+        $represent = $this->audited->forClass($owner->name, $owner->newInstance(...))?->fields[$collection] ?? null;
 
         if ($represent === null) {
             return null;

@@ -323,7 +323,7 @@ final class EntityRowRuns
 
         $metadata = $em->getClassMetadata($execution['class']);
         $entity = $this->identity->managed($em, $execution['class'], $execution['key']);
-        $declaration = $this->audited->for($entity ?? $metadata->newInstance());
+        $declaration = $entity !== null ? $this->audited->for($entity) : $this->audited->forClass($metadata->name, $metadata->newInstance(...));
         $id = $this->identity->historyId($em, $execution['class'], $execution['key']);
         $event = self::EVENTS[$execution['statement']] ?? null;
 

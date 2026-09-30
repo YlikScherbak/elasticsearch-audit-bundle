@@ -98,7 +98,7 @@ final class ElementFieldRuns
             }
 
             $owner = $this->identity->byForeignKey($em, $element['owner'], $element['ownerKey'], $consume);
-            $declaration = $this->audited->for($owner ?? $em->getClassMetadata($element['owner'])->newInstance());
+            $declaration = $owner !== null ? $this->audited->for($owner) : $this->audited->forClass($em->getClassMetadata($element['owner'])->name, $em->getClassMetadata($element['owner'])->newInstance(...));
 
             if ($declaration === null) {
                 continue;

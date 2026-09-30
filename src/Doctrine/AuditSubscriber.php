@@ -824,7 +824,7 @@ final class AuditSubscriber
 
             if ($shape === null || $binding === null || $binding->kind !== RowBinding::ROW || $binding->class === null
                 || $this->statements->fate($at) !== StatementLog::VOID
-                || $this->metadataFactory->for($em->getClassMetadata($binding->class)->newInstance()) === null
+                || $this->metadataFactory->forClass($em->getClassMetadata($binding->class)->name, $em->getClassMetadata($binding->class)->newInstance(...)) === null
             ) {
                 $last = null;
 
@@ -1008,7 +1008,7 @@ final class AuditSubscriber
         foreach ($links as $run) {
             try {
                 $owner = $run['owner'];
-                $metadata = $this->metadataFactory->for($owner ?? $em->getClassMetadata($run['class'])->newInstance());
+                $metadata = $owner !== null ? $this->metadataFactory->for($owner) : $this->metadataFactory->forClass($em->getClassMetadata($run['class'])->name, $em->getClassMetadata($run['class'])->newInstance(...));
 
                 if ($metadata === null || $run['id'] === null) {
                     continue;
@@ -1105,7 +1105,7 @@ final class AuditSubscriber
 
             // One decision whatever kind of field it was, as the builder's: the application's
             // comparator first -- two lists of the same labels are no move to it, say.
-            $declared = $this->metadataFactory->for($em->getClassMetadata($run['owner'])->newInstance());
+            $declared = $this->metadataFactory->forClass($em->getClassMetadata($run['owner'])->name, $em->getClassMetadata($run['owner'])->newInstance(...));
 
             if ($declared === null || ($this->comparator->equals($declared->objectType, $run['collection'], $run['old'], $run['new']) ?? ValueComparator::same($run['old'], $run['new']))) {
                 continue;

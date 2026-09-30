@@ -43,6 +43,28 @@ final class AuditMetadataFactory
         return $this->attributeMetadata[$class];
     }
 
+    /**
+     * The declaration of a class, when there is no entity of it to ask: the attribute form is
+     * the class's own and read without one, the interface form asks the instance $instance
+     * makes. A flush of twenty thousand rows asks this of every statement, and made twenty
+     * thousand instances to read one set of attributes.
+     *
+     * @param class-string        $class
+     * @param \Closure(): object $instance
+     */
+    public function forClass(string $class, \Closure $instance): ?AuditMetadata
+    {
+        if (is_a($class, AuditableInterface::class, true)) {
+            return $this->for($instance());
+        }
+
+        if (!\array_key_exists($class, $this->attributeMetadata)) {
+            $this->attributeMetadata[$class] = $this->fromAttributes(new \ReflectionClass($class));
+        }
+
+        return $this->attributeMetadata[$class];
+    }
+
     public function isAuditable(object $entity): bool
     {
         return $this->for($entity) !== null;
