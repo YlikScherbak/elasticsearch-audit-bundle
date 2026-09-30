@@ -15,6 +15,7 @@ use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandle
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\MessengerTransport;
 use Borsche\ElasticsearchAuditBundle\Transport\TransportInterface;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\Compiler\CheckTypeDeclarationsPass;
@@ -30,7 +31,17 @@ use Symfony\Component\HttpKernel\Kernel;
  * accepts what the README documents, and that every service the extension defines can
  * actually be built. Loading the tree through a Processor proves none of it — that is
  * how a bundle that could not boot in any application shipped twice.
+ *
+ * In a process of its own, each test: every boot compiles a container class of its own -- a
+ * namespace of its own each time -- and PHP unloads no class, so a process that boots N kernels
+ * keeps N containers' code (0.75 MB each after the first, measured 2026-09-30; this file boots
+ * seventeen, and the suite's process ran out of 128M on a later test). The bundle's state does not
+ * leak here: each test is green alone, and WhatTheListenerKeepsBetweenFlushesTest sees nothing
+ * kept between flushes. Not for a class that boots nothing -- there the isolation would hide a
+ * leak, not a class loader. Per test rather than per class: PHPUnit 12 deprecates the per-class
+ * attribute (sebastianbergmann/phpunit#6284), which ran each test apart all the same.
  */
+#[RunTestsInSeparateProcesses]
 final class BundleBootTest extends TestCase
 {
     private string $cacheDir;

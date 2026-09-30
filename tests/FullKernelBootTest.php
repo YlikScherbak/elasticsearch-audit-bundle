@@ -21,6 +21,7 @@ use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecordsHandle
 use Borsche\ElasticsearchAuditBundle\Transport\Messenger\IndexAuditRecord;
 use Doctrine\Bundle\DoctrineBundle\DoctrineBundle;
 use Doctrine\ORM\Events;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 use Symfony\Bundle\FrameworkBundle\FrameworkBundle;
 use Symfony\Component\Config\Loader\LoaderInterface;
@@ -39,7 +40,17 @@ use Symfony\Component\HttpKernel\Kernel;
  * A container that boots while the listener is attached to no EventManager and the
  * batch message has no handler is exactly the silence this bundle exists to prevent,
  * so it is proven here against the real bundles.
+ *
+ * In a process of its own, each test: every boot compiles a container class of its own -- a
+ * namespace of its own each time -- and PHP unloads no class, so a process that boots N kernels
+ * keeps N containers' code (0.75 MB each after the first, measured 2026-09-30; this file boots
+ * seventeen, and the suite's process ran out of 128M on a later test). The bundle's state does not
+ * leak here: each test is green alone, and WhatTheListenerKeepsBetweenFlushesTest sees nothing
+ * kept between flushes. Not for a class that boots nothing -- there the isolation would hide a
+ * leak, not a class loader. Per test rather than per class: PHPUnit 12 deprecates the per-class
+ * attribute (sebastianbergmann/phpunit#6284), which ran each test apart all the same.
  */
+#[RunTestsInSeparateProcesses]
 final class FullKernelBootTest extends TestCase
 {
     private string $cacheDir;
