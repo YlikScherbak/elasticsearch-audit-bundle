@@ -73,13 +73,22 @@ final class HistoryReplay
      * statements the flush running them has not claimed yet, and an answer kept from then would
      * be nobody's for good.
      *
+     * Kept as a list -- what it was, of which class, which row, the key's column names, their
+     * values, where, its fields, and the row once it ran -- and given as the array its readers
+     * read (eachRowFact()): twenty thousand facts of named arrays were a third more. The key's
+     * column names are the table's, one array shared by every fact of it; each field's sides a
+     * pair, old then new; whose flush it is, asked of the log when it is read, as it always was.
+     *
      * A fact whose execution the history has been written from is let go of (letGoOf()): what
      * the readers of every fact from the first need of it stays -- what it was, of which row,
-     * where, and the row once it ran -- and its key and fields go, marked released.
+     * where, and the row once it ran -- and its key and fields go.
      *
-     * @var list<array{statement: string, class: class-string, id: string, key?: array<string, mixed>, at: int, flush: int|null, fields?: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>, released?: true}>
+     * @var list<array{0: string, 1: class-string, 2: string, 3: list<string>|null, 4: list<mixed>|null, 5: int, 6: array<string, array{0: mixed, 1: mixed}>|null, 7: array<string, mixed>}>
      */
     private array $rowFacts = [];
+
+    /** @var array<string, list<string>> the key's column names, by class: one array for every fact of it */
+    private array $keyColumns = [];
 
     /** @var array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int, by: string}>}> */
     private array $links = [];
@@ -380,10 +389,35 @@ final class HistoryReplay
     public function eachRowFact(): \Generator
     {
         foreach ($this->rowFacts as $index => $fact) {
-            $fact['flush'] = $this->log?->ownerOf($fact['at']);
-
-            yield $index => $fact;
+            yield $index => $this->asRead($fact);
         }
+    }
+
+    /**
+     * A fact as its readers read it, from the list it is kept as ($rowFacts).
+     *
+     * @param array{0: string, 1: class-string, 2: string, 3: list<string>|null, 4: list<mixed>|null, 5: int, 6: array<string, array{0: mixed, 1: mixed}>|null, 7: array<string, mixed>} $fact
+     *
+     * @return array{statement: string, class: class-string, id: string, key?: array<string, mixed>, at: int, flush: int|null, fields?: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>, released?: true}
+     */
+    private function asRead(array $fact): array
+    {
+        [$statement, $class, $id, $columns, $values, $at, $fields, $context] = $fact;
+
+        if ($columns === null || $values === null || $fields === null) {
+            return ['statement' => $statement, 'class' => $class, 'id' => $id, 'at' => $at, 'flush' => $this->log?->ownerOf($at), 'context' => $context, 'released' => true];
+        }
+
+        return [
+            'statement' => $statement,
+            'class' => $class,
+            'id' => $id,
+            'key' => array_combine($columns, $values),
+            'at' => $at,
+            'flush' => $this->log?->ownerOf($at),
+            'fields' => array_map(static fn (array $sides): array => ['old' => $sides[0], 'new' => $sides[1]], $fields),
+            'context' => $context,
+        ];
     }
 
     /**
@@ -394,15 +428,14 @@ final class HistoryReplay
      */
     public function rowFactAt(int $index): array
     {
-        $fact = $this->rowFacts[$index] ?? throw new \OutOfBoundsException(sprintf('No fact of the rows at %d.', $index));
+        $kept = $this->rowFacts[$index] ?? throw new \OutOfBoundsException(sprintf('No fact of the rows at %d.', $index));
+        $fact = $this->asRead($kept);
 
         // Read after it was let go: whatever asks has come after the history was written from
         // it, and would make something of a fact that is no longer there.
         if (!isset($fact['key'], $fact['fields'])) {
             throw new \LogicException(sprintf('The fact of the rows at %d was let go once its execution was written; it cannot be read again.', $index));
         }
-
-        $fact['flush'] = $this->log?->ownerOf($fact['at']);
 
         return $fact;
     }
@@ -425,11 +458,11 @@ final class HistoryReplay
         foreach ($places as $place) {
             $fact = $this->rowFacts[$place] ?? null;
 
-            if ($fact === null || !isset($fact['key'])) {
+            if ($fact === null || $fact[6] === null) {
                 continue;
             }
 
-            $this->rowFacts[$place] = ['statement' => $fact['statement'], 'class' => $fact['class'], 'id' => $fact['id'], 'at' => $fact['at'], 'flush' => null, 'context' => $fact['context'], 'released' => true];
+            $this->rowFacts[$place] = [$fact[0], $fact[1], $fact[2], null, null, $fact[5], null, $fact[7]];
         }
     }
 
@@ -851,15 +884,16 @@ final class HistoryReplay
             return;
         }
 
+        $key = self::keyColumnsOf($metadata, $row);
         $this->rowFacts[] = [
-            'statement' => $statement,
-            'class' => $class->name,
-            'id' => self::keyOf($metadata, $row),
-            'key' => self::keyColumnsOf($metadata, $row),
-            'at' => $this->at,
-            'flush' => $this->log?->ownerOf($this->at),
-            'fields' => $fields,
-            'context' => $this->contextOf($class, $row),
+            $statement,
+            $class->name,
+            self::keyOf($metadata, $row),
+            $this->keyColumns[$metadata->name] ??= array_keys($key),
+            array_values($key),
+            $this->at,
+            array_map(static fn (array $sides): array => [$sides['old'], $sides['new']], $fields),
+            $this->contextOf($class, $row),
         ];
     }
 
