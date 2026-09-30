@@ -448,6 +448,19 @@ final class RowMemory
     }
 
     /**
+     * What replayed() reads, in a replay of its own: for a reader besides the listener, which
+     * lets go of the facts it has written the history from ({@see HistoryReplay::letGoOf()}) --
+     * a second reading of the listener's own replay after that meets what is left of them.
+     */
+    public function replayedApart(EntityManagerInterface $em, ?int $upTo = null): HistoryReplay
+    {
+        $replay = new HistoryReplay($em, $this->rows, $this->takenAt, $this->audited, $this->watched);
+        $replay->replay($this->log, $this->settledAt, $upTo ?? $this->log->position(), $this->persisted);
+
+        return $replay;
+    }
+
+    /**
      * At postPersist: a row whose key the database handed out is bound to its INSERT by the
      * order these were announced in.
      */

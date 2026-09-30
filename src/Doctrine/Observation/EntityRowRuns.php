@@ -133,9 +133,12 @@ final class EntityRowRuns
         $executions = self::withTheirCompletions($em, $log, $replay, $executions);
         $builder = new ChangeSetBuilder($em, $this->comparator);
 
-        // Each execution made of its facts as its record is made, and let go with it.
+        // Each execution made of its facts as its record is made, and let go with it -- and, by
+        // the reading that writes them, its facts too, once its record is made: a flush of twenty
+        // thousand rows held every fact of every execution through to the last record.
         foreach (array_keys($executions) as $index) {
-            $execution = self::executionOf($replay, $executions[$index]);
+            $facts = $executions[$index];
+            $execution = self::executionOf($replay, $facts);
             unset($executions[$index]);
 
             if ($execution['flush'] === null) {
@@ -143,6 +146,10 @@ final class EntityRowRuns
                 // nothing audited is nothing to say.
                 if ($consume && $execution['fields'] !== []) {
                     NobodysStatement::say($this->logger, $duringAFlush !== null && $duringAFlush($execution['at'][0]), implode(', ', array_keys($execution['fields'])), $execution['class'], array_keys($execution['key']));
+                }
+
+                if ($consume) {
+                    $replay->letGoOf(self::placesOf($facts));
                 }
 
                 continue;
@@ -157,7 +164,16 @@ final class EntityRowRuns
 
                 $failed($e);
 
+                // Said and left out, as a written one is written: the reading goes past it.
+                if ($consume) {
+                    $replay->letGoOf(self::placesOf($facts));
+                }
+
                 continue;
+            }
+
+            if ($consume) {
+                $replay->letGoOf(self::placesOf($facts));
             }
 
             if ($record !== null) {
@@ -218,6 +234,18 @@ final class EntityRowRuns
         }
 
         return $kept;
+    }
+
+    /**
+     * The places of an execution's facts, a completion's among them.
+     *
+     * @param non-empty-list<int> $facts
+     *
+     * @return list<int>
+     */
+    private static function placesOf(array $facts): array
+    {
+        return array_map(static fn (int $place): int => $place < 0 ? -1 - $place : $place, $facts);
     }
 
     /**

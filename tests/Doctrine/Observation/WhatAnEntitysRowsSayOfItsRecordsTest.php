@@ -327,7 +327,7 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
         $this->em->getConnection()->update('Article', ['title' => 'By hand'], ['id' => $article->id]);
 
         self::assertSame([], self::said($this->runs()));
-        self::assertNotSame([], $this->memory()->replayed($this->em)->rowFacts(), 'the premise: the statement is a fact of the row');
+        self::assertNotSame([], $this->memory()->replayedApart($this->em)->rowFacts(), 'the premise: the statement is a fact of the row');
 
         $this->end();
     }
@@ -745,7 +745,8 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
         );
 
         return (new EntityRowRuns(new AuditMetadataFactory(), new ValueComparator(), $identity, $this->logger()))
-            ->of($this->em, $replay ?? $this->memory()->replayed($this->em), $this->log, $this->from, $this->departed(), $consume, static fn (int $at): bool => false);
+            // A replay of its own: the listener's has let go of what it wrote the history from.
+            ->of($this->em, $replay ?? $this->memory()->replayedApart($this->em), $this->log, $this->from, $this->departed(), $consume, static fn (int $at): bool => false);
     }
 
     /**

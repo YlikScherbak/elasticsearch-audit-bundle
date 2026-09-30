@@ -407,7 +407,8 @@ final class WhatTheLogSaysOfAnEntitysRowTest extends DoctrineTestCase
     private function facts(): array
     {
         return array_values(array_filter(
-            $this->memory()->replayed($this->em)->rowFacts(),
+            // A replay of its own: the listener's has let go of what it wrote the history from.
+            $this->memory()->replayedApart($this->em)->rowFacts(),
             fn (array $fact): bool => $fact['at'] > $this->from,
         ));
     }

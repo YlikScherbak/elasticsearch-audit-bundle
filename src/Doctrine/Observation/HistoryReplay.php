@@ -73,7 +73,11 @@ final class HistoryReplay
      * statements the flush running them has not claimed yet, and an answer kept from then would
      * be nobody's for good.
      *
-     * @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
+     * A fact whose execution the history has been written from is let go of (letGoOf()): what
+     * the readers of every fact from the first need of it stays -- what it was, of which row,
+     * where, and the row once it ran -- and its key and fields go, marked released.
+     *
+     * @var list<array{statement: string, class: class-string, id: string, key?: array<string, mixed>, at: int, flush: int|null, fields?: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>, released?: true}>
      */
     private array $rowFacts = [];
 
@@ -359,7 +363,7 @@ final class HistoryReplay
     }
 
     /**
-     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
+     * @return list<array{statement: string, class: class-string, id: string, key?: array<string, mixed>, at: int, flush: int|null, fields?: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>, released?: true}>
      */
     public function rowFacts(): array
     {
@@ -367,9 +371,11 @@ final class HistoryReplay
     }
 
     /**
-     * The facts of the rows one at a time, as eachFact() gives the facts.
+     * The facts of the rows one at a time, as eachFact() gives the facts. A released one
+     * (letGoOf()) comes as what is kept of it: what it was, of which row, where, and the row once
+     * it ran; its key and fields are not there to be read.
      *
-     * @return \Generator<int, array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
+     * @return \Generator<int, array{statement: string, class: class-string, id: string, key?: array<string, mixed>, at: int, flush: int|null, fields?: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>, released?: true}>
      */
     public function eachRowFact(): \Generator
     {
@@ -389,9 +395,42 @@ final class HistoryReplay
     public function rowFactAt(int $index): array
     {
         $fact = $this->rowFacts[$index] ?? throw new \OutOfBoundsException(sprintf('No fact of the rows at %d.', $index));
+
+        // Read after it was let go: whatever asks has come after the history was written from
+        // it, and would make something of a fact that is no longer there.
+        if (!isset($fact['key'], $fact['fields'])) {
+            throw new \LogicException(sprintf('The fact of the rows at %d was let go once its execution was written; it cannot be read again.', $index));
+        }
+
         $fact['flush'] = $this->log?->ownerOf($fact['at']);
 
         return $fact;
+    }
+
+    /**
+     * Lets go of what the facts at these places say beyond what every reader from the first
+     * needs: once the records of an execution are made, its key and fields are nobody's. What
+     * stays is what it was, of which row, where, and the row once it ran -- the links read which
+     * rows went and came back from the first fact on, and a link's context is the row as it
+     * stood at a position, however long ago.
+     *
+     * The listener lets go of the executions of the reading that writes them, one at a time as
+     * each is written. A replay read to count, or one a flush reads again later, lets go of
+     * nothing; a replay rebuilt from the log because a rollback reached back has every fact again.
+     *
+     * @param list<int> $places
+     */
+    public function letGoOf(array $places): void
+    {
+        foreach ($places as $place) {
+            $fact = $this->rowFacts[$place] ?? null;
+
+            if ($fact === null || !isset($fact['key'])) {
+                continue;
+            }
+
+            $this->rowFacts[$place] = ['statement' => $fact['statement'], 'class' => $fact['class'], 'id' => $fact['id'], 'at' => $fact['at'], 'flush' => null, 'context' => $fact['context'], 'released' => true];
+        }
     }
 
     /**
