@@ -52,7 +52,38 @@ final class StatementShape
     ) {
     }
 
+    /** How many statements' shapes are kept read: a flush writes a few forms, many times over. */
+    public const REMEMBERED = 256;
+
+    /**
+     * The shapes last read, by their SQL -- the only thing a shape is read from, so a statement's
+     * text is the whole key: no parameter, row, flush or fate goes into it. Bounded, the oldest
+     * let go first: reading one again costs time and nothing else, and a worker that runs for a
+     * week does not keep every statement it has seen.
+     *
+     * @var array<string, self|null>
+     */
+    private static array $read = [];
+
+    /**
+     * What a statement says it does, or null where it is not one of the three forms. The same SQL
+     * always reads the same, and a flush of twenty thousand rows writes one INSERT twenty
+     * thousand times: it is read once.
+     */
     public static function read(string $sql): ?self
+    {
+        if (\array_key_exists($sql, self::$read)) {
+            return self::$read[$sql];
+        }
+
+        if (\count(self::$read) >= self::REMEMBERED) {
+            unset(self::$read[array_key_first(self::$read)]);
+        }
+
+        return self::$read[$sql] = self::readAgain($sql);
+    }
+
+    private static function readAgain(string $sql): ?self
     {
         $tokens = self::tokens($sql);
 

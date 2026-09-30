@@ -35,6 +35,31 @@ final class StatementShapeTest extends TestCase
         );
     }
 
+    public function testTheSameStatementIsReadOnce(): void
+    {
+        // A flush of twenty thousand rows writes one INSERT twenty thousand times.
+        $sql = 'UPDATE Article SET title = ? WHERE id = ?';
+
+        self::assertSame(StatementShape::read($sql), StatementShape::read($sql), 'the shape read before, not read again');
+        self::assertNull(StatementShape::read('SELECT 1'), 'and a statement of no shape is remembered as none');
+    }
+
+    public function testWhatIsRememberedOfStatementsIsBounded(): void
+    {
+        // A worker that runs for a week meets more statements than it should keep: past the
+        // bound, the oldest are read again when they come back -- the same shape, a new reading.
+        $first = StatementShape::read('DELETE FROM Oldest WHERE id = ?');
+
+        for ($i = 0; $i < StatementShape::REMEMBERED; ++$i) {
+            StatementShape::read(sprintf('DELETE FROM Other%d WHERE id = ?', $i));
+        }
+
+        $again = StatementShape::read('DELETE FROM Oldest WHERE id = ?');
+
+        self::assertNotSame($first, $again, 'let go of, and read again');
+        self::assertEquals($first, $again, 'reading the same');
+    }
+
     /**
      * @return iterable<string, array{0: string, 1: array{0: string, 1: string, 2: array<string, int|null>, 3: array<string, int>, 4: bool}|null}>
      */
