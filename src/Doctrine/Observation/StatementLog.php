@@ -104,6 +104,13 @@ final class StatementLog
         $this->keeps = $tables;
     }
 
+    /**
+     * The entry of the last statement not kept, which the next one of its frame shares.
+     *
+     * @var array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool}|null
+     */
+    private ?array $unkept = null;
+
     /** @var array<string, array<string, array{label: string, flush: int, columns: list<string>, keys: array<string, true>, going: array<string, true>, linkedBy: array{table: string, columns: list<string>}|null, read: string}>> by table */
     private array $watches = [];
 
@@ -259,10 +266,24 @@ final class StatementLog
         // A statement of a table no history is about is not kept: an import of rows nobody
         // audits is no work of the listener's. One that cannot be read is kept -- it may be of
         // any table, and is doubt where it writes.
+        //
+        // What is not kept is its text. Its place is: that something ran there, in which frame,
+        // and whether it stood, parts what ran before it from what ran after -- two tables of one
+        // change are next to each other in the log, and a join row's DELETE is right before its
+        // owner's only with nothing standing between. One entry, shared by every such statement
+        // of a frame that runs back to back, until a rollback marks it.
         if ($this->keeps !== null) {
             $shape = StatementShape::read($sql);
 
             if ($shape !== null && !($this->keeps)($shape->table)) {
+                $frame = $this->open === [] ? -1 : $this->open[\count($this->open) - 1];
+
+                if ($this->unkept === null || $this->unkept['frame'] !== $frame || $this->unkept['failed'] !== $failed) {
+                    $this->unkept = ['sql' => '', 'params' => [], 'affected' => null, 'failed' => $failed, 'frame' => $frame, 'void' => false];
+                }
+
+                $this->statements[++$this->sequence] = $this->unkept;
+
                 return null;
             }
         }
@@ -606,7 +627,8 @@ final class StatementLog
     {
         $entry = $this->statements[$statement] ?? null;
 
-        return $entry === null ? null : [
+        // One not kept has a place and a fate, and no text to read.
+        return $entry === null || $entry['sql'] === '' ? null : [
             'sql' => $entry['sql'],
             'params' => $entry['params'],
             'affected' => $entry['affected'],

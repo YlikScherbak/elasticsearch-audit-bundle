@@ -76,14 +76,18 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
     }
 
     /**
-     * @return iterable<string, array{bool, bool}>
+     * @return iterable<string, array{bool, bool, bool}>
      */
     public static function whetherTheApplicationWritesBetween(): iterable
     {
-        yield 'the two changes one after the other' => [false, false];
-        yield 'a statement of the application\'s between them' => [true, false];
-        yield 'one after the other, in a transaction of the application\'s' => [false, true];
-        yield 'a statement between them, in a transaction of the application\'s' => [true, true];
+        yield 'the two changes one after the other' => [false, false, false];
+        yield 'a statement of the application\'s between them' => [true, false, false];
+        yield 'one after the other, in a transaction of the application\'s' => [false, true, false];
+        yield 'a statement between them, in a transaction of the application\'s' => [true, true, false];
+        // A table no history is about, whose statement the log does not keep: what it keeps of
+        // it is that something ran there.
+        yield 'a statement of a table no history is about between them' => [true, false, true];
+        yield 'a statement of a table no history is about between them, in a transaction of the application\'s' => [true, true, true];
     }
 
     /**
@@ -92,25 +96,31 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
      * hierarchy's two tables, in one frame, under one owner -- measured, and asserted below as
      * the premise -- and, with nothing between them, next to each other in the log: where the
      * nested flush began is what says they are two. With the application's statement between
-     * them they are not next to each other in the log, though they are among the facts.
+     * them they are not next to each other in the log, though they are among the facts -- and
+     * so too when the statement is of a table the log keeps nothing of.
      *
      * Inside a transaction of the application's the flushes are owned apart, and that has to
      * say the same; outside one, what the listener remembers is settled once the flush is over,
      * so the facts are read by a replay of its own over the rows as they were before.
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('whetherTheApplicationWritesBetween')]
-    public function testTwoChangesOfAJoinedRowEachOfOneTableAreTwoExecutionsWithoutSavepoints(bool $between, bool $inATransaction): void
+    public function testTwoChangesOfAJoinedRowEachOfOneTableAreTwoExecutionsWithoutSavepoints(bool $between, bool $inATransaction, bool $ofNoHistory): void
     {
         $this->unownedStatementsAreExpected = true;
         $this->log = $this->watchTheConnection(FailurePolicy::Log, savepoints: false);
+
+        if ($ofNoHistory) {
+            $this->em->getConnection()->executeStatement('CREATE TABLE scratch (id INTEGER)');
+        }
+
         $this->em->persist($vehicle = new Vehicle());
         $this->em->persist($press = new Press('One'));
         $this->em->flush();
 
-        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $press, $between ? $vehicle->id : null) {
+        $this->em->getEventManager()->addEventListener([Events::postUpdate], new class($this->em, $press, $between ? $vehicle->id : null, $ofNoHistory) {
             private bool $ran = false;
 
-            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Press $press, private readonly mixed $vehicle)
+            public function __construct(private readonly \Doctrine\ORM\EntityManagerInterface $em, private readonly Press $press, private readonly mixed $vehicle, private readonly bool $ofNoHistory)
             {
             }
 
@@ -122,7 +132,9 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
 
                 $this->ran = true;
 
-                if ($this->vehicle !== null) {
+                if ($this->vehicle !== null && $this->ofNoHistory) {
+                    $this->em->getConnection()->insert('scratch', ['id' => 1]);
+                } elseif ($this->vehicle !== null) {
                     $this->em->getConnection()->update('Vehicle', ['plate' => 'between'], ['id' => $this->vehicle]);
                 }
 

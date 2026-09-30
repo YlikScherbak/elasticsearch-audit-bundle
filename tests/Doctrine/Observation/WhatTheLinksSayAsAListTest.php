@@ -221,6 +221,48 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function whatStoodBetween(): iterable
+    {
+        yield 'a statement of an audited table' => [false];
+        yield 'a statement of a table no history is about' => [true];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('whatStoodBetween')]
+    public function testWhatStoodBetweenTheLinksAndTheOwnersDeleteLeavesThemAMoveOfTheirOwn(bool $ofNoHistory): void
+    {
+        // The article's links deleted by its key, then a statement that stands, then its row's
+        // DELETE: the links' DELETE is not right before the row's, and is a move of its list.
+        // Of a table the history is about or of one the log keeps no text of, the same -- what
+        // it keeps of the second is its place and its fate, and "right before" is judged by them.
+        $x = $this->aTag('x');
+        $article = $this->anArticle('One', $x);
+        $other = $this->anArticle('Other');
+        $this->unownedStatementsAreExpected = true;
+        $connection = $this->em->getConnection();
+        $connection->executeStatement('CREATE TABLE scratch (id INTEGER)');
+
+        $this->begin();
+        $this->afterTheUpdateOf($other, function () use ($connection, $article, $other, $ofNoHistory): void {
+            $connection->executeStatement('DELETE FROM article_tag WHERE article_id = ?', [$article->id]);
+
+            if ($ofNoHistory) {
+                $connection->insert('scratch', ['id' => 1]);
+            } else {
+                $connection->executeStatement('UPDATE Article SET views = ? WHERE id = ?', [7, $other->id]);
+            }
+
+            $connection->executeStatement('DELETE FROM Article WHERE id = ?', [$article->id]);
+        });
+        $other->title = 'Other, again';
+        $this->em->flush();
+
+        self::assertSame([['One', ['x'], []]], $this->said());
+        $this->end();
+    }
+
     public function testLinksTakenRightBeforeAnOwnersDeleteTakenBackStayTheirOwnMove(): void
     {
         // The same form as a removal's -- the article's links deleted by its key, its row's DELETE

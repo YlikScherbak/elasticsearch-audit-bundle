@@ -60,11 +60,14 @@ final class LinkFacts
     {
     }
 
-    /** Whether every statement the log kept between two positions was taken back. */
+    /**
+     * Whether every statement between two positions was taken back -- one whose text the log
+     * did not keep as much as any other: its fate is kept, and one forgotten is void.
+     */
     private static function nothingStoodBetween(StatementLog $log, int $from, int $to): bool
     {
         for ($at = $from + 1; $at < $to; ++$at) {
-            if ($log->statement($at) !== null && $log->fate($at) !== StatementLog::VOID) {
+            if ($log->fate($at) !== StatementLog::VOID) {
                 return false;
             }
         }

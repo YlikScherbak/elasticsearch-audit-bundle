@@ -30,7 +30,8 @@ use PHPUnit\Framework\TestCase;
 /**
  * Which statements the log keeps once the listener has said which tables a history is about:
  * those of the tables, the transactions and savepoints always, and a statement it cannot read,
- * which may be of any table. A flush of rows nobody audits leaves nothing in it.
+ * which may be of any table. Of any other it keeps no text -- its place, its frame and whether
+ * it stood, which part what ran before it from what ran after.
  *
  * Two managers may share a connection, and so the log and the listener: each maps classes of
  * its own, and what one says of its tables is not what the other says.
@@ -52,12 +53,34 @@ final class WhichTablesTheLogKeepsTest extends TestCase
 
         $log->executed('SAVEPOINT DOCTRINE_2', [], 0);
         $inside = $log->executed('UPDATE kept SET id = ? WHERE id = ?', [2, 1], 1);
+        $log->executed('UPDATE other SET name = ? WHERE id = ?', ['b', 1], 1);
         $log->executed('ROLLBACK TO SAVEPOINT DOCTRINE_2', [], 0);
+        $log->executed('UPDATE other SET name = ? WHERE id = ?', ['c', 1], 1);
         $log->committed();
 
         self::assertNotNull($inside);
         self::assertSame(StatementLog::VOID, $log->fate($inside), 'a savepoint is kept whatever the tables: what ran inside it is rolled back');
-        self::assertSame(3, $log->position(), 'and the tables nobody keeps are not in the log: they are not even counted');
+        self::assertSame(9, $log->position(), 'every statement has its place, kept or not');
+
+        // Of the four of the other table before the savepoint, the one inside it, and the one after.
+        foreach ([2, 3, 4, 5, 8, 9] as $at) {
+            self::assertNull($log->statement($at), 'no text of a table nobody keeps, at '.$at);
+        }
+
+        self::assertSame([StatementLog::COMMITTED, StatementLog::COMMITTED, StatementLog::VOID, StatementLog::COMMITTED], [$log->fate(2), $log->fate(5), $log->fate(8), $log->fate(9)], 'and a fate as any other: rolled back with its savepoint, committed with its transaction');
+        self::assertSame($log->frameOf(1), $log->frameOf(2), 'and a frame');
+        self::assertNotSame($log->frameOf(5), $log->frameOf(8), 'the savepoint\'s own, inside the transaction\'s');
+    }
+
+    public function testAFailedStatementOfATableNobodyKeepsIsVoid(): void
+    {
+        $log = new StatementLog();
+        $log->keepingOnly(static fn (string $table): bool => $table === 'kept');
+        $log->executed('INSERT INTO other (id) VALUES (?)', [1], 1);
+        $log->executed('INSERT INTO other (id) VALUES (?)', [1], 0, failed: true);
+        $log->executed('INSERT INTO other (id) VALUES (?)', [2], 1);
+
+        self::assertSame([StatementLog::COMMITTED, StatementLog::VOID, StatementLog::COMMITTED], [$log->fate(1), $log->fate(2), $log->fate(3)], 'a failed one changed nothing, and the ones around it are not taken with it');
     }
 
     public function testAStatementOfAnotherManagersTablesIsKeptAfterThisOneFlushed(): void
@@ -70,20 +93,19 @@ final class WhichTablesTheLogKeepsTest extends TestCase
         $budget->persist(new Imported('b'));
         $budget->flush();
 
-        $before = $statements->position();
         $connection->executeStatement('UPDATE Author SET name = ? WHERE id = ?', ['changed', 1]);
-        self::assertSame($before + 1, $statements->position(), 'Author is the other manager\'s history, and the last flush was not that manager\'s');
+        self::assertNotNull($statements->statement($statements->position()), 'Author is the other manager\'s history, and the last flush was not that manager\'s');
 
         $connection->executeStatement('UPDATE budget_unaudited SET name = ? WHERE id = ?', ['changed', 1]);
-        self::assertSame($before + 1, $statements->position(), 'and a table neither manager has any history of is not kept');
+        self::assertNull($statements->statement($statements->position()), 'and a table neither manager has any history of is not kept');
 
         // Again, with nothing reset: a manager that flushes a second time is asked as the first.
         $budget->persist(new Imported('c'));
         $budget->flush();
-        $again = $statements->position();
         $connection->executeStatement('UPDATE Author SET name = ? WHERE id = ?', ['again', 1]);
+        self::assertNotNull($statements->statement($statements->position()), 'the second flush says of the tables what the first said');
         $connection->executeStatement('UPDATE budget_unaudited SET name = ? WHERE id = ?', ['again', 1]);
-        self::assertSame($again + 1, $statements->position(), 'the second flush says of the tables what the first said');
+        self::assertNull($statements->statement($statements->position()));
     }
 
     public function testEachManagerIsAskedOfItsOwnMapping(): void
