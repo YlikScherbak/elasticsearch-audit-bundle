@@ -11,8 +11,9 @@ declare(strict_types=1);
  * SQLite in memory, a transport that keeps nothing, one flush of N entities of the benchmark's own
  * classes (tools/flush-cost/Entities.php), each case in a process of its own so that nothing one
  * leaves behind is counted in the next, each repeated and reported by its median. What is
- * reported is the flush's own time, and the peak memory it added over what the process held
- * before it. A case that runs out of the memory limit given says so.
+ * reported is the flush's own time, the peak memory it added over what the process held
+ * before it, and the process's peak through the flush -- what a memory limit is held against.
+ * A case that runs out of the memory limit given says so.
  *
  * Runs against whichever release of the bundle is installed: from 1.3 the audited connection is
  * watched through the bundle's driver middleware, before it the listener needed nothing of the
@@ -69,8 +70,8 @@ if ($case === null) {
             for ($i = 0; $i < $repeats; ++$i) {
                 $out = trim((string) shell_exec(sprintf('%s%s -d memory_limit=%s %s %d %d %s %s 2>&1', $php, $driver, escapeshellarg($limit), escapeshellarg(__FILE__), $entities, 1, escapeshellarg($limit), escapeshellarg("$what:$whose:$listener"))));
 
-                if (preg_match('/^(\d+) (\d+)$/', $out, $m) === 1) {
-                    $runs[] = [(int) $m[1], (int) $m[2]];
+                if (preg_match('/^(\d+) (\d+) (\d+)$/', $out, $m) === 1) {
+                    $runs[] = [(int) $m[1], (int) $m[2], (int) $m[3]];
                 } else {
                     // Out of memory is a result; anything else is the benchmark failing, and says what.
                     $failure ??= str_contains($out, 'Allowed memory size') ? 'out of memory' : 'failed: '.strtok($out, "\n");
@@ -87,7 +88,9 @@ if ($case === null) {
             $ms = $runs[intdiv(\count($runs), 2)][0];
             $bytes = array_column($runs, 1);
             sort($bytes);
-            $cells[] = sprintf('%d ms, +%d MB', $ms, round($bytes[intdiv(\count($bytes), 2)] / 1048576));
+            $peaks = array_column($runs, 2);
+            sort($peaks);
+            $cells[] = sprintf('%d ms, +%d MB (peak %d MB)', $ms, round($bytes[intdiv(\count($bytes), 2)] / 1048576), round($peaks[intdiv(\count($peaks), 2)] / 1048576));
         }
 
         printf("| %s | %s | %s |\n", $name, $cells[0], $cells[1]);
@@ -167,4 +170,6 @@ $started = hrtime(true);
 $em->flush();
 $ms = (hrtime(true) - $started) / 1e6;
 
-printf("%d %d\n", round($ms), memory_get_peak_usage() - $before);
+// What the flush added, and the process's peak through it: the second is what a memory limit is
+// held against.
+printf("%d %d %d\n", round($ms), memory_get_peak_usage() - $before, memory_get_peak_usage());

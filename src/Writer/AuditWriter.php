@@ -307,6 +307,31 @@ final class AuditWriter
     }
 
     /**
+     * Whether a frame is open, so that what writeAll() is handed now is held, staged or
+     * released by it -- and one call is one decision there: under `on_overflow: throw`, a
+     * frame that overflows takes the whole call with it. The listener hands a moment over in
+     * one call while a frame is open, and in batches of batchSize() otherwise.
+     *
+     * @internal the listener's question; nothing of the application's
+     */
+    public function isInAFrame(): bool
+    {
+        return $this->frame?->isOpen() ?? false;
+    }
+
+    /**
+     * How many records go out to the transport in one batch.
+     *
+     * @internal the listener's question; nothing of the application's
+     *
+     * @return positive-int
+     */
+    public function batchSize(): int
+    {
+        return $this->batchSize;
+    }
+
+    /**
      * The batch form of writeCompleted(): records that already went through the
      * completion pass, sent together.
      *

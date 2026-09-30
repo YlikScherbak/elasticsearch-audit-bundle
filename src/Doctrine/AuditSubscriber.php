@@ -729,44 +729,34 @@ final class AuditSubscriber
     private function publish(ObjectManager $manager, ?EntityManagerInterface $em): void
     {
         $em = self::entityManagerOf($manager) ?? $em;
-        $records = [];
-        $collected = [];
 
-        // The whole of this is inside the failure policy: this is postFlush, the transaction
-        // has committed, and an exception escaping would come out of flush() for a database
-        // change that is already real. What the policy cannot do here is undo it.
-        if ($em !== null) {
-            foreach ($this->drafts($em, consume: true) as $draft) {
-                try {
-                    $records[] = $this->recordOfTheDraft($em, $draft);
-                    $collected[] = $draft['flush'];
-                } catch (\Throwable $e) {
-                    $this->reportWhileBuilding($e);
-                }
-            }
-        }
-
-        // One batch: a flush that touched fifty entities is one _bulk call, not fifty
-        // round-trips. The moment the change happened, not the moment it is being
-        // written: this method runs in postFlush, and in the branch that publishes a
-        // swallowed flush it runs during a later one entirely.
+        // One batch per run of records that share a moment: a flush that touched fifty
+        // entities is one _bulk call, not fifty round-trips. The moment the change happened,
+        // not the moment it is being written: this method runs in postFlush, and in the branch
+        // that publishes a swallowed flush it runs during a later one entirely. Nearly always
+        // there is exactly one run; there are two or three when a lifecycle listener called
+        // flush() in the middle of this one, and then each stretch goes out with the moment its
+        // own flush settled. Runs rather than groups, so that the order records were collected
+        // in is the order they are written in.
         //
-        // One batch per run of records that share a moment, and runs rather than groups
-        // so that the order records were collected in is the order they are written in.
-        // Nearly always there is exactly one run; there are two or three when a
-        // lifecycle listener called flush() in the middle of this one, and then each
-        // stretch goes out with the moment its own flush settled.
+        // A run goes out as it is made, not once every record is: a flush of twenty thousand
+        // held its drafts and its records whole at once. Outside a frame a run goes in batches
+        // of the writer's own size, which is how the writer sends them anyway. Inside one a run
+        // goes in one call, as before: there one call is one decision, and under on_overflow:
+        // throw a frame that overflows takes the whole call with it -- a run in parts would
+        // leave the parts before it written.
         //
-        // One run failing does not cost the rest. Under on_failure: throw a refused
-        // record leaves writeAll() as an exception, and stopping there would drop every
-        // later run — records of changes that are already committed, thrown away because
-        // something else could not be written. A single writeAll() never did that: it
-        // tries every record and raises afterwards. The runs are held to the same
-        // promise, and the first exception is the one the caller gets, because it is the
-        // one writeAll() already reported.
+        // One run failing does not cost the rest. Under on_failure: throw a refused record
+        // leaves writeAll() as an exception, and stopping there would drop every later run --
+        // records of changes that are already committed, thrown away because something else
+        // could not be written. A single writeAll() never did that: it tries every record and
+        // raises afterwards. The runs are held to the same promise, and the first exception is
+        // the one the caller gets, because it is the one writeAll() already reported.
         $run = [];
         $moment = self::NO_FLUSH;
         $refused = null;
+        $whole = $this->writer->isInAFrame();
+        $batch = $this->writer->batchSize();
 
         $send = function (array $run, int $moment) use (&$refused): void {
             try {
@@ -779,16 +769,35 @@ final class AuditSubscriber
             }
         };
 
-        foreach ($records as $position => $record) {
-            $its = $collected[$position] ?? self::NO_FLUSH;
+        // The whole of this is inside the failure policy: this is postFlush, the transaction
+        // has committed, and an exception escaping would come out of flush() for a database
+        // change that is already real. What the policy cannot do here is undo it.
+        if ($em !== null) {
+            $drafts = $this->drafts($em, consume: true);
 
-            if ($run !== [] && $its !== $moment) {
-                $send($run, $moment);
-                $run = [];
+            // Each draft let go as its record is made.
+            foreach (array_keys($drafts) as $index) {
+                $draft = $drafts[$index];
+                unset($drafts[$index]);
+
+                try {
+                    $record = $this->recordOfTheDraft($em, $draft);
+                } catch (\Throwable $e) {
+                    $this->reportWhileBuilding($e);
+
+                    continue;
+                }
+
+                $its = $draft['flush'];
+
+                if ($run !== [] && ($its !== $moment || (!$whole && \count($run) >= $batch))) {
+                    $send($run, $moment);
+                    $run = [];
+                }
+
+                $run[] = $record;
+                $moment = $its;
             }
-
-            $run[] = $record;
-            $moment = $its;
         }
 
         if ($run !== []) {
