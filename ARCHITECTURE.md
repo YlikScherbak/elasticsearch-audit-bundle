@@ -186,6 +186,15 @@ row for it since (`aJoinRowWritten()`, called from `executed()`, arms the key). 
 (`observationsOf()`) and shares its fate. Watches go with their flush (`forgetTheWatchesOf()`,
 from `postFlush`); one left behind does no harm.
 
+**Tables kept.** From the listener's first flush on (`keepingOnly()`, set at `preFlush`), the log
+keeps the text of a statement only if it is of a table a history is about
+(`WatchedRows::isAHistoryTable()`), or cannot be read at all. Transactions and savepoints are always
+kept. Any other statement keeps its place, its frame and whether it failed, with no SQL and no
+parameters, and `statement()` returns `null` for it. The place is what parts one change of a JOINED
+row from the next, and what says a join row's `DELETE` is not right before its owner's. A statement
+of that kind can still be rolled back, like any other. The back-to-back statements of one frame
+share a single entry.
+
 **Forgetting.** `forgetUpTo()` lets go of statements, flush-start marks and closed frames nothing
 needs any more. The listener calls it only after its row memory has settled. `new StatementLog(letsGo: false)`
 keeps everything, for tests that replay the log on their own.
@@ -198,7 +207,11 @@ be known from somewhere. Only rows a history is written about are remembered.
 **`WatchedRows`** decides which: a class with an audit declaration, and a class that is the element
 of an audited inverse collection (`areWatched()`); an owning ManyToMany among an audited owner's
 fields (`areLinksWatched()`); and, for a target class, which watched links it is the target of
-(`linksTo()`). Asked once per class and cached.
+(`linksTo()`). Asked once per class and cached. It also answers two questions about the whole
+mapping. The first is which classes a representer may be handed as they stood (`areShownAsTheyStood()`):
+the replay keeps versions only of those. The second is which tables' statements the log keeps
+(`isAHistoryTable()`). Both answers are kept by the manager's metadata factory, because managers that
+share a connection share the listener (rule 13).
 
 **`RowMemory`** (`src/Doctrine/Observation/RowMemory.php`) holds each watched row's columns as
 database values, by root class and key.
@@ -444,6 +457,19 @@ Each is enforced somewhere named, and broken at least once before it was written
     after every good record has gone out.
 12. **Redaction is the last word before the transport**, after the enrichers and again after
     `RecordCreatedEvent`, so nothing added to a record can put a secret back.
+13. **A cache of what the mapping says is kept by manager.** Several entity managers can sit on one
+    connection, and then they share one listener and one log, each with a mapping of its own.
+    - A cache read from `getAllMetadata()` is kept by the manager's metadata factory (a `WeakMap`).
+      One kept whole was answered by whichever manager asked first: the second one's classes were
+      never shown as they stood.
+    - A cache kept by class alone is right only where a class belongs to one mapping.
+    - The log's filter keeps a table if any manager that has flushed says it is history. So one
+      manager's flush never narrows what another's needs.
+    - What the filter cannot know is a manager that has not flushed yet. The application's own
+      statements on that manager's tables before its first flush keep no text, so no warning names
+      them. Its history begins at that first `preFlush` either way.
+
+    `tests/Doctrine/Observation/WhichTablesTheLogKeepsTest.php` holds all three.
 
 ## Tests as the map of guarantees
 
