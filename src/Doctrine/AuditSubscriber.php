@@ -896,12 +896,8 @@ final class AuditSubscriber
         // Ordered by where each happened: an execution by its first statement.
         $ordered = [];
 
-        $entityRuns = $this->entityRuns->of($em, $replay, $this->statements, $this->factsReadThrough, $this->departed, $consume, $this->ranDuringAFlush(...), $failed);
-
-        // Each run let go as its draft is made, as each execution was as its run was.
-        foreach (array_keys($entityRuns) as $index) {
-            $run = $entityRuns[$index];
-            unset($entityRuns[$index]);
+        // Each run made into its draft as it comes, and let go: no list of them is held.
+        foreach ($this->entityRuns->each($em, $replay, $this->statements, $this->factsReadThrough, $this->departed, $consume, $this->ranDuringAFlush(...), $failed) as $run) {
             $changes = $run['bare'];
 
             if ($run['event'] === AuditEvent::UPDATE && $this->skipEmptyUpdates && $changes === []) {
@@ -1183,7 +1179,7 @@ final class AuditSubscriber
         $id = HistoryReplay::keyOf($root, $key);
         $context = null;
 
-        foreach ($replay->rowFacts() as $fact) {
+        foreach ($replay->eachRowFact() as $fact) {
             if ($fact['at'] > $position) {
                 break;
             }

@@ -321,7 +321,23 @@ final class HistoryReplay
      */
     public function facts(): array
     {
-        return array_map(fn (array $fact): array => array_replace($fact, ['flush' => $this->log?->ownerOf($fact['at'])]), $this->facts);
+        return iterator_to_array($this->eachFact(), false);
+    }
+
+    /**
+     * The facts one at a time, each with the flush that ran it: what facts() lists, without a
+     * copy of every one of them made at once -- a flush of twenty thousand rows made one per
+     * reader.
+     *
+     * @return \Generator<int, array{type: string, id: string, field: string, old: mixed, new: mixed, flush: int|null, at: int, element: array{kind: string, owner: class-string, ownerKey: mixed, collection: string, class: class-string, key: array<string, mixed>, field: string|null}|null, failed: bool, ownerContext: array<string, mixed>}>
+     */
+    public function eachFact(): \Generator
+    {
+        foreach ($this->facts as $fact) {
+            $fact['flush'] = $this->log?->ownerOf($fact['at']);
+
+            yield $fact;
+        }
     }
 
     /** @return list<string> */
@@ -347,7 +363,35 @@ final class HistoryReplay
      */
     public function rowFacts(): array
     {
-        return array_map(fn (array $fact): array => array_replace($fact, ['flush' => $this->log?->ownerOf($fact['at'])]), $this->rowFacts);
+        return iterator_to_array($this->eachRowFact(), false);
+    }
+
+    /**
+     * The facts of the rows one at a time, as eachFact() gives the facts.
+     *
+     * @return \Generator<int, array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
+     */
+    public function eachRowFact(): \Generator
+    {
+        foreach ($this->rowFacts as $index => $fact) {
+            $fact['flush'] = $this->log?->ownerOf($fact['at']);
+
+            yield $index => $fact;
+        }
+    }
+
+    /**
+     * One fact of the rows by its place among them -- the key eachRowFact() gives it -- as
+     * eachRowFact() gives it.
+     *
+     * @return array{statement: string, class: class-string, id: string, key: array<string, mixed>, at: int, flush: int|null, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}
+     */
+    public function rowFactAt(int $index): array
+    {
+        $fact = $this->rowFacts[$index] ?? throw new \OutOfBoundsException(sprintf('No fact of the rows at %d.', $index));
+        $fact['flush'] = $this->log?->ownerOf($fact['at']);
+
+        return $fact;
     }
 
     /**

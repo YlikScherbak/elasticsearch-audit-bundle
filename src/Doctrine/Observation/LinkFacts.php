@@ -94,7 +94,7 @@ final class LinkFacts
         // indexed every one of them to find none.
         $rows = [];
 
-        foreach ($owning === [] ? [] : $replay->rowFacts() as $fact) {
+        foreach ($owning === [] ? [] : $replay->eachRowFact() as $fact) {
             if ($fact['statement'] !== StatementShape::UPDATE
                 && isset($owning[$root = $em->getClassMetadata($fact['class'])->rootEntityName])
             ) {

@@ -69,7 +69,7 @@ final class ElementFieldRuns
         $ranTo = [];
         $contexts = [];
 
-        foreach ($replay->facts() as $fact) {
+        foreach ($replay->eachFact() as $fact) {
             $element = $fact['element'];
 
             if ($element === null || $fact['at'] <= $readThrough) {

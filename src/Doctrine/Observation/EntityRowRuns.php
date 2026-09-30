@@ -77,52 +77,65 @@ final class EntityRowRuns
      */
     public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null, bool $consume = false, ?\Closure $duringAFlush = null, ?\Closure $failed = null): array
     {
-        /** @var list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}> $executions */
+        return iterator_to_array($this->each($em, $replay, $log, $readThrough, $departed, $consume, $duringAFlush, $failed), false);
+    }
+
+    /**
+     * What of() lists, a record at a time as each is made: a caller that makes something of its
+     * own of each lets it go before the next, and a flush of twenty thousand rows holds no list
+     * of them. Everything of() does, it does as this is read -- the failures and what it says in
+     * the log -- and only as far as it is read.
+     *
+     * @param (\Closure(int): bool)|null        $duringAFlush
+     * @param (\Closure(\Throwable): void)|null $failed
+     *
+     * @return \Generator<int, array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change|mixed>, bare: array<string, Change>, context: array<string, mixed>}>
+     */
+    public function each(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null, bool $consume = false, ?\Closure $duringAFlush = null, ?\Closure $failed = null): \Generator
+    {
+        // Each execution as the places of its facts among the replay's (executionOf()): a
+        // flush of twenty thousand rows held twenty thousand executions beside the facts they
+        // were made of, each a copy of what its facts say.
+        /** @var list<non-empty-list<int>> $executions */
         $executions = [];
+        // The execution being read: its facts, and what it says of itself, for the next fact to
+        // be asked whether it is the next table of it.
+        $facts = null;
         $open = null;
 
-        foreach ($replay->rowFacts() as $fact) {
+        foreach ($replay->eachRowFact() as $index => $fact) {
             if ($fact['at'] <= $readThrough) {
                 continue;
             }
 
             $table = StatementShape::read($log->statement($fact['at'])['sql'] ?? '')?->table;
-            $execution = $open === null ? null : $executions[$open];
 
-            if ($execution !== null && $table !== null && self::continues($log, $execution, $fact, $table)) {
-                $execution['at'][] = $fact['at'];
-                $execution['tables'][$table] = true;
-                $execution['fields'] = array_replace($execution['fields'], $fact['fields']);
-                $execution['context'] = $fact['context'];
-                $executions[$open] = $execution;
+            if ($facts !== null && $open !== null && $table !== null && self::continues($log, $open, $fact, $table)) {
+                $facts[] = $index;
+                $open['at'][] = $fact['at'];
+                $open['tables'][$table] = true;
 
                 continue;
             }
 
-            $executions[] = [
-                'statement' => $fact['statement'],
-                'class' => $fact['class'],
-                'id' => $fact['id'],
-                'key' => $fact['key'],
-                'flush' => $fact['flush'],
-                'at' => [$fact['at']],
-                'tables' => [(string) $table => true],
-                'fields' => $fact['fields'],
-                // The row once the whole change is in the database: the last statement's, as
-                // each table of the change is written.
-                'context' => $fact['context'],
-            ];
-            $open = array_key_last($executions);
+            if ($facts !== null) {
+                $executions[] = $facts;
+            }
+
+            $facts = [$index];
+            $open = ['statement' => $fact['statement'], 'class' => $fact['class'], 'id' => $fact['id'], 'flush' => $fact['flush'], 'at' => [$fact['at']], 'tables' => [(string) $table => true]];
         }
 
-        $executions = self::withTheirCompletions($em, $log, $executions);
-        $builder = new ChangeSetBuilder($em, $this->comparator);
-        $runs = [];
+        if ($facts !== null) {
+            $executions[] = $facts;
+        }
 
-        // Each execution let go as its record is made: the two lists of twenty thousand are
-        // never held at once.
+        $executions = self::withTheirCompletions($em, $log, $replay, $executions);
+        $builder = new ChangeSetBuilder($em, $this->comparator);
+
+        // Each execution made of its facts as its record is made, and let go with it.
         foreach (array_keys($executions) as $index) {
-            $execution = $executions[$index];
+            $execution = self::executionOf($replay, $executions[$index]);
             unset($executions[$index]);
 
             if ($execution['flush'] === null) {
@@ -148,11 +161,9 @@ final class EntityRowRuns
             }
 
             if ($record !== null) {
-                $runs[] = $record;
+                yield $record;
             }
         }
-
-        return $runs;
     }
 
     /**
@@ -171,36 +182,35 @@ final class EntityRowRuns
      * such a reference, and nothing more, in the same flush, reads as the same completion: the
      * log holds nothing that tells the two apart.
      *
-     * @param list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}> $executions
+     * An execution here is the places of its facts (executionOf()); a completion's facts join
+     * their creation's, marked as completing it.
      *
-     * @return list<array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, tables: array<string, true>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}>
+     * @param list<non-empty-list<int>> $executions
+     *
+     * @return list<non-empty-list<int>>
      */
-    private static function withTheirCompletions(EntityManagerInterface $em, StatementLog $log, array $executions): array
+    private static function withTheirCompletions(EntityManagerInterface $em, StatementLog $log, HistoryReplay $replay, array $executions): array
     {
         $kept = [];
         $creations = [];
 
-        foreach ($executions as $execution) {
+        foreach ($executions as $facts) {
+            $execution = self::executionOf($replay, $facts);
             $row = $execution['class'].'|'.$execution['id'];
 
             // Asked of the INSERT, not of what came between: Doctrine runs its completions once
             // every INSERT has, and a listener's own statement may have run in between.
             $at = $creations[$row] ?? null;
-            $creation = $at === null ? null : $kept[$at];
 
-            if ($creation !== null && $execution['statement'] === StatementShape::UPDATE && self::completes($em, $log, $creation, $execution)) {
-                foreach ($execution['fields'] as $field => $sides) {
-                    $creation['fields'][$field] = ['old' => null, 'new' => $sides['new']];
+            if ($at !== null && $execution['statement'] === StatementShape::UPDATE && self::completes($em, $log, self::executionOf($replay, $kept[$at]), $execution)) {
+                foreach ($facts as $index) {
+                    $kept[$at][] = -1 - $index;
                 }
-
-                $creation['at'] = [...$creation['at'], ...$execution['at']];
-                $creation['context'] = $execution['context'];
-                $kept[$at] = $creation;
 
                 continue;
             }
 
-            $kept[] = $execution;
+            $kept[] = $facts;
 
             if ($execution['statement'] === StatementShape::INSERT) {
                 $creations[$row] = array_key_last($kept);
@@ -208,6 +218,57 @@ final class EntityRowRuns
         }
 
         return $kept;
+    }
+
+    /**
+     * An execution as its facts say it: what its first fact is of, every position it ran at,
+     * its fields as each fact wrote them over the last, and the row once the last one ran. A
+     * fact that completes a creation (withTheirCompletions(), marked -1 - its place) says of each
+     * field it writes only what it set it to: the row appeared with it.
+     *
+     * @param non-empty-list<int> $facts
+     *
+     * @return array{statement: string, class: class-string, id: string, key: array<string, mixed>, flush: int|null, at: list<int>, fields: array<string, array{old: mixed, new: mixed}>, context: array<string, mixed>}
+     */
+    private static function executionOf(HistoryReplay $replay, array $facts): array
+    {
+        $execution = null;
+
+        foreach ($facts as $place) {
+            $completes = $place < 0;
+            $fact = $replay->rowFactAt($completes ? -1 - $place : $place);
+
+            if ($execution === null) {
+                $execution = [
+                    'statement' => $fact['statement'],
+                    'class' => $fact['class'],
+                    'id' => $fact['id'],
+                    'key' => $fact['key'],
+                    'flush' => $fact['flush'],
+                    'at' => [$fact['at']],
+                    'fields' => $fact['fields'],
+                    // The row once the whole change is in the database: the last statement's, as
+                    // each table of the change is written.
+                    'context' => $fact['context'],
+                ];
+
+                continue;
+            }
+
+            $execution['at'][] = $fact['at'];
+
+            if ($completes) {
+                foreach ($fact['fields'] as $field => $sides) {
+                    $execution['fields'][$field] = ['old' => null, 'new' => $sides['new']];
+                }
+            } else {
+                $execution['fields'] = array_replace($execution['fields'], $fact['fields']);
+            }
+
+            $execution['context'] = $fact['context'];
+        }
+
+        return $execution;
     }
 
     /**
