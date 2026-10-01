@@ -23,9 +23,15 @@
 # Six threads rather than all of them (INFECTION_THREADS=n to choose), because a timeout
 # counts as a kill: on HistoryReplay.php, eleven threads on a twelve-thread machine called
 # eight mutants timeouts that six threads, the same mutants and the same tests, saw escape.
-# --only-covering-test-cases runs the test cases covering the mutated line rather than the
-# whole files they are in: on the same file, at six threads, every one of the 670 mutants
-# had the same status with it as without it, in 19 minutes rather than 27.
+#
+# Not --only-covering-test-cases, though it is a third faster and agreed on every one of
+# HistoryReplay.php's 670 mutants: over the whole listener it let four mutants of
+# StatementShape.php escape that the whole test files kill. StatementShape::read() keeps
+# what it has read by the SQL, so a line of the parser is covered only by the first test in
+# the process to read that statement, and the test that would fail on the mutant reads it
+# second — from the memo, covering nothing. Run with whole files, the second test is still
+# in the file Infection picks; run with covering cases only, it is not. What a memo hides
+# from coverage, coverage cannot hand back to the run.
 set -e
 
 cd "$(dirname "$0")/../.."
@@ -50,7 +56,6 @@ MSYS_NO_PATHCONV=1 exec docker run --rm \
     es-audit-infection \
     php -d memory_limit=-1 tools/infection/vendor/bin/infection \
         --initial-tests-php-options="-d memory_limit=-1" \
-        --only-covering-test-cases \
         --threads="${INFECTION_THREADS:-6}" \
         --no-progress \
         --no-interaction \
