@@ -26,7 +26,7 @@ final class TheMutationGateTest extends TestCase
     {
         $this->root = sys_get_temp_dir() . '/es-audit-gate-' . bin2hex(random_bytes(6));
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'rest' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'rest' => ['*']]],
         ], \JSON_THROW_ON_ERROR));
         $this->write('tools/infection/composer.lock', json_encode([
             'packages' => [['name' => 'infection/infection', 'version' => '0.35.4', 'source' => ['reference' => 'abc']]],
@@ -143,6 +143,16 @@ final class TheMutationGateTest extends TestCase
             'ran on another fingerprint than this tree has',
         ];
 
+        yield 'a part run on more threads than the manifest gives the set' => [
+            static fn (self $test) => $test->runEverything(machines: ['rest' => [6, 12]]),
+            'set.rest ran on 6 threads, and the manifest says 2',
+        ];
+
+        yield 'a part whose threads took every CPU' => [
+            static fn (self $test) => $test->runEverything(machines: ['one' => [2, 2]]),
+            'set.one ran 2 threads on 2 CPUs',
+        ];
+
         yield 'a score below the floor' => [
             static function (self $test): void {
                 $test->write('infection.json5', "{\n    minCoveredMsi: 80,\n    timeout: 120,\n}\n");
@@ -166,7 +176,7 @@ final class TheMutationGateTest extends TestCase
     public function testAFileTwoPartsNameIsRefusedBeforeAnythingRuns(): void
     {
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'again' => ['src/A/One.php'], 'rest' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'again' => ['src/A/One.php'], 'rest' => ['*']]],
         ], \JSON_THROW_ON_ERROR));
 
         [$code, $output] = $this->gate('files', 'set', 'one');
@@ -178,13 +188,25 @@ final class TheMutationGateTest extends TestCase
     public function testAPartNamesOnlyFilesOfTheSet(): void
     {
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'sources' => ['src/A'], 'parts' => ['one' => ['src/B/Gone.php'], 'rest' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'sources' => ['src/A'], 'parts' => ['one' => ['src/B/Gone.php'], 'rest' => ['*']]],
         ], \JSON_THROW_ON_ERROR));
 
         [$code, $output] = $this->gate('files', 'set', 'rest');
 
         self::assertSame(1, $code);
         self::assertStringContainsString('Part "one" names src/B/Gone.php, which is not a PHP file of the set', $output);
+    }
+
+    public function testASetGivesItsThreads(): void
+    {
+        $this->write('tools/infection/parts.json', json_encode([
+            'set' => ['config' => 'infection.json5', 'sources' => ['src/A'], 'parts' => ['rest' => ['*']]],
+        ], \JSON_THROW_ON_ERROR));
+
+        [$code, $output] = $this->gate('files', 'set', 'rest');
+
+        self::assertSame(1, $code);
+        self::assertStringContainsString('parts.json gives set "set" no number of threads', $output);
     }
 
     public function testTheRestIsEveryFileNoOtherPartNames(): void
@@ -201,6 +223,7 @@ final class TheMutationGateTest extends TestCase
      * @param array<string, array<string, list<array{string, string, int}>>> $mutants
      * @param array<string, int>                              $skipped
      * @param array<string, string>                           $before
+     * @param array<string, array{int, int}>                  $machines threads and CPUs
      */
     public function runEverything(
         ?string $skip = null,
@@ -209,6 +232,7 @@ final class TheMutationGateTest extends TestCase
         array $mutants = [],
         array $skipped = [],
         array $before = [],
+        array $machines = [],
     ): void {
         $mutants += [
             'one' => ['killed' => [['src/A/One.php', 'Plus', 1]], 'escaped' => [['src/A/One.php', 'Minus', 2]]],
@@ -230,7 +254,8 @@ final class TheMutationGateTest extends TestCase
                 $this->write('var/' . $part . '.json', $text);
             }
 
-            [$code, $output] = $this->gate('record', 'set', $part, $log, (string) ($exitCodes[$part] ?? 0), $before[$part] ?? trim($fingerprint), $this->root . '/out');
+            [$threads, $cpus] = $machines[$part] ?? [2, 4];
+            [$code, $output] = $this->gate('record', 'set', $part, $log, (string) ($exitCodes[$part] ?? 0), $before[$part] ?? trim($fingerprint), (string) $threads, (string) $cpus, $this->root . '/out');
             self::assertSame(0, $code, $output);
         }
     }

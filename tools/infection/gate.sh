@@ -19,6 +19,9 @@ set_name=$1
 shift
 config=$(php -r '$m = json_decode(file_get_contents("tools/infection/parts.json"), true); echo $m[$argv[1]]["config"] ?? "";' "$set_name")
 [ -n "$config" ] || { echo "parts.json has no set \"$set_name\"" >&2; exit 2; }
+threads=$(php -r '$m = json_decode(file_get_contents("tools/infection/parts.json"), true); echo $m[$argv[1]]["threads"] ?? "";' "$set_name")
+# The CPUs the tests run on: run.sh runs them in a container, whose machine is not this one.
+cpus=$(docker run --rm es-audit-infection nproc)
 
 log="var/infection/$set_name.json"
 out="var/infection/gate"
@@ -32,8 +35,8 @@ run() {
     before=$(php tools/infection/gate.php fingerprint "$set_name")
     rm -f "$log"
     code=0
-    sh tools/infection/run.sh --configuration="$config" --min-covered-msi=0 "$@" || code=$?
-    php -d memory_limit=-1 tools/infection/gate.php record "$set_name" "$name" "$log" "$code" "$before" "$out"
+    INFECTION_THREADS=$threads sh tools/infection/run.sh --configuration="$config" --min-covered-msi=0 "$@" || code=$?
+    php -d memory_limit=-1 tools/infection/gate.php record "$set_name" "$name" "$log" "$code" "$before" "$threads" "$cpus" "$out"
 }
 
 run plan --dry-run

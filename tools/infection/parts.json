@@ -1,6 +1,7 @@
 {
     "main": {
         "config": "infection.json5",
+        "threads": 3,
         "sources": [
             "src/Privacy",
             "src/Coalescing",
@@ -13,14 +14,21 @@
             "src/Transport"
         ],
         "parts": {
-            "all": ["*"]
+            "all": [
+                "*"
+            ]
         }
     },
     "doctrine": {
         "config": "infection.doctrine.json5",
-        "sources": ["src/Doctrine"],
+        "threads": 3,
+        "sources": [
+            "src/Doctrine"
+        ],
         "parts": {
-            "all": ["*"]
+            "all": [
+                "*"
+            ]
         }
     }
 }

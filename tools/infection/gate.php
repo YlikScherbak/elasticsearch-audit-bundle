@@ -26,7 +26,7 @@ declare(strict_types=1);
  *   php tools/infection/gate.php parts <set>
  *   php tools/infection/gate.php files <set> <part>
  *   php tools/infection/gate.php fingerprint <set>
- *   php tools/infection/gate.php record <set> <part|plan> <log.json> <exit-code> <fingerprint-before> <out-dir>
+ *   php tools/infection/gate.php record <set> <part|plan> <log.json> <exit-code> <fingerprint-before> <threads> <cpus> <out-dir>
  *   php tools/infection/gate.php summarise <set> <dir>
  *
  * --root=<dir> points it at another tree than this one, which is how its tests run it.
@@ -44,13 +44,17 @@ function refuse(string $message): void
     throw new GateRefused($message);
 }
 
-/** @return array{config: string, sources: list<string>, parts: array<string, list<string>>} */
+/** @return array{config: string, threads: int, sources: list<string>, parts: array<string, list<string>>} */
 function setOf(string $root, string $set): array
 {
     $manifest = json_decode((string) file_get_contents($root . '/tools/infection/parts.json'), true, 512, \JSON_THROW_ON_ERROR);
 
     if (!isset($manifest[$set])) {
         refuse(sprintf('parts.json has no set "%s".', $set));
+    }
+
+    if (!\is_int($manifest[$set]['threads'] ?? null) || $manifest[$set]['threads'] < 1) {
+        refuse(sprintf('parts.json gives set "%s" no number of threads.', $set));
     }
 
     return $manifest[$set];
@@ -176,7 +180,7 @@ function infectionVersion(string $root): string
  * mutant, hundreds of megabytes for the listener. A log that cannot be read is recorded
  * as that, so that summarise refuses it by name rather than the record going missing.
  */
-function record(string $root, string $setName, string $part, string $log, string $exitCode, string $before, string $out): void
+function record(string $root, string $setName, string $part, string $log, string $exitCode, string $before, string $threads, string $cpus, string $out): void
 {
     $set = setOf($root, $setName);
     $parts = partsOf($root, $set);
@@ -195,6 +199,8 @@ function record(string $root, string $setName, string $part, string $log, string
         'part' => $part,
         'files' => $files,
         'exitCode' => (int) $exitCode,
+        'threads' => (int) $threads,
+        'cpus' => (int) $cpus,
         'fingerprintBefore' => $before,
         'fingerprint' => fingerprint($root, $set),
         'infection' => infectionVersion($root),
@@ -333,6 +339,17 @@ function summarise(string $root, string $setName, string $dir): int
             }
         }
 
+        // A timeout counts as a kill, and how many a run has depends on how many mutants were
+        // sharing the machine: on HistoryReplay.php, eleven threads of twelve called eight
+        // escaped mutants timeouts. So the threads are the manifest's, and one CPU is left over.
+        if ($record['threads'] !== $set['threads']) {
+            refuse(sprintf('%s ran on %d threads, and the manifest says %d.', $where, $record['threads'], $set['threads']));
+        }
+
+        if ($record['threads'] >= $record['cpus']) {
+            refuse(sprintf('%s ran %d threads on %d CPUs, which leaves the tests none to wait on.', $where, $record['threads'], $record['cpus']));
+        }
+
         if (isset($record['refusal'])) {
             refuse($record['refusal']);
         }
@@ -431,7 +448,7 @@ try {
             echo fingerprint($root, setOf($root, $arguments[1])), "\n";
             exit(0);
         case 'record':
-            record($root, ...array_slice($arguments, 1, 6));
+            record($root, ...array_slice($arguments, 1, 8));
             exit(0);
         case 'summarise':
             exit(summarise($root, $arguments[1], $arguments[2]));
