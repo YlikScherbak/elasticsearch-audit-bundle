@@ -284,9 +284,15 @@
     // What the score still does not do is stand in for the search: three thousand
     // sequences run green against the rows, and the list of known failures is empty.
     minCoveredMsi: 94,
-    // Six times the other run's. A test here is a schema and an EntityManager before it
-    // is an assertion, so the work per mutant is a second or two rather than well under
-    // one, and at 10 seconds the runner was calling eighty-eight of them timeouts — each
-    // of which counts as a kill and quietly lifts the score.
-    timeout: 60,
+    // High enough that nothing is skipped — see the other configuration's for why that is
+    // what decides it, and tools/infection/gate.php for the refusal that holds it there.
+    // The listener's lines are covered by the whole Doctrine suite, and at 60 seconds 1,176
+    // of 3,842 mutants were skipped uncounted while 337 were called timeouts, each of which
+    // counts as a kill; at 120 none were skipped and 31 timed out. Too low a timeout lifts
+    // the score both ways, by what it leaves out and by what it calls killed.
+    timeout: 120,
+    // As in the other configuration: the memory bar is a measurement, and the group list
+    // replaces phpunit.xml.dist's. The model of the rows stays — it is what kills the
+    // mutants no single test describes.
+    testFrameworkExtraArgs: "--exclude-group=integration --exclude-group=benchmark --exclude-group=budget",
 }

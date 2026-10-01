@@ -19,6 +19,13 @@
 # which the suite outgrew in 1.3 (a test of the listener's memory, five thousand entities a
 # flush); -d on Infection's own process does not reach the process it starts. CI's setup-php sets
 # no limit. The mutants' runs are each a few tests without coverage, and fit.
+#
+# Six threads rather than all of them (INFECTION_THREADS=n to choose), because a timeout
+# counts as a kill: on HistoryReplay.php, eleven threads on a twelve-thread machine called
+# eight mutants timeouts that six threads, the same mutants and the same tests, saw escape.
+# --only-covering-test-cases runs the test cases covering the mutated line rather than the
+# whole files they are in: on the same file, at six threads, every one of the 670 mutants
+# had the same status with it as without it, in 19 minutes rather than 27.
 set -e
 
 cd "$(dirname "$0")/../.."
@@ -43,7 +50,8 @@ MSYS_NO_PATHCONV=1 exec docker run --rm \
     es-audit-infection \
     php -d memory_limit=-1 tools/infection/vendor/bin/infection \
         --initial-tests-php-options="-d memory_limit=-1" \
-        --threads=max \
+        --only-covering-test-cases \
+        --threads="${INFECTION_THREADS:-6}" \
         --no-progress \
         --no-interaction \
         "$@"

@@ -264,10 +264,21 @@
     // ignored. minCoveredMsi rather than minMsi because uncovered code is the coverage
     // floor's business, and tools/coverage-floor.php already owns that argument.
     minCoveredMsi: 97,
-    // Low on purpose. A mutant that loops forever is ordinary here — the redactor and
-    // the frame walk with budgets, and removing a budget is exactly the mutation — and
-    // every one of those otherwise costs the whole timeout. The real work per mutant is
-    // the few tests covering one line, which take well under a second even through a
-    // slow mount.
-    timeout: 10,
+    // High enough that nothing is skipped, which is what decides it — and the gate
+    // (tools/infection/gate.php) refuses a run that skipped any, so that a timeout lowered
+    // for speed shows up as a red job rather than as a score over fewer mutants. Infection
+    // skips a mutant, uncounted, when the tests covering its line add up to more than this,
+    // and the writer's and the frame's lines are covered by nearly the whole suite: every
+    // Doctrine test writes through them, about ninety seconds under coverage. At 10 it was
+    // skipping 494 of 2,663 mutants (202 before 1.3, and growing) under a green gate.
+    //
+    // What it costs is the mutants that loop: a removed budget in the redactor or the
+    // frame now runs for two minutes rather than ten seconds. There were thirteen.
+    timeout: 120,
+    // The listener's memory bar is a measurement of five thousand entities, not a test of
+    // behaviour: it adds seconds to every mutant whose line it passes and decides none of
+    // them. It runs in the ordinary suite. A group given here replaces phpunit.xml.dist's
+    // rather than adding to them, so those two are repeated — one flag each: PHPUnit 12
+    // reads "a,b" as the name of one group, excludes nothing, and runs the integration tests.
+    testFrameworkExtraArgs: "--exclude-group=integration --exclude-group=benchmark --exclude-group=budget",
 }

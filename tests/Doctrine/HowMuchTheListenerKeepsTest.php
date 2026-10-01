@@ -67,6 +67,7 @@ final class HowMuchTheListenerKeepsTest extends TestCase
     }
 
     #[DataProvider('theBar')]
+    #[\PHPUnit\Framework\Attributes\Group('budget')]
     public function testTheListenerStaysUnderItsBar(string $what, string $class, int $bytesAnEntity): void
     {
         $this->assertTheListenerAdds($what, $class, $bytesAnEntity);
