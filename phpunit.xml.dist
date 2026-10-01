@@ -23,6 +23,11 @@
         </exclude>
     </groups>
 
+    <extensions>
+        <!-- StatementShape's memo outlives a test; see the class for what that hid from coverage -->
+        <bootstrap class="Borsche\ElasticsearchAuditBundle\Tests\EveryTestReadsItsOwnStatements"/>
+    </extensions>
+
     <php>
         <ini name="error_reporting" value="-1"/>
         <env name="AUDIT_ES_URL" value=""/>

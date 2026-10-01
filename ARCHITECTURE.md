@@ -470,6 +470,38 @@ Each is enforced somewhere named, and broken at least once before it was written
       them. Its history begins at that first `preFlush` either way.
 
     `tests/Doctrine/Observation/WhichTablesTheLogKeepsTest.php` holds all three.
+14. **State that outlives the listener is named, and there is one piece of it.**
+    `StatementShape::read()` keeps what it has read by the SQL text alone, for the life of the
+    process: at most `StatementShape::REMEMBERED` (256) statements, the oldest let go first. The text
+    is the whole key — no parameter, row, flush or fate — so it is the same for every request a
+    worker serves. Everything else the listener keeps belongs to an object: a field of
+    `AuditSubscriber` (rule 10), or a `WeakMap` by the manager's metadata factory (rule 13). The two
+    other statics in `src/` hold what never changes — the package's own path in `SafeMessage`, the
+    reader's allowed keys — and remember nothing the application did. A static that does is a new
+    rule here, not a field.
+
+    It is also why the tests forget it: `tests/EveryTestReadsItsOwnStatements.php` empties it before
+    each test. Coverage gives a line to the tests that ran it, and with the memo only the first test
+    of the process to read a statement runs the parser for it; a mutation run, which picks the tests
+    to try a mutant against by coverage, then never asks the test that would tell it apart.
+
+## The mutation gate
+
+**A score is believed only with the run it came from.** `tools/infection/gate.php` reads a run as a
+plan (Infection's `--dry-run` over the whole configuration) and parts (`tools/infection/parts.json`),
+and refuses one where any mutant was skipped, a part is missing, unfinished or ran on another tree,
+another configuration or other threads than the manifest gives, or the parts' mutants are not the
+plan's one for one. Then it sums the counts — never the parts' percentages — and holds them to the
+configuration's `minCoveredMsi`.
+
+- **The timeout is set so that nothing is skipped.** Infection skips a mutant, uncounted, when the
+  tests covering its line add up to more than the timeout; with too low a one the score is a score
+  of fewer mutants, and the gate says so rather than passing it. Raising the timeout for speed
+  comes back as a red job.
+- **The threads are part of the result.** A timeout counts as a kill, and contention makes them:
+  eleven threads of twelve called escaped mutants timeouts that one thread sees escape.
+- **Mutants run against whole test files**, not only the cases covering the line: coverage cannot
+  name a test that read a cached answer (rule 14), and whole files at least keep its neighbours.
 
 ## Tests as the map of guarantees
 
