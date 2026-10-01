@@ -29,6 +29,8 @@
     logs: {
         text: "var/infection/escaped.log",
         summary: "var/infection/summary.log",
+        // What tools/infection/gate.php checks a part against the plan with.
+        json: "var/infection/main.json",
     },
     mutators: {
         "@default": true,

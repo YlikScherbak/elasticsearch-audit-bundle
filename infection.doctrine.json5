@@ -18,6 +18,8 @@
     logs: {
         text: "var/infection/doctrine-escaped.log",
         summary: "var/infection/doctrine-summary.log",
+        // What tools/infection/gate.php checks a part against the plan with.
+        json: "var/infection/doctrine.json",
     },
     mutators: {
         "@default": true,

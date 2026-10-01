@@ -1,0 +1,26 @@
+{
+    "main": {
+        "config": "infection.json5",
+        "sources": [
+            "src/Privacy",
+            "src/Coalescing",
+            "src/Outbox",
+            "src/Command",
+            "src/Elasticsearch",
+            "src/Model",
+            "src/Reader",
+            "src/Writer",
+            "src/Transport"
+        ],
+        "parts": {
+            "all": ["*"]
+        }
+    },
+    "doctrine": {
+        "config": "infection.doctrine.json5",
+        "sources": ["src/Doctrine"],
+        "parts": {
+            "all": ["*"]
+        }
+    }
+}
