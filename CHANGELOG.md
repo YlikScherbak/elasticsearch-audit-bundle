@@ -26,7 +26,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   Seen with doctrine/dbal 4.5.0 and symfony/doctrine-messenger 7.4.20 on 1.1.0, the first release
   with the outbox, and on 1.2.4, and with 6.4.47 on 1.1.0; the same check is in every release
   between. Not seen with doctrine/dbal 4.4.4 and doctrine-messenger 7.4.18, nor with dbal 3.8.0 and
-  6.4.0. Messenger 8 was not tried.
+  6.4.0. Messenger 8 was not tried: its shape of the answer is covered by a test with stubs, not
+  by a run of the real queue.
+
+### Internal
+- **The mutation gate of this branch measures what it says.** A test helper declared inside
+  another test's file made a mutant's run die of a missing class, and that was counted as the
+  mutant killed; the helpers have files of their own, the main run's timeout skips nothing, and
+  the floors are set from that measurement — the reasons are in `infection.json5` and
+  `infection.doctrine.json5`. Nothing in the bundle changed for this.
 
 ## [1.2.4] - 2026-09-21
 

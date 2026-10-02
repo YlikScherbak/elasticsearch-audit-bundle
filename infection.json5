@@ -261,7 +261,19 @@
     // group of escaped mutants is worked through rather than set aspirationally and
     // ignored. minCoveredMsi rather than minMsi because uncovered code is the coverage
     // floor's business, and tools/coverage-floor.php already owns that argument.
-    minCoveredMsi: 97,
+    //
+    // 1.2.5, in place of the room and the numbers above: the floor is what this branch
+    // measures, exactly. The mechanism of false kills
+    // existed from v1.1.0 — QueueSender, a test helper declared in OutboxTransportTest.php
+    // and used by AuditTransactionTest, was missing whenever a mutant's run loaded the
+    // second file and not the first, and Infection counted the "class not found" as the
+    // mutant killed — so the scores measured before 1.2.5 are not to be believed without
+    // measuring again. Measured with the helpers in files of their own, doctrine/dbal 4.5.0,
+    // nothing skipped, three threads on a four-CPU runner: 2,465 mutants, 2,341 killed, 119
+    // escaped, 4 errors (unbounded recursions in NumericNullAsZeroComparator and
+    // SyncIndexCommand), 1 timeout that a test kills when the machine is not shared: 95.17.
+    // This is the maintenance branch; the work on what escapes is 1.3's.
+    minCoveredMsi: 95.17,
     // High enough that nothing is skipped (1.2.5). Infection skips a mutant, uncounted,
     // when the tests covering its line add up to more than the timeout, and at 10 seconds
     // it was leaving out 186 of 2,465 — the score was a score of the rest. What it costs

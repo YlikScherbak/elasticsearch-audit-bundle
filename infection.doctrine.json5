@@ -177,7 +177,16 @@
     // happened on the commit that taught the listener about a flush whose only history
     // came from inside a collection, and every claim had to be pointed at its line
     // again — which is the moment to notice if one of them stopped being true.
-    minCoveredMsi: 97,
+    //
+    // 1.2.5, in place of what is said above: the floor is what this branch measures, exactly
+    // — see infection.json5 for why the
+    // scores before 1.2.5 are not to be believed without measuring again: here 83 of the 698
+    // kills they counted were runs that died of a missing test helper. Measured with the
+    // helpers in files of their own, doctrine/dbal 4.5.0, nothing skipped, three threads on a
+    // four-CPU runner: 706 mutants, 615 killed, 89 escaped, 2 timeouts — both loops that cannot
+    // end, in onFlush's walk down the depth stack (a condition true of an empty stack; the pop
+    // removed): 87.39.
+    minCoveredMsi: 87.39,
     // Six times the other run's. A test here is a schema and an EntityManager before it
     // is an assertion, so the work per mutant is a second or two rather than well under
     // one, and at 10 seconds the runner was calling eighty-eight of them timeouts — each
