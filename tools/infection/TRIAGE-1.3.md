@@ -112,8 +112,40 @@ and its test directory run with errors shown.
 
 ## Escaped
 
-To be worked through in this order: `AuditSubscriber.php` and `HistoryReplay.php`, then
-`RowBinding.php`, then the rest.
+The base is CI's run of `6bb3945`, with the false kills gone and nothing skipped: main 2,664
+mutants, 145 escaped, 94.56%; Doctrine 3,842, 715 escaped, 81.39%. Worked through in this order:
+`AuditSubscriber.php` and `HistoryReplay.php`, then `RowBinding.php`, then the rest.
+
+### AuditSubscriber::executionsTheLogTookBack (the dropped warning's count)
+
+Nine escaped after `0d757de`, which had been the first defect of this triage: two INSERTs of one
+class counted as one by the warning about a flush that was rolled back (seven cases, red before,
+each half of the fix neutralised red).
+
+| Id | Line | Change | Class |
+|---|---|---|---|
+| `23929a4e`, `d490b211` | 829 | the loop starts one statement early (+0, −1) | test gap — closed by `WhatAnAbandonedFlushLeavesTest::testAFlushAfterTwoThatDiedIsRecordedAsItself`, written for them; writing it found the code defect below |
+| `9401a26b` | 840 | `continue` → `break` | test gap — the case "a row nobody audits, written first, is passed over" |
+| `92809252` | 834 | `$shape === null \|\| $binding === null` → `&&` | equivalent: `$entry === null` gives `$shape === null` (line 831), and `$binding` is null only when `$entry` or `$shape` is (line 832) — so `$binding === null` holds exactly when `$shape === null` does |
+| `c7ad9331`, `d7f41f62` | 834 | `$binding->kind !== ROW` joined by `&&` | **code defect (diagnostics)**: a change made only in a collection was counted as no record ("0 audit record(s) … dropped" for a tag added) |
+| `644423bc`, `7c7c458b`, `1be4c49f` | 832–834 | the fate and the mapping conditions | not reached: a statement of a table no history is about is not kept in the log |
+
+All nine are moot: the count is gone (`4261bdb`, the reviewers' choice). Counting records honestly
+would have meant building them a second way for a log line, so the warning now says the changes
+are dropped and promises no number. The function and its helper went with it.
+
+### Code defects found
+
+- **A record under another row's id** (`229e01a`, HIGH, in 1.3 from its start, no release had it).
+  The key of a row the database hands out was taken from the order `postPersist` announced rows
+  in; a flush that dies in its first `postPersist`, or one started from `postPersist` (announced A,
+  C, B for INSERTs A, B, C), moved every key after it. Found by the test written for the 829
+  mutants. Fixed by keeping the connection's answer to Doctrine's `lastInsertId()` beside its
+  INSERT; pinned by `WhereDoctrineAsksForAGeneratedKeyTest` (the canary, seven configurations) and
+  `AKeyBelongsToItsInsertTest` (each document's objectId and values, red before, five
+  configurations). The corpora after the fix: 0 documents of 3,000 changed against the base in any
+  of the fourteen runs — no generated sequence takes either road.
+- **The dropped warning's count** (`4261bdb`, diagnostics): see above.
 
 ## Killed outside coverage
 
@@ -130,3 +162,11 @@ cause is found, so that coverage names the test.
 
 Paths the model's vocabulary does not produce, found by mutants it did not kill. The input for the
 vocabulary after the release.
+
+- **A flush started from `postPersist`.** The model starts nested flushes from `postUpdate`; from
+  `postPersist` the rows are announced in another order than their INSERTs ran, which is where the
+  key defect lived.
+- **A flush that dies in a `postPersist`, with more than one row of a class inserted.** The model's
+  dying endings throw elsewhere; this one leaves rows inserted and never announced.
+- **A collection changed alone in a flush that dies.** Seen only by the warning, now without count;
+  worth having where the history of the flush after it is what is compared.
