@@ -956,34 +956,45 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
      */
     private function theOuterFlushsYAndTheNestedFlushsSecondX(): array
     {
-        // Whose statement Y's UPDATE is, is Doctrine's to decide. One ORM dispatches X's postUpdate
-        // only after the outer flush has written every row it scheduled; another dispatches it
-        // right after X's own row, and the nested flush then runs on the same unit of work, with
-        // Y's update still pending -- so the nested flush writes Y, and Y's change is the nested
-        // flush's, in a record of its own after the second X. The order of the statements is the
-        // same both ways (X, Y, X again); what differs is which flush each belongs to, and that is
-        // what the history follows.
+        // Y's change comes before or after the second X, and which is the database's and the
+        // connection's to decide, not the listener's. The nested flush runs on the outer flush's
+        // unit of work and writes Y, which the outer one had scheduled. Where the log can tell the
+        // nested flush's statements apart (DBAL 4, or savepoints), Y is the nested flush's and its
+        // record follows the second X. Where it cannot, all three are the outer flush's, and the
+        // records follow the statements -- whose order differs by engine: SQLite writes Y before
+        // the second X, Postgres after it.
         //
-        // This used to be told by ORM 2 against ORM 3, and ORM 3.0.0 dispatches the way ORM 2
-        // does; so it is read off the log, from the flush each statement belongs to.
-        $xSetTo2 = $ySetTo2 = null;
+        // So it is read off the log. Told by ORM 2 against 3, it was wrong on ORM 3.0.0; by the
+        // owners alone, wrong on Postgres; by where the nested flush began, or by which flush
+        // Doctrine announced Y's update in (it announces it in both), wrong again.
+        $at = ['x2' => null, 'y2' => null, 'x5' => null];
 
-        for ($at = $this->from + 1, $to = $this->log->position(); $at <= $to; ++$at) {
-            $statement = $this->log->statement($at);
+        for ($statement = $this->from + 1, $to = $this->log->position(); $statement <= $to; ++$statement) {
+            $entry = $this->log->statement($statement);
 
-            if ($statement === null || !str_starts_with($statement['sql'], 'UPDATE CrateItem')) {
+            if ($entry === null || !str_starts_with($entry['sql'], 'UPDATE CrateItem')) {
                 continue;
             }
 
-            $params = array_map('intval', array_values($statement['params']));
-            $xSetTo2 ??= $params === [2, 1] ? $at : null;
-            $ySetTo2 ??= $params === [2, 2] ? $at : null;
+            $which = match (array_map('intval', array_values($entry['params']))) {
+                [2, 1] => 'x2',
+                [2, 2] => 'y2',
+                [5, 1] => 'x5',
+                default => null,
+            };
+
+            if ($which !== null) {
+                $at[$which] ??= $statement;
+            }
         }
 
-        self::assertNotNull($xSetTo2, 'the premise: the outer flush set X to 2');
-        self::assertNotNull($ySetTo2, 'the premise: Y was set to 2');
+        foreach ($at as $which => $statement) {
+            self::assertNotNull($statement, 'the premise: the scenario ran '.$which);
+        }
 
-        return $this->log->ownerOf($ySetTo2) === $this->log->ownerOf($xSetTo2)
+        $yIsTheOuterFlushs = $this->log->ownerOf($at['y2']) === $this->log->ownerOf($at['x2']);
+
+        return $yIsTheOuterFlushs && $at['y2'] < $at['x5']
             ? ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5']
             : ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'];
     }
