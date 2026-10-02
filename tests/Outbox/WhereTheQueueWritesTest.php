@@ -39,7 +39,7 @@ final class WhereTheQueueWritesTest extends TestCase
 
     public function testAQueueThatAnswersInANewSchemaIsHeard(): void
     {
-        if ((string) (new \ReflectionMethod(DoctrineTransport::class, 'configureSchema'))->getReturnType() === 'void') {
+        if (self::declared() === 'void') {
             self::markTestSkipped('This Symfony declares configureSchema() void, as the oldest 6.4 releases do: its queue cannot answer in a schema of its own.');
         }
 
@@ -57,11 +57,17 @@ final class WhereTheQueueWritesTest extends TestCase
 
     public function testAQueueThatAnswersInTheSchemaItWasGivenIsHeard(): void
     {
+        if (self::declared() === Schema::class) {
+            self::markTestSkipped('This Symfony declares configureSchema() to return a schema, as 8 does: its queue cannot answer with nothing.');
+        }
+
         // As on the oldest Symfony 6.4 releases, where the method is void and fills in what it is
         // given.
         $queue = $this->createStub(DoctrineTransport::class);
-        $queue->method('configureSchema')->willReturnCallback(static function (Schema $handedIn): void {
+        $queue->method('configureSchema')->willReturnCallback(static function (Schema $handedIn): ?Schema {
             $handedIn->createTable('audit_outbox')->addColumn('id', 'integer');
+
+            return null;
         });
 
         self::assertTrue(WhereTheQueueWrites::isOn($queue, self::connection()));
@@ -69,10 +75,22 @@ final class WhereTheQueueWritesTest extends TestCase
 
     public function testAQueueThatAddsNothingAnywhereIsNotOnTheConnection(): void
     {
+        // Nothing, in whichever way this Symfony lets it be said: the empty schema it was given
+        // back, or no answer at all where the method is void.
+        $void = self::declared() === 'void';
         $queue = $this->createStub(DoctrineTransport::class);
-        $queue->method('configureSchema')->willReturnCallback(static fn (): ?Schema => null);
+        $queue->method('configureSchema')->willReturnCallback(static fn (Schema $handedIn): ?Schema => $void ? null : $handedIn);
 
         self::assertFalse(WhereTheQueueWrites::isOn($queue, self::connection()));
+    }
+
+    /**
+     * What this Symfony declares configureSchema() to return: void on the oldest 6.4 releases,
+     * nothing on later 6.4 and 7, a Schema on 8. A stub cannot answer outside it.
+     */
+    private static function declared(): string
+    {
+        return ltrim((string) (new \ReflectionMethod(DoctrineTransport::class, 'configureSchema'))->getReturnType(), '\\');
     }
 
     private static function connection(): Connection
