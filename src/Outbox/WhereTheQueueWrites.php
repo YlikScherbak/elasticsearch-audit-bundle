@@ -29,9 +29,9 @@ final class WhereTheQueueWrites
     {
         $handedIn = new Schema();
 
-        // Through call_user_func because on Symfony 6.4 the method is void, and an analyser run
-        // against it will not let its result be read; on 6.4 the result is null.
-        $returned = \call_user_func([$queue, 'configureSchema'], $handedIn, $connection, static fn (): bool => false);
+        // On Symfony 6.4 the method is void and this is null; phpstan-dbal.php lets the analyser
+        // run against 6.4 read it.
+        $returned = $queue->configureSchema($handedIn, $connection, static fn (): bool => false);
 
         return ($returned instanceof Schema ? $returned : $handedIn)->getTables() !== [];
     }

@@ -125,7 +125,9 @@ final class WatchedRows
             $pointedAt = [];
 
             foreach ($mapping->getAllMetadata() as $owner) {
-                if (!$owner instanceof ClassMetadata || $owner->isMappedSuperclass || $owner->getReflectionClass()->isAbstract()) {
+                // The class by its name rather than getReflectionClass(), which ORM 3.0 declares
+                // nullable and later ORMs do not: one spelling the analyser accepts on both.
+                if (!$owner instanceof ClassMetadata || $owner->isMappedSuperclass || (new \ReflectionClass($owner->name))->isAbstract()) {
                     continue;
                 }
 
