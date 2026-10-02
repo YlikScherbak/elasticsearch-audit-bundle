@@ -24,6 +24,8 @@ declare(strict_types=1);
  * mutants still finishes and is counted rather than lost.
  *
  *   php tools/infection/gate.php parts <set>
+ *   php tools/infection/gate.php matrix <set>                 # the parts, as JSON, for a CI matrix
+ *   php tools/infection/gate.php agrees <set> <plan-record>   # before a part runs: is the plan of this tree?
  *   php tools/infection/gate.php files <set> <part>
  *   php tools/infection/gate.php fingerprint <set>
  *   php tools/infection/gate.php record <set> <part|plan> <log.json> <exit-code> <fingerprint-before> <threads> <cpus> <out-dir>
@@ -310,10 +312,11 @@ function summarise(string $root, string $setName, string $dir): int
         $records[$record['part']] = $record;
     }
 
-    foreach ([...array_keys($parts), 'plan'] as $part) {
-        if (!isset($records[$part])) {
-            refuse(sprintf('%s.%s has no record — the part did not run, or its record was not collected.', $setName, $part));
-        }
+    // Every one named at once: a CI run that lost three parts should not read as one that lost one.
+    $unrecorded = array_values(array_diff([...array_keys($parts), 'plan'], array_keys($records)));
+
+    if ($unrecorded !== []) {
+        refuse(sprintf('%s has no record of %s — the part did not run, or its record was not collected.', $setName, implode(', ', $unrecorded)));
     }
 
     $extra = array_diff(array_keys($records), [...array_keys($parts), 'plan']);
@@ -410,6 +413,33 @@ function summarise(string $root, string $setName, string $dir): int
     return 0;
 }
 
+/**
+ * Whether the plan a part was handed is of this tree, this Infection and this configuration.
+ * The summary would refuse the run anyway; asked before a part starts, it is an hour of a CI
+ * runner not spent on mutants the summary will throw away.
+ */
+function agrees(string $root, string $setName, string $planRecord): void
+{
+    $set = setOf($root, $setName);
+
+    if (!is_file($planRecord)) {
+        refuse(sprintf('%s: there is no plan to run against.', $planRecord));
+    }
+
+    $plan = json_decode((string) file_get_contents($planRecord), true, 512, \JSON_THROW_ON_ERROR);
+    $here = ['fingerprint' => fingerprint($root, $set), 'infection' => infectionVersion($root), 'config' => hash_file('sha256', $root . '/' . $set['config'])];
+
+    if ($plan['set'] !== $setName || $plan['part'] !== 'plan') {
+        refuse(sprintf('%s is not the plan of set "%s".', $planRecord, $setName));
+    }
+
+    foreach ($here as $field => $expected) {
+        if ($plan[$field] !== $expected) {
+            refuse(sprintf('The plan was made on another %s than this tree has (%s, here %s).', $field, $plan[$field], $expected));
+        }
+    }
+}
+
 /** @return array<string, int> what $a has more of than $b */
 function differenceOf(array $a, array $b): array
 {
@@ -440,6 +470,12 @@ try {
     switch ($arguments[0] ?? null) {
         case 'parts':
             echo implode(' ', array_keys(partsOf($root, setOf($root, $arguments[1])))), "\n";
+            exit(0);
+        case 'matrix':
+            echo json_encode(array_keys(partsOf($root, setOf($root, $arguments[1]))), \JSON_THROW_ON_ERROR), "\n";
+            exit(0);
+        case 'agrees':
+            agrees($root, $arguments[1], $arguments[2]);
             exit(0);
         case 'files':
             echo implode(',', partsOf($root, setOf($root, $arguments[1]))[$arguments[2]] ?? refuse(sprintf('No part "%s".', $arguments[2]))), "\n";

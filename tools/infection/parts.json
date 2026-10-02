@@ -14,21 +14,37 @@
             "src/Transport"
         ],
         "parts": {
-            "all": [
-                "*"
-            ]
+            "all": ["*"]
         }
     },
     "doctrine": {
         "config": "infection.doctrine.json5",
         "threads": 3,
-        "sources": [
-            "src/Doctrine"
-        ],
+        "sources": ["src/Doctrine"],
         "parts": {
-            "all": [
-                "*"
-            ]
+            "subscriber": ["src/Doctrine/AuditSubscriber.php"],
+            "replay": ["src/Doctrine/Observation/HistoryReplay.php"],
+            "shape": [
+                "src/Doctrine/Observation/StatementShape.php",
+                "src/Doctrine/Observation/WatchedRows.php"
+            ],
+            "log": [
+                "src/Doctrine/Observation/StatementLog.php",
+                "src/Doctrine/Observation/LookRightAfter.php",
+                "src/Doctrine/Observation/NobodysStatement.php"
+            ],
+            "memory": [
+                "src/Doctrine/Observation/RowMemory.php",
+                "src/Doctrine/Observation/JoinRowMemory.php",
+                "src/Doctrine/Observation/JoinRowsQuery.php"
+            ],
+            "links": [
+                "src/Doctrine/Observation/LinkFacts.php",
+                "src/Doctrine/Observation/LinkRuns.php",
+                "src/Doctrine/Observation/EntityRowRuns.php",
+                "src/Doctrine/Observation/ElementFieldRuns.php"
+            ],
+            "rest": ["*"]
         }
     }
 }

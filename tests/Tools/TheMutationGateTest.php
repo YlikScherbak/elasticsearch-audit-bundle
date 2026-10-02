@@ -63,8 +63,13 @@ final class TheMutationGateTest extends TestCase
     public static function spoiledRuns(): iterable
     {
         yield 'a part that did not run' => [
-            static fn (self $test) => $test->runEverything(skip: 'rest'),
-            'set.rest has no record',
+            static fn (self $test) => $test->runEverything(skip: ['rest']),
+            'set has no record of rest',
+        ];
+
+        yield 'two parts that did not run, named together' => [
+            static fn (self $test) => $test->runEverything(skip: ['one', 'rest']),
+            'set has no record of one, rest',
         ];
 
         yield 'a part whose run did not finish' => [
@@ -209,6 +214,32 @@ final class TheMutationGateTest extends TestCase
         self::assertStringContainsString('parts.json gives set "set" no number of threads', $output);
     }
 
+    public function testAPartAsksWhetherItsPlanIsOfThisTree(): void
+    {
+        $this->runEverything();
+        $plan = $this->root . '/out/set.plan.json';
+
+        self::assertSame([0, ''], $this->gate('agrees', 'set', $plan));
+
+        [$code, $output] = $this->gate('agrees', 'set', $this->root . '/out/set.one.json');
+        self::assertSame(1, $code);
+        self::assertStringContainsString('is not the plan of set "set"', $output);
+
+        [$code, $output] = $this->gate('agrees', 'set', $this->root . '/out/missing.json');
+        self::assertSame(1, $code);
+        self::assertStringContainsString('there is no plan to run against', $output);
+
+        $this->write('tests/OneTest.php', '<?php // changed after the plan was made');
+        [$code, $output] = $this->gate('agrees', 'set', $plan);
+        self::assertSame(1, $code);
+        self::assertStringContainsString('The plan was made on another fingerprint than this tree has', $output);
+    }
+
+    public function testTheMatrixIsTheManifestsParts(): void
+    {
+        self::assertSame([0, "[\"one\",\"rest\"]\n"], $this->gate('matrix', 'set'));
+    }
+
     public function testTheRestIsEveryFileNoOtherPartNames(): void
     {
         self::assertSame([0, "src/A/Three.php,src/A/Two.php\n"], $this->gate('files', 'set', 'rest'));
@@ -218,6 +249,7 @@ final class TheMutationGateTest extends TestCase
      * The plan and both parts, each recorded the way gate.sh records it. Each argument
      * spoils one part (or the plan) and leaves the rest of the run as it was.
      *
+     * @param list<string>                                    $skip      parts (or the plan) left unrecorded
      * @param array<string, int>                              $exitCodes
      * @param array<string, \Closure(string): ?string>        $logs
      * @param array<string, array<string, list<array{string, string, int}>>> $mutants
@@ -226,7 +258,7 @@ final class TheMutationGateTest extends TestCase
      * @param array<string, array{int, int}>                  $machines threads and CPUs
      */
     public function runEverything(
-        ?string $skip = null,
+        array $skip = [],
         array $exitCodes = [],
         array $logs = [],
         array $mutants = [],
@@ -243,7 +275,7 @@ final class TheMutationGateTest extends TestCase
         [, $fingerprint] = $this->gate('fingerprint', 'set');
 
         foreach (['plan', 'one', 'rest'] as $part) {
-            if ($part === $skip) {
+            if (\in_array($part, $skip, true)) {
                 continue;
             }
 

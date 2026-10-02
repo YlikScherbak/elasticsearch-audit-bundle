@@ -36,6 +36,26 @@ Identity: Infection's id where the log gives it, and always the file, line, muta
 with the commit the result was seen on. `src/` has not changed since `b958e3b`; every result below
 is on that code.
 
+## Traps of the tools
+
+Each of these cost a run before it was seen, and each makes a result mean something other than
+what it says.
+
+- **Infection skips, uncounted, a mutant whose covering tests add up to more than the timeout.**
+  "N mutants required more time than configured" is the only sign; the score is computed without
+  them. The gate refuses any.
+- **PHPUnit 12 reads `--exclude-group=a,b` as the name of one group** — it excludes nothing — and a
+  group given on the command line replaces phpunit.xml.dist's, so the integration tests ran under
+  the mutants. One flag per group.
+- **Infection given `--id` more than once runs only the last.** To re-run several mutants, run one
+  at a time.
+- **`--only-covering-test-cases` trusts coverage to name the killer**, and coverage cannot name a
+  test that read a cached answer. Not used.
+- **Contention makes timeouts, and a timeout counts as a kill.** The threads are the manifest's.
+- **Infection's JSON log repeats the whole source file with every mutant**: ninety megabytes for one
+  file of the listener. Read it with no memory limit, or not at all — the gate keeps only the
+  identities and statuses.
+
 ## Timeouts
 
 A timeout counts as a kill, and contention makes them: at eleven threads 31 of the listener's

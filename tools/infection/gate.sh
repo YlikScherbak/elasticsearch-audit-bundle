@@ -7,41 +7,23 @@
 #   tools/infection/gate.sh doctrine subscriber   # the plan and one part; the summary then
 #                                                 # names the parts that did not run
 #
-# See tools/infection/gate.php for what the summary refuses and why. The parts run with
-# no floor of their own: the floor is the set's, and only the summary can know it.
-# Recording reads Infection's whole log, which repeats the source file with every mutant,
-# hence no memory limit there.
+# Each run is tools/infection/part.sh, which CI runs too; see tools/infection/gate.php for what
+# the summary refuses and why. The parts run with no floor of their own: the floor is the
+# set's, and only the summary can know it.
 set -e
 
 cd "$(dirname "$0")/../.."
 
 set_name=$1
 shift
-config=$(php -r '$m = json_decode(file_get_contents("tools/infection/parts.json"), true); echo $m[$argv[1]]["config"] ?? "";' "$set_name")
-[ -n "$config" ] || { echo "parts.json has no set \"$set_name\"" >&2; exit 2; }
-threads=$(php -r '$m = json_decode(file_get_contents("tools/infection/parts.json"), true); echo $m[$argv[1]]["threads"] ?? "";' "$set_name")
-# The CPUs the tests run on: run.sh runs them in a container, whose machine is not this one.
-cpus=$(docker run --rm es-audit-infection nproc)
-
-log="var/infection/$set_name.json"
-out="var/infection/gate"
+out=${INFECTION_GATE_OUT:-var/infection/gate}
 parts=${*:-$(php tools/infection/gate.php parts "$set_name")}
 
 rm -f "$out/$set_name".*.json
 
-run() {
-    name=$1
-    shift
-    before=$(php tools/infection/gate.php fingerprint "$set_name")
-    rm -f "$log"
-    code=0
-    INFECTION_THREADS=$threads sh tools/infection/run.sh --configuration="$config" --min-covered-msi=0 "$@" || code=$?
-    php -d memory_limit=-1 tools/infection/gate.php record "$set_name" "$name" "$log" "$code" "$before" "$threads" "$cpus" "$out"
-}
-
-run plan --dry-run
+sh tools/infection/part.sh "$set_name" plan
 for part in $parts; do
-    run "$part" --filter="$(php tools/infection/gate.php files "$set_name" "$part")"
+    sh tools/infection/part.sh "$set_name" "$part" "$out/$set_name.plan.json"
 done
 
 php tools/infection/gate.php summarise "$set_name" "$out"
