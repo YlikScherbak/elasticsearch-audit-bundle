@@ -64,7 +64,7 @@ final class StatementLog
     public const VOID = 'void';
     public const COMMITTED = 'committed';
 
-    /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>}> by sequence number */
+    /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>, key?: int|string}> by sequence number */
     private array $statements = [];
 
     /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, open: bool, committed: bool, dead: bool}> by identity, in the order they were opened */
@@ -621,7 +621,7 @@ final class StatementLog
     }
 
     /**
-     * @return array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool}|null
+     * @return array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, key: int|string|null}|null
      */
     public function statement(int $statement): ?array
     {
@@ -633,7 +633,30 @@ final class StatementLog
             'params' => $entry['params'],
             'affected' => $entry['affected'],
             'failed' => $entry['failed'],
+            'key' => $entry['key'] ?? null,
         ];
+    }
+
+    /**
+     * The key the database handed out for the row the last statement wrote, as the connection
+     * answered whoever asked for it. Doctrine asks, right after each INSERT whose key the database
+     * gives, before anything else runs on the connection (WhereDoctrineAsksForAGeneratedKeyTest),
+     * so the answer is kept beside that INSERT and nowhere else: the observer asks nothing itself.
+     *
+     * It belongs to that execution only. Taken back with it, it goes with it; asked again, the
+     * first answer stands; asked after anything but an INSERT that ran — a statement not kept, one
+     * that failed, a savepoint's — it is no INSERT's, and is kept nowhere. A key the replay finds
+     * missing is doubt, never the key of another execution.
+     */
+    public function keyHandedOut(int|string $key): void
+    {
+        $last = $this->statements[$this->sequence] ?? null;
+
+        if ($last === null || $last['failed'] || isset($last['key']) || preg_match('/^\s*INSERT\b/i', $last['sql']) !== 1) {
+            return;
+        }
+
+        $this->statements[$this->sequence]['key'] = $key;
     }
 
     /**

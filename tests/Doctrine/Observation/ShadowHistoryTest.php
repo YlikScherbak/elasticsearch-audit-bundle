@@ -82,22 +82,34 @@ final class ShadowHistoryTest extends DoctrineTestCase
         self::assertSame(['facts' => [], 'unsure' => []], $this->replayed($log));
     }
 
-    public function testRowsWhoseKeyTheDatabaseHandedOutAreBoundInTheOrderTheyWereAnnounced(): void
+    public function testARowWhoseKeyTheDatabaseHandedOutHasTheKeyItsOwnInsertWasAnswered(): void
+    {
+        // Answered out of order on purpose: the key is the one given right after the INSERT, not
+        // the nth of anything.
+        $log = $this->begun();
+        $log->executed('INSERT INTO CrateItem (sku, quantity, crate_id) VALUES (?, ?, ?)', [1 => 'SKU-P', 2 => 1, 3 => 'C-1'], 1);
+        $log->keyHandedOut('4');
+        $log->executed('INSERT INTO CrateItem (sku, quantity, crate_id) VALUES (?, ?, ?)', [1 => 'SKU-Q', 2 => 1, 3 => 'C-1'], 1);
+        $log->keyHandedOut(3);
+        $log->committed();
+
+        self::assertSame(['facts' => [
+            'crate C-1 items.4: null -> "SKU-P"',
+            'crate C-1 items.3: null -> "SKU-Q"',
+        ], 'unsure' => []], $this->replayed($log));
+    }
+
+    public function testARowWhoseKeyNobodyAskedTheConnectionForIsUnsureAndTakesNoOtherRowsKey(): void
     {
         $log = $this->begun();
         $log->executed('INSERT INTO CrateItem (sku, quantity, crate_id) VALUES (?, ?, ?)', [1 => 'SKU-P', 2 => 1, 3 => 'C-1'], 1);
         $log->executed('INSERT INTO CrateItem (sku, quantity, crate_id) VALUES (?, ?, ?)', [1 => 'SKU-Q', 2 => 1, 3 => 'C-1'], 1);
+        $log->keyHandedOut(4);
         $log->committed();
 
-        $p = new CrateItem('SKU-P');
-        $p->id = 3;
-        $q = new CrateItem('SKU-Q');
-        $q->id = 4;
-
         self::assertSame(['facts' => [
-            'crate C-1 items.3: null -> "SKU-P"',
             'crate C-1 items.4: null -> "SKU-Q"',
-        ], 'unsure' => []], $this->replayed($log, [CrateItem::class => [$p, $q]]));
+        ], 'unsure' => ['an INSERT into CrateItem whose key the database handed out and nothing asked the connection for']], $this->replayed($log));
     }
 
     public function testAnEmptyingThatTookOtherThanTheRowsKnownIsUnsure(): void
@@ -203,14 +215,13 @@ final class ShadowHistoryTest extends DoctrineTestCase
     }
 
     /**
-     * @param array<class-string, list<object>>                           $persisted
      * @param array<string, array<string, array<string, mixed>>> $rows
      *
      * @return array{facts: list<string>, unsure: list<string>}
      */
-    private function replayed(StatementLog $log, array $persisted = [], array $rows = self::ROWS): array
+    private function replayed(StatementLog $log, array $rows = self::ROWS): array
     {
-        $replayed = ShadowHistory::fromWhatWasRemembered($this->em, $rows)->replay($log, 0, $persisted);
+        $replayed = ShadowHistory::fromWhatWasRemembered($this->em, $rows)->replay($log, 0);
 
         return ['facts' => $replayed['facts'], 'unsure' => $replayed['unsure']]; // no flush labels these logs
     }

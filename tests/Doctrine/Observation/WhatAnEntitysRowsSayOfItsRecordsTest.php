@@ -452,9 +452,9 @@ final class WhatAnEntitysRowsSayOfItsRecordsTest extends DoctrineTestCase
         $this->em->persist($spoke = new Relay('spoke'));
         $this->em->flush();
 
-        // A creation without a key the database hands out is bound to its INSERT by the order
-        // postPersist announced it in, which a replay of its own does not have: told it here.
-        $replay?->replay($this->log, $this->from, null, [Relay::class => [['id' => $spoke->id]]]);
+        // A creation whose key the database hands out has it from its own INSERT's entry in the
+        // log, which a replay of its own reads as the listener's does.
+        $replay?->replay($this->log, $this->from);
         $runs = $this->runs($replay);
 
         self::assertSame([

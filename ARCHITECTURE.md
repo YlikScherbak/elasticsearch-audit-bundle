@@ -223,8 +223,13 @@ database values, by root class and key.
   scheduled for insert is not a row yet: its `INSERT` says what it holds.
 - `rememberTheRowsOf()` reads, as rows and with filters bypassed, the elements of an inverse
   collection about to be emptied that nobody loaded.
-- `rememberPersisted()` keeps, in `postPersist` order, the key of every row whose key the
-  database handed out, so each keyless `INSERT` can be bound to it.
+- `rememberPersisted()` binds the row a `postPersist` announces to its object. Not its key: a
+  key the database handed out is its `INSERT`'s own, the connection's answer right after it
+  (`StatementLog::keyHandedOut()`). Doctrine asks for it there, before anything else runs
+  (`tests/Doctrine/Keys/WhereDoctrineAsksForAGeneratedKeyTest.php`); the order rows are announced
+  in is not their INSERTs' — a flush started from `postPersist` is announced A, C, B for INSERTs A,
+  B, C, one that dies in its first `postPersist` announces nothing after it — and keys matched by
+  that order went to the wrong rows.
 - `replayed()` returns the current `HistoryReplay`, carried on from where it read to and rebuilt
   only when a rollback has reached back (`voided()` moved) or another manager asks.
 - `settle()` folds what stayed done into the rows, lets go of rows whose object nobody holds
@@ -274,8 +279,9 @@ mapping is a parameter so tests can hand over the shapes no fixture has.
 query the database; it reads mappings and, to name a related entity, the identity map. For each
 statement after where it last read:
 
-- a void statement is skipped whole, doubt included — but a keyless `INSERT` is still counted, so
-  the `postPersist` order keeps lining up;
+- a void statement is skipped whole, doubt included, and the key its `INSERT` was given with it;
+- a keyless `INSERT` takes the key the connection handed out right after it, and one nothing asked
+  the key of is doubt — never the key of another execution;
 - a statement that writes and cannot be read, or reads as `UNBOUND`, on a watched table is
   *doubt*; on a table of the application's own it is nothing;
 - `ROWS_OF_OWNER` is an emptying: the rows the owner held go, if the count agrees; otherwise doubt;

@@ -64,6 +64,26 @@ final class ObservedConnection extends AbstractConnectionMiddleware
         return $affected;
     }
 
+    /**
+     * Asked by whoever asks -- Doctrine, after an INSERT whose key the database gives -- and
+     * answered as the driver answers; the log keeps the answer beside the INSERT it is about. A
+     * driver with nothing to say answers false, and that is no key.
+     *
+     * @param string|null $name
+     *
+     * @return string|int|false
+     */
+    public function lastInsertId($name = null)
+    {
+        $key = parent::lastInsertId($name);
+
+        if (\is_int($key) || \is_string($key)) {
+            $this->log->keyHandedOut($key);
+        }
+
+        return $key;
+    }
+
     /** @return bool */
     public function beginTransaction()
     {

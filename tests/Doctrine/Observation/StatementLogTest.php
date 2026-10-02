@@ -277,7 +277,7 @@ final class StatementLogTest extends TestCase
         self::assertNotNull($failed);
         self::assertSame([StatementLog::COMMITTED, null], [$log->fate($ran), $log->ownerOf($ran)]);
         self::assertSame(StatementLog::VOID, $log->fate($failed));
-        self::assertSame(['sql' => 'UPDATE Article SET title = ? WHERE id = ?', 'params' => [null, 1], 'affected' => null, 'failed' => true], $log->statement($failed));
+        self::assertSame(['sql' => 'UPDATE Article SET title = ? WHERE id = ?', 'params' => [null, 1], 'affected' => null, 'failed' => true, 'key' => null], $log->statement($failed));
     }
 
     public function testWhatIsLetGoOfDoesNotComeBackAndTheLogDoesNotGrow(): void
@@ -329,5 +329,40 @@ final class StatementLogTest extends TestCase
 
         self::assertNotNull($later);
         self::assertSame([StatementLog::COMMITTED, 1], [$log->fate($later), $log->ownerOf($later)]);
+    }
+
+    /**
+     * A key the connection gave out is the INSERT's that ran right before the asking, and no other
+     * statement's: asked twice, the first answer stands; asked after an UPDATE, a failed INSERT or a
+     * statement the log does not keep, it is nobody's.
+     */
+    public function testAKeyHandedOutIsKeptBesideTheInsertItWasAskedAfterAndNowhereElse(): void
+    {
+        $log = new StatementLog();
+        $log->keepingOnly(static fn (string $table): bool => $table === 'Article');
+
+        $one = $log->executed('INSERT INTO Article (title) VALUES (?)', [1 => 'One'], 1);
+        $log->keyHandedOut('7');
+        $log->keyHandedOut('8');
+
+        $update = $log->executed('UPDATE Article SET title = ? WHERE id = ?', [1 => 'x', 2 => 7], 1);
+        $log->keyHandedOut('9');
+
+        $failed = $log->executed('INSERT INTO Article (title) VALUES (?)', [1 => 'Two'], null, failed: true);
+        $log->keyHandedOut('10');
+
+        $log->executed('INSERT INTO Unwatched (title) VALUES (?)', [1 => 'Three'], 1);
+        $log->keyHandedOut('11');
+        $after = $log->executed('INSERT INTO Article (title) VALUES (?)', [1 => 'Four'], 1);
+
+        self::assertNotNull($one);
+        self::assertNotNull($update);
+        self::assertNotNull($failed);
+        self::assertNotNull($after);
+        self::assertSame(
+            ['7', null, null, null],
+            [$log->statement($one)['key'] ?? null, $log->statement($update)['key'] ?? null, $log->statement($failed)['key'] ?? null, $log->statement($after)['key'] ?? null],
+            'the first answer, beside its INSERT; nothing beside the others, and nothing carried to the next INSERT',
+        );
     }
 }

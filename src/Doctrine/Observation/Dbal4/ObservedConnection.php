@@ -60,6 +60,18 @@ final class ObservedConnection extends AbstractConnectionMiddleware
         return $affected;
     }
 
+    /**
+     * Asked by whoever asks -- Doctrine, after an INSERT whose key the database gives -- and
+     * answered as the driver answers; the log keeps the answer beside the INSERT it is about.
+     */
+    public function lastInsertId(): int|string
+    {
+        $key = parent::lastInsertId();
+        $this->log->keyHandedOut($key);
+
+        return $key;
+    }
+
     public function beginTransaction(): void
     {
         parent::beginTransaction();

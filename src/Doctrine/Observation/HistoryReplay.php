@@ -119,9 +119,6 @@ final class HistoryReplay
     /** How many statements it has read, for the tests that pin what reading costs. */
     private int $read = 0;
 
-    /** @var array<string, int> by root class: how many INSERTs without a key it has read */
-    private array $insertsWithoutKey = [];
-
     private readonly AuditMetadataFactory $audited;
 
     private readonly WatchedRows $watched;
@@ -164,11 +161,8 @@ final class HistoryReplay
 
     /**
      * Replays the log after a position, up to a position.
-     *
-     * @param array<string, list<array<string, mixed>>> $persisted the key of every row postPersist announced, by root class and in order: a row
-     *                                               whose key the database handed out is bound to its INSERT by that order
      */
-    public function replay(StatementLog $log, int $from, ?int $upTo = null, array $persisted = []): void
+    public function replay(StatementLog $log, int $from, ?int $upTo = null): void
     {
         $this->log = $log;
         $upTo ??= $log->position();
@@ -185,14 +179,6 @@ final class HistoryReplay
 
             $shape = StatementShape::read($statement['sql']);
             $binding = $shape === null ? null : RowBinding::of($this->em(), $shape, $statement['params']);
-
-            // Counted whatever became of it: postPersist is announced for an INSERT the
-            // transaction later rolls back, and the order has to line up with every one.
-            $nth = null;
-
-            if ($shape !== null && $binding !== null && $shape->kind === StatementShape::INSERT && $binding->kind === RowBinding::ROW && $binding->key === null && $binding->class !== null) {
-                $nth = $this->insertsWithoutKey[$binding->class] = ($this->insertsWithoutKey[$binding->class] ?? -1) + 1;
-            }
 
             if ($log->fate($at) === StatementLog::VOID) {
                 continue;
@@ -267,7 +253,7 @@ final class HistoryReplay
             }
 
             match ($shape->kind) {
-                StatementShape::INSERT => $this->inserted($table, $shape, $statement['params'], $binding->key, $nth === null ? null : ($persisted[$binding->class][$nth] ?? null)),
+                StatementShape::INSERT => $this->inserted($table, $shape, $statement['params'], $binding->key, $statement['key']),
                 StatementShape::UPDATE => $this->updated($table, $shape, $statement['params'], $binding->key ?? [], $statement['affected']),
                 default => $this->deleted($table, $binding->key ?? [], $statement['affected']),
             };
@@ -680,9 +666,10 @@ final class HistoryReplay
      * @param ClassMetadata<object>     $metadata
      * @param array<array-key, mixed>   $params
      * @param array<string, mixed>|null $key
-     * @param array<string, mixed>|null $persisted the key postPersist announced for this INSERT
+     * @param int|string|null           $handedOut the key the database handed out for this INSERT's row, as the connection
+     *                                              answered right after it ({@see StatementLog::keyHandedOut()})
      */
-    private function inserted(ClassMetadata $metadata, StatementShape $shape, array $params, ?array $key, ?array $persisted): void
+    private function inserted(ClassMetadata $metadata, StatementShape $shape, array $params, ?array $key, int|string|null $handedOut): void
     {
         $row = [];
 
@@ -691,15 +678,20 @@ final class HistoryReplay
         }
 
         if ($key === null) {
-            if ($persisted === null || $persisted === []) {
-                $this->doubt('an INSERT into '.$shape->table.' with no postPersist to take its key from', $metadata->rootEntityName);
+            // The row's key from its own INSERT, as the connection gave it out; never from another
+            // execution's. A row whose key is more than one column is never one the database hands
+            // out, and one whose key nobody asked the connection for is doubt.
+            $columns = $metadata->getIdentifierColumnNames();
+
+            if ($handedOut === null || \count($columns) !== 1) {
+                $this->doubt('an INSERT into '.$shape->table.' whose key the database handed out and nothing asked the connection for', $metadata->rootEntityName);
 
                 return;
             }
 
-            foreach ($persisted as $column => $value) {
-                $row[$column] = $value;
-            }
+            // As the database gave it, like every key read off a statement's parameters: it is
+            // made the field's value where an id is built from it (RowIdentity::identifierValues()).
+            $row[$columns[0]] = $handedOut;
 
             $this->forgetWhatWasTakenAfter($metadata->rootEntityName, self::keyOf($metadata, $row), $this->at);
         }

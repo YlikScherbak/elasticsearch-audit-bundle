@@ -84,16 +84,6 @@ final class RowMemory
      */
     private ?\WeakReference $currentManager = null;
 
-    /**
-     * The key of every row postPersist announced since the rows were settled, by root class and
-     * in order. The key and not the entity: an entity's collections hold its manager, and a
-     * flush whose postFlush never reached this listener leaves the list unsettled -- holding a
-     * manager the application has replaced, and everything it managed.
-     *
-     * @var array<string, list<array<string, mixed>>>
-     */
-    private array $persisted = [];
-
     public function __construct(private readonly StatementLog $log, private readonly AuditMetadataFactory $audited = new AuditMetadataFactory(), ?WatchedRows $watched = null)
     {
         $this->watched = $watched ?? new WatchedRows($audited);
@@ -442,7 +432,7 @@ final class RowMemory
             $this->currentManager = \WeakReference::create($em);
         }
 
-        $this->current->replay($this->log, $this->settledAt, $upTo, $this->persisted);
+        $this->current->replay($this->log, $this->settledAt, $upTo);
 
         return $this->current;
     }
@@ -455,23 +445,26 @@ final class RowMemory
     public function replayedApart(EntityManagerInterface $em, ?int $upTo = null): HistoryReplay
     {
         $replay = new HistoryReplay($em, $this->rows, $this->takenAt, $this->audited, $this->watched);
-        $replay->replay($this->log, $this->settledAt, $upTo ?? $this->log->position(), $this->persisted);
+        $replay->replay($this->log, $this->settledAt, $upTo ?? $this->log->position());
 
         return $replay;
     }
 
     /**
-     * At postPersist: a row whose key the database handed out is bound to its INSERT by the
-     * order these were announced in.
+     * At postPersist: the row its INSERT made is held by this object from now on.
+     *
+     * Not where its key comes from. That is its INSERT's own entry in the log, the connection's
+     * answer right after it ({@see StatementLog::keyHandedOut()}): the order postPersist announces
+     * rows in is not the order of their INSERTs -- a flush started from postPersist is announced
+     * A, C, B for INSERTs A, B, C, and one that dies in its first postPersist announces nothing
+     * after it -- and keys matched to INSERTs by that order went to the wrong rows.
      */
     public function rememberPersisted(EntityManagerInterface $em, object $entity): void
     {
-        // Every one, whatever its key: the order has to line up with every INSERT without one.
         $metadata = $em->getClassMetadata($entity::class);
         $key = self::keyColumns($em, $entity);
-        $this->persisted[$metadata->rootEntityName][] = $key ?? [];
 
-        // And the row its INSERT makes is held by this object from now on, as a remembered row
+        // The row its INSERT makes is held by this object from now on, as a remembered row
         // is by the one it was taken from. Without that, settling let go of every row a flush
         // had just inserted, and the next preFlush took it again from Doctrine's memory -- after
         // whatever the application had written to it meanwhile, which Doctrine does not know.
@@ -547,7 +540,6 @@ final class RowMemory
         $this->settledAt = $upTo;
         $this->takenAt = [];
         $this->current = null;
-        $this->persisted = [];
 
         foreach ($this->rows as $root => $keys) {
             foreach (array_keys($keys) as $id) {

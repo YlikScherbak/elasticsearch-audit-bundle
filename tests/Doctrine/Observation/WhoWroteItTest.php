@@ -11,7 +11,6 @@ use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
-use Doctrine\ORM\Event\PostPersistEventArgs;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
 use Doctrine\ORM\Events;
 
@@ -37,9 +36,6 @@ class WhoWroteItTest extends DoctrineTestCase
 
     /** @var array<int, ?string> the actor each flush's moment was taken with, copied when it was taken */
     private array $authors = [];
-
-    /** @var array<class-string, list<object>> */
-    private array $persisted = [];
 
     protected function setUp(): void
     {
@@ -73,17 +69,6 @@ class WhoWroteItTest extends DoctrineTestCase
                         $this->authors[$flush] = $moment instanceof Provenance ? $moment->actor : null;
                     }
                 }
-            }
-        });
-        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($this->persisted) {
-            /** @param array<class-string, list<object>> $persisted */
-            public function __construct(private array &$persisted)
-            {
-            }
-
-            public function postPersist(PostPersistEventArgs $args): void
-            {
-                $this->persisted[$args->getObjectManager()->getClassMetadata($args->getObject()::class)->rootEntityName][] = $args->getObject();
             }
         });
     }
@@ -147,7 +132,7 @@ class WhoWroteItTest extends DoctrineTestCase
      */
     private function signed(int $from, array $before): array
     {
-        $shadow = ShadowHistory::fromWhatWasRemembered($this->em, $before)->replay($this->log, $from, $this->persisted);
+        $shadow = ShadowHistory::fromWhatWasRemembered($this->em, $before)->replay($this->log, $from);
         self::assertSame([], $shadow['unsure']);
 
         $signed = [];

@@ -232,6 +232,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   warning about a nested flush emptying the running flush's change sets.
 
 ### Fixed
+- **A row whose key the database hands out has its own history, under its own id.** The history
+  read from what the connection ran took such a row's key from the order `postPersist` announced
+  rows in. That is not the order of their INSERTs: a flush started from `postPersist` is
+  announced A, C, B for INSERTs A, B, C, and a flush that dies in its first `postPersist`
+  announces nothing after it — and the keys went to the wrong rows. A record was written under
+  another row's id, with that one's values missing, or a row had no record at all. The key is
+  now its INSERT's own, the connection's answer to Doctrine right after it; one nobody asked for
+  is said as doubt, never borrowed. In 1.3 from its start on this branch; no release had it —
+  1.2 reads Doctrine's change sets. Found working through the escaped mutants.
 - **The warning about a flush that was rolled back counts what it dropped.** Two rows of one class
   inserted by a flush that died were counted as one, because a statement that does not yet carry
   its row's id was taken for the next table of the row before it.

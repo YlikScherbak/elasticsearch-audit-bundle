@@ -62,9 +62,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
 
     private RowMemory $remembered;
 
-    /** @var array<class-string, list<object>> every entity postPersist announced, in order */
-    private array $persisted = [];
-
     protected function setUp(): void
     {
         parent::setUp();
@@ -604,18 +601,6 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
                 }
             }
         });
-        $this->em->getEventManager()->addEventListener([Events::postPersist], new class($this->persisted) {
-            /** @param array<class-string, list<object>> $persisted */
-            public function __construct(private array &$persisted)
-            {
-            }
-
-            public function postPersist(PostPersistEventArgs $args): void
-            {
-                $entity = $args->getObject();
-                $this->persisted[$args->getObjectManager()->getClassMetadata($entity::class)->rootEntityName][] = $entity;
-            }
-        });
 
         return [$crate, $x, $y, $z];
     }
@@ -668,7 +653,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
             'from the rows read before the scenario' => [$this->before, []],
             'from the row memory the listener will read' => [$this->remembered->rows(), $this->remembered->takenAt()],
         ] as $source => [$rows, $copiedAt]) {
-            $shadow = ShadowHistory::fromWhatWasRemembered($this->em, $rows, $copiedAt)->replay($this->log, $this->from, $this->persisted);
+            $shadow = ShadowHistory::fromWhatWasRemembered($this->em, $rows, $copiedAt)->replay($this->log, $this->from);
             $said = $shadow['facts'];
             sort($said);
 

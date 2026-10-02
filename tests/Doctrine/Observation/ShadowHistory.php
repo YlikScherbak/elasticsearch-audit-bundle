@@ -72,17 +72,12 @@ final class ShadowHistory
     }
 
     /**
-     * @param array<string, list<object>> $persisted
-     *
      * @return array{facts: list<string>, unsure: list<string>, owners: list<int|null>}
      */
-    public function replay(StatementLog $log, int $from, array $persisted): array
+    public function replay(StatementLog $log, int $from): array
     {
         $replay = new HistoryReplay($this->em, $this->rows, $this->takenAt);
-        $replay->replay($log, $from, null, array_map(
-            fn (array $entities): array => array_map(fn (object $entity): array => \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory::keyColumns($this->em, $entity) ?? [], $entities),
-            $persisted,
-        ));
+        $replay->replay($log, $from);
 
         $facts = [];
         $owners = [];
