@@ -842,9 +842,12 @@ final class AuditSubscriber
 
             $row = [$shape->kind, $em->getClassMetadata($binding->class)->rootEntityName, $binding->key === null ? null : self::rowOf($binding->key)];
 
-            // The next table of the same change: the same kind and hierarchy, and a row that is
-            // the same one or one whose key the statement does not carry.
-            if ($last === null || $last[0] !== $row[0] || $last[1] !== $row[1] || ($last[2] !== null && $row[2] !== null && $last[2] !== $row[2])) {
+            // The next table of the same change: the same kind and hierarchy, and the same row --
+            // or, after a statement that did not carry its key, the row that statement made. A
+            // statement with no key is the first table of a new row, its id not generated yet,
+            // so it begins a change of its own: two rows inserted one after the other are two,
+            // and the second table of each carries the id the first one was given.
+            if ($last === null || $last[0] !== $row[0] || $last[1] !== $row[1] || $row[2] === null || ($last[2] !== null && $last[2] !== $row[2])) {
                 ++$count;
             }
 

@@ -232,6 +232,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   warning about a nested flush emptying the running flush's change sets.
 
 ### Fixed
+- **The outbox works on DBAL 4.5.** `AuditTransaction` asks the queue whether it writes on the
+  transaction's connection through Messenger's `configureSchema()`, and read the answer off the
+  schema it handed in. On DBAL 4.5, whose schemas are edited into new ones, Symfony 7's queue
+  returns a new schema with its table and leaves the one it was given empty, so every queue looked
+  like one on another connection: every audit transaction was refused ("The outbox queue is
+  holding a different Doctrine connection"), and `audit:check` reported the outbox broken. Every
+  release since 1.1.0 does this with DBAL 4.5 installed. The answer is now read wherever the
+  queue puts it. Found by CI on the first run that installed DBAL 4.5.
+- **The warning about a flush that was rolled back counts what it dropped.** Two rows of one class
+  inserted by a flush that died were counted as one, because a statement that does not yet carry
+  its row's id was taken for the next table of the row before it.
 - **The late records of a committed change inside a collection are written behind a flush that
   failed.** A flush whose publishing was swallowed (a `postFlush` listener registered before this
   bundle's threw) has its records written late, by the next flush. When the flush in between

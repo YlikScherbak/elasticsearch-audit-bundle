@@ -13,6 +13,10 @@ use Doctrine\ORM\EntityManagerInterface;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\HideEveryStop;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
+use Doctrine\ORM\Event\PostRemoveEventArgs;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
 use Doctrine\ORM\Events;
@@ -604,6 +608,102 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
             $this->logs,
             static fn (string $line): bool => str_contains($line, '1 audit record(s) it had collected are dropped'),
         ), sprintf("the warning counted a record nobody was dropping; what was logged:\n%s", implode("\n", $this->logs)));
+    }
+
+    /**
+     * @return iterable<string, array{\Closure(EntityManagerInterface): void, int}>
+     */
+    public static function whatADyingFlushWrote(): iterable
+    {
+        yield 'two rows of one class are two' => [static function (EntityManagerInterface $em): void {
+            $em->persist(new Article('One'));
+            $em->persist(new Article('Two'));
+        }, 2];
+
+        yield 'the two tables of one inserted row are one' => [static function (EntityManagerInterface $em): void {
+            $em->persist(new Press('Stamp'));
+        }, 1];
+
+        yield 'two inserted rows of one hierarchy are two' => [static function (EntityManagerInterface $em): void {
+            $em->persist(new Press('Stamp'));
+            $em->persist(new Press('Punch'));
+        }, 2];
+
+        yield 'the two tables of one updated row are one' => [static function (EntityManagerInterface $em): void {
+            $press = $em->getRepository(Press::class)->findOneBy(['name' => 'Standing']);
+            $press->name = 'Renamed';
+            $press->tonnage = 9;
+        }, 1];
+
+        yield 'two updated rows of one hierarchy are two' => [static function (EntityManagerInterface $em): void {
+            foreach ($em->getRepository(Press::class)->findAll() as $press) {
+                $press->name .= ', renamed';
+                $press->tonnage = 9;
+            }
+        }, 2];
+
+        yield 'rows of two hierarchies are two' => [static function (EntityManagerInterface $em): void {
+            $em->persist(new Article('One'));
+            $em->persist(new Press('Stamp'));
+        }, 2];
+
+        yield 'an insert and an update of one class are two' => [static function (EntityManagerInterface $em): void {
+            $em->persist(new Article('New'));
+            $em->getRepository(Article::class)->findOneBy(['title' => 'Standing'])->title = 'Renamed';
+        }, 2];
+    }
+
+    /**
+     * The dropped warning's count, where the flush wrote more than one statement: each change is
+     * one record, and the statements of one change — a table at a time, in a hierarchy mapped
+     * across several — are counted once. The flush dies after every one of them ran: the last
+     * thing it does is remove a row nobody audits, and that removal's listener throws.
+     *
+     * @param \Closure(EntityManagerInterface): void $change
+     */
+    #[DataProvider('whatADyingFlushWrote')]
+    public function testTheDroppedWarningCountsEachChangeOnce(\Closure $change, int $dropped): void
+    {
+        $this->em->persist(new Article('Standing'));
+        $this->em->persist($standing = new Press('Standing'));
+        $this->em->persist(new Press('Standing too'));
+        $this->em->persist($last = new Vehicle());
+        $this->em->flush();
+        $this->em->clear();
+        $this->gateway->documents = [];
+        $this->logs = [];
+        unset($standing);
+
+        $breaker = new class {
+            public function postRemove(PostRemoveEventArgs $args): void
+            {
+                if ($args->getObject() instanceof Vehicle) {
+                    throw new \DomainException('the flush dies after the last of its statements');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postRemove], $breaker);
+
+        $change($this->em);
+        $this->em->remove($this->em->find(Vehicle::class, $last->id));
+
+        try {
+            $this->em->flush();
+            self::fail('the premise: the flush died');
+        } catch (\DomainException) {
+        } finally {
+            $this->em->getEventManager()->removeEventListener([Events::postRemove], $breaker);
+        }
+
+        $this->reopen();
+        $this->em->persist(new Article('Unrelated'));
+        $this->em->flush();
+
+        self::assertSame(['Unrelated'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+        self::assertNotSame([], array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, sprintf('so %d audit record(s) it had collected are dropped', $dropped)),
+        ), sprintf("the warning did not say %d; what was logged:\n%s", $dropped, implode("\n", $this->logs)));
     }
 
     public function testARemovalDraftedBeforeAFlushSurvivesTheDroppingOfAnother(): void
