@@ -509,8 +509,10 @@ configuration's `minCoveredMsi`.
   `OutboxTransportTest.php`, used by `AuditTransactionTest`): scores measured before 1.2.5 are not
   to be believed without measuring again.
 - **The mutants' memory is limited as the container limits it** (128M), so that a mutant that loops
-  while it allocates dies an error instead of taking a CI runner with it; the whole suite fits in
-  that in one process, so an error of that kind is the mutant's.
+  while it allocates dies an error rather than taking a CI runner with it. The whole suite fits in
+  that in one process, which is why the limit stays; it does not make every out-of-memory the
+  mutant's — a subset warms caches and lets go differently — so one is counted as detected once the
+  unmutated code has passed the same selected tests with the same settings.
 
 ## Releases and hotfixes
 

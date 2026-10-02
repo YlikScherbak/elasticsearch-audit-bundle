@@ -63,6 +63,19 @@ what it says.
   file of the listener. Read it with no memory limit, or not at all — the gate keeps only the
   identities and statuses.
 
+## Where the evidence stops
+
+- **1.2.x, one timeout of the main configuration is not identified.** CI 1.2.5 counted 1 timeout and
+  2,341 killed; run alone here, the same tree gave 0 and 2,342. That fits a mutant that contention
+  pushed past the timeout, but without its id it is not shown to be the same mutant: 1.2.x's CI
+  keeps no mutant logs. It does not move the score (both statuses count as detected).
+- **Why the parser's part lost its runner twice is not known.** With the mutants limited to 128M it
+  finished, and its record has no errors — no out-of-memory in the log. The limit is a working
+  condition, not an explanation; a runner lost again is looked into, not taken as the same thing.
+- **An out-of-memory is the mutant's only once the unmutated code has passed the same selected
+  tests with the same settings.** The whole suite fits in 128M in one process, which is why the
+  limit stays; it is not a proof for every subset.
+
 ## Timeouts
 
 A timeout counts as a kill, and contention makes them: at eleven threads 31 of the listener's
