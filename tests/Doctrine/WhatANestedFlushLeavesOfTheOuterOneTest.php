@@ -90,7 +90,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $y->quantity = 2;
         $this->em->flush();
 
-        $this->assertTheRowsAndTheHistory([1 => 5, 2 => 2], self::theOuterFlushsYAndTheNestedFlushsSecondX());
+        $this->assertTheRowsAndTheHistory([1 => 5, 2 => 2], $this->theOuterFlushsYAndTheNestedFlushsSecondX());
     }
 
     public function testALineTheNestedFlushWroteForTheOuterOneHasTheValueItWrote(): void
@@ -130,7 +130,7 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
         $y->quantity = 2;
         $this->em->flush();
 
-        $this->assertTheRowsAndTheHistory([1 => 5, 2 => 2], self::theOuterFlushsYAndTheNestedFlushsSecondX());
+        $this->assertTheRowsAndTheHistory([1 => 5, 2 => 2], $this->theOuterFlushsYAndTheNestedFlushsSecondX());
     }
 
     public function testANestedFlushRefusedAheadOfThisListenerDoesNotLendItsChangeSet(): void
@@ -954,9 +954,36 @@ final class WhatANestedFlushLeavesOfTheOuterOneTest extends DoctrineTestCase
      *
      * @return list<string>
      */
-    private static function theOuterFlushsYAndTheNestedFlushsSecondX(): array
+    private function theOuterFlushsYAndTheNestedFlushsSecondX(): array
     {
-        return method_exists(\Doctrine\ORM\Event\OnClearEventArgs::class, 'clearsAllEntities')
+        // Whose statement Y's UPDATE is, is Doctrine's to decide. One ORM dispatches X's postUpdate
+        // only after the outer flush has written every row it scheduled; another dispatches it
+        // right after X's own row, and the nested flush then runs on the same unit of work, with
+        // Y's update still pending -- so the nested flush writes Y, and Y's change is the nested
+        // flush's, in a record of its own after the second X. The order of the statements is the
+        // same both ways (X, Y, X again); what differs is which flush each belongs to, and that is
+        // what the history follows.
+        //
+        // This used to be told by ORM 2 against ORM 3, and ORM 3.0.0 dispatches the way ORM 2
+        // does; so it is read off the log, from the flush each statement belongs to.
+        $xSetTo2 = $ySetTo2 = null;
+
+        for ($at = $this->from + 1, $to = $this->log->position(); $at <= $to; ++$at) {
+            $statement = $this->log->statement($at);
+
+            if ($statement === null || !str_starts_with($statement['sql'], 'UPDATE CrateItem')) {
+                continue;
+            }
+
+            $params = array_map('intval', array_values($statement['params']));
+            $xSetTo2 ??= $params === [2, 1] ? $at : null;
+            $ySetTo2 ??= $params === [2, 2] ? $at : null;
+        }
+
+        self::assertNotNull($xSetTo2, 'the premise: the outer flush set X to 2');
+        self::assertNotNull($ySetTo2, 'the premise: Y was set to 2');
+
+        return $this->log->ownerOf($ySetTo2) === $this->log->ownerOf($xSetTo2)
             ? ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.2.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5']
             : ['crate C-1 items.1.quantity: 1 -> 2', 'crate C-1 items.1.quantity: 2 -> 5', 'crate C-1 items.2.quantity: 1 -> 2'];
     }
