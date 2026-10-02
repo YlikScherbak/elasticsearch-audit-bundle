@@ -7,10 +7,10 @@ namespace Borsche\ElasticsearchAuditBundle\Command;
 use Borsche\ElasticsearchAuditBundle\Contract\AuditEnricherInterface;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\ClusterVersion;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\GatewayInterface;
+use Borsche\ElasticsearchAuditBundle\Outbox\WhereTheQueueWrites;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
 use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\Schema\Schema;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
@@ -148,14 +148,7 @@ final class CheckCommand extends Command
             return false;
         }
 
-        // Read off the schema handed in rather than off what comes back: the method
-        // returns void on Symfony 6.4 and a Schema on 7, and it fills in the object it
-        // was given in both. Using the return value is what the oldest supported version
-        // will not even let an analyser look at.
-        $schema = new Schema();
-        $this->outboxQueue->configureSchema($schema, $this->auditedConnection, static fn (): bool => false);
-
-        if ($schema->getTables() === []) {
+        if (!WhereTheQueueWrites::isOn($this->outboxQueue, $this->auditedConnection)) {
             $io->text(sprintf('<error>%s</error>: the queue is on a different Doctrine connection from the entities being audited. Two connections are two transactions even against one database, so a record and the change it describes commit separately - which is the one thing transport: outbox exists to prevent.', $this->outboxQueueName));
 
             return false;

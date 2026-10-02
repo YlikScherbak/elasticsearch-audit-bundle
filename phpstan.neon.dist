@@ -7,3 +7,16 @@ parameters:
         - src
         - examples
     treatPhpDocTypesAsCertain: false
+    ignoreErrors:
+        # Symfony 6.4 declares DoctrineTransport::configureSchema() void and fills in the schema
+        # it is given; 7 returns a schema, which on DBAL 4.5 is the only one with the queue's
+        # table. The outbox reads both, so against 6.4 it reads the result of a void method on
+        # purpose: there, and in no other file. Against 7 there is nothing to ignore.
+        -
+            identifier: method.void
+            path: src/Outbox/WhereTheQueueWrites.php
+            reportUnmatched: false
+        -
+            identifier: instanceof.alwaysFalse
+            path: src/Outbox/WhereTheQueueWrites.php
+            reportUnmatched: false

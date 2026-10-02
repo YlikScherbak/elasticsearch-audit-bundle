@@ -9,6 +9,25 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-10-02
+
+### Fixed
+- **`transport: outbox` refused every audit transaction with doctrine/dbal 4.5** — "The outbox
+  queue is holding a different Doctrine connection from the one this transaction commits on", and
+  `audit:check` reported the queue on a different connection, with the queue on the right one.
+  Upgrade to 1.2.5; nothing to change in the configuration.
+  The check asks the queue through Messenger's `configureSchema()` whether it writes on the
+  transaction's connection, and read the answer off the schema it handed in — where the oldest
+  Symfony 6.4 releases, whose method is void, put it. A Doctrine queue that builds its table with
+  DBAL 4.5's schema editor returns a new schema with the table and leaves the one it was given
+  empty. The answer is now read off the schema returned when there is one, and off the one handed
+  in otherwise; a queue on another connection is refused as before, by `AuditTransaction` and by
+  `audit:check`.
+  Seen with doctrine/dbal 4.5.0 and symfony/doctrine-messenger 7.4.20 on 1.1.0, the first release
+  with the outbox, and on 1.2.4, and with 6.4.47 on 1.1.0; the same check is in every release
+  between. Not seen with doctrine/dbal 4.4.4 and doctrine-messenger 7.4.18, nor with dbal 3.8.0 and
+  6.4.0. Messenger 8 was not tried.
+
 ## [1.2.4] - 2026-09-21
 
 ### Fixed
