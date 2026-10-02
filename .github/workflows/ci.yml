@@ -318,37 +318,16 @@ jobs:
         run: |
           php tools/bc-check/vendor/bin/roave-backward-compatibility-check             --from="$(git describe --tags --abbrev=0)"             --install-development-dependencies
 
+  # The mutation gate, one set of tools/infection/parts.json per call: a plan, its parts
+  # and a summary that holds the parts to the plan and the score to the floor. The floor
+  # is in each configuration and is raised as escaped mutants are worked through; it is a
+  # floor and not a target. What to leave alone to keep the score honest is written at the
+  # top of mutation.yml.
   mutation:
     name: Mutation testing
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          extensions: pdo_sqlite
-          coverage: pcov
-          tools: composer:v2
-
-      - name: Install dependencies
-        run: composer install --prefer-dist --no-progress --no-interaction
-
-      # Infection is not in require-dev: it wants PHP 8.3 and this bundle supports 8.1,
-      # so every job in the test matrix would have had to resolve a tool none of them
-      # run. Locally the same install happens inside a container - see
-      # tools/infection/Dockerfile, which exists because a workstation need not have a
-      # coverage driver and this job's pcov is the one that must agree with it.
-      - name: Install Infection
-        run: composer install --working-dir=tools/infection --prefer-dist --no-progress --no-interaction
-
-      # The floor is in infection.json5 and is raised as escaped mutants are worked
-      # through. It is a floor and not a target: a mutant that survives is a test that
-      # would not have noticed the code being wrong, and some of them are equivalent
-      # mutants that no test can kill - those are listed in the config, with the reason.
-      - name: Enforce the mutation score floor
-        run: php -d memory_limit=-1 tools/infection/vendor/bin/infection --threads=max --no-progress --no-interaction
+    uses: ./.github/workflows/mutation.yml
+    with:
+      set: main
 
   # Three thousand generated sequences of ordinary operations, each checked against what
   # the database actually did. It is a search rather than a guard -- what it finds is
@@ -361,9 +340,10 @@ jobs:
   # real too. That is what this job is for: the search is only worth what it is allowed to
   # search, and how far it is allowed to go.
   #
-  # Not folded into the mutation job either, and for the opposite reason to the one below:
-  # this test covers nearly every line of the listener, so Infection would run three
-  # thousand sequences per mutant, and every one of them would time out.
+  # Not folded into the mutation gate at this length: this test covers nearly every line of
+  # the listener, so Infection would run three thousand sequences per mutant, and every one
+  # of them would time out. The mutation runs keep it at the suite's sixty, which is what
+  # kills the mutants no single test describes.
   model:
     name: The model, at length
     runs-on: ubuntu-latest
@@ -385,34 +365,14 @@ jobs:
           AUDIT_MODEL_SEEDS: '3000'
         run: vendor/bin/phpunit --filter WhatTheHistorySaysAgainstWhatTheRowsDid
 
-  # Its own job, and not another directory in the one above, for two reasons that both
-  # come from the same place: the tests for this listener build an EntityManager and a
-  # schema apiece. They are slow, so the run takes five minutes rather than one and does
-  # not belong in the job somebody waits on; and they need a timeout six times the other
-  # one's, which at 10 seconds was calling eighty-eight mutants timeouts. A timeout
-  # counts as a kill, so that alone was reading eight points higher than the truth.
+  # Its own set, for the reason the listener's tests build an EntityManager and a schema
+  # apiece: the run is hours rather than minutes, so parts.json splits its mutants by file
+  # into parts that run side by side, each against the whole suite.
   mutation-doctrine:
     name: Mutation testing (the Doctrine listener)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          extensions: pdo_sqlite
-          coverage: pcov
-          tools: composer:v2
-
-      - name: Install dependencies
-        run: composer install --prefer-dist --no-progress --no-interaction
-
-      - name: Install Infection
-        run: composer install --working-dir=tools/infection --prefer-dist --no-progress --no-interaction
-
-      - name: Enforce the mutation score floor for src/Doctrine
-        run: php -d memory_limit=-1 tools/infection/vendor/bin/infection --configuration=infection.doctrine.json5 --threads=max --no-progress --no-interaction
+    uses: ./.github/workflows/mutation.yml
+    with:
+      set: doctrine
 
   static-analysis:
     name: Static analysis

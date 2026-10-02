@@ -1,0 +1,161 @@
+name: Mutation gate
+
+# One set of tools/infection/parts.json, as a plan, its parts and a summary. Called by ci.yml
+# once per set, so release.yml waits for it like any other job.
+#
+# Why it is three jobs and not one: the listener's run is two hours on one runner and more
+# as it grows, and a score is believed only with the run it came from — so the run is
+# split, and every piece of it is checked against the whole. See tools/infection/gate.php
+# for what the summary refuses, and ARCHITECTURE.md ("The mutation gate") for why.
+#
+# What not to do to make it faster, because each one was done once and each made the
+# score a score of something else:
+# - lower the timeout: Infection skips, uncounted, a mutant whose covering tests add up to
+#   more than it — 494 and 1,176 of them under a green gate. The summary refuses a run that
+#   skipped any.
+# - raise the threads past parts.json: a timeout counts as a kill, and contention makes
+#   them. The summary refuses other threads than the manifest's.
+# - pass --only-covering-test-cases: coverage cannot name a test that read a cached answer,
+#   and four mutants escaped that whole files kill.
+# - narrow a part's TESTS — a --filter, a test suite, a directory: a part is a share of the
+#   mutants to make, never of the tests that may kill them. Every part runs against the
+#   whole suite, so that a mutant killed by a test somewhere else is still killed.
+
+on:
+  workflow_call:
+    inputs:
+      set:
+        description: 'A set of tools/infection/parts.json: main or doctrine'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # The plan: every mutant the configuration makes, with no test run against any of them.
+  # It is made once and handed to every part, which checks it is of its own tree before
+  # it starts, and to the summary, which holds the parts to it one mutant at a time.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      parts: ${{ steps.parts.outputs.parts }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite
+          coverage: pcov
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      # Infection is not in require-dev: it wants PHP 8.3 and this bundle supports 8.1,
+      # so every job in the test matrix would have had to resolve a tool none of them
+      # run. Locally the same install happens inside a container - see
+      # tools/infection/Dockerfile.
+      - name: Install Infection
+        run: composer install --working-dir=tools/infection --prefer-dist --no-progress --no-interaction
+
+      - name: The parts of the set
+        id: parts
+        run: echo "parts=$(php tools/infection/gate.php matrix '${{ inputs.set }}')" >> "$GITHUB_OUTPUT"
+
+      - name: Plan the mutants
+        env:
+          INFECTION_RUNNER: direct
+        run: sh tools/infection/part.sh '${{ inputs.set }}' plan
+
+      - name: Keep the plan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-${{ inputs.set }}-plan
+          path: var/infection/gate/${{ inputs.set }}.plan.json
+          retention-days: 14
+
+  part:
+    name: Part
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      # A part that fails must not take the others with it: the summary names what is
+      # missing, and the parts that ran are still what the next look at the escaped
+      # mutants starts from.
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.plan.outputs.parts) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite
+          coverage: pcov
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Install Infection
+        run: composer install --working-dir=tools/infection --prefer-dist --no-progress --no-interaction
+
+      - name: The plan
+        uses: actions/download-artifact@v4
+        with:
+          name: mutation-${{ inputs.set }}-plan
+          path: var/infection/plan
+
+      # Runs with no floor of its own: a part with many escaped mutants is a finished part.
+      # The step fails only when the plan is of another tree or the run could not be
+      # recorded; Infection's own exit code goes into the record, for the summary.
+      - name: Run the part
+        env:
+          INFECTION_RUNNER: direct
+        run: sh tools/infection/part.sh '${{ inputs.set }}' '${{ matrix.part }}' 'var/infection/plan/${{ inputs.set }}.plan.json'
+
+      - name: Keep the record and the escaped mutants
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-${{ inputs.set }}-${{ matrix.part }}
+          path: |
+            var/infection/gate/${{ inputs.set }}.${{ matrix.part }}.json
+            var/infection/*.log
+          retention-days: 14
+
+  # Runs whatever became of the plan and the parts — a part that failed, timed out or was
+  # cancelled leaves no record, and a missing record is a refusal, not a skipped job.
+  summary:
+    name: Summary
+    needs: [plan, part]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: The records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-${{ inputs.set }}-*
+          path: var/infection/records
+
+      - name: Hold the parts to the plan and the score to the floor
+        run: |
+          mkdir -p var/infection/gate
+          find var/infection/records -name '${{ inputs.set }}.*.json' -exec cp {} var/infection/gate/ \;
+          php tools/infection/gate.php summarise '${{ inputs.set }}' var/infection/gate
