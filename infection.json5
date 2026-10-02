@@ -262,10 +262,10 @@
     // ignored. minCoveredMsi rather than minMsi because uncovered code is the coverage
     // floor's business, and tools/coverage-floor.php already owns that argument.
     minCoveredMsi: 97,
-    // Low on purpose. A mutant that loops forever is ordinary here — the redactor and
-    // the frame walk with budgets, and removing a budget is exactly the mutation — and
-    // every one of those otherwise costs the whole timeout. The real work per mutant is
-    // the few tests covering one line, which take well under a second even through a
-    // slow mount.
-    timeout: 10,
+    // High enough that nothing is skipped (1.2.5). Infection skips a mutant, uncounted,
+    // when the tests covering its line add up to more than the timeout, and at 10 seconds
+    // it was leaving out 186 of 2,465 — the score was a score of the rest. What it costs
+    // is the mutants that loop: a removed budget in the redactor or the frame now runs
+    // for two minutes rather than ten seconds.
+    timeout: 120,
 }
