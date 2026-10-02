@@ -94,6 +94,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The mutants' processes get the limit the container's php.ini gives them locally
+      # (128M); the initial run is given none by part.sh. Without one — setup-php sets none — a
+      # mutant that loops while it allocates takes the runner's memory with it: the "shape" part,
+      # the parser's, lost its runner twice ("received a shutdown signal") seven minutes in.
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
@@ -101,6 +105,7 @@ jobs:
           extensions: pdo_sqlite
           coverage: pcov
           tools: composer:v2
+          ini-values: memory_limit=128M
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-progress --no-interaction
