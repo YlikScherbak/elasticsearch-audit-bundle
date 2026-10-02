@@ -14,9 +14,6 @@ use Borsche\ElasticsearchAuditBundle\Tests\TestConnection;
 use Doctrine\DBAL\DriverManager;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\Connection as QueueConnection;
-use Symfony\Component\Messenger\Envelope;
-use Symfony\Component\Messenger\Transport\Sender\SenderInterface;
-use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
 
 /**
  * The outbox against a real SQL queue on a real connection, because the one thing it
@@ -160,37 +157,5 @@ final class OutboxTransportTest extends TestCase
     private function queued(): int
     {
         return (int) $this->connection->fetchOne('SELECT COUNT(*) FROM audit_outbox');
-    }
-}
-
-/**
- * The smallest thing that turns a Doctrine queue connection into a Messenger sender:
- * what FrameworkBundle's own transport does, without the receiving half.
- */
-final class QueueSender implements SenderInterface
-{
-    public function __construct(private readonly QueueConnection $queue)
-    {
-    }
-
-    public function send(Envelope $envelope): Envelope
-    {
-        $encoded = (new PhpSerializer())->encode($envelope);
-        $this->queue->send($encoded['body'], $encoded['headers'] ?? []);
-
-        return $envelope;
-    }
-}
-
-final class RememberingSender implements SenderInterface
-{
-    /** @var list<object> */
-    public array $sent = [];
-
-    public function send(Envelope $envelope): Envelope
-    {
-        $this->sent[] = $envelope->getMessage();
-
-        return $envelope;
     }
 }
