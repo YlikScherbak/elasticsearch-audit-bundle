@@ -241,9 +241,13 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   now its INSERT's own, the connection's answer to Doctrine right after it; one nobody asked for
   is said as doubt, never borrowed. In 1.3 from its start on this branch; no release had it —
   1.2 reads Doctrine's change sets. Found working through the escaped mutants.
-- **The warning about a flush that was rolled back counts what it dropped.** Two rows of one class
-  inserted by a flush that died were counted as one, because a statement that does not yet carry
-  its row's id was taken for the next table of the row before it.
+- **The warning about a flush that was rolled back names no number it cannot vouch for.** It said
+  how many audit records were dropped, counted by grouping the statements taken back, and that was
+  a count of something else: two rows of one class inserted by a flush that died came out as one,
+  and a change made only inside a collection as none ("0 audit record(s) … dropped" for a tag
+  added). It now says the flush's audit changes are dropped and no history will be published for
+  them. The warning about records written late keeps its count: those are counted by building
+  them.
 - **The late records of a committed change inside a collection are written behind a flush that
   failed.** A flush whose publishing was swallowed (a `postFlush` listener registered before this
   bundle's threw) has its records written late, by the next flush. When the flush in between

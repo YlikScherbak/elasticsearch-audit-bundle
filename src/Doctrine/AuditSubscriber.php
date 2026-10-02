@@ -18,11 +18,9 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\HistoryReplay;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\LinkFacts;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\LinkRuns;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\NobodysStatement;
-use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowBinding;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowIdentity;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
-use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape;
 use Borsche\ElasticsearchAuditBundle\Model\AuditEvent;
 use Borsche\ElasticsearchAuditBundle\Model\AuditOrigin;
 use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
@@ -817,47 +815,6 @@ final class AuditSubscriber
     }
 
     /**
-     * How many executions of an audited entity's row the log took back since the history was
-     * last read into: what a flush that died wrote, and what it would have had records of.
-     * Statements of one change, a table at a time, are one.
-     */
-    private function executionsTheLogTookBack(EntityManagerInterface $em): int
-    {
-        $count = 0;
-        $last = null;
-
-        for ($at = $this->factsReadThrough + 1, $to = $this->statements->position(); $at <= $to; ++$at) {
-            $entry = $this->statements->statement($at);
-            $shape = $entry === null ? null : StatementShape::read($entry['sql']);
-            $binding = $entry === null || $shape === null ? null : RowBinding::of($em, $shape, $entry['params']);
-
-            if ($shape === null || $binding === null || $binding->kind !== RowBinding::ROW || $binding->class === null
-                || $this->statements->fate($at) !== StatementLog::VOID
-                || $this->metadataFactory->forClass($em->getClassMetadata($binding->class)->name, $em->getClassMetadata($binding->class)->newInstance(...)) === null
-            ) {
-                $last = null;
-
-                continue;
-            }
-
-            $row = [$shape->kind, $em->getClassMetadata($binding->class)->rootEntityName, $binding->key === null ? null : self::rowOf($binding->key)];
-
-            // The next table of the same change: the same kind and hierarchy, and the same row --
-            // or, after a statement that did not carry its key, the row that statement made. A
-            // statement with no key is the first table of a new row, its id not generated yet,
-            // so it begins a change of its own: two rows inserted one after the other are two,
-            // and the second table of each carries the id the first one was given.
-            if ($last === null || $last[0] !== $row[0] || $last[1] !== $row[1] || $row[2] === null || ($last[2] !== null && $last[2] !== $row[2])) {
-                ++$count;
-            }
-
-            $last = $row;
-        }
-
-        return $count;
-    }
-
-    /**
      * How many records the flush on the stack has collected: exactly as many as publishing
      * it would write -- counted by building them, on the same road ({@see drafts()}), since two
      * counts kept in step by hand are how a flush whose only news came from inside a
@@ -1431,18 +1388,6 @@ final class AuditSubscriber
     }
 
     /**
-     * A row's key as one string, whatever order its columns came in.
-     *
-     * @param array<string, mixed> $key
-     */
-    private static function rowOf(array $key): string
-    {
-        ksort($key);
-
-        return implode('|', array_map(static fn (mixed $value): string => \is_scalar($value) ? (string) $value : '', $key));
-    }
-
-    /**
      * Remember how deep this flush started, and notice a flush above it that died.
      *
      * The unwinding is the one {@see collectingNow()} does, spelled out because here it
@@ -1476,7 +1421,6 @@ final class AuditSubscriber
             // record built from it -- a flush that died rolled its statements back, and that,
             // not its manager being closed or cleared on the way out, is what says so.
             $collected = $this->collectedSoFar($abandoned ?? $em);
-            $before = $collected + $this->executionsTheLogTookBack($abandoned ?? $em);
 
             if ($committed && $collected > 0) {
                 // Its statements stayed done, and it did not come back through postFlush:
@@ -1499,7 +1443,12 @@ final class AuditSubscriber
                 // listener in onFlush threw before Doctrine wrote anything; or what it wrote
                 // was rolled back. Either way nothing here reached the database, and history
                 // that describes rows nobody has is worse than history that is missing.
-                $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, most likely — so {count} audit record(s) it had collected are dropped.', ['count' => $before]);
+                //
+                // No number. It once said how many records were dropped, counted by grouping
+                // the statements taken back, and two things made that a number of something
+                // else: an execution is not a record -- an owner's lines and links join its
+                // record -- and a change made only inside a collection was counted as none.
+                $this->logger->warning('A flush ended without committing, or without anything left to prove it did — a listener in onFlush threw, or its transaction was rolled back — so the audit changes it collected are dropped: no history will be published for them.');
 
                 $this->forgetThisFlush(keepingTheUnwrittenRemovals: true);
             }

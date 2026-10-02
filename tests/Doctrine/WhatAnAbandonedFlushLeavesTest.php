@@ -15,10 +15,12 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\HideEveryStop;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Press;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
+use Doctrine\ORM\Event\PostPersistEventArgs;
 use Doctrine\ORM\Event\PostRemoveEventArgs;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 use Doctrine\ORM\Events;
 
 /**
@@ -568,7 +570,7 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         ), sprintf("the warning counted a record nobody was writing; what was logged:\n%s", implode("\n", $this->logs)));
     }
 
-    public function testTheDroppedWarningCountsWhatIsReallyDropped(): void
+    public function testTheDroppedWarningSaysTheChangesWentWithTheFlush(): void
     {
         // The other ending, where the log says what the flush wrote was taken back: it died
         // after its INSERT, and the transaction rolled back. Nothing is written, and the
@@ -606,63 +608,77 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         self::assertSame(['Unrelated'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
         self::assertNotSame([], array_filter(
             $this->logs,
-            static fn (string $line): bool => str_contains($line, '1 audit record(s) it had collected are dropped'),
-        ), sprintf("the warning counted a record nobody was dropping; what was logged:\n%s", implode("\n", $this->logs)));
+            static fn (string $line): bool => str_contains($line, 'so the audit changes it collected are dropped: no history will be published for them'),
+        ), sprintf("no warning said the changes were dropped; what was logged:\n%s", implode("\n", $this->logs)));
     }
 
     /**
-     * @return iterable<string, array{\Closure(EntityManagerInterface): void, int}>
+     * @return iterable<string, array{\Closure(EntityManagerInterface): void}>
      */
     public static function whatADyingFlushWrote(): iterable
     {
         yield 'two rows of one class are two' => [static function (EntityManagerInterface $em): void {
             $em->persist(new Article('One'));
             $em->persist(new Article('Two'));
-        }, 2];
+        }];
 
         yield 'the two tables of one inserted row are one' => [static function (EntityManagerInterface $em): void {
             $em->persist(new Press('Stamp'));
-        }, 1];
+        }];
 
         yield 'two inserted rows of one hierarchy are two' => [static function (EntityManagerInterface $em): void {
             $em->persist(new Press('Stamp'));
             $em->persist(new Press('Punch'));
-        }, 2];
+        }];
 
         yield 'the two tables of one updated row are one' => [static function (EntityManagerInterface $em): void {
             $press = $em->getRepository(Press::class)->findOneBy(['name' => 'Standing']);
             $press->name = 'Renamed';
             $press->tonnage = 9;
-        }, 1];
+        }];
 
         yield 'two updated rows of one hierarchy are two' => [static function (EntityManagerInterface $em): void {
             foreach ($em->getRepository(Press::class)->findAll() as $press) {
                 $press->name .= ', renamed';
                 $press->tonnage = 9;
             }
-        }, 2];
+        }];
 
         yield 'rows of two hierarchies are two' => [static function (EntityManagerInterface $em): void {
             $em->persist(new Article('One'));
             $em->persist(new Press('Stamp'));
-        }, 2];
+        }];
+
+        yield 'a tag added, and nothing else' => [static function (EntityManagerInterface $em): void {
+            $em->persist($tag = new Tag('dying'));
+            $em->getRepository(Article::class)->findOneBy(['title' => 'Standing'])->tags->add($tag);
+        }];
+
+        yield 'a row nobody audits, written first, is passed over and not stopped at' => [static function (EntityManagerInterface $em): void {
+            $em->persist(new Vehicle());
+            $em->persist(new Article('One'));
+        }];
 
         yield 'an insert and an update of one class are two' => [static function (EntityManagerInterface $em): void {
             $em->persist(new Article('New'));
             $em->getRepository(Article::class)->findOneBy(['title' => 'Standing'])->title = 'Renamed';
-        }, 2];
+        }];
     }
 
     /**
-     * The dropped warning's count, where the flush wrote more than one statement: each change is
-     * one record, and the statements of one change — a table at a time, in a hierarchy mapped
-     * across several — are counted once. The flush dies after every one of them ran: the last
-     * thing it does is remove a row nobody audits, and that removal's listener throws.
+     * A flush that wrote more than one statement and died after every one of them ran — the last
+     * thing it does is remove a row nobody audits, and that removal's listener throws — has
+     * nothing of it published, and the warning says its changes are dropped, for every shape of
+     * change: rows, a hierarchy's tables, a collection alone.
+     *
+     * The warning once counted the records, by grouping the statements taken back, and the count
+     * was of something else: two INSERTs of one class came out as one, and a tag added alone as
+     * none ("0 audit record(s) … dropped"). It names no number now.
      *
      * @param \Closure(EntityManagerInterface): void $change
      */
     #[DataProvider('whatADyingFlushWrote')]
-    public function testTheDroppedWarningCountsEachChangeOnce(\Closure $change, int $dropped): void
+    public function testAFlushThatDiedAfterItsStatementsHasNothingPublishedAndSaysSo(\Closure $change): void
     {
         $this->em->persist(new Article('Standing'));
         $this->em->persist($standing = new Press('Standing'));
@@ -702,8 +718,56 @@ final class WhatAnAbandonedFlushLeavesTest extends DoctrineTestCase
         self::assertSame(['Unrelated'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
         self::assertNotSame([], array_filter(
             $this->logs,
-            static fn (string $line): bool => str_contains($line, sprintf('so %d audit record(s) it had collected are dropped', $dropped)),
-        ), sprintf("the warning did not say %d; what was logged:\n%s", $dropped, implode("\n", $this->logs)));
+            static fn (string $line): bool => str_contains($line, 'so the audit changes it collected are dropped: no history will be published for them'),
+        ), sprintf("no warning said the changes were dropped; what was logged:\n%s", implode("\n", $this->logs)));
+        self::assertSame([], array_filter($this->logs, static fn (string $line): bool => preg_match('/\\d+ audit record\\(s\\) it had collected/', $line) === 1), 'no count of records the warning cannot vouch for');
+    }
+
+    /**
+     * The same twice, with nothing in between that starts again: a flush dies, the next one is
+     * where its changes are dropped and it dies too, and the one after that drops the second's
+     * and is recorded as itself. Doctrine dispatches postPersist after it has written every row of
+     * the class, so each flush dies in its first postPersist with every INSERT run and one row
+     * announced: the shape that once made the next flush's record take another row's id
+     * (AKeyBelongsToItsInsertTest holds the ids).
+     */
+    public function testAFlushAfterTwoThatDiedIsRecordedAsItself(): void
+    {
+        $breaker = new class {
+            public function postPersist(PostPersistEventArgs $args): void
+            {
+                if ($args->getObject() instanceof Article && $args->getObject()->title !== 'Unrelated') {
+                    throw new \DomainException('the flush dies after its INSERTs');
+                }
+            }
+        };
+        $this->em->getEventManager()->addEventListener([Events::postPersist], $breaker);
+        $said = [];
+
+        foreach ([['One', 'Two'], ['Three']] as $titles) {
+            foreach ($titles as $title) {
+                $this->em->persist(new Article($title));
+            }
+
+            try {
+                $this->em->flush();
+                self::fail('the premise: the flush died');
+            } catch (\DomainException) {
+            }
+
+            $this->reopen();
+        }
+
+        $this->em->getEventManager()->removeEventListener([Events::postPersist], $breaker);
+        $this->logs = [];
+        $this->em->persist(new Article('Unrelated'));
+        $this->em->flush();
+
+        self::assertSame(['Unrelated'], array_map(static fn (array $d): mixed => $d['changes']['title']['new'] ?? null, $this->documents()));
+        self::assertNotSame([], array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'so the audit changes it collected are dropped: no history will be published for them'),
+        ), sprintf("no warning said the second flush's changes were dropped; what was logged:\n%s", implode("\n", $this->logs)));
     }
 
     public function testARemovalDraftedBeforeAFlushSurvivesTheDroppingOfAnother(): void
