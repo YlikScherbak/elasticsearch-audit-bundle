@@ -232,14 +232,6 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   warning about a nested flush emptying the running flush's change sets.
 
 ### Fixed
-- **The outbox works on DBAL 4.5.** `AuditTransaction` asks the queue whether it writes on the
-  transaction's connection through Messenger's `configureSchema()`, and read the answer off the
-  schema it handed in. On DBAL 4.5, whose schemas are edited into new ones, Symfony 7's queue
-  returns a new schema with its table and leaves the one it was given empty, so every queue looked
-  like one on another connection: every audit transaction was refused ("The outbox queue is
-  holding a different Doctrine connection"), and `audit:check` reported the outbox broken. Every
-  release since 1.1.0 does this with DBAL 4.5 installed. The answer is now read wherever the
-  queue puts it. Found by CI on the first run that installed DBAL 4.5.
 - **The warning about a flush that was rolled back counts what it dropped.** Two rows of one class
   inserted by a flush that died were counted as one, because a statement that does not yet carry
   its row's id was taken for the next table of the row before it.
@@ -567,6 +559,33 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 - **Removing a target left every owner that held it without a record.** The join rows went with
   the target's row, by the cascade, and no owner's list said so. The code responsible dates from
   0.2.0.
+
+## [1.2.5] - 2026-10-02
+
+### Fixed
+- **`transport: outbox` refused every audit transaction with doctrine/dbal 4.5** — "The outbox
+  queue is holding a different Doctrine connection from the one this transaction commits on", and
+  `audit:check` reported the queue on a different connection, with the queue on the right one.
+  Upgrade to 1.2.5; nothing to change in the configuration.
+  The check asks the queue through Messenger's `configureSchema()` whether it writes on the
+  transaction's connection, and read the answer off the schema it handed in — where the oldest
+  Symfony 6.4 releases, whose method is void, put it. A Doctrine queue that builds its table with
+  DBAL 4.5's schema editor returns a new schema with the table and leaves the one it was given
+  empty. The answer is now read off the schema returned when there is one, and off the one handed
+  in otherwise; a queue on another connection is refused as before, by `AuditTransaction` and by
+  `audit:check`.
+  Seen with doctrine/dbal 4.5.0 and symfony/doctrine-messenger 7.4.20 on 1.1.0, the first release
+  with the outbox, and on 1.2.4, and with 6.4.47 on 1.1.0; the same check is in every release
+  between. Not seen with doctrine/dbal 4.4.4 and doctrine-messenger 7.4.18, nor with dbal 3.8.0 and
+  6.4.0. Messenger 8 was not tried: its shape of the answer is covered by a test with stubs, not
+  by a run of the real queue.
+
+### Internal
+- **The mutation gate of this branch measures what it says.** A test helper declared inside
+  another test's file made a mutant's run die of a missing class, and that was counted as the
+  mutant killed; the helpers have files of their own, the main run's timeout skips nothing, and
+  the floors are set from that measurement — the reasons are in `infection.json5` and
+  `infection.doctrine.json5`. Nothing in the bundle changed for this.
 
 ## [1.2.4] - 2026-09-21
 
