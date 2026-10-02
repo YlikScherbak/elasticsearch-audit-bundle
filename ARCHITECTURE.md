@@ -502,6 +502,24 @@ configuration's `minCoveredMsi`.
   eleven threads of twelve called escaped mutants timeouts that one thread sees escape.
 - **Mutants run against whole test files**, not only the cases covering the line: coverage cannot
   name a test that read a cached answer (rule 14), and whole files at least keep its neighbours.
+- **A test's helpers live in files of their own.** A class declared beside a test class exists only
+  once that file is loaded; the suite loads every file and never notices, but a mutant's run loads
+  the files covering it, and a test there that needed the class died of "class not found" — which
+  Infection counts as the mutant killed. The mechanism was there from v1.1.0 (`QueueSender`, in
+  `OutboxTransportTest.php`, used by `AuditTransactionTest`): scores measured before 1.2.5 are not
+  to be believed without measuring again.
+- **The mutants' memory is limited as the container limits it** (128M), so that a mutant that loops
+  while it allocates dies an error instead of taking a CI runner with it; the whole suite fits in
+  that in one process, so an error of that kind is the mutant's.
+
+## Releases and hotfixes
+
+**A tag is made by `release.yml` and nothing else**, after every job of CI on the commit it tags.
+It tags the HEAD of the ref it is run on, which is what makes a hotfix possible: a branch from the
+last release's **tag**, the fix and its guard on it, the CI of that branch, and `release.yml` run on
+that branch. Not from `main`: what `main` holds beyond the last tag is the next release, unreleased
+— 1.2.5 was made from `v1.2.4` because `main` held forty-seven commits of 1.3. The fix then goes
+into the branch of the next release too, and the changelogs are made to agree when they meet.
 
 ## Tests as the map of guarantees
 

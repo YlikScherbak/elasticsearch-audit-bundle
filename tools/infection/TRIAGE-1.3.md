@@ -52,6 +52,13 @@ what it says.
 - **`--only-covering-test-cases` trusts coverage to name the killer**, and coverage cannot name a
   test that read a cached answer. Not used.
 - **Contention makes timeouts, and a timeout counts as a kill.** The threads are the manifest's.
+- **A class declared beside a test class, used by another test file, turns a missing class into a
+  kill.** `QueueSender` and `RememberingSender` lived in `OutboxTransportTest.php`; a mutant whose
+  covering files included `AuditTransactionTest` and not that one "died" of "class not found". The
+  mechanism exists since v1.1.0, and the scores before 8ddb614 are not to be believed without
+  measuring again. Measured where it was measured: `RecordId.php` 124 killed of 124 before, 105
+  and 18 escaped after; on 1.2.x the Doctrine configuration 698 killed of 706 before, 615 after.
+  The new base of 1.3's main configuration is 94.56%, not the 98% this file's runs reported.
 - **Infection's JSON log repeats the whole source file with every mutant**: ninety megabytes for one
   file of the listener. Read it with no memory limit, or not at all — the gate keeps only the
   identities and statuses.
