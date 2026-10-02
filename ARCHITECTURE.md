@@ -526,6 +526,17 @@ replacement does to a kept element's row, that a removed target leaves the colle
 A change that leans on a new belief about the ORM adds a canary; a red canary after `composer update`
 is the first thing to read.
 
+**A question asked through someone else's API is pinned on the shape of the answer**, not only on
+the answer. The outbox asks a Doctrine queue whether it writes on the audited connection through
+Messenger's `configureSchema()`, and from 1.1.0 read the answer off the schema it handed in — a
+belief the API never promised. DBAL 4.5's schema editor made the queue return a new schema and leave
+the one handed in empty, and every audit transaction was refused (fixed in 1.2.5). The tests that ran
+the real queue passed throughout, because the installed versions answered the old way; what would
+have caught it is a test that plays every way the answer can come back.
+`tests/Outbox/WhereTheQueueWritesTest.php` does that with stubs, whatever is installed. A new check
+of that kind — a third party's method asked to say something it was not written to say — comes with
+one.
+
 **The cost pins** — `tests/Doctrine/HowOftenTheListenerAsksTheDatabaseTest.php`. Every question the
 listener asks the database, counted after the test's own setup: membership read back only where
 nothing knows it, holders read in batches, one `SELECT` per removal made inside a flush, and the look

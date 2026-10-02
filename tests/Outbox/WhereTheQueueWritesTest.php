@@ -17,10 +17,10 @@ use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
  * Whether a queue writes on a connection, read off configureSchema() wherever that puts its
  * answer.
  *
- * Found by CI on the first run after DBAL 4.5: Symfony 7's queue there returns a new schema with
- * its table and leaves the one it was given empty, and the check, which read the one it had given,
- * called every queue one on another connection — so every audit transaction was refused and
- * audit:check reported the outbox broken. The installed DBAL decides which of the two the real
+ * Found by CI on the first run after DBAL 4.5: Messenger's queue there (7.4.20, and 6.4.47)
+ * returns a new schema with its table and leaves the one it was given empty, and the check, which
+ * read the one it had given, called every queue one on another connection — so every audit
+ * transaction was refused and audit:check reported the outbox broken. The installed DBAL decides which of the two the real
  * queue does, so each is also played here by a queue that does it whatever is installed.
  */
 final class WhereTheQueueWritesTest extends TestCase
@@ -40,7 +40,7 @@ final class WhereTheQueueWritesTest extends TestCase
     public function testAQueueThatAnswersInANewSchemaIsHeard(): void
     {
         if ((string) (new \ReflectionMethod(DoctrineTransport::class, 'configureSchema'))->getReturnType() === 'void') {
-            self::markTestSkipped('Symfony 6.4 declares configureSchema() void: its queue cannot answer in a schema of its own.');
+            self::markTestSkipped('This Symfony declares configureSchema() void, as the oldest 6.4 releases do: its queue cannot answer in a schema of its own.');
         }
 
         // As on DBAL 4.5, where a schema is edited into a new one.
@@ -57,7 +57,8 @@ final class WhereTheQueueWritesTest extends TestCase
 
     public function testAQueueThatAnswersInTheSchemaItWasGivenIsHeard(): void
     {
-        // As on Symfony 6.4, where the method is void and fills in what it was given.
+        // As on the oldest Symfony 6.4 releases, where the method is void and fills in what it is
+        // given.
         $queue = $this->createStub(DoctrineTransport::class);
         $queue->method('configureSchema')->willReturnCallback(static function (Schema $handedIn): void {
             $handedIn->createTable('audit_outbox')->addColumn('id', 'integer');
