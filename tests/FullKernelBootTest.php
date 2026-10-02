@@ -627,6 +627,12 @@ final class FullKernel extends Kernel
                     : ['transports' => $outbox ? ['audit_outbox' => sprintf('doctrine://%s?table_name=audit_outbox&auto_setup=false', $elsewhere ? 'reporting' : 'default')] : [], 'routing' => []],
             ]);
 
+            // A logger of the test's own, which says nothing. Without one HttpKernel provides
+            // its own, writing to stderr — and these tests run in processes of their own, where
+            // PHPUnit takes anything on the child's stderr for an error: a warning the bundle is
+            // right to log (a transaction rolled back) failed the test that provoked it.
+            $container->register('logger', \Psr\Log\NullLogger::class);
+
             if ($undelivered) {
                 // A bus with the messenger.bus tag and nothing that would take a message
                 // anywhere — what `default_middleware: false` produces, built here
