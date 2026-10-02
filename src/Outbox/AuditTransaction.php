@@ -9,7 +9,6 @@ use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
 use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\Schema\Schema;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
@@ -188,12 +187,7 @@ final class AuditTransaction
             throw OutboxException::queueIsNotTransactional($this->queue::class);
         }
 
-        // The schema handed in is the one to read: the method returns void on Symfony
-        // 6.4 and a Schema on 7, and fills in what it was given on both.
-        $schema = new Schema();
-        $this->queue->configureSchema($schema, $this->connection, static fn (): bool => false);
-
-        if ($schema->getTables() === []) {
+        if (!WhereTheQueueWrites::isOn($this->queue, $this->connection)) {
             throw OutboxException::queueOnAnotherConnection();
         }
 
