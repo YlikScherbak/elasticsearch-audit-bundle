@@ -44,6 +44,15 @@ final class StatementShapeTest extends TestCase
         self::assertNull(StatementShape::read('SELECT 1'), 'and a statement of no shape is remembered as none');
     }
 
+    public function testAStatementReadIsStillRememberedAfterAnotherWellWithinTheBound(): void
+    {
+        $sql = 'UPDATE RememberedAlongside SET title = ? WHERE id = ?';
+        $first = StatementShape::read($sql);
+        StatementShape::read('DELETE FROM ReadInBetween WHERE id = ?');
+
+        self::assertSame($first, StatementShape::read($sql));
+    }
+
     public function testWhatIsRememberedOfStatementsIsBounded(): void
     {
         // A worker that runs for a week meets more statements than it should keep: past the
@@ -126,6 +135,15 @@ final class StatementShapeTest extends TestCase
         yield 'a division that is no comment' => ['UPDATE t SET a = ? / 2 WHERE id = ?', ['update', 't', ['a' => null], ['id' => 2], true]];
         yield 'names that begin with an underscore' => ['UPDATE _t SET _a = ? WHERE _id = ?', ['update', '_t', ['_a' => 1], ['_id' => 2], true]];
         yield 'a condition joined by a lower-case and' => ['DELETE FROM t WHERE a = ? and b = ?', ['delete', 't', [], ['a' => 1, 'b' => 2], true]];
+        yield 'a literal with an escaped quote inside' => ["UPDATE t SET note = 'it''s' WHERE id = ?", ['update', 't', ['note' => null], ['id' => 1], true]];
+        yield 'two literals in a list' => ["UPDATE t SET a = ? WHERE id = ? AND kind IN ('x','yz')", ['update', 't', ['a' => 1], ['id' => 2], false]];
+        yield 'an insert whose values have no opening parenthesis' => ['INSERT INTO t (a) VALUES ?)', null];
+        yield 'an update without SET' => ['UPDATE t a = ? WHERE id = ?', null];
+        yield 'a word after the last condition' => ['DELETE FROM t WHERE id = ? LIMIT 1', ['delete', 't', [], [], false]];
+        yield 'a reserved word in lower case as a bare column of an insert' => ['INSERT INTO t (a, from) VALUES (?, ?)', null];
+        yield 'an insert with a column missing' => ['INSERT INTO t (, a) VALUES (?, ?)', null];
+        yield 'an update with a column missing' => ['UPDATE t SET = ? WHERE id = ?', null];
+        yield 'a parenthesis left open in a value' => ['UPDATE t SET a = (? WHERE id = ?', null];
         yield 'a block comment is not read' => ['DELETE FROM t WHERE id = ? /* why */', null];
         yield 'a block comment first is not read' => ['/* why */ DELETE FROM t WHERE id = ?', null];
         yield 'a named parameter is not read' => ['DELETE FROM t WHERE id = :id', null];

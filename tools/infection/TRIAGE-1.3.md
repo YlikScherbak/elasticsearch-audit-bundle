@@ -335,6 +335,26 @@ was run against both files.
 | `7cff9aba`, `4103b9cf`, `33124d94`, `b317c982`, `b1fcc099`, `b2a992f2`, `ba57a98f`, `c3fda286`, `b519fdca`, `f42f4bb6`, `e34928dd` | 73, 92–98 | what a failed question gives back inside a transaction | not reached: the question is the listener's own SELECT of a join table it has just read, and nothing in the tests makes it fail. The road exists for PostgreSQL, where a failed statement leaves the transaction unusable; on SQLite a savepoint left open is released with DBAL's own. Deliberately not tested — it would take a connection made to fail one SELECT inside a flush on PostgreSQL |
 | `2d8f3cd4`, `a01458ce` | NobodysStatement 35, 37 | the warning while a flush ran | not reached, as `ranDuringAFlush()` (above) |
 
+### StatementShape (35)
+
+The reader was tested with the shapes the persisters write and a few look-alikes. Cases added to
+`StatementShapeTest`'s table — SQL tight against its punctuation, empty and escaped literals, a
+number, a minus and a division, underscores, a lower-case `and`, block comments, a reserved word
+as a bare column, a word after the last condition, a parenthesis left open, statements with a
+part missing — and one for the cache (`testAStatementReadIsStillRememberedAfterAnotherWellWithinTheBound`):
+23 of the 35 are red, **test gaps**. `622aa7f0` (line 199, `!== null` folded into the `??`) loops
+for ever on the open parenthesis: Infection counts that as a timeout, detected.
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `38adf250` | 133 | `placeholder()` protected | **equivalent**: only the reader calls it. For the reviewers: it can be private, with `keyword()`, `symbol()`, `name()`, `identifier()`, `value()`, `where()` whichever the class's own methods alone call |
+| `6d58d29c` | 401 | `''` inside a literal never an escaped quote | **equivalent**: `'it''s'` read as `'it'` and `'s'` — two literals where there was one, and a value is skipped literal by literal |
+| `2c22036c` | 379 | a quoted name searched for its closing quote one place on | not reached: differs only for an empty quoted name, `""`, which PostgreSQL and MySQL refuse |
+| `7a868d00`, `646c693a` | 411, 436 | a literal's token without its kind | **equivalent**: a literal is only ever passed over, and nothing reads the kind of what is passed over |
+| `7d0f476c`, `fcb7bb98` | 424 | a comment told by the character before, not after | **equivalent** for SQL a database runs: `--` and a closed `/* */` are refused either way, at the first character or at the last |
+| `9bbb7a62`, `082809eb` | 428, 435 | the first-character guard of a word or a number dropped | **equivalent**: the anchored pattern after it decides the same |
+| `f43f09e6`, `a0683944` | 443, 444 | a symbol's text from group 1 | **equivalent**: group 1 is the whole match |
+
 ### Code defects found (continued)
 
 - **The owner an element leaves was never checked** (diagnostics, LOW). `aboutTheOwnersOf()` meant to
