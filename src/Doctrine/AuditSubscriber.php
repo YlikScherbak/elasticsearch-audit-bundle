@@ -1479,21 +1479,23 @@ final class AuditSubscriber
      * or lost -- the statements say that -- but what has to hold before they are written.
      *
      * A declaration that cannot be honoured refuses the flush that would have relied on it,
-     * here in onFlush, for an owner that may have no event of its own. The owner the element points at and the one Doctrine remembers
-     * it pointing at, which differ exactly when it moves.
+     * here in onFlush, for an owner that may have no event of its own. The owner the element
+     * points at and the one it pointed at, which differ exactly when it moves -- read from the
+     * change set: by onFlush Doctrine has written the new values into what it calls the
+     * entity's original data, and the owner an element leaves was never checked.
      */
     private function aboutTheOwnersOf(EntityManagerInterface $em, object $element, int $flush): void
     {
         try {
             $elementMetadata = $em->getClassMetadata($element::class);
-            $original = $em->getUnitOfWork()->getOriginalEntityData($element);
+            $changes = $em->getUnitOfWork()->getEntityChangeSet($element);
 
             foreach ($elementMetadata->getAssociationNames() as $association) {
                 if (!$elementMetadata->isSingleValuedAssociation($association) || $elementMetadata->isAssociationInverseSide($association)) {
                     continue;
                 }
 
-                $owners = [$elementMetadata->getFieldValue($element, $association), $original[$association] ?? null];
+                $owners = [$elementMetadata->getFieldValue($element, $association), $changes[$association][0] ?? null];
 
                 foreach (array_unique(array_filter($owners, 'is_object'), \SORT_REGULAR) as $owner) {
                     $metadata = $this->metadataFactory->for($owner);

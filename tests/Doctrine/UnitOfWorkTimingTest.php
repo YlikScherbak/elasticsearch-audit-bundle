@@ -212,6 +212,26 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         self::assertCount(1, $lost, sprintf("two entities lost theirs and it was said %d times", \count($lost)));
     }
 
+    public function testALostChangeSetOfAnEntityNobodyAuditsIsNotThisListenersToReport(): void
+    {
+        // The warning is about what the audit relies on: an author nobody audits, its change
+        // set emptied the same way, is not said to be at risk by the audit listener.
+        $author = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author('alice');
+        $this->em->persist($author);
+        $this->em->flush();
+
+        $this->flushFromPostUpdate();
+        $this->attachListener(FailurePolicy::Log);
+
+        $author->name = 'bob';
+        $this->em->flush();
+
+        self::assertSame([], array_values(array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'had no change set left')
+        )));
+    }
+
     public function testTheLostChangeSetIsReportedAgainByTheNextFlushThatLosesOne(): void
     {
         // Once per flush, and per flush means each of them: "already said" is the state of one

@@ -489,6 +489,60 @@ final class ElementOwnershipTest extends DoctrineTestCase
         }
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function whatTheLineDoes(): iterable
+    {
+        yield 'a line of it changed' => ['changed'];
+        yield 'a new line added to it' => ['added'];
+        yield 'a line moved to it from an owner that is fine' => ['moved'];
+        yield 'a line of it moved to an owner that is fine' => ['moved away'];
+        yield 'a line of it removed' => ['removed'];
+    }
+
+    /**
+     * An owner with no event of its own, only a line's: its declaration is checked all the
+     * same, in onFlush, through the line -- the owner the line points at now and the one it
+     * pointed at, which differ when it moves.
+     */
+    #[DataProvider('whatTheLineDoes')]
+    public function testAnOwnerReachedOnlyThroughItsLineIsCheckedToo(string $what): void
+    {
+        $owner = new SometimesMisspelledTracking('SM-1', spelled: false);
+        $owner->lines->add($line = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesTrackedLine(1));
+        $line->owner = $owner;
+        $this->em->persist($owner);
+        $this->em->persist($fine = new SometimesMisspelledTracking('SM-2'));
+        $fine->lines->add($elsewhere = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesTrackedLine(5));
+        $elsewhere->owner = $fine;
+        $this->em->flush(); // refused under the setUp listener's "log", and written
+        $this->logs = [];
+
+        $this->attachListener(FailurePolicy::Throw);
+
+        match ($what) {
+            'changed' => $line->quantity = 2,
+            'added' => $owner->lines->add((static function () use ($owner): \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesTrackedLine {
+                $new = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\SometimesTrackedLine(2);
+                $new->owner = $owner;
+
+                return $new;
+            })()),
+            'moved' => $elsewhere->owner = $owner,
+            // The owner it leaves is the one that was there: by onFlush Doctrine has written the
+            // new owner into what it calls the entity's original data, and the old one is in
+            // the change set only.
+            'moved away' => $line->owner = $fine,
+            'removed' => $this->em->remove($line),
+        };
+
+        try {
+            $this->em->flush();
+            self::fail('the owner\'s declaration was not checked');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString('tracks the element field "quanitity"', self::chain($refused));
+        }
+    }
+
     private static function chain(\Throwable $e): string
     {
         $said = [];

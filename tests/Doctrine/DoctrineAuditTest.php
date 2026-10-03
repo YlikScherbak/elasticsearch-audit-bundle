@@ -66,6 +66,29 @@ final class DoctrineAuditTest extends DoctrineTestCase
         self::assertSame([], $this->documents());
     }
 
+    public function testAListenerBuiltWithItsDefaultsSkipsAnUpdateOfNothingAudited(): void
+    {
+        // skip_empty_updates is on unless somebody turns it off -- for the bundle's own
+        // configuration and for a listener built by hand alike.
+        $manager = $this->em->getEventManager();
+
+        foreach ($manager->getListeners(\Doctrine\ORM\Events::postFlush) as $listener) {
+            if ($listener instanceof \Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber) {
+                $manager->removeEventListener(\Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber::EVENTS, $listener);
+            }
+        }
+
+        $manager->addEventListener(\Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber::EVENTS, new \Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber($this->writer(\Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy::Throw), new \Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory(), $this->statements));
+
+        $article = $this->persisted(new Article('Hello'));
+        $this->gateway->documents = [];
+
+        $article->views = 99;
+        $this->em->flush();
+
+        self::assertSame([], $this->documents());
+    }
+
     public function testASkippedUpdateDoesNotTakeTheRecordsAfterItWithIt(): void
     {
         // Skipped is this execution's: the flush's other rows, run after it, are recorded.

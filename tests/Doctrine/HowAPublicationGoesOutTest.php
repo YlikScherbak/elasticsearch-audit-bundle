@@ -51,11 +51,19 @@ final class HowAPublicationGoesOutTest extends DoctrineTestCase
         self::assertCount(5, array_unique($ids));
     }
 
-    public function testInAFrameThatRefusesTheOperationNothingPastTheOverflowIsCompleted(): void
+    /** @return iterable<string, array{int}> */
+    public static function batchSizes(): iterable
+    {
+        yield 'a batch of one' => [1];
+        yield 'a batch larger than the moment' => [10];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('batchSizes')]
+    public function testInAFrameThatRefusesTheOperationNothingPastTheOverflowIsCompleted(int $batchSize): void
     {
         $completed = new \ArrayObject();
         $buffer = new FrameBuffer(maxHeld: 2, throwOnOverflow: true);
-        $this->listenWith($this->writerOf(batchSize: 1, buffer: $buffer, completed: $completed));
+        $this->listenWith($this->writerOf(batchSize: $batchSize, buffer: $buffer, completed: $completed));
         $buffer->open();
 
         for ($i = 0; $i < 5; ++$i) {

@@ -170,6 +170,25 @@ final class WhatARefusedDeclarationSaysTest extends DoctrineTestCase
         }
     }
 
+    public function testADeclarationIsCheckedWhenItsEntityIsRemovedToo(): void
+    {
+        // A removal is a record of the entity like any other, and its declaration is checked
+        // where the entity leaves: preRemove, the one event a removal is sure to raise.
+        $this->em->persist($box = new PostBox());
+        $this->em->flush(); // refused under the setUp listener's "log", and written
+        $this->logs = [];
+
+        $this->attachListener(FailurePolicy::Throw);
+
+        try {
+            $this->em->remove($box); // preRemove is raised here, before any flush
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString(PostBox::class.'::$nickname is audited, but Doctrine maps it as neither', self::chain($refused));
+        }
+    }
+
     public function testAuditingSomethingDoctrineDoesNotMapAtAll(): void
     {
         // The plainest refusal of the three, and the one whose whole job is to say that

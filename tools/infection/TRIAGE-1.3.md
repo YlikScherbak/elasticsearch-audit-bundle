@@ -243,6 +243,44 @@ all seven green, and each test red under its mutants on SQLite.
 | `2c8fcb69` | 485 | `\|\|` → `&&`: a declaration that is not there is read | test gap — under "throw" the TypeError refused the flush: `…::testAnEmptyingOfAnOwnerNobodyAuditsIsPassedOverInSilence` |
 | `c07c1e96` | 483 | the arms for ORM 2's array mapping and ORM 3's object swapped | **equivalent on the ORM the run installs**: ORM 3's mapping is also `ArrayAccess`. On ORM 2 it would fail; the mutation run does not install it |
 
+### AuditSubscriber: the owners of an element, and the rest of the listener
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `8dd74d8d`, `3b29d99c`, `d8ec9551`, `3eeae90d` | 438–450, 1506 | an owner reached only through its line not checked, from an update, an insertion or a removal of the line | test gap — `ElementOwnershipTest::testAnOwnerReachedOnlyThroughItsLineIsCheckedToo` (an owner whose tracked field is misspelled, with no event of its own) |
+| `294f8331` | 1496 | the owner the element points at dropped, the one it pointed at kept | **found a code defect** (below): the "one it pointed at" was read from `getOriginalEntityData()`, which by onFlush already holds the new owner — so the two entries were always the same and the mutant changed nothing. After the fix it is read from the change set; the case is `…@a line of it moved to an owner that is fine`, red before the fix |
+| `9672c382` | 445 | what an insertion planned not remembered | not yet told apart: read only by the lost-change-set warning, which a new row's change set does not lose the same way |
+| `1ce8a69e`, `a83abeff`, `202b5e9c` | 1493–1502 | the owners' list not made unique; the first owner ends the reading; the first association ends it | **equivalent** for the first (the check is idempotent); not reached for the others: both owners are of the association's one target class, and no element in the fixtures has an association ahead of its owner's that is skipped |
+| `9fdc86c4`, `6670e663`, `5e8f3af4` | 1492, 1522, 1530 | which associations of an element lead to its owner | not yet told apart: different only for an owner that does not hold the element through that association and whose own declaration is wrong |
+| `26d077e5` | 281 | `skipEmptyUpdates` on by default | test gap — `DoctrineAuditTest::testAListenerBuiltWithItsDefaultsSkipsAnUpdateOfNothingAudited` |
+| `00b005f3` | 554 | the lost-change-set warning for an entity nobody audits | test gap — `UnitOfWorkTimingTest::testALostChangeSetOfAnEntityNobodyAuditsIsNotThisListenersToReport` |
+| `e3d31ec2` | 625 | a declaration not checked when its entity is removed | test gap — `WhatARefusedDeclarationSaysTest::testADeclarationIsCheckedWhenItsEntityIsRemovedToo` (refused in `remove()`, where preRemove is raised) |
+| `48183f3f` | 791 | a moment cut into calls inside a frame | test gap — `HowAPublicationGoesOutTest::testInAFrameThatRefusesTheOperationNothingPastTheOverflowIsCompleted` also with a batch larger than the moment |
+| `6e507d68` | 791 | a batch cut at one more than its size | **equivalent** to what reaches the cluster: the writer cuts what it is handed to its own batch size again |
+| `8734191e` | 1122 | a removal given the context of its row | **equivalent**: a removal's draft has no changes and its row's context is gone; a test written for it passed under the mutant and was taken out |
+| `731b0792` | 1125 | the context applied through a fresh instance, not the owner | not yet told apart: different only for a declaration by interface that varies by instance in its always-recorded fields |
+| `502c32b6` | 1173 | the last failure while building raised, not the first | not yet told apart: under "throw" both are the bundle's same sentence; which one it is shows only with `failure_details: full` |
+| `3731ecff`, `ad9e61ad` | 729, 761 | the manager's order; `array_values()` on a run | **equivalent**: both callers pass the same manager twice; a run is built as a list |
+| `5ee1afb0`, `e679b8fc` | 344, 347 | what is kept per manager | **equivalent**: the narrowing is idempotent; `isset()` again |
+| `800f006d`, `da0a6952` | 825 | the count for no manager | not reached: `beginFlush()` always has one |
+| `7462d284` | 1791 | `consume` defaulted to true | **equivalent**: every caller passes it |
+| `8df1c95e`, `fcab43e4` | 1244 | claiming what ran with no frame of its own | not reached on DBAL 4, which always nests with savepoints — the run's; the DBAL 3 cells' tests without savepoints are where it is reached |
+| `77edd212`, `2b00bf8e`, `9f5f4297` | 1855–1860 | an enum key, and an object key with no identifier | not reached: Doctrine hands a key back as the value behind the case, and an associated key has its identifier by the time a record is built |
+| `c07c1e96` | 483 | see above | |
+| `2008c7e5`, `ce553d62`, `d9e0f6d5`, `622b66e7`, `ebdd1399`, `ac610dbe`, `952df9bd`, `59ae5ac5`, `cc74ec7d`, `5dbf9dac`, `72b11801`, `6d76930b`, `bf912738`, `d8f66b3a` | 431, 678–697, 1195–1221, 1323–1324 | which entry of the stack a postFlush claims for, when an inner flush hands back, whether a flush planned only collections, and whether one ran | not yet told apart, with the unwindTo group: they change which of a nested flush's states is taken for which, and a flush refused between two of the application's transactions is a word the vocabulary lacks. For the 3,000 seeds with that word |
+
+### Code defects found (continued)
+
+- **The owner an element leaves was never checked** (diagnostics, LOW). `aboutTheOwnersOf()` meant to
+  check the declaration of the owner a line points at and of the one it pointed at, and read the
+  second from `getOriginalEntityData()` — which Doctrine has overwritten with the new values by
+  onFlush (measured: a line moved from A to B reads B there; A is in the change set only). A line
+  leaving an owner whose declaration is wrong, with no event of the owner's own, was not refused.
+  Fixed by reading the change set; red before. A regression of the 1.3 branch: 1.2's
+  `holdMembership()` read the change set first and said why in a comment ("computing it refreshes
+  the original data to the current values") — the knowledge was in the code and did not survive
+  the rewrite. No release had it, so no CHANGELOG line.
+
 ### AuditWriter (main)
 
 | Id | Line | Change | Class |
