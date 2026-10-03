@@ -1243,6 +1243,41 @@ final class WhatTheHistorySaysAgainstWhatTheRowsDidTest extends DoctrineTestCase
         ],
     ];
 
+    /**
+     * Sequences of today's vocabulary, run in today's world -- not by the rule above, which sends
+     * every sequence with a word 5.2c did not have to 5.3's, whose oracle is older.
+     *
+     * What the sixty seeds of every run do not draw and the mutation triage of 1.3 found the wider
+     * search did (2026-10-03): a creation Doctrine completes with an UPDATE is one execution with
+     * that UPDATE, and the executions after it are still read. Each of these fails when the
+     * reading stops at a completion, and when a completion's places are read one off.
+     */
+    private const FOUND_BY_THE_MUTATION_TRIAGE = [
+        // drawn by seed 237
+        [4, false, ['add a namesake', 'flush, and after the statement a nested one empties the crate', 'create two relays pointing at each other', 'remove the article', 'flush, publishing swallowed', 'flush']],
+        // drawn by seed 786
+        [5, false, ['create two relays pointing at each other', 'create two relays pointing at each other', 'clear the article\'s tags', 'flush, and after the statement a nested one edits the article', 'flush']],
+    ];
+
+    public function testTheSequencesTheMutationTriageFoundStillDescribeWhatTheRowsDid(): void
+    {
+        if (self::theVocabulary()[0] !== self::VOCABULARY) {
+            self::markTestSkipped('drawn by today\'s vocabulary, and run in its world only');
+        }
+
+        $wrong = [];
+
+        foreach (self::FOUND_BY_THE_MUTATION_TRIAGE as [$shape, $filtered, $steps]) {
+            $said = $this->whatTheseStepsSaid($shape, $filtered, $steps);
+
+            if ($said !== null) {
+                $wrong[] = $said['story'];
+            }
+        }
+
+        self::assertSame([], $wrong, implode("\n\n", $wrong));
+    }
+
     public function testTheSequencesThatTellARuleApartStillDescribeWhatTheRowsDid(): void
     {
         $wrong = [];

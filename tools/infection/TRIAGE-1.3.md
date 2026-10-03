@@ -282,6 +282,26 @@ all seven green, and each test red under its mutants on SQLite.
 | `572817c3`, `a2b64dbb`, `caeda453` | 134 | the owner's key without or with a moved separator | **equivalent**: a class name holds no `"`, and the key is JSON, so class and key cannot run into each other |
 | `33d6122c`, `53bbe34b`, `e8c95e51`, `727edcba`, `c8d6bfd4` | 152 | the defaults of a run's `since` and `at` | **equivalent**: both are set when the run is opened |
 
+### EntityRowRuns
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `152a69d3` | 515 | a collection ends the reading of the declaration's fields | test gap — no fixture declared an audited column after an audited collection: `ListFirst`, and `DoctrineAuditTest::testAColumnDeclaredAfterACollectionIsRecorded` (a collection of relays: the tests that count which collections hold a tag, a stop or an author count exactly the ones they name) |
+| `9a016442`, `17032edd`, `d510c138` | 152–169 | what the writing reading passes over not let go of, or let go of by the counting one | test gap — `WhatTheListenerLetsGoOfTest::testWhatTheWritingReadingPassesOverIsLetGoOfToo` |
+| `b7642d19`, `b534de34` | 226, 248 | a completion ends the reading; its places read one off | **killed by the wider search** (tier (b): seeds 237, 421 and 786 of the default vocabulary); transcribed into the model's sequences — see below |
+| `cbb6b843`, `c8894974`, `113`–`126` (`3fafce6c`, `da0ae00e`, `39291695`, `b46e7646`), `2d218010`, `5d316093`, `73e5dd13`, `ff86c13d`, `3fe82b30` | | keys of a generator with none; `consume` passed by every caller; facts and the open execution set together; `isset()` on `false`; a to-one's join columns always a list and a to-many owning one's none; a departed list always passed | **equivalent** |
+| `9ce0d0e2`, `a8b5a2e1`, `696b1422`, `a962fa38`, `8fef1221`, `8ffa69cb` | 111, 350, 215 | a statement the log cannot parse; a creation's key without its class or separator | not reached: a fact's statement was parsed to become one; two classes' creations under keys that run into each other in one flush |
+| `6aa0d62e`, `56103d99` | 148 | which warning | not reached, as `ranDuringAFlush()` |
+| the rest of the method's (`completes()`, `continues()`, the once flags, `related()`, the declaration's always-recorded list) | | | in tier (b)/(c) |
+
+### LinkFacts
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `847f10f7`, `b853c891`, `3ba1c35c`, `989153b7`, `308238ac` | 89, 106, 357, 367 | `explode()` to three; `isset()` on `false` | **equivalent**: a collection's name holds no `::` |
+| `d9164260`, `851fe5c7`, `3b1b1131`, `27c15eb8`, `bd887e6b`, `429b1d4f`, `6c2cc532`, `970febc5`, `01ee01ac`, `bbf76f7b`, `b4637b08`, `9abe6b37` | 133–146 | the order of events at one position | not reached: two events of one owner at one position need one DELETE that is the owner's row going and a target of its own collection going — an owner holding itself; no fixture does |
+| the rest | | | in tier (b)/(c) |
+
 ### Code defects found (continued)
 
 - **The owner an element leaves was never checked** (diagnostics, LOW). `aboutTheOwnersOf()` meant to
