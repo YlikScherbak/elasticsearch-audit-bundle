@@ -10,7 +10,9 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\LinkFacts;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Baton;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CornerShelf;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\RelayTeam;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shelf;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -231,6 +233,47 @@ final class WhatTheListenerReadsOfTheJoinRowsTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame([], array_values(array_filter($this->queries, static fn (string $sql): bool => str_starts_with($sql, 'SELECT') && str_contains($sql, 'article_tag'))));
+    }
+
+    public function testAnOwnerGoingWhoseJoinColumnsDoNotCascadeHasItsLinksReadAndTakenAsFacts(): void
+    {
+        // Doctrine deletes the join rows itself, before the owner's row: what they held is read
+        // in onFlush -- of a team nothing had read -- and each is a fact of the removal.
+        $team = new RelayTeam();
+        $team->batons->add($red = new Baton('red'));
+        $team->batons->add($blue = new Baton('blue'));
+        $this->em->persist($red);
+        $this->em->persist($blue);
+        $this->em->persist($team);
+        $this->em->flush();
+        $this->em->clear();
+        $team = $this->em->find(RelayTeam::class, $team->id);
+        self::assertInstanceOf(RelayTeam::class, $team);
+        $id = (int) $team->id;
+        $this->labels[(string) $red->id] = 'red';
+        $this->labels[(string) $blue->id] = 'blue';
+
+        $this->begin();
+        $this->em->remove($team);
+        $this->em->flush();
+
+        $told = $this->told();
+        $this->end();
+        self::assertSame([], $told->facts(), 'the join rows are the removal\'s: no fact of a link');
+        self::assertSame([], $told->doubts());
+        self::assertSame([RelayTeam::class.'::batons' => [$id => []]], $told->states(), 'and the team holds nothing');
+    }
+
+    /**
+     * @param list<string> $said
+     *
+     * @return list<string>
+     */
+    private function sorted(array $said): array
+    {
+        sort($said);
+
+        return $said;
     }
 
     public function testATargetOfASubclassGoingByItsRootsTableIsTakenOutToo(): void

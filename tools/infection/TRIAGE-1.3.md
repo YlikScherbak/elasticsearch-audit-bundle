@@ -355,6 +355,54 @@ for ever on the open parenthesis: Infection counts that as a timeout, detected.
 | `9bbb7a62`, `082809eb` | 428, 435 | the first-character guard of a word or a number dropped | **equivalent**: the anchored pattern after it decides the same |
 | `f43f09e6`, `a0683944` | 443, 444 | a symbol's text from group 1 | **equivalent**: group 1 is the whole match |
 
+### WatchedRows (27)
+
+Red now: 179, the seven of 185 (a join table in a schema and in mixed case), 242, 252 (`821d3414`,
+by hand: its diff no longer applies past the fix below) — `WhichRowsAreWatchedTest`, a mapping of its
+own under `tests/Doctrine/Shop` and `ShopPlate` — the one-to-one apart, as ORM 3.0.0 cannot load an owning one, and skipped there (tables in a schema, a link that is no history, a line's collection
+before its owner, an inverse one-to-one, a subclass held and a held subclass's root).
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `2802eeea`, `d7654f66`, `097437ed`, `efaf8c44`, `e0e70282` | 50, 61, 76, 122, 198 | a cache not kept | **equivalent** in what is decided; cost only |
+| `c8e9afc1`, `5e6d8e4c`, `6f2c65e9`, `c03a3388` | 175, 185, 193, 142 | `true` → `false` in a map read by `isset()` | **equivalent** |
+| `ae4625be`, `694b9fe6`, `69f3f51f`, `49577eea`, `50a6842e`, `ed943cf6` | 84, 130, 170 | a mapped superclass or an abstract class not passed over; `array_values` | not reached / **equivalent**: no fixture has a mapped superclass (the class says so); an abstract class's `newInstance()` throws and is caught; a filter's keys are not read |
+| `dfde30e5` | 184 | a join table's name `\|\|` empty | **equivalent**: Doctrine always names it |
+| `ea32e22b` | 262 | `return false` in the catch | **equivalent**: the method returns false after it |
+
+**Code defect found (LOW, 1.3 only, fixed `15e23c4`)**: `decide()` watched a class whose to-one had
+the name an audited collection is mapped by, though the collection held another class — a fee of a
+shipment, beside its lines. Its rows were remembered and its statements kept for a history nobody
+writes; a probe found no wrong record or warning. Now the collection's target must be the class or
+one of its hierarchy, both ways; each half seen failing alone.
+
+### RowMemory, JoinRowMemory, JoinRowsQuery (92)
+
+23 red under the tests as they stand (`rememberTheRowsOf()` 203–207, `settle()` 519, and 17 of
+JoinRowsQuery, with `testEveryColumnIsNamedAsTheMappingQuotesItWhicheverSideItIsOn` and
+`testAJoinTableTheMappingCannotSayAllOfIsNotAsked`). Of the rest:
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `66b90840`, `f2aad7b5` | RowMemory 114, 115 | the rows scheduled for deletion not remembered | **killed outside coverage**: ORM 2.19 only takes them out of the identity map at `remove()`; red in the ORM 2.19 cell (3 failures), as is `c07c1e96` (AuditSubscriber 483) with 7 |
+| `06c473f0`, `c4ec3fd9`, `8a35fd9b`, `4fa74c3e`, `d46d5c78`, `75f21a74` | RowMemory 282–283, 375–382 | the links of an owner going whose join columns do not cascade not read; `cascades()` | not yet told apart, and **for the reviewers**: with the read taken out, an owner going changes no fact, doubt or state and no record (`ALinkThatDoesNotCascadeTest`, `…::testAnOwnerGoingWhoseJoinColumnsDoNotCascadeHasItsLinksReadAndTakenAsFacts`) — since 5.3c the join rows Doctrine deletes right before its owner's row are the removal's. The read may be one SELECT per removed owner for nothing |
+| `bbb303f9`, `74a5273d`, `3ef913a2`, `9559bc40`, `f64cbd02`, `00e1ff04`, `653281a2`, `e2faf3f8`, `a80d9da2`, `2656a909`, `6a825917`, `7dce50cb`, `eca40afe` | RowMemory 170, 645–711 | a foreign key's value in a remembered row: of a target keyed by an association, past a collection, through a type | not yet told apart: an entity's own record takes its old values from elsewhere (`AReferenceToARowKeyedByAnAssociationTest`, lockers and cards, green under all thirteen); the elements' run with an owner keyed by an association was added at the end and not probed |
+| the other 48 (caches and counters 89, 422–448, `statementsRead`, `size`; `settle`/`remember` weak references 91, 240, 250, 525–527, 605; chunk sizes 152; 156, 161, 165, 185, 189, 194, 211, 232, 238, 243, 251, 303, 338, 341, 471, 615; JoinRowsQuery 122, 128) | | | not yet told apart |
+
+**Code defect found (fixed, 1.3 only)**: `aboutTheOwnersOf()` put the owner an element points at and
+the one it pointed at through `array_unique(…, SORT_REGULAR)` — a comparison with `==`, field by
+field. Before `ed32e37` the two were the same object; since, they are the two owners of a moved
+element, and where the first field compared is a collection, PHP walks owner → elements → owner
+until it ends the process: *Fatal error: Nesting level too deep*. Found by the fixtures added for the
+mutants (`MemberAccount`, whose collection is declared before its key). Fixed by telling the owners
+apart by identity; `AReferenceToARowKeyedByAnAssociationTest::testAnEntryMovedBetweenTwoAccountsLeavesOneAndJoinsTheOther`
+dies under the old line. My own regression of the morning, through a line written on 2026-09-24.
+
+### Not triaged when the work stopped (2026-10-03)
+
+LinkRuns 16, LinkFacts 21, HistoryReplay ~100, RowBinding 34, RowIdentity 3, EntityRowRuns ~20,
+ChangeSetBuilder 5 — 193 ids in all, none probed against today's tests.
+
 ### Code defects found (continued)
 
 - **The owner an element leaves was never checked** (diagnostics, LOW). `aboutTheOwnersOf()` meant to

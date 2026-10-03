@@ -9,7 +9,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\WatchedRows;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\BoxedRackItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Label;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Load;
-use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Plate;
+use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\ShopPlate\DeskPlate;
+use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\ShopPlate\Drawer;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Shelf;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\ShelfLine;
 use Doctrine\DBAL\DriverManager;
@@ -76,18 +77,30 @@ final class WhichRowsAreWatchedTest extends TestCase
     {
         // An inverse one-to-one names the field it is mapped by, as an inverse collection does;
         // its target is a single row, not an element of anything.
+        if (class_exists(\Doctrine\ORM\Mapping\AssociationMapping::class) && !class_exists(\Doctrine\ORM\Mapping\OneToOneOwningSideMapping::class)) {
+            self::markTestSkipped('ORM 3.0.0 cannot load an owning one-to-one.');
+        }
+
+        $em = self::manager('ShopPlate');
+        $watched = new WatchedRows();
+
+        self::assertFalse($watched->areWatched($em, $em->getClassMetadata(DeskPlate::class)));
+        self::assertTrue($watched->areWatched($em, $em->getClassMetadata(Drawer::class)));
+    }
+
+    public function testATargetOfAWatchedLinkIsNoLine(): void
+    {
         $em = self::manager();
         $watched = new WatchedRows();
 
-        self::assertFalse($watched->areWatched($em, $em->getClassMetadata(Plate::class)));
         self::assertFalse($watched->areWatched($em, $em->getClassMetadata(Label::class)));
         self::assertTrue($watched->areWatched($em, $em->getClassMetadata(Shelf::class)));
     }
 
-    private static function manager(): EntityManager
+    private static function manager(string $directory = 'Shop'): EntityManager
     {
         $config = new Configuration();
-        $config->setMetadataDriverImpl(new AttributeDriver([__DIR__.'/../Shop']));
+        $config->setMetadataDriverImpl(new AttributeDriver([__DIR__.'/../'.$directory]));
         $config->setProxyDir(sys_get_temp_dir().'/borsche-audit-proxies');
         $config->setProxyNamespace('BorscheAuditProxies');
 

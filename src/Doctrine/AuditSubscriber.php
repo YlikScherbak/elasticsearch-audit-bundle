@@ -1495,9 +1495,18 @@ final class AuditSubscriber
                     continue;
                 }
 
-                $owners = [$elementMetadata->getFieldValue($element, $association), $changes[$association][0] ?? null];
+                // One of each object, told apart by identity: compared with ==, two owners were
+                // compared field by field, through their collections into the elements and back
+                // to the owners -- a cycle PHP gives up on with a fatal error.
+                $owners = [];
 
-                foreach (array_unique(array_filter($owners, 'is_object'), \SORT_REGULAR) as $owner) {
+                foreach ([$elementMetadata->getFieldValue($element, $association), $changes[$association][0] ?? null] as $one) {
+                    if (\is_object($one)) {
+                        $owners[spl_object_id($one)] = $one;
+                    }
+                }
+
+                foreach ($owners as $owner) {
                     $metadata = $this->metadataFactory->for($owner);
 
                     if ($metadata === null || !self::holdsItsElementsThrough($em, $owner, $metadata, $association)) {

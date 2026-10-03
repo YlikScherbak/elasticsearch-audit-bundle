@@ -12,8 +12,8 @@ use Doctrine\ORM\Mapping as ORM;
 
 /**
  * Mapped apart from the fixtures ({@see \Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Observation\WhichRowsAreWatchedTest}):
- * tables in a schema, named in mixed case, a link that is history beside one that is not, a
- * collection of lines and an inverse one-to-one. Only the mapping is read; no table is made.
+ * tables in a schema, named in mixed case, a link that is history beside one that is not, and a
+ * collection of lines. Only the mapping is read; no table is made.
  */
 #[ORM\Entity]
 #[ORM\Table(name: 'Shelf', schema: 'Shop')]
@@ -38,10 +38,6 @@ class Shelf
     #[ORM\OneToMany(mappedBy: 'shelf', targetEntity: ShelfLine::class)]
     #[AuditField(trackElements: true)]
     public Collection $lines;
-
-    #[ORM\OneToOne(mappedBy: 'shelf', targetEntity: Plate::class)]
-    #[AuditField]
-    public ?Plate $plate = null;
 
     public function __construct()
     {

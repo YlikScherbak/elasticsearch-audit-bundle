@@ -207,6 +207,65 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         self::assertNull(JoinRowsQuery::linksOf($platform, ['mappedBy' => 'x'], ['id' => 5]));
     }
 
+    public function testEveryColumnIsNamedAsTheMappingQuotesItWhicheverSideItIsOn(): void
+    {
+        // The targets' columns quoted, and the owners' plain: the other way round from above.
+        $mapping = ['joinTable' => [
+            'name' => 'article_tag',
+            'schema' => 'audit',
+            'joinColumns' => [['name' => 'article id', 'referencedColumnName' => 'id', 'quoted' => true]],
+            'inverseJoinColumns' => [['name' => 'tag id', 'referencedColumnName' => 'id', 'quoted' => true]],
+        ]];
+        $platform = $this->em->getConnection()->getDatabasePlatform();
+        $q = $platform->quoteIdentifier(...);
+
+        self::assertSame('SELECT '.$q('tag id').' FROM audit.article_tag WHERE '.$q('article id').' = ?', JoinRowsQuery::linksOf($platform, $mapping, ['id' => 5])['sql'] ?? null);
+        self::assertSame(
+            'SELECT j.'.$q('article id').', j.'.$q('tag id').' FROM audit.article_tag j WHERE EXISTS (SELECT 1 FROM audit.article_tag h WHERE h.'.$q('article id').' = j.'.$q('article id').' AND h.'.$q('tag id').' IN (?, ?))',
+            JoinRowsQuery::holdersOf($platform, $mapping, [['id' => 3], ['id' => 4]])['sql'] ?? null,
+        );
+        self::assertSame(
+            ['sql' => 'SELECT '.$q('article id').' FROM audit.article_tag WHERE '.$q('tag id').' = ?', 'owners' => ['id']],
+            JoinRowsQuery::ownersHolding($platform, $mapping, ['id']),
+        );
+        self::assertSame(['table' => 'audit.article_tag', 'columns' => ['tag id']], JoinRowsQuery::pointingAt($mapping, ['id']), 'as a statement names it: unquoted, with its schema');
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>, array{table: string, columns: list<string>}|null}>
+     */
+    public static function joinTablesThatCannotBeFollowed(): iterable
+    {
+        $owner = [['name' => 'article_id', 'referencedColumnName' => 'id']];
+        $target = [['name' => 'tag_id', 'referencedColumnName' => 'id']];
+
+        // A statement's join row names its targets' columns only: the owners' are not asked for.
+        yield 'no owner columns' => [['joinTable' => ['name' => 'article_tag', 'joinColumns' => [], 'inverseJoinColumns' => $target]], ['table' => 'article_tag', 'columns' => ['tag_id']]];
+        yield 'no target columns' => [['joinTable' => ['name' => 'article_tag', 'joinColumns' => $owner, 'inverseJoinColumns' => []]], null];
+        yield 'no name' => [['joinTable' => ['name' => '', 'joinColumns' => $owner, 'inverseJoinColumns' => $target]], null];
+        yield 'a target column that references nothing' => [['joinTable' => ['name' => 'article_tag', 'joinColumns' => $owner, 'inverseJoinColumns' => [['name' => 'tag_id']]]], null];
+    }
+
+    /**
+     * @param array<string, mixed>                                 $mapping
+     * @param array{table: string, columns: list<string>}|null $pointing
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('joinTablesThatCannotBeFollowed')]
+    public function testAJoinTableTheMappingCannotSayAllOfIsNotAsked(array $mapping, ?array $pointing): void
+    {
+        $platform = $this->em->getConnection()->getDatabasePlatform();
+
+        self::assertSame(
+            [null, null, null, $pointing],
+            [
+                JoinRowsQuery::linksOf($platform, $mapping, ['id' => 5]),
+                JoinRowsQuery::holdersOf($platform, $mapping, [['id' => 3]]),
+                JoinRowsQuery::ownersHolding($platform, $mapping, ['id']),
+                JoinRowsQuery::pointingAt($mapping, ['id']),
+            ],
+        );
+    }
+
     /**
      * An article with its tags, written: tags made of the labels given, or the tags given.
      *
