@@ -97,6 +97,59 @@ final class WhatARefusedDeclarationSaysTest extends DoctrineTestCase
         }
     }
 
+    /** @return iterable<string, array{class-string, string, string}> */
+    public static function whatCannotTrackElements(): iterable
+    {
+        yield 'a column' => [\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\TracksAColumn::class, 'note', 'is not an association'];
+        yield 'a to-one association' => [\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\TracksAReference::class, 'tag', 'is a to-one association'];
+    }
+
+    /**
+     * Each refusal says which of the things element tracking needs is missing, and a column is
+     * not told it is a to-one association: the reason is what the developer goes to fix.
+     *
+     * @param class-string $class
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('whatCannotTrackElements')]
+    public function testTrackingElementsOfSomethingWithoutAnySaysWhatItIsInstead(string $class, string $field, string $reason): void
+    {
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist(new $class());
+
+        try {
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString(sprintf(
+                '%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.',
+                $class,
+                $field,
+                $reason,
+            ), self::chain($refused));
+        }
+    }
+
+    public function testAClassCheckedBeforeDoesNotVouchForAnotherOne(): void
+    {
+        // The check is asked once per class, and remembered by the class: a crate that tracks
+        // its lines rightly says nothing about the next class that declares tracking.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist($crate = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('C-1'));
+        $crate->add(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem('SKU'));
+        $this->em->flush();
+
+        $this->em->persist(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\TracksAColumn());
+
+        try {
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString('TracksAColumn::$note tracks its elements, but it is not an association', self::chain($refused));
+        }
+    }
+
     public function testAuditingSomethingDoctrineDoesNotMapAtAll(): void
     {
         // The plainest refusal of the three, and the one whose whole job is to say that

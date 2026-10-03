@@ -195,6 +195,19 @@ manager holds them is not), and on Postgres with DBAL 3 a key comes from a seque
 so a smaller key does not mean an earlier INSERT (the INSERTs' parameters say it). Both rewritten;
 all seven green, and each test red under its mutants on SQLite.
 
+### AuditSubscriber::assertTrackedCollectionsAreServable (what a tracking declaration is refused for)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `a3586bc8`, `215aab52` | 1718 | the arm for "is not an association", and for "is a to-one association", removed | test gap — no fixture made either mistake. `TracksAColumn` and `TracksAReference`, and `WhatARefusedDeclarationSaysTest::testTrackingElementsOfSomethingWithoutAnySaysWhatItIsInstead`, which asks for the whole sentence: without its arm, a column is told it is a to-one association |
+| `22f796ca` | 1709 | the remembered key without the class | test gap — every test had one class; `…::testAClassCheckedBeforeDoesNotVouchForAnotherOne` checks a crate and then refuses another class |
+| `04dc88e2` | 1753 | the field list read up to its first name that checks out | test gap — `MisspelledTracking` now names `quantity` before `quanitity`, and the existing test of its sentence fails under the mutant |
+| `cf8d5195`, `3bd484b7` | 1709 | the key as the class alone, or the suffix before it | **equivalent**: still one key per class, and the one other kind of key in the map is the class with `"\0fields"` |
+| `6f2a9878` | 1699 | the early return for a declaration that tracks nothing | **equivalent**: what follows is a loop over that empty list and a key remembered for it |
+| `0b3146e9`, `786ffc42`, `8f2ae6f9`, `2599a64d` | 1711, 1712, 1760, 1761 | what is remembered, and the return when it is | **equivalent**: without them the check is asked again, and gives the same answer; `= false` is also `isset()` |
+| `4d7f6997` | 1718 | the arm for an inverse side with no mappedBy | not reached: Doctrine's inverse side is the one that has a mappedBy |
+| `f943dd3d` | 1718 | the arm for the inverse side of a ManyToMany | not reached: `assertAuditedFieldsAreThere()` refuses the same declaration first (line 1599), and both callers ask it first (606, 1505). `ElementOwnershipTest` asserts that refusal's sentence |
+
 ### AuditWriter (main)
 
 | Id | Line | Change | Class |
