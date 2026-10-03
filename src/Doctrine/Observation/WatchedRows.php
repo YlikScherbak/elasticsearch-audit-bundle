@@ -249,10 +249,13 @@ final class WatchedRows
                     // Only the inverse side names the field it is mapped by, and asking an
                     // owning ManyToMany threw -- caught below as "not watched", so a class was
                     // left unwatched by whichever of its owner's collections came first.
+                    // And a collection of this class or of one in its hierarchy: another class
+                    // pointing at the owner by a field of the same name is no element of it.
                     if ($owner->hasAssociation($field)
                         && $owner->isCollectionValuedAssociation($field)
                         && $owner->isAssociationInverseSide($field)
                         && $owner->getAssociationMappedByTargetField($field) === $association
+                        && (is_a($metadata->name, $of = $owner->getAssociationTargetClass($field), true) || is_a($of, $metadata->name, true))
                     ) {
                         return true;
                     }
