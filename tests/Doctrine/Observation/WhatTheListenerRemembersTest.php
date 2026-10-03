@@ -130,6 +130,42 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         self::assertSame(['A statement changed its place in items of a '.CrateItem::class.' row, keyed by id, outside every flush, so it is not in the history: SQL the application ran itself, which the bundle does not audit.'], $said);
     }
 
+    public function testSqlTheApplicationRunsWithoutParametersIsSeenToo(): void
+    {
+        // executeQuery() with nothing bound goes to the driver's query(), not to a prepared
+        // statement: the log sees a write there all the same. Its key is written into the SQL, so
+        // the log cannot say which row it moved -- and says that, rather than nothing.
+        $this->unownedStatementsAreExpected = true;
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
+        $x = $this->aLine();
+
+        $this->em->getConnection()->executeQuery('UPDATE CrateItem SET quantity = 5 WHERE id = '.(int) $x->id);
+        $x->quantity = 2;
+        $this->em->flush();
+
+        self::assertContains('What the connection ran could not be followed for 1 statement(s) of '.CrateItem::class.' since the history was last written, so the history may be missing what they did.', $this->logs);
+    }
+
+    public function testAStatementOfTheApplicationsThatFailedChangedNothing(): void
+    {
+        // Through exec(), and refused by the database: the row is as it was, and the next change
+        // starts there -- a failed statement read as one that ran would make it start at 7.
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
+        $x = $this->aLine();
+
+        try {
+            $this->em->getConnection()->executeStatement('UPDATE CrateItem SET quantity = 7, no_such_column = 1 WHERE id = '.(int) $x->id);
+            self::fail('the premise: the database refuses it');
+        } catch (\Doctrine\DBAL\Exception) {
+        }
+
+        $this->gateway->documents = [];
+        $x->quantity = 2;
+        $this->em->flush();
+
+        self::assertSame(['old' => 1, 'new' => 2], $this->documents()[0]['changes']['items.'.$x->id.'.quantity'] ?? null);
+    }
+
     public function testAStatementTheLogCannotFollowIsDoubtSaidOnceAndByClassAlone(): void
     {
         // An UPDATE of a watched table that names no row, read or not: the log cannot say
