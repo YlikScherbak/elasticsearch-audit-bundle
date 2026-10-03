@@ -150,6 +150,26 @@ final class WhatARefusedDeclarationSaysTest extends DoctrineTestCase
         }
     }
 
+    public function testAClassWhoseFieldsCheckedOutDoesNotVouchForAnotherOne(): void
+    {
+        // The same for the audited fields: remembered by the class, and a crate's fields
+        // checking out says nothing about the next class's. A class declared by attribute --
+        // a declaration by interface is never remembered.
+        $this->attachListener(FailurePolicy::Throw);
+
+        $this->em->persist(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('C-1'));
+        $this->em->flush();
+
+        $this->em->persist(new PostBox());
+
+        try {
+            $this->em->flush();
+            self::fail('the declaration should have been refused');
+        } catch (WriteFailedException $refused) {
+            self::assertStringContainsString(PostBox::class.'::$nickname is audited, but Doctrine maps it as neither', self::chain($refused));
+        }
+    }
+
     public function testAuditingSomethingDoctrineDoesNotMapAtAll(): void
     {
         // The plainest refusal of the three, and the one whose whole job is to say that

@@ -106,6 +106,74 @@ final class CollectionElementsTest extends DoctrineTestCase
         self::assertArrayHasKey('items.'.$line->id.'.quantity', $this->documents()[0]['changes'], 'the line is in the first crate\'s record');
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function emptiedBeforeTheCrate(): iterable
+    {
+        yield 'a collection nobody audits' => ['detours'];
+        yield 'a collection Doctrine does not empty' => ['lines'];
+    }
+
+    /**
+     * A collection with nothing to say about it, emptied in the same flush before the one that
+     * has: passing over the first is not the end of the reading. Without the second's rows, read
+     * before its DELETE, what the crate lost could not be followed.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('emptiedBeforeTheCrate')]
+    public function testAnEmptyingPassedOverDoesNotTakeTheNextWithIt(string $first): void
+    {
+        $this->em->persist($route = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route('R-1'));
+        $route->detours->add($stop = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop('a'));
+        $this->em->persist($stop);
+        $this->em->persist($shipment = new Shipment('SH-1'));
+        $shipment->lines->add($line = new ShipmentLine('p', 1));
+        $line->shipment = $shipment;
+        $this->em->persist($line);
+        $this->em->flush();
+        $native = $this->em->getConnection()->getNativeConnection();
+        self::assertInstanceOf(\PDO::class, $native);
+        $native->exec("INSERT INTO Crate (code, status, internalNote) VALUES ('C-far', 'packed', '')");
+        $native->exec("INSERT INTO CrateItem (id, sku, quantity, crate_id) VALUES (900501, 'FAR', 1, 'C-far')");
+        $this->em->clear();
+        $this->gateway->documents = [];
+
+        // Loaded before the crate, so that Doctrine schedules it first.
+        $before = $first === 'detours' ? $this->em->find(\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route::class, $route->id) : $this->em->find(Shipment::class, $shipment->id);
+        $crate = $this->em->find(Crate::class, 'C-far');
+        self::assertNotNull($before);
+        self::assertNotNull($crate);
+
+        if ($before instanceof \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route) {
+            $before->detours->clear();
+        } else {
+            $before->lines = new \Doctrine\Common\Collections\ArrayCollection();
+        }
+
+        $crate->items = new \Doctrine\Common\Collections\ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame([['C-far', ['old' => ['FAR'], 'new' => []]]], array_map(static fn (array $d): array => [$d['objectId'], $d['changes']['items'] ?? null], $this->documents()));
+    }
+
+    public function testAnEmptyingOfAnOwnerNobodyAuditsIsPassedOverInSilence(): void
+    {
+        // Nothing to say, and nothing to fail at: a collection of an entity nobody audits is
+        // passed over before anything is asked of its declaration -- under "throw", a question
+        // asked of a declaration that is not there would refuse the application's flush.
+        $member = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\TrackedGroupMember();
+        $member->groups->add($group = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\MisdeclaredInverseTracking());
+        $this->em->persist($member);
+        $this->em->persist($group);
+        $this->em->flush(); // the group's own declaration is refused under the setUp listener's "log"
+        $this->logs = [];
+
+        $this->attachListener(\Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy::Throw);
+        $member->groups->clear();
+        $this->em->flush();
+
+        self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM '.$this->em->getClassMetadata(\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\TrackedGroupMember::class)->getAssociationMapping('groups')['joinTable']['name']), 'the premise: the links went');
+        self::assertSame([], $this->logs);
+    }
+
     public function testAnOwnerNobodyTouchedStillGetsItsRecord(): void
     {
         // No column of the shipment changed, so Doctrine raises no postUpdate for it.

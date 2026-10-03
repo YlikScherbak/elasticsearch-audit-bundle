@@ -11,6 +11,8 @@ use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Depot;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\PackingCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Route;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shipment;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ShipmentLine;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Stop;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 use Doctrine\ORM\Events;
@@ -281,6 +283,59 @@ final class HowOftenTheListenerAsksTheDatabaseTest extends DoctrineTestCase
 
         self::assertSame([], self::selects($this->queries), 'the collection was read to discover that it had not changed');
         self::assertFalse($route->stops->isInitialized(), 'and it is still unread afterwards');
+    }
+
+    public function testAnEmptyingTheRowsAlreadySayAsksNothing(): void
+    {
+        // The rows of an emptied inverse collection are read only where nothing else will say
+        // them: a lazy one Doctrine empties with one DELETE of its owner's rows. Not for one it
+        // will not empty at all -- an inverse collection without orphanRemoval is no DELETE --
+        // and not for one it loaded to empty element by element, whose DELETEs name each row.
+        $this->em->persist($shipment = new Shipment('SH-1'));
+        $shipment->lines->add($line = new ShipmentLine('p', 1));
+        $line->shipment = $shipment;
+        $this->em->persist($line);
+        $this->em->persist($crate = new Crate('C-1'));
+        $crate->add(new CrateItem('SKU'));
+        $this->em->flush();
+        $this->em->clear();
+
+        $shipment = $this->em->find(Shipment::class, $shipment->id);
+        self::assertNotNull($shipment);
+        $shipment->lines = new \Doctrine\Common\Collections\ArrayCollection();
+        $this->queries = [];
+        $this->em->flush();
+
+        // The listener's own reading names its columns bare; Doctrine's loading of a collection
+        // aliases them (t0.), and is Doctrine's to do.
+        $ours = static fn (array $queries, string $table): array => array_values(array_filter(self::selects($queries), static fn (string $sql): bool => str_contains($sql, 'FROM '.$table.' WHERE') && !str_contains($sql, ' t0.')));
+
+        self::assertSame([], $ours($this->queries, 'ShipmentLine'), 'a collection Doctrine does not empty is not read');
+
+        // Crates written past this process, so that only loading them tells what they hold.
+        $native = $this->em->getConnection()->getNativeConnection();
+        self::assertInstanceOf(\PDO::class, $native);
+        $native->exec("INSERT INTO Crate (code, status, internalNote) VALUES ('C-near', 'packed', ''), ('C-far', 'packed', '')");
+        $native->exec("INSERT INTO CrateItem (id, sku, quantity, crate_id) VALUES (900500, 'NEAR', 1, 'C-near'), (900501, 'FAR', 1, 'C-far')");
+
+        $near = $this->em->find(Crate::class, 'C-near');
+        self::assertNotNull($near);
+        self::assertCount(1, $near->items, 'the premise: its lines loaded');
+        $near->items = new \Doctrine\Common\Collections\ArrayCollection();
+        $this->queries = [];
+        $this->em->flush();
+
+        self::assertSame([], $ours($this->queries, 'CrateItem'), 'a loaded one is not read again');
+
+        // And the one it is there for, so that the two above are not passing for a reason of
+        // their own: its lines replaced unread.
+        $far = $this->em->find(Crate::class, 'C-far');
+        self::assertNotNull($far);
+        $far->items = new \Doctrine\Common\Collections\ArrayCollection();
+        $this->queries = [];
+        $this->em->flush();
+
+        self::assertCount(1, $ours($this->queries, 'CrateItem'), 'read once, before the DELETE');
     }
 
     public function testAuditingWhatChangedInsideTheElementsCostsNoQueryPerElement(): void

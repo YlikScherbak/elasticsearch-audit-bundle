@@ -86,6 +86,45 @@ final class WhatAnOwningCollectionPublishesTest extends DoctrineTestCase
         );
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function neighbours(): iterable
+    {
+        yield 'another article' => ['article'];
+        yield 'a row of another class under the same key' => ['same key'];
+        yield 'a row of neither' => ['neither'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('neighbours')]
+    public function testALinksContextIsItsOwnersRowAndNoOtherRowOfTheFlush(string $neighbour): void
+    {
+        // An article that only gained a tag has no row of its own in the flush: its context is
+        // read where the link was written, from its own row -- and not from a row changed beside
+        // it in the same flush, whichever row that is.
+        $this->em->persist($tag = new Tag('t'));
+        $this->em->persist($one = new Article('One'));
+        $this->em->persist($two = new Article('Two'));
+        $this->em->persist($consignment = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Consignment());
+        $this->em->persist($crate = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('C-1'));
+        $this->em->flush();
+        self::assertSame((string) $one->id, (string) $consignment->id, 'the premise: a row of another class under the same key');
+        $this->gateway->documents = [];
+
+        $one->tags->add($tag);
+
+        match ($neighbour) {
+            'article' => $two->status = 'published',
+            'same key' => $consignment->status = 'held',
+            'neither' => $crate->status = 'shipped',
+        };
+
+        $this->em->flush();
+
+        $records = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'article' && $d['objectId'] === $one->id));
+
+        self::assertCount(1, $records);
+        self::assertSame(['tags' => ['old' => [], 'new' => ['t']], 'status' => ['old' => 'draft', 'new' => 'draft']], $records[0]['changes']);
+    }
+
     public function testTwoCollectionsOfOneOwnerInOneFlushAreOneRecord(): void
     {
         // A shelf has nothing of its own to change: what its two lists did in one flush is one
@@ -212,16 +251,20 @@ final class WhatAnOwningCollectionPublishesTest extends DoctrineTestCase
         $one = new Article('One');
         $one->tags->add($a);
         $this->em->persist($one);
+        $this->em->persist($two = new Article('Two'));
         $this->em->flush();
         $this->gateway->documents = [];
         $this->unownedStatementsAreExpected = true;
 
         $this->em->getConnection()->insert('article_tag', ['article_id' => $one->id, 'tag_id' => $b->id]);
         $one->title = 'One, again';
+        // And the flush's own link, after it: saying what was nobody's is not the end of the reading.
+        $two->tags->add($a);
         $this->em->flush();
 
-        self::assertSame([['title', 'status']], array_map(static fn (array $d): array => array_keys($d['changes']), $this->documents()), 'the flush\'s own change, and nothing of the link');
-        self::assertNotSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'tags of a '.Article::class) && str_contains($line, 'outside every flush')), 'said: '.implode(' | ', $this->logs));
+        self::assertSame([[$one->id, ['title', 'status']], [$two->id, ['tags', 'status']]], array_map(static fn (array $d): array => [$d['objectId'], array_keys($d['changes'])], $this->documents()), 'the flush\'s own changes, its link among them, and nothing of the other link');
+        // By class, field and the key's columns -- never by the key's values.
+        self::assertContains('A statement changed tags of a '.Article::class.' row, keyed by id, outside every flush, so it is not in the history: SQL the application ran itself, which the bundle does not audit.', $this->logs);
         $this->logs = [];
     }
 
@@ -244,6 +287,38 @@ final class WhatAnOwningCollectionPublishesTest extends DoctrineTestCase
 
         self::assertCount(2, array_filter($this->queries, static fn (string $sql): bool => str_contains($sql, 'article_tag') && !str_starts_with($sql, 'SELECT')), 'the premise: a DELETE and an INSERT');
         self::assertSame([], $this->documents());
+
+        // And the reading goes on past it: another article's list, moved in the same flush.
+        $this->em->persist($two = new Article('Two'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $one->tags->removeElement($again);
+        $one->tags->add($x);
+        $two->tags->add($x);
+        $this->em->flush();
+
+        self::assertSame([[$two->id, ['old' => [], 'new' => ['x']]]], array_map(static fn (array $d): array => [$d['objectId'], $d['changes']['tags'] ?? null], $this->documents()));
+    }
+
+    public function testTheApplicationsComparatorDecidesWhetherAListMoved(): void
+    {
+        // Asked first, as for any field: a comparator that calls every tags list the same leaves
+        // a tag added with no record.
+        $this->attachListener(\Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy::Log, new class implements \Borsche\ElasticsearchAuditBundle\Contract\ValueComparatorInterface {
+            public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+            {
+                return $field === 'tags' ? true : null;
+            }
+        });
+        $this->em->persist($tag = new Tag('t'));
+        $this->em->persist($one = new Article('One'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $one->tags->add($tag);
+        $this->em->flush();
+
+        self::assertSame([], $this->documents());
     }
 
     public function testWhatTheLinksCouldNotBeFollowedThroughIsSaid(): void
@@ -263,11 +338,22 @@ final class WhatAnOwningCollectionPublishesTest extends DoctrineTestCase
         $other->title = 'Other, again';
         $this->em->flush();
         $this->em->getConnection()->executeStatement('DELETE FROM article_tag WHERE article_id = ?', [900401]);
+        $this->em->getConnection()->executeStatement('DELETE FROM article_tag WHERE article_id = ?', [900402]);
         $other->title = 'Other, once more';
         $this->em->flush();
         $this->em->getConnection()->commit();
 
-        self::assertNotSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did') && str_contains($line, Article::class)), 'said: '.implode(' | ', $this->logs));
+        $said = static fn (array $logs): array => array_values(array_filter($logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did')));
+
+        // Two statements of one class: counted as two, the class named once.
+        self::assertSame(['What the connection ran could not be followed for 2 statement(s) of '.Article::class.' since the history was last written, so the history may be missing what they did.'], $said($this->logs));
+
+        // Said once: the next flush has nothing of it to say.
+        $this->logs = [];
+        $other->title = 'Other, the last time';
+        $this->em->flush();
+
+        self::assertSame([], $said($this->logs));
         $this->logs = [];
     }
 }

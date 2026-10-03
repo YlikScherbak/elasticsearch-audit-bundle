@@ -26,6 +26,10 @@ class PostBox
     #[ORM\Column, AuditField]
     public string $label = 'x';
 
+    /** An association before it, which checks out: its field is read after one that does. */
+    #[ORM\ManyToOne(targetEntity: Tag::class), AuditField(represent: 'getLabel')]
+    public ?Tag $tag = null;
+
     /** No ORM attribute: Doctrine maps neither a field nor an association for it. */
     #[AuditField]
     public string $nickname = 'y';

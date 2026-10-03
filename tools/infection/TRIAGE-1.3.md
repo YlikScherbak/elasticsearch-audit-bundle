@@ -208,6 +208,41 @@ all seven green, and each test red under its mutants on SQLite.
 | `4d7f6997` | 1718 | the arm for an inverse side with no mappedBy | not reached: Doctrine's inverse side is the one that has a mappedBy |
 | `f943dd3d` | 1718 | the arm for the inverse side of a ManyToMany | not reached: `assertAuditedFieldsAreThere()` refuses the same declaration first (line 1599), and both callers ask it first (606, 1505). `ElementOwnershipTest` asserts that refusal's sentence |
 
+### AuditSubscriber::contextWhere and linkRuns (a link's record)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `acc61be7`, `746ba95e`, `8a2f6535`, `e37729f9`, `eff90a78` | 1155 | the context read from a row that is not the owner's | test gap — `WhatAnOwningCollectionPublishesTest::testALinksContextIsItsOwnersRowAndNoOtherRowOfTheFlush`: another article, a consignment under the same key, a crate; each one kills some of them, the three together all five. A first try with a shipment under the same key let two through: its context has no `status`, and the record's own was filled in from elsewhere |
+| `92ec0166` | 1152 | `break` → `continue` | **equivalent**: the facts come in the order of the log, so every one after the first past the position is past it too |
+| `ec0ea262` | 1151 | `>` → `>=` | **equivalent**: a join row's statement is never an owner's row's |
+| `14b0b9f3`, `570a9cc4`, `f98ba6e1` | 1150–1160 | the context as the row stands now, not where the link was written | not yet told apart: different only when the owner's row moves after its link in the same publishing without the link joining that move's record — an owner change in another flush of it. A probe with a postFlush listener's UPDATE after the link: the change became the owner's record and the link joined it |
+| `6a5679a1`, `1d130219`, `697e0158` | 1060–1065 | doubt said again, said without its count, its class named twice | test gap — `…::testWhatTheLinksCouldNotBeFollowedThroughIsSaid` now asserts the sentence, with two statements of one class, and that the next flush says nothing |
+| `b9c0120c` | 1078 | the key's values instead of its columns in the warning | test gap — the sentence asserted whole in `…::testALinkTheApplicationWritesOutsideEveryFlushIsSaidAndIsNoRecord`. A value in that log line would be one more road out for what redaction keeps in |
+| `006e7f36`, `17df3d13` | 1081, 1089 | a run nobody owns, or a list that did not move, ends the reading | test gap — the same test and `…::testAListThatDidNotMoveIsNoRecord`, each with a link of another article after it |
+| `88be88dc` | 1088 | the application's comparator asked after the built-in one, which always answers | test gap — `…::testTheApplicationsComparatorDecidesWhetherAListMoved` |
+| `bcc92f0c` | 1060 | `array_values()` removed | **equivalent**: counted and its classes read; keys are not |
+| `7e8a205b` | 1060 | doubt `>` → `>=` the position read through | not yet told apart. A probe that ran the doubtful statement last of its flush, from a postFlush listener ahead of this one, was green under the mutant; the test written for it was taken out |
+
+### AuditSubscriber: assertAuditedFieldsAreThere and assertTheColumnSaysWhatTheRowHolds
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `aafc84a4` | 1560 | the remembered key without the class | test gap — `WhatARefusedDeclarationSaysTest::testAClassWhoseFieldsCheckedOutDoesNotVouchForAnotherOne`: a crate, then a post box. Not an article — a declaration by interface is never remembered, which is why a first try passed under the mutant |
+| `efbc191e` | 1607 | an audited association ends the reading of the fields | test gap — `PostBox` has an audited association before the property Doctrine does not map |
+| `a8e2bb90`, `405f0b71` | 1659 | another field of a versioned entity, or every field, refused as the version | test gap — `ElementOwnershipTest::testAColumnThatMovesOnItsOwnIsRefusedRatherThanAudited` asks for the clause with the field's name; it asked for "version column" |
+| `c78bf4ec`, `7f4c172f`, `da3f6f5e` | 1672–1673 | not insertable and generated: their arms, and `false ?? …` | test gap — `NotInsertableColumnOrder`, `GeneratedColumnOrder` (generated on INSERT and written by Doctrine, so it is refused for that and nothing else) |
+| `80d912dc`, `42ca6b44`, `edb444ae`, `00efa799`, `d9f90330`, `458fa3d3` | 1560–1632 | the key as the class alone; what is remembered, and the return | **equivalent**, as in the tracked-collections check |
+| `c5106440`, `78b95b1f` | 1673, 1674 | `(bool)` removed | **equivalent**: Doctrine holds those flags as booleans in both majors' mappings |
+
+### AuditSubscriber::rememberWhatIsBeingEmptied
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `b76bf54d`, `a1e81a17` | 486, 500 | a collection with nothing to say ends the reading | test gap — `CollectionElementsTest::testAnEmptyingPassedOverDoesNotTakeTheNextWithIt`: a route's unaudited list, or a shipment's lines Doctrine does not delete, before a crate written past the process whose lines are replaced unread. Doctrine schedules them in the order of its identity map, not of the replacements, which two first tries learned |
+| `62ac420a`, `1dc135d6`, `5e315cdd` | 499, 508 | the rows read for a collection Doctrine will not empty, or one already loaded | test gap (cost) — `HowOftenTheListenerAsksTheDatabaseTest::testAnEmptyingTheRowsAlreadySayAsksNothing`, with the one read it is there for |
+| `2c8fcb69` | 485 | `\|\|` → `&&`: a declaration that is not there is read | test gap — under "throw" the TypeError refused the flush: `…::testAnEmptyingOfAnOwnerNobodyAuditsIsPassedOverInSilence` |
+| `c07c1e96` | 483 | the arms for ORM 2's array mapping and ORM 3's object swapped | **equivalent on the ORM the run installs**: ORM 3's mapping is also `ArrayAccess`. On ORM 2 it would fail; the mutation run does not install it |
+
 ### AuditWriter (main)
 
 | Id | Line | Change | Class |
