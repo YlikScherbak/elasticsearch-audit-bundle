@@ -96,6 +96,24 @@ final class WhatTheCheckReportsTest extends TestCase
         self::assertStringContainsString('audit:index:create', $display, 'and did not say what to run');
     }
 
+    public function testAWindowIsReportedForEveryIndexBehindOneName(): void
+    {
+        // An alias a rollover moved on stands for several indices, each with its own setting:
+        // every one of them that is wrong is said, not the first.
+        $this->everyIndexExists();
+        $this->gateway->settingsOf['audit_log'] = [
+            'audit_log-000001' => ['max_result_window' => '5000'],
+            'audit_log-000002' => ['max_result_window' => '7000'],
+        ];
+
+        $tester = new CommandTester($this->command(maxResultWindow: 10_000));
+        $tester->execute([]);
+        $display = $tester->getDisplay();
+
+        self::assertStringContainsString('(5000) on audit_log-000001', $display);
+        self::assertStringContainsString('(7000) on audit_log-000002', $display);
+    }
+
     public function testAWindowTheIndexRefusesIsReportedForEveryIndexItIsWrongOn(): void
     {
         // Two indices behind one configuration drift apart one at a time — one created

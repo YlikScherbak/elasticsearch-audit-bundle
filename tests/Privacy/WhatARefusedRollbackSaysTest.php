@@ -145,6 +145,11 @@ final class WhatARefusedRollbackSaysTest extends TestCase
         $said = (string) json_encode($this->logs, \JSON_PARTIAL_OUTPUT_ON_ERROR);
 
         self::assertStringContainsString(self::MARKER, $said, 'full means full, and this is the configuration that asks for it');
+
+        // Each in its own place in the line: the operation's reason and the rollback's.
+        $context = $this->logs[0][1];
+        self::assertStringContainsString(self::MARKER, (string) ($context['reason'] ?? ''));
+        self::assertNotSame('', (string) ($context['rollback'] ?? ''));
     }
 
     public function testALoggerThatFailsIsNotTheAnswerTheCallerGets(): void

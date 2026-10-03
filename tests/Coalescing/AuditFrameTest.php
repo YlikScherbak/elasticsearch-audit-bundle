@@ -216,7 +216,9 @@ final class AuditFrameTest extends TestCase
         }
 
         self::assertFalse($frame->isOpen(), 'and the frame was still closed');
-        self::assertNotEmpty(array_filter($this->warnings, static fn (string $m) => str_contains($m, 'could not be released')));
+        $said = array_values(array_filter($this->warnings, static fn (string $m) => str_contains($m, 'could not be released')));
+        self::assertNotEmpty($said);
+        self::assertStringNotContainsString('{reason}', $said[0], 'and says why');
     }
 
     public function testAFailedReleaseStillSurfacesWhenTheHandlerSucceeded(): void
@@ -1072,7 +1074,17 @@ final class AuditFrameTest extends TestCase
             /** @param mixed $level */
             public function log($level, $message, array $context = []): void // untyped $message: psr/log 1.x
             {
-                $this->warnings[] = strtr((string) $message, ['{held}' => (string) ($context['held'] ?? '')]);
+                // Every placeholder a scalar fills, as a PSR-3 logger would: one left standing
+                // is a value the line promised and did not carry.
+                $values = [];
+
+                foreach ($context as $key => $value) {
+                    if (\is_scalar($value)) {
+                        $values['{'.$key.'}'] = (string) $value;
+                    }
+                }
+
+                $this->warnings[] = strtr((string) $message, $values);
             }
         };
     }

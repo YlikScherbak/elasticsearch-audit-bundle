@@ -350,6 +350,33 @@ For the reviewers: whether the README should say so about the late road.
 | `91308a01`, `4e1de648`, `8ec0b969` | 416, 529, 778 | a record with no id or timestamp | not reached: `complete()` sets both before |
 | `510c5bf4`, `825fc53b`, `4e7f48a3` | 557, 735, 889 | `array_values()` on a list read by `foreach`; the latest counter returned by the live one; an early return of nothing taken | **equivalent** |
 | `b967ce30` | 761 | `complete()` public → protected | **equivalent**: nothing outside the class calls it; for the reviewers whether it should say so in its visibility |
+
+### The rest of main
+
+| Ids | Where | Change | Class |
+|---|---|---|---|
+| `3b85757a` | CheckCommand 301 | one drifting window reported of several behind one name | test gap — `WhatTheCheckReportsTest::testAWindowIsReportedForEveryIndexBehindOneName` (a rollover's alias; `InMemoryGateway::$settingsOf` to answer for several) |
+| `62e0d69d` | CheckCommand 159 | the connection's two halves asked with `&&` | not reached: the container gives both or neither |
+| `63bc1cf9`, `dc8170df`, `a8a084d1` | CheckCommand 169 | the savepoint check's conditions | not reached on the DBAL the run installs: DBAL 4 always nests with savepoints; the DBAL 3 cells check it |
+| `95b34b18`, `87fa4a57`, `1f3d2f93`, `65494361`, `78ca98ff`, `fd3f9c46` | OutboxContext | what entering, leaving, spoiling and a reset keep | test gap — `WhatTheOutboxContextRemembersTest` |
+| `86e7f571` | OutboxContext 52 | clearing at depth -1 | **equivalent**: at depth 0 nothing is spoiled — `spoil()` keeps nothing there and leaving to 0 clears |
+| `706451b4` | AuditTransaction 220 | `commit()` removed | test gap — `AuditTransactionTest::testTheRowAndItsRecordAreCommittedTogether` now asks that no transaction is left open: on one connection uncommitted rows read as there |
+| `e4803d21`, `9e8a0f93`, `e9416428` | AuditTransaction 247–249 | the reason and the rollback's reason in the log line | test gap — `WhatARefusedRollbackSaysTest::testAskingForFullDetailStillRepeatsBoth` read the marker anywhere, and the exception carried it |
+| `6e47482b`, `c7f837de` | AuditTransaction 199, 229 | asked again; the finally unwrapped | **equivalent**: the check's answer is the same; the inner catch takes every Throwable |
+| `bb9177b2`, `d40ffd07`, `8219252d`, `6072428b`, `ea08ee10`, `63285efe` | AuditFrame | comparator failures of a frame that failed to write, of one released, said when they cannot be reported, the first raised | test gap — `WhatAClosingFrameReportsTest` |
+| `b923bca0` | AuditReader 580 | a decorator's keys kept | test gap — `AuditReaderTest::testAPageIsAListWhateverKeysADecoratorGaveIt` |
+| `4f464123`, `f1edbcdb`, `5bd2b24e`, `969a3267` | AuditReader | `array_values()` on Elasticsearch's lists; a count it gives as a number; -1 for none | **equivalent** |
+| `a8c6ce9e` | AuditQuery 450 | the object type left out of the fingerprint | test gap — `AuditReaderTest::testATokenFromOneObjectTypeCannotBeContinuedOnAnother` |
+| `086808b5` | AuditQuery 624 | where a token came from kept after its cursor was abandoned | test gap — `…::testAQueryThatLeftItsCursorBehindLeavesWhereItCameFromTooAndReadsFromTheStart`: refused for a token it no longer carried |
+| `74636fc0` | AuditQuery 610 | a new cursor losing to the old one | **equivalent**: `after()` gives a page with its cursor, and a page means another search, so a cursor never arrives with the same search |
+| `6834168a`, `765699cf` | AuditQuery 458, 118 | filters fingerprinted as objects; actors not re-listed | **equivalent**: the same for one query every time; `nonEmpty()` lists them, as its siblings' ignores say |
+| `54e66876`, `dbe18441`, `6300e44a` | AuditEntry | a number read where text is expected; extra replaced | test gap — `WhatAnEntryReadsOfAHitTest` |
+| `2781a110` | AuditEntry 99 | `array_values()` on a hit's sort | **equivalent** |
+| `5fa99f49` | ValueComparator 51 | a generator's comparators kept by key | test gap — `ValueComparatorTest::testComparatorsHandedOverWithTheSameKeyAreEachAsked` |
+| `590177d7` | ValueComparator 50 | `array_values()` on a list read by `foreach` | **equivalent** |
+| `2d1c8e39`, `2a0f3744` | FrameResetMiddleware 86 | the reason left out of the line | test gap — `AuditFrameTest`'s logger fills every placeholder now, and the line is asked to have none left |
+| `898bea1e`, `abf2e221` | ClientFactory 24, 40 | TLS verification off by default; the log gate not set | not yet told apart: the extension always passes the configured value, and what the client does with a logger needs a client that talks. For the reviewers: the default of a public factory is TLS — whether a test should read it off the built client |
+| `3d738fda` | EnricherMapping 51 | `apply()` public → protected | **equivalent**: nothing outside the class calls it |
 | `b7a8d80e` | 289 | `catch (NotConfiguredException)` in `writeAll()`'s loop removed | test gap — `writeAll()` settles its moment before the loop, which meets the refusal first, so no test reached the catch; a caller handing in its own `Provenance` (public) does, and the refusal then went through `on_failure: log` as a line. Closed by `WhatAMomentEnricherDescribesTest::testTheRefusalIsNotSwallowedWhenTheMomentWasSettledElsewhere`, red under the mutant. Infection printed this diff without the file's blank lines, so it was applied by hand |
 
 ### Code defects found

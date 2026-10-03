@@ -110,6 +110,75 @@ final class AuditReaderTest extends TestCase
         $this->reader()->find(AuditQuery::for('order')->withEvents('remove')->afterToken($token));
     }
 
+    public function testATokenFromOneObjectTypeCannotBeContinuedOnAnother(): void
+    {
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+        ]]];
+
+        $token = $this->reader()->find(AuditQuery::for('order'))->nextCursorToken();
+
+        self::assertIsString($token);
+
+        $this->expectException(InvalidQueryException::class);
+        $this->expectExceptionMessage('different query');
+
+        $this->reader()->find(AuditQuery::for('invoice')->afterToken($token));
+    }
+
+    public function testAQueryThatLeftItsCursorBehindLeavesWhereItCameFromTooAndReadsFromTheStart(): void
+    {
+        // A filter added after the token abandons the cursor -- and with it the question of
+        // which query the cursor came from: there is nothing left to continue, and the query
+        // reads its first page rather than being refused for a token it no longer carries.
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [
+            ['_id' => 'a', 'sort' => ['2026-08-26 10:00:00', 'a', 'audit_log'], '_source' => ['objectType' => 'order', 'objectId' => 1, 'event' => 'update', 'loggedAt' => '2026-08-26 10:00:00', 'source' => '7', 'changes' => []]],
+        ]]];
+
+        $token = $this->reader()->find(AuditQuery::for('order'))->nextCursorToken();
+        self::assertIsString($token);
+
+        $this->reader()->find(AuditQuery::for('order')->afterToken($token)->withEvents('remove'));
+
+        self::assertArrayNotHasKey('search_after', $this->gateway->searches[1]['body']);
+    }
+
+    public function testTheLastCursorGivenIsTheOneContinuedFrom(): void
+    {
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 0], 'hits' => []]];
+
+        $this->reader()->find(AuditQuery::for('order')->after(['2026-08-26 10:00:00', 'a', 'audit_log'])->after(['2026-08-26 11:00:00', 'b', 'audit_log']));
+
+        self::assertSame(['2026-08-26 11:00:00', 'b', 'audit_log'], $this->gateway->searches[0]['body']['search_after']);
+    }
+
+    public function testAPageIsAListWhateverKeysADecoratorGaveIt(): void
+    {
+        $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 2], 'hits' => [
+            self::hit('a', '7'),
+            self::hit('b', '8'),
+        ]]];
+
+        // By id, as a lookup would key them.
+        $keyed = new class implements RecordDecoratorInterface {
+            public function decorate(array $entries): array
+            {
+                $byId = [];
+
+                foreach ($entries as $entry) {
+                    $byId[$entry->id] = $entry;
+                }
+
+                return $byId;
+            }
+        };
+
+        $page = $this->reader(decorators: [$keyed])->find(AuditQuery::for('order'));
+
+        self::assertTrue(array_is_list($page->entries));
+        self::assertSame(['a', 'b'], array_map(static fn (AuditEntry $e): string => $e->id, $page->entries));
+    }
+
     public function testATokenContinuesTheQueryItCameFrom(): void
     {
         $this->gateway->respondToSearch = static fn () => ['hits' => ['total' => ['value' => 3], 'hits' => [

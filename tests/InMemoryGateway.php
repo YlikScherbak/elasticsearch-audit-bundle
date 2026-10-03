@@ -82,9 +82,21 @@ final class InMemoryGateway implements GatewayInterface
         $this->indices[$index]['mappings']['properties'] = array_replace_recursive($current, $properties);
     }
 
+    /**
+     * What settings() answers for a name, by concrete index, where a test wants an alias that
+     * stands for several -- a rollover's -- rather than the one index of that name.
+     *
+     * @var array<string, array<string, array<string, mixed>>>
+     */
+    public array $settingsOf = [];
+
     public function settings(string $index): array
     {
         $this->maybeFail(__FUNCTION__);
+
+        if (isset($this->settingsOf[$index])) {
+            return $this->settingsOf[$index];
+        }
 
         if (!isset($this->indices[$index])) {
             throw IndexNotFoundException::forIndex($index);

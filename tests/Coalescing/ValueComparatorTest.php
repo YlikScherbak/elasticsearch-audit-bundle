@@ -145,4 +145,29 @@ final class ValueComparatorTest extends TestCase
         self::assertFalse($comparator->equals('order', 'at', $beforeEpoch, new \DateTimeImmutable('1969-07-20 20:17:40.000001', new \DateTimeZone('UTC'))));
         self::assertTrue($comparator->equals('order', 'at', $beforeEpoch, new \DateTime('1969-07-20 20:17:40.000000', new \DateTimeZone('UTC'))), 'mutable against immutable is still an instant');
     }
+
+    public function testComparatorsHandedOverWithTheSameKeyAreEachAsked(): void
+    {
+        // A generator may give two of them one key; the second is asked when the first has
+        // no opinion, not lost to it.
+        $comparators = (static function (): \Generator {
+            yield 'same' => new class implements ValueComparatorInterface {
+                public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+                {
+                    return $field === 'title' ? true : null;
+                }
+            };
+            yield 'same' => new class implements ValueComparatorInterface {
+                public function equals(string $objectType, string $field, mixed $old, mixed $new): ?bool
+                {
+                    return $field === 'status' ? true : null;
+                }
+            };
+        })();
+
+        $chain = new ValueComparator($comparators);
+
+        self::assertTrue($chain->equals('order', 'title', 'a', 'b'), 'the first one asked');
+        self::assertTrue($chain->equals('order', 'status', 'a', 'b'), 'and the second');
+    }
 }

@@ -130,6 +130,8 @@ final class AuditTransactionTest extends TestCase
 
         self::assertSame(1, $this->shipments(), 'the business row');
         self::assertSame(1, $this->queued(), 'and one record for the whole operation, in the queue');
+        // Committed, not merely visible to the connection that wrote it.
+        self::assertFalse($this->connection->isTransactionActive(), 'no transaction left open');
     }
 
     public function testARollbackTakesBothHalvesWithIt(): void
