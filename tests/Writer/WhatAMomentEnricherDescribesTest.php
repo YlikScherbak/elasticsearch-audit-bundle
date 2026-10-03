@@ -213,6 +213,49 @@ final class WhatAMomentEnricherDescribesTest extends TestCase
         $this->writer([$both])->record('order', 1, 'update');
     }
 
+    public function testTheRefusalIsNotSwallowedWhenTheMomentWasSettledElsewhere(): void
+    {
+        // writeAll() settles its moment before the loop, and settling it is what meets
+        // the refusal first -- unless the caller hands one in. Provenance is public, so
+        // an application can, and then the enrichers are first asked inside the loop,
+        // where every other exception is held and reported under on_failure. This one is
+        // not a failed write, and the default policy (log) must not turn it into a line.
+        $both = new class implements MomentEnricherInterface, ScopedEnricherInterface {
+            public function objectTypes(): array
+            {
+                return ['order'];
+            }
+
+            public function describe(): array
+            {
+                return ['route' => '/checkout'];
+            }
+
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                return $record;
+            }
+
+            public function mapping(): array
+            {
+                return ['route' => ['type' => 'keyword']];
+            }
+        };
+
+        $this->expectException(NotConfiguredException::class);
+        $this->expectExceptionMessage('there is no record for objectTypes() to narrow');
+
+        $this->writer([$both])->writeAll(
+            [new AuditRecord('order', 1, 'update')],
+            new Provenance(new \DateTimeImmutable('2026-10-02 12:00:00'), 'alice'),
+        );
+    }
+
     public function testAnOrdinaryEnricherDoesNotGetToOverwriteIt(): void
     {
         // The whole point, in one assertion. An ordinary enricher runs when the record

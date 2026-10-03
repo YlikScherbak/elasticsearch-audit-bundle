@@ -212,6 +212,29 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         self::assertCount(1, $lost, sprintf("two entities lost theirs and it was said %d times", \count($lost)));
     }
 
+    public function testTheLostChangeSetIsReportedAgainByTheNextFlushThatLosesOne(): void
+    {
+        // Once per flush, and per flush means each of them: "already said" is the state of one
+        // flush, and kept past its end it silenced the warning for the life of the worker.
+        $shipment = $this->shipmentWithTwoLines();
+        $flushing = $this->flushFromPostUpdate();
+        $this->attachListener(FailurePolicy::Log);
+
+        $shipment->reference = 'SH-10';
+        $this->em->flush();
+
+        $flushing->done = false;
+        $shipment->reference = 'SH-20';
+        $this->em->flush();
+
+        $lost = array_values(array_filter(
+            $this->logs,
+            static fn (string $line): bool => str_contains($line, 'had no change set left')
+        ));
+
+        self::assertCount(2, $lost, 'two flushes lost a change set, and each is told');
+    }
+
     public function testNothingIsReportedWhenNobodyFlushes(): void
     {
         $shipment = $this->shipmentWithTwoLines();
@@ -545,12 +568,13 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
         $this->em->getEventManager()->addEventListener([Events::postPersist], $listener);
     }
 
-    private function flushFromPostUpdate(): void
+    /** @return object{done: bool} the listener, whose $done set back to false makes it flush once more */
+    private function flushFromPostUpdate(): object
     {
         $em = $this->em;
 
         $listener = new class($em) {
-            private bool $done = false;
+            public bool $done = false;
 
             public function __construct(private readonly EntityManagerInterface $em)
             {
@@ -569,6 +593,8 @@ final class UnitOfWorkTimingTest extends DoctrineTestCase
 
         // Before the audit listener: that is what makes it destructive.
         $this->em->getEventManager()->addEventListener([Events::postUpdate], $listener);
+
+        return $listener;
     }
 
     /** @var array<string, mixed> */

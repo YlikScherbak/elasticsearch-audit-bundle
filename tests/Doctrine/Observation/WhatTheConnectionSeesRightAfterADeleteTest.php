@@ -40,6 +40,48 @@ final class WhatTheConnectionSeesRightAfterADeleteTest extends DoctrineTestCase
         self::assertContains($left, [[], $articles], 'the premise: either all went or none');
     }
 
+    public function testTwoCollectionsWatchingOneTableInOneFlushAreEachLookedAtUnderTheirOwnLabel(): void
+    {
+        // A tag an article and a shelf both hold: two collections watch the tag's table in the
+        // same flush, each with its own question. Kept apart by label -- under one name the
+        // second watch took the first's place, and which collection lost its look depended on
+        // the order the mapping listed the classes in, which is the filesystem's: the listener's
+        // test caught it on Windows and not on Linux.
+        [$tag, $articles] = $this->aTagHeldBy(1);
+        $shelf = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shelf();
+        $shelf->labels->add($this->em->find(Tag::class, $tag));
+        $this->em->persist($shelf);
+        $this->em->flush();
+
+        $this->statements->watch(1, 'tags', 'Tag', ['id'], [(string) $tag => true], self::READ);
+        $this->statements->watch(1, 'labels', 'Tag', ['id'], [(string) $tag => true], 'SELECT shelf_id FROM shelf_label WHERE tag_id = ?');
+        $this->em->getConnection()->executeStatement('DELETE FROM Tag WHERE id = ?', [$tag]);
+
+        $seen = $this->statements->observationsOf($this->statements->position());
+        ksort($seen);
+
+        self::assertSame(['labels', 'tags'], array_keys($seen), 'one look for each collection');
+        self::assertContains(array_map(static fn (array $row): int => (int) $row[0], $seen['tags']), [[], $articles], 'the article\'s question, about the article\'s rows');
+        self::assertContains(array_map(static fn (array $row): int => (int) $row[0], $seen['labels']), [[], [(int) $shelf->id]], 'the shelf\'s, about the shelf\'s');
+    }
+
+    public function testALabelEndingInADigitIsNotTakenForAnotherFlushsWatch(): void
+    {
+        // The watch's name is its label and its flush, and what keeps them apart is the
+        // separator: without it "x1" of flush 2 and "x" of flush 12 are one name -- a field
+        // may end in a digit, and a flush nested inside another is a later number while the
+        // first still watches.
+        [$tag, $articles] = $this->aTagHeldBy(1);
+        $this->statements->watch(2, 'x1', 'Tag', ['id'], [(string) $tag => true], self::READ);
+        $this->statements->watch(12, 'x', 'Tag', ['id'], [(string) $tag => true], self::READ);
+        $this->em->getConnection()->executeStatement('DELETE FROM Tag WHERE id = ?', [$tag]);
+
+        $seen = $this->statements->observationsOf($this->statements->position());
+        ksort($seen);
+
+        self::assertSame(['x', 'x1'], array_keys($seen));
+    }
+
     public function testADeleteThatTookNoRowIsNotLookedAt(): void
     {
         [$tag] = $this->aTagHeldBy(1);

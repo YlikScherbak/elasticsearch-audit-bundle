@@ -38,6 +38,76 @@ final class WhatAnOwningCollectionPublishesTest extends DoctrineTestCase
         );
     }
 
+    public function testEachOwnersLinksJoinItsOwnRecordOfTheFlush(): void
+    {
+        // Two articles retitled and each given a tag in one flush: each list's move is part of its
+        // own article's record -- the second owner's is not taken for the first's, nor left out.
+        $this->em->persist($tag = new Tag('t'));
+        $this->em->persist($one = new Article('One'));
+        $this->em->persist($two = new Article('Two'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $one->title = 'One!';
+        $one->tags->add($tag);
+        $two->title = 'Two!';
+        $two->tags->add($tag);
+        $this->em->flush();
+
+        self::assertSame(
+            [[$one->id, 'One!', ['old' => [], 'new' => ['t']]], [$two->id, 'Two!', ['old' => [], 'new' => ['t']]]],
+            array_map(static fn (array $d): array => [$d['objectId'], $d['changes']['title']['new'] ?? null, $d['changes']['tags'] ?? null], $this->documents()),
+        );
+    }
+
+    public function testAnOwnersRecordStandsWhereItsOwnStatementRanNotWhereItsLinksDid(): void
+    {
+        // Two articles retitled and the first also tagged: Doctrine runs both UPDATEs and then the
+        // join row. The tag joins the first article's record, which still begins where that
+        // article's UPDATE ran -- before the second's.
+        $this->em->persist($tag = new Tag('t'));
+        $this->em->persist($one = new Article('One'));
+        $this->em->persist($two = new Article('Two'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $this->queries = [];
+
+        $one->title = 'One!';
+        $one->tags->add($tag);
+        $two->title = 'Two!';
+        $this->em->flush();
+
+        $writes = array_values(array_filter($this->queries, static fn (string $sql): bool => (bool) preg_match('/^(INSERT|UPDATE)\b/', $sql)));
+        self::assertSame(['UPDATE Article', 'UPDATE Article', 'INSERT INTO'], array_map(static fn (string $sql): string => implode(' ', \array_slice(explode(' ', $sql), 0, 2)), $writes), 'the premise: the other article\'s UPDATE between the owner\'s and its link');
+
+        self::assertSame(
+            [[$one->id, true], [$two->id, false]],
+            array_map(static fn (array $d): array => [$d['objectId'], isset($d['changes']['tags'])], $this->documents()),
+        );
+    }
+
+    public function testTwoCollectionsOfOneOwnerInOneFlushAreOneRecord(): void
+    {
+        // A shelf has nothing of its own to change: what its two lists did in one flush is one
+        // record of it, the second joining the one the first made -- the key a list joins under
+        // is its owner's, its collection's and its flush's, and dropping the collection made the
+        // second list a record of its own.
+        $this->em->persist($tag = new Tag('t'));
+        $this->em->persist($corner = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CornerShelf());
+        $this->em->persist($shelf = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shelf());
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $shelf->labels->add($tag);
+        $shelf->neighbours->add($corner);
+        $this->em->flush();
+
+        $documents = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectId'] === $shelf->id));
+
+        self::assertCount(1, $documents, 'one record of the shelf');
+        self::assertSame(['labels', 'neighbours'], array_values(array_intersect(['labels', 'neighbours'], array_keys($documents[0]['changes']))));
+    }
+
     public function testALinkWrittenBeforeItsOwnerWentInOneFlushIsSaidBeforeTheRemoval(): void
     {
         // A tag added and the article removed in one flush: Doctrine does not write the link of

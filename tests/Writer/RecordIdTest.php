@@ -12,9 +12,13 @@ final class RecordIdTest extends TestCase
 {
     public function testItIsAVersion7Uuid(): void
     {
-        $id = RecordId::v7(new \DateTimeImmutable('2026-08-26 12:00:00.123', new \DateTimeZone('UTC')));
+        // Many, not one: the variant's two bits sit beside random ones, and a mask that lets
+        // one of those in is wrong for every other id -- one id caught it half the time.
+        for ($i = 0; $i < 64; ++$i) {
+            $id = RecordId::v7(new \DateTimeImmutable('2026-08-26 12:00:00.123', new \DateTimeZone('UTC')));
 
-        self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $id);
+            self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $id);
+        }
     }
 
     public function testTheFirst48BitsAreTheMillisecondsOfTheTimestamp(): void

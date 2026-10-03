@@ -57,6 +57,55 @@ final class CollectionElementsTest extends DoctrineTestCase
         self::assertArrayNotHasKey('lines', $changes, 'the collection itself did not change: nothing was added or removed');
     }
 
+    public function testEachOwnersLinesJoinItsOwnRecordAndNoOtherIsLeftOut(): void
+    {
+        // Two crates, each changed and each with a line changed, in one flush: every line's
+        // change is in its own crate's record. Joining the first crate's lines is not the end
+        // of the reading -- with it treated as one, the second crate's line went unrecorded.
+        $this->em->persist($a = new Crate('A'));
+        $a->add($first = new CrateItem('SKU-A'));
+        $this->em->persist($b = new Crate('B'));
+        $b->add($second = new CrateItem('SKU-B'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $a->status = 'shipped';
+        $first->quantity = 5;
+        $b->status = 'lost';
+        $second->quantity = 6;
+        $this->em->flush();
+
+        self::assertSame(
+            [['A', ['old' => 1, 'new' => 5]], ['B', ['old' => 1, 'new' => 6]]],
+            array_map(static fn (array $d): array => [$d['objectId'], $d['changes']['items.'.($d['objectId'] === 'A' ? $first->id : $second->id).'.quantity'] ?? null], $this->documents()),
+        );
+    }
+
+    public function testAnOwnersRecordStandsWhereItsOwnStatementRanNotWhereItsLinesDid(): void
+    {
+        // Two crates changed, and a line of the first, in one flush. Doctrine runs the crates'
+        // UPDATEs in the order it holds them, the first's first, and the line's after both --
+        // the line's class refers to the crate's. The line joins the first crate's record, and
+        // that record still begins where the crate's own UPDATE ran: before the second's.
+        $this->em->persist($first = new Crate('A'));
+        $first->add($line = new CrateItem('SKU'));
+        $this->em->persist($second = new Crate('B'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $this->queries = [];
+
+        $first->status = 'shipped';
+        $second->status = 'lost';
+        $line->quantity = 4;
+        $this->em->flush();
+
+        $updates = array_values(array_filter($this->queries, static fn (string $sql): bool => str_starts_with($sql, 'UPDATE')));
+        self::assertSame(['Crate', 'Crate', 'CrateItem'], array_map(static fn (string $sql): string => explode(' ', $sql)[1], $updates), 'the premise: the other crate\'s statement between the owner\'s and its line\'s');
+
+        self::assertSame(['A', 'B'], array_column($this->documents(), 'objectId'));
+        self::assertArrayHasKey('items.'.$line->id.'.quantity', $this->documents()[0]['changes'], 'the line is in the first crate\'s record');
+    }
+
     public function testAnOwnerNobodyTouchedStillGetsItsRecord(): void
     {
         // No column of the shipment changed, so Doctrine raises no postUpdate for it.

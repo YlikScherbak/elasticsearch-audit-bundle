@@ -66,6 +66,74 @@ final class DoctrineAuditTest extends DoctrineTestCase
         self::assertSame([], $this->documents());
     }
 
+    public function testASkippedUpdateDoesNotTakeTheRecordsAfterItWithIt(): void
+    {
+        // Skipped is this execution's: the flush's other rows, run after it, are recorded.
+        $quiet = $this->persisted(new Article('Quiet'));
+        $loud = $this->persisted(new Article('Loud'));
+        $this->gateway->documents = [];
+
+        $quiet->views = 99;
+        $loud->title = 'Louder';
+        $this->em->flush();
+
+        self::assertSame([['Loud', 'Louder']], array_map(static fn (array $d): array => [$d['changes']['title']['old'] ?? null, $d['changes']['title']['new'] ?? null], $this->documents()));
+    }
+
+    /** @return iterable<string, array{int}> */
+    public static function rings(): iterable
+    {
+        yield 'two relays' => [2];
+        yield 'three relays' => [3];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('rings')]
+    public function testACreationDoctrineCompletesLaterStandsWhereItsInsertRan(int $size): void
+    {
+        // New relays pointing at each other round a ring: Doctrine inserts one with its
+        // reference empty, then the others, then completes the first with an UPDATE. Its record
+        // is its INSERT and that UPDATE, and it is placed by where it began -- before the
+        // others, whose INSERTs ran in between -- not by where it ended. Three, so that the
+        // record completed late is on both sides of the comparison that orders them.
+        $ring = [];
+
+        for ($i = 0; $i < $size; ++$i) {
+            $ring[] = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay('relay '.$i);
+        }
+
+        foreach ($ring as $i => $relay) {
+            $relay->next = $ring[($i + 1) % $size];
+            $this->em->persist($relay);
+        }
+
+        $this->gateway->documents = [];
+        $this->queries = [];
+        $from = $this->statements->position();
+        $this->em->flush();
+
+        $writes = array_values(array_filter($this->queries, static fn (string $sql): bool => (bool) preg_match('/^(INSERT|UPDATE)\b/', $sql)));
+        self::assertSame([...array_fill(0, $size, 'INSERT'), 'UPDATE'], array_map(static fn (string $sql): string => (string) strtok($sql, ' '), $writes), 'the premise: one creation completed after the others\' INSERTs');
+
+        // Which one Doctrine inserts first is its own choice, and the order of the keys says
+        // nothing of it where a sequence hands them out before the INSERT: the INSERTs' own
+        // parameters say it.
+        $inserted = [];
+
+        for ($at = $from + 1; $at <= $this->statements->position(); ++$at) {
+            $statement = $this->statements->statement($at);
+
+            if ($statement !== null && str_starts_with($statement['sql'], 'INSERT INTO Relay')) {
+                $inserted[] = current(array_filter($statement['params'], static fn (mixed $value): bool => \is_string($value) && str_starts_with($value, 'relay ')));
+            }
+        }
+
+        $documents = $this->documents();
+
+        self::assertCount($size, $inserted, 'the premise: every INSERT read');
+        self::assertSame(array_fill(0, $size, 'create'), array_column($documents, 'event'));
+        self::assertSame($inserted, array_map(static fn (array $d): mixed => $d['changes']['name']['new'] ?? null, $documents));
+    }
+
     public function testAssociationsAreRecordedThroughTheirRepresenter(): void
     {
         $alice = new Author('alice');

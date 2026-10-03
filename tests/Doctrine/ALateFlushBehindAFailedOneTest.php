@@ -182,6 +182,47 @@ final class ALateFlushBehindAFailedOneTest extends DoctrineTestCase
         self::assertCount(1, $crates, 'the committed line is in the crate\'s history');
     }
 
+    public function testALatePublicationThatRaisesLeavesTheFlushesAfterItTheirOwn(): void
+    {
+        // Under on_failure: throw the late write's failure is raised from the onFlush that
+        // found it, and that flush is refused. What the late write was about is over either
+        // way: its records were reported, its facts let go. Left behind, the next flush read
+        // those facts again and met them let go -- a LogicException, and its own record lost.
+        $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
+        $article = new Article('One');
+        $this->em->persist($article);
+        $this->em->flush();
+        $written = \count($this->documents());
+
+        $article->title = 'Two';
+        $this->swallowingPostFlush(function (): void {
+            $this->em->flush();
+        });
+
+        $this->gateway->failWith = new \RuntimeException('the cluster is down');
+        $article->title = 'Three';
+
+        try {
+            $this->em->flush();
+            self::fail('the premise: the late write fails, and under "throw" says so');
+        } catch (\Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException) {
+        }
+
+        $this->gateway->failWith = null;
+        self::assertSame('Two', $this->em->getConnection()->fetchOne('SELECT title FROM Article WHERE id = ?', [$article->id]), 'the premise: the flush that found it was refused');
+
+        $article->title = 'Four';
+        $this->em->flush();
+        $article->title = 'Five';
+        $this->em->flush();
+
+        self::assertSame(
+            [['Two', 'Four'], ['Four', 'Five']],
+            array_map(static fn (array $d): array => [$d['changes']['title']['old'] ?? null, $d['changes']['title']['new'] ?? null], \array_slice($this->documents(), $written)),
+            'each flush after it writes its own change, and the one after that its own again',
+        );
+    }
+
     private function swallowingPostFlush(\Closure $flush): void
     {
         $breaker = new class {
