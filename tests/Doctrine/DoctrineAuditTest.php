@@ -89,6 +89,18 @@ final class DoctrineAuditTest extends DoctrineTestCase
         self::assertSame([], $this->documents());
     }
 
+    public function testAColumnDeclaredAfterACollectionIsRecorded(): void
+    {
+        $this->em->persist($entity = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ListFirst());
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $entity->name = 'second';
+        $this->em->flush();
+
+        self::assertSame([['name' => ['old' => 'first', 'new' => 'second']]], array_map(static fn (array $d): array => $d['changes'], $this->documents()));
+    }
+
     public function testASkippedUpdateDoesNotTakeTheRecordsAfterItWithIt(): void
     {
         // Skipped is this execution's: the flush's other rows, run after it, are recorded.

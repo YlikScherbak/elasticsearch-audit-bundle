@@ -153,6 +153,47 @@ final class WhatTheListenerLetsGoOfTest extends DoctrineTestCase
         self::assertSame(['first, again', 'first, a third time'], [$this->lastDocument()['changes']['name']['old'] ?? null, $this->lastDocument()['changes']['name']['new'] ?? null], 'and the next flush\'s record whole, from where the row stood');
     }
 
+    /** @return iterable<string, array{bool}> */
+    public static function whatIsLeftOut(): iterable
+    {
+        yield 'a statement of the application\'s, outside every flush' => [false];
+        yield 'a record whose representer failed' => [true];
+    }
+
+    /**
+     * What the reading that writes passes over is let go of too, not only what it wrote: a
+     * statement no flush owns, said and left out, and a record that could not be built. Inside
+     * the application's transaction, where nothing settles the rows and the log keeps every
+     * statement, a fact held after the flush is one nobody will read again.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('whatIsLeftOut')]
+    public function testWhatTheWritingReadingPassesOverIsLetGoOfToo(bool $failing): void
+    {
+        $this->unownedStatementsAreExpected = true;
+        $refuses = new Relay('refuses');
+        $relay = new Relay('one');
+        $this->em->persist($refuses);
+        $this->em->persist($relay);
+        $this->em->flush();
+        $connection = $this->em->getConnection();
+        $from = $this->statements->position();
+        $connection->beginTransaction();
+
+        if ($failing) {
+            $relay->next = $refuses;
+        } else {
+            $connection->update('Relay', ['name' => 'the application\'s'], ['id' => $relay->id]);
+            $refuses->name = 'refuses, renamed';
+        }
+
+        $this->em->flush();
+        $held = array_filter($this->memory()->replayed($this->em)->rowFacts(), static fn (array $fact): bool => $fact['at'] > $from && ($fact['released'] ?? false) !== true);
+        $connection->rollBack();
+        $this->logs = [];
+
+        self::assertSame([], $held);
+    }
+
     /**
      * @return list<array<string, mixed>>
      */
