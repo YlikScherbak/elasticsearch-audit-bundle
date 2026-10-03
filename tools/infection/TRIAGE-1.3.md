@@ -302,6 +302,39 @@ all seven green, and each test red under its mutants on SQLite.
 | `d9164260`, `851fe5c7`, `3b1b1131`, `27c15eb8`, `bd887e6b`, `429b1d4f`, `6c2cc532`, `970febc5`, `01ee01ac`, `bbf76f7b`, `b4637b08`, `9abe6b37` | 133–146 | the order of events at one position | not reached: two events of one owner at one position need one DELETE that is the owner's row going and a target of its own collection going — an owner holding itself; no fixture does |
 | the rest | | | in tier (b)/(c) |
 
+### StatementLog (81)
+
+The log was tested through the listener, with SQL as DBAL writes it: upper case, bare, one
+savepoint inside one transaction. Asked directly, 74 of the 81 are red: 51 under
+`WhatTheLogReadsOfSqlAsWrittenTest` (`3ec129b`: savepoints, releases and rollbacks in lower case
+and their look-alikes, a key after a lower-case INSERT, `onlyReads()`, lower-case DELETEs and
+INSERTs, a DELETE in a literal, an UPDATE of the join table) and
+`WhatTheLogKeepsOfFramesAndOwnersTest` (which frame a flush claims, what a rollback voids and
+counts, `claimUnowned()`, what letting go keeps, `size()`, a watch asked for twice, a key of two
+columns, a failed or empty join-row INSERT, a count in a string, a statement the log does not
+hold, a savepoint opened outside a transaction). **Test gaps**, all of them; every survivor below
+was run against both files.
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `e32f08ca`, `1839d317`, `1bd31703` | 173, 471, 699 | `true` → `false` in a map read only by `isset()` | **equivalent** |
+| `76f53404`, `f62486af`, `760f0ac7` | 229, 761, 785 | `voidFrom()` after −1, or `>=` | **equivalent**: sequence numbers start at 1, and every caller passes 0 — the `$after` parameter is dead; for the reviewers |
+| `a9090257`, `9eb4abfc`, `3b3dd746`, `139c0b74`, `75ef7ade`, `deedebdd`, `3e3b77ab`, `01ef8c19`, `6c80ade2`, `60a8c85e`, `3caab360`, `ded1ab2f` | 720, 733, 232–233, 745–746, 765 | a frame's `open` flag, or the loops that close frames on a rollback, release or rollback-to | **equivalent**: `open` is written and never read, and `close()` without `committed` writes `false` over `false`. Dead code; for the reviewers — the flag and the three loops can go |
+| `1921b0d6` | 291 | `(int)` dropped before `> 0` | **equivalent**: a count in a numeric string compares as a number, `null` as 0 |
+| `1c57296d`, `ab1af661` | 398, 468 | a key's values imploded without making them strings | **equivalent**: the middleware sees driver parameters, already converted to scalars |
+| `7720dc22` | 794 | `isInside()` stops at frame 0 | **equivalent**: frames are numbered from 1, and the `?? null` ends the walk |
+| `25d43f1d` | 727 | `close()` commits by default | not reached by DBAL: it differs only for a savepoint that is the outermost frame — `SAVEPOINT` run by the application outside a transaction, which SQLite answers by beginning one and `RELEASE` by committing it. The log calls such a statement pending for good. For the reviewers: pin the SQLite meaning, or leave it |
+
+### LookRightAfter and NobodysStatement (17)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `ec4d37f8` | LookRightAfter 41 | a statement with no place asked after | **equivalent**: no place means a savepoint statement or one of a table no history reads, and a watch's table is one (`WatchedRows::isAHistoryTable()` counts link targets) |
+| `a9a2b2de`, `a36c96f7` | 71 | `array_values` dropped | **equivalent**: `fetchAllNumeric()` returns a list of lists |
+| `ed6ab06d` | 68 | a key bound as a string, or as an integer | **equivalent** on SQLite, which the gate runs; PostgreSQL casts an untyped parameter |
+| `7cff9aba`, `4103b9cf`, `33124d94`, `b317c982`, `b1fcc099`, `b2a992f2`, `ba57a98f`, `c3fda286`, `b519fdca`, `f42f4bb6`, `e34928dd` | 73, 92–98 | what a failed question gives back inside a transaction | not reached: the question is the listener's own SELECT of a join table it has just read, and nothing in the tests makes it fail. The road exists for PostgreSQL, where a failed statement leaves the transaction unusable; on SQLite a savepoint left open is released with DBAL's own. Deliberately not tested — it would take a connection made to fail one SELECT inside a flush on PostgreSQL |
+| `2d8f3cd4`, `a01458ce` | NobodysStatement 35, 37 | the warning while a flush ran | not reached, as `ranDuringAFlush()` (above) |
+
 ### Code defects found (continued)
 
 - **The owner an element leaves was never checked** (diagnostics, LOW). `aboutTheOwnersOf()` meant to
