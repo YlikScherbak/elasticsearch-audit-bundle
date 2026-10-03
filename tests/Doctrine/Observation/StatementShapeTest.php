@@ -115,6 +115,19 @@ final class StatementShapeTest extends TestCase
         yield 'IS NULL is not exact' => ['UPDATE t SET a = ? WHERE b IS NULL', ['update', 't', ['a' => 1], [], false]];
         yield 'a key with arithmetic after it is not a key compared' => ['DELETE FROM t WHERE id = ? + 1', ['delete', 't', [], [], false]];
         yield 'a parenthesised condition is not exact' => ['DELETE FROM t WHERE (id = ? OR id = ?)', ['delete', 't', [], [], false]];
+        // Written the way an application writes it, tight against its punctuation.
+        yield 'quoted names with nothing around the equals' => ['UPDATE "t" SET "a"=? WHERE "id"=?', ['update', 't', ['a' => 1], ['id' => 2], true]];
+        yield 'an empty literal' => ["UPDATE t SET note = '' WHERE id = ?", ['update', 't', ['note' => null], ['id' => 1], true]];
+        yield 'a literal of one escaped quote' => ["UPDATE t SET note = '''' WHERE id = ?", ['update', 't', ['note' => null], ['id' => 1], true]];
+        yield 'a literal ending in an escaped quote, then a placeholder' => ["UPDATE t SET note = 'x''', a = ? WHERE id = ?", ['update', 't', ['note' => null, 'a' => 1], ['id' => 2], true]];
+        yield 'a literal against the comma after it' => ["UPDATE t SET note = 'x',a = ? WHERE id = ?", ['update', 't', ['note' => null, 'a' => 1], ['id' => 2], true]];
+        yield 'a number assigned' => ['UPDATE t SET a = 5, b = ? WHERE id = ?', ['update', 't', ['a' => null, 'b' => 1], ['id' => 2], true]];
+        yield 'a minus that is no comment' => ['UPDATE t SET a = ? - 1 WHERE id = ?', ['update', 't', ['a' => null], ['id' => 2], true]];
+        yield 'a division that is no comment' => ['UPDATE t SET a = ? / 2 WHERE id = ?', ['update', 't', ['a' => null], ['id' => 2], true]];
+        yield 'names that begin with an underscore' => ['UPDATE _t SET _a = ? WHERE _id = ?', ['update', '_t', ['_a' => 1], ['_id' => 2], true]];
+        yield 'a condition joined by a lower-case and' => ['DELETE FROM t WHERE a = ? and b = ?', ['delete', 't', [], ['a' => 1, 'b' => 2], true]];
+        yield 'a block comment is not read' => ['DELETE FROM t WHERE id = ? /* why */', null];
+        yield 'a block comment first is not read' => ['/* why */ DELETE FROM t WHERE id = ?', null];
         yield 'a named parameter is not read' => ['DELETE FROM t WHERE id = :id', null];
         yield 'a comment is not read' => ['DELETE FROM t WHERE id = ? -- why', null];
         yield 'a read is not read' => ['SELECT id FROM t WHERE id = ?', null];

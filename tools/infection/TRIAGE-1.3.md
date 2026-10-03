@@ -305,7 +305,7 @@ all seven green, and each test red under its mutants on SQLite.
 ### StatementLog (81)
 
 The log was tested through the listener, with SQL as DBAL writes it: upper case, bare, one
-savepoint inside one transaction. Asked directly, 74 of the 81 are red: 51 under
+savepoint inside one transaction. Asked directly, 58 of the 81 are red under
 `WhatTheLogReadsOfSqlAsWrittenTest` (`3ec129b`: savepoints, releases and rollbacks in lower case
 and their look-alikes, a key after a lower-case INSERT, `onlyReads()`, lower-case DELETEs and
 INSERTs, a DELETE in a literal, an UPDATE of the join table) and
