@@ -281,10 +281,75 @@ all seven green, and each test red under its mutants on SQLite.
   the original data to the current values") — the knowledge was in the code and did not survive
   the rewrite. No release had it, so no CHANGELOG line.
 
+### HistoryReplay::rowAt (what a link's target is shown as)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `2f8e393c`, `fc32d843`, `20f6156d`, `0b505bac`, `f2716159`, `2c8e74ac`, `476c7203`, `9b4eb769`, `543c60e8` | 1112–1121 | which version of a target's row is shown, or none and the object instead | test gap — `WhatALinksTargetIsShownAsTest`: catalogue items (crate lines, whose rows the history reads), moved after the link by a postFlush listener ahead of this one, the row and the object or the object alone |
+| `8fb6460a`, `0333ae78`, `f24856f8`, `3558ae88`, `f4c4e8e6`, `a436d6e3`, `ce1f0daf`, `bc6892aa` | 1112–1122 | the same, for a row taken after the position asked about, a row gone, two versions at one position | not yet told apart; in tier (b) |
+
+A correction of yesterday's finding ("a late record's label from a later moment"): `Author`, the
+target in that probe, is a class whose rows the history does not read, and for those the README
+says the representer is handed "the object the application holds". The late road widens what
+that means — the object as it is a flush later — but it is the documented behaviour, not a defect
+against it. `DoctrineAuditTest::testARepresenterDescribesTheObjectAsItStandsWhenTheRecordIsBuilt`
+pins the same for tags.
+For the reviewers: whether the README should say so about the late road.
+
+### RecordId and IdSequence (main)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `4b4bfd20`, `fb2bffed`, `330e0d54`, `9c52ada6`, `24eafdc8` | 79–82 | a random bit read twice, from another part's place | test gap — `RecordIdTest::testNoRandomBitOfAnIdIsAnotherOneAgain`: of 512 ids, no two of the 74 random bits always equal (a false failure 2^-512) |
+| `0c116a71`, `60180985`, `b03a2ad7` | 80 | the variant's low bits narrowed or widened | test gap — `…::testEveryVariantNibbleOccurs` (8, 9, a and b among 256), and the 64-id format check |
+| `34115c41`, `d64b3980`, `354eb690`, `b637532d`, `eb77e021`, `efc1dd2d` | 95 | where 48 bits of milliseconds end | test gap — `…::testATimestampPastWhatFortyEightBitsHoldIsTheLastMillisecondTheyDo` |
+| `33d12095`, `507be0b5`, `01ab4e86`, `a0999437`, `082f3e97` | IdSequence 35 | where a sequence may begin | test gap — `…::testASequenceBeginsWithinItsBits` |
+| `db4e88d6`, `6878af71` | IdSequence 39 | a fixed or a narrower random beginning | test gap — `…::testARandomBeginningUsesTheWholeLowerHalf` |
+| `1d081760`, `3830ce17`, `e0f7fa09`, `97b9760f`, `86218263` | 69–82 | more random bytes, a longer slice, a last group of 13 | **equivalent**: what is past the 32 digits is cut off |
+| `cebe35a6` | 80 | rand_b read from one digit later | **equivalent**: the digit skipped is random and used nowhere else |
+| `207b02ac`, `753d2b07`, `630a7811`, `bac0aba8`, `bab5ea10` | IdSequence 39 | the random beginning's bounds moved by one or two | **equivalent** to any test: one value in 2^41 |
+
+### ChangeRedactor (main)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `65c6ef76`, `4383da32`, `70f1a69a`, `b26849d6`, `02f23523`, `517ae572`, `1726d2bd` | 136–394 | what a record costs the budget, and where its edge is | test gap — `WhatTheRedactionBudgetCountsTest::testARecordThatCostsTheBudgetIsWalkedAndOneMorePlaceIsNot`, six shapes at their exact cost |
+| `095f9409`, `187db02f`, `ee6faec2` | 81 | the smallest limits, and either at nothing | test gap — `…::testTheSmallestLimitsThereAreAreAccepted`, `…::testEitherLimitAtNothingIsRefused` |
+| `c775f9fa` | 438 | a rule matching the start of a longer name | test gap, **over-redaction**: "pass" masked "password" — `…::testARuleIsAWholeNameAndNotTheStartOfOne` |
+| `8ed88e77` | 364 | a date or an enum walked as a structure | test gap — `…::testADateOrAnEnumIsAValueAndNotAPlaceToLook` |
+| `52d1ebe2`, `9ca6f5c3`, `cc50888d`, `d8c50c5f` | 92 | the check for a blank half of a rule | **equivalent**: every rule that trimming changes is refused by the padding check after it, and an empty half by any form of this one; a test written for them passed under each and was taken out |
+| `85e40636`, `7f86ba27`, `76d0e2a4` | 86, 169, 207 | a cast on a position `strpos` found; `array_values()` before a spread; a pair walked as any array | **equivalent** |
+
+### FrameBuffer (main)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `e826e057`, `e6de3444` | 98 | the default valve | test gap — `WhatTheBufferPromisesAtItsEdgesTest::testTheDefaultValveHoldsTenThousandObjects` |
+| `285374b9`, `35b3f744`, `8889bfa7`, `84fca9f0`, `ac1b2f7c` | 187–302 | what a reset says and leaves; a frame that stages everything | test gap — `…::testAResetSaysWhetherAnythingWasThere`, `…::testAfterAResetTheNextFrameIsAnOrdinaryOne`, `…::testAnOrdinaryFrameStagesNothing` |
+| `afe269c2`, `310c297d` | 224, 259 | what a refusal counts; a refusal left for the next operation | test gap — `…::testARefusalCountsWhatWasHeldAndWhatWasStaged`, `…::testAFrameLeftOpenOnARefusedOperationDoesNotRefuseTheNext` |
+| `1b496142`, `57574a2d`, `1374ff77`, `32550bf8`, `935812e3` | 455–457 | two objects' keys made one | test gap — `…::testTwoObjectsAreNeverHeldAsOne`; the backslash case needed two backslashes, which a first try's literal did not have |
+| `c6108d83` | 497 | one comparator failure of several kept | test gap — `…::testEveryComparatorFailureOfAClosingFrameIsKeptForTheWriter` |
+| `e2b2a68d`, `d1db9574` | 170, 261 | the return after `forget()` | **equivalent**: releasing what `forget()` emptied returns the same empty list |
+| `7c42fa44`, `3385fdbb` | 403, 409 | the first step's fields not marked as moved | **equivalent**: a field that comes back is marked by the step that brings it back |
+| `e6d6aced` | 511 | `= true` → `= false` | **equivalent**: read with `isset()` |
+
 ### AuditWriter (main)
 
 | Id | Line | Change | Class |
 |---|---|---|---|
+| `ce71d641`, `4d5f1d1d` | 64 | the default batch | test gap — `WhatTheWriterPromisesAtItsEdgesTest::testTheDefaultBatchIsFiveHundredRecords` |
+| `56bc9b58` | 160 | the transaction not told before an immediate write is refused | test gap — `AuditTransactionTest::testAnImmediateWriteCaughtByTheApplicationStillKeepsTheTransactionFromCommitting` |
+| `075a847e`, `e5018496` | 441, 433 | a batch that failed whole without the records never sent; an empty batch sent | test gap — `…::testABatchThatFailsWholeReportsTheRecordsThatNeverReachedItToo`, `…::testNothingToSendIsNoRequest` (a frame on nothing, a batch all vetoed: no request — an asynchronous transport would queue an empty message) |
+| `b56f82f0` | 495 | a frame's comparator failure told at a later write | test gap — `…::testAComparatorFailureOfARecordLetGoEarlyIsReportedWithIt` |
+| `f49e4915` | 557 | a generator's enrichers kept by key | test gap — `…::testEnrichersHandedOverWithTheSameKeyAreEachAsked` |
+| `6221df21` | 745 | a live counter let go | test gap — `…::testAMillisecondMetAgainKeepsItsCounterWhileAMomentOfItLives` |
+| `27cf7d3e`, `40d8c8db` | 835, 839 | a moment enricher after an ordinary one, or after another moment enricher | test gap — `…::testEveryMomentEnricherIsAskedWhateverComesBeforeIt` |
+| `ee61a8ff`, `23bc8d11`, `327bb016`, `dc47195b`, `cfd29e66` | 957, 992–993 | what a failure says when its record cannot be redacted, and with its record | test gap — `…::testAFailureThatCannotBeRedactedIsToldWithoutItsRecordAndWithWhatWentWrong`, `…::testAFailureIsToldWithTheRecordItWasAbout` |
+| `1b082d62` | 319 | in a frame when there is none | **equivalent** to what reaches the transport: the writer cuts a whole moment to its batch size |
+| `379a6285` | 345 | the early return for nothing to write | **equivalent**: the same empty list stops at line 433 |
+| `91308a01`, `4e1de648`, `8ec0b969` | 416, 529, 778 | a record with no id or timestamp | not reached: `complete()` sets both before |
+| `510c5bf4`, `825fc53b`, `4e7f48a3` | 557, 735, 889 | `array_values()` on a list read by `foreach`; the latest counter returned by the live one; an early return of nothing taken | **equivalent** |
+| `b967ce30` | 761 | `complete()` public → protected | **equivalent**: nothing outside the class calls it; for the reviewers whether it should say so in its visibility |
 | `b7a8d80e` | 289 | `catch (NotConfiguredException)` in `writeAll()`'s loop removed | test gap — `writeAll()` settles its moment before the loop, which meets the refusal first, so no test reached the catch; a caller handing in its own `Provenance` (public) does, and the refusal then went through `on_failure: log` as a line. Closed by `WhatAMomentEnricherDescribesTest::testTheRefusalIsNotSwallowedWhenTheMomentWasSettledElsewhere`, red under the mutant. Infection printed this diff without the file's blank lines, so it was applied by hand |
 
 ### Code defects found

@@ -217,6 +217,27 @@ final class AuditTransactionTest extends TestCase
         self::assertSame([], $this->gateway->documents, 'and nothing reached the index');
     }
 
+    public function testAnImmediateWriteCaughtByTheApplicationStillKeepsTheTransactionFromCommitting(): void
+    {
+        // The refusal is raised to the caller, and a caller can catch it and carry on: the
+        // transaction is told before the refusal is raised, so the commit after it is refused
+        // too, rather than committing a change whose history was never going to be written.
+        try {
+            $this->transaction->run(function (): void {
+                try {
+                    $this->writer->write(new AuditRecord('order', 1, AuditEvent::UPDATE, changes: ['q' => new Change(1, 2)]), immediately: true);
+                } catch (OutboxException) {
+                    // the application copes
+                }
+            });
+            self::fail('the transaction should have refused to commit');
+        } catch (OutboxException $e) {
+            self::assertStringContainsString('immediately: true', $e->getMessage());
+        }
+
+        self::assertSame([], $this->gateway->documents);
+    }
+
     public function testAnImmediateWriteIsRefusedEvenWithNothingGuardingTheTransport(): void
     {
         // The reason the rule lives in the writer rather than only in the transport that
