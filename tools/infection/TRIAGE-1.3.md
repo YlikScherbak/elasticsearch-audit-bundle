@@ -269,6 +269,19 @@ all seven green, and each test red under its mutants on SQLite.
 | `c07c1e96` | 483 | see above | |
 | `2008c7e5`, `ce553d62`, `d9e0f6d5`, `622b66e7`, `ebdd1399`, `ac610dbe`, `952df9bd`, `59ae5ac5`, `cc74ec7d`, `5dbf9dac`, `72b11801`, `6d76930b`, `bf912738`, `d8f66b3a` | 431, 678–697, 1195–1221, 1323–1324 | which entry of the stack a postFlush claims for, when an inner flush hands back, whether a flush planned only collections, and whether one ran | not yet told apart, with the unwindTo group: they change which of a nested flush's states is taken for which, and a flush refused between two of the application's transactions is a word the vocabulary lacks. For the 3,000 seeds with that word |
 
+### ElementFieldRuns
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `089220e6`, `23ab881c`, `904bb451` | 81 | the warning for a line's place changed outside every flush | test gap — `WhatTheListenerRemembersTest::testALineTheApplicationMovesItselfIsSaidAsAMoveOfItsPlace` |
+| `b6e5122f` | 91 | an element whose representer failed ends the reading | test gap — `CollectionElementsTest::testAnElementWhoseRepresenterFailedDoesNotTakeTheRestOfTheFlushWithIt` |
+| `4954b786` | 97 | the lines of an owner removed in the flush end the reading | not yet told apart: Doctrine deletes last, so nothing of the same reading follows them but a nested flush's |
+| `23aa8e10`, `abb4db75` | 81 | which warning, during a flush or outside | not reached, as `ranDuringAFlush()` (above); tier (b)'s two kills here were warnings of eight worktrees sharing a proxy directory — green alone |
+| `0ebd03d1` | 62 | `consume` defaulted to true | **equivalent**: every caller passes it |
+| `ed67afe2` | 118 | `MEMBER \|\| field === null` → `&&` | **equivalent**: a membership fact has no field and a fact with no field is a membership |
+| `572817c3`, `a2b64dbb`, `caeda453` | 134 | the owner's key without or with a moved separator | **equivalent**: a class name holds no `"`, and the key is JSON, so class and key cannot run into each other |
+| `33d6122c`, `53bbe34b`, `e8c95e51`, `727edcba`, `c8d6bfd4` | 152 | the defaults of a run's `since` and `at` | **equivalent**: both are set when the run is opened |
+
 ### Code defects found (continued)
 
 - **The owner an element leaves was never checked** (diagnostics, LOW). `aboutTheOwnersOf()` meant to

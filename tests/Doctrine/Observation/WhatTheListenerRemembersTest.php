@@ -111,6 +111,25 @@ final class WhatTheListenerRemembersTest extends DoctrineTestCase
         self::assertSame([['items.'.$x->id.'.quantity' => ['old' => 5, 'new' => 2]]], array_map(static fn (array $d): array => array_filter($d['changes'], static fn (string $k): bool => str_starts_with($k, 'items.'), \ARRAY_FILTER_USE_KEY), $this->documents()));
     }
 
+    public function testALineTheApplicationMovesItselfIsSaidAsAMoveOfItsPlace(): void
+    {
+        // Not a field of the line: its place in a collection. Said as that, by the collection's
+        // name -- the line left one crate's items and arrived in another's.
+        $this->unownedStatementsAreExpected = true;
+        $this->log = $this->watchTheConnection(FailurePolicy::Throw, letsGo: true);
+        $x = $this->aLine();
+        $this->em->persist(new Crate('C-2'));
+        $this->em->flush();
+
+        $this->em->getConnection()->update('CrateItem', ['crate_id' => 'C-2'], ['id' => $x->id]);
+        $x->quantity = 2;
+        $this->em->flush();
+
+        $said = array_values(array_unique(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'so it is not in the history'))));
+
+        self::assertSame(['A statement changed its place in items of a '.CrateItem::class.' row, keyed by id, outside every flush, so it is not in the history: SQL the application ran itself, which the bundle does not audit.'], $said);
+    }
+
     public function testAStatementTheLogCannotFollowIsDoubtSaidOnceAndByClassAlone(): void
     {
         // An UPDATE of a watched table that names no row, read or not: the log cannot say

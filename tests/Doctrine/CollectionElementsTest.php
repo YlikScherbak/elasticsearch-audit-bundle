@@ -174,6 +174,26 @@ final class CollectionElementsTest extends DoctrineTestCase
         self::assertSame([], $this->logs);
     }
 
+    public function testAnElementWhoseRepresenterFailedDoesNotTakeTheRestOfTheFlushWithIt(): void
+    {
+        // A document added to a vault, whose representer throws, and a crate's line changed in
+        // the same flush: the document's fact is left out, and the line's is still read.
+        $this->em->persist($crate = new Crate('C-1'));
+        $crate->add($line = new CrateItem('SKU'));
+        $this->em->persist($vault = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vault('Contracts'));
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $vault->add(new FolderDocument('lease.pdf'));
+        $line->quantity = 4;
+        $this->em->flush();
+        $this->logs = [];
+
+        $crates = array_values(array_filter($this->documents(), static fn (array $d): bool => $d['objectType'] === 'crate'));
+
+        self::assertSame([['old' => 1, 'new' => 4]], array_map(static fn (array $d): mixed => $d['changes']['items.'.$line->id.'.quantity'] ?? null, $crates));
+    }
+
     public function testAnOwnerNobodyTouchedStillGetsItsRecord(): void
     {
         // No column of the shipment changed, so Doctrine raises no postUpdate for it.
