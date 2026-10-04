@@ -46,7 +46,8 @@ final class RefusingMiddleware implements Middleware
                         $statement = parent::prepare($sql);
 
                         return !str_starts_with($sql, $this->refused) ? $statement : new class($statement) extends AbstractStatementMiddleware {
-                            public function execute(): Result
+                            // DBAL 3's takes the parameters; DBAL 4's does not, and takes an optional one.
+                            public function execute($params = null): Result
                             {
                                 throw new \RuntimeException('Refused by the database.');
                             }
