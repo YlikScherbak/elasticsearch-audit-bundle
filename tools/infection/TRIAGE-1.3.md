@@ -839,7 +839,7 @@ look was untested, on every database.
 | `80e76eaf`, `4087a61e`, `4f4b022d`, `d245b722`, `db994545` | 111, 113, 116, 126 | `?->` on the shape of a fact's statement; `(string)` of its table; `&&` → `\|\|` of two variables set together; `true` → `false` in a map read by `isset()` | **equivalent**: a row fact is made only while its statement's shape is read (`HistoryReplay`), so the shape and the table are never null here; `$facts` and `$open` are set and cleared together |
 | `1aa246e0`, `06548cc7` | 148 | `$duringAFlush` tested against null | **equivalent** by the callers: the listener always passes it; null comes only from `of()`, read by tests without `$consume`, where this line is not reached |
 | `0cfd063f` | 494 | `?->` → `->` on the objects removed | **equivalent** by the callers, the same way: the listener always passes them |
-| `b48424719`, `eb940a6c`, `91792d8f`, `339ed24a` | 215 | a row's name in a string | goes with **H** |
+| `b4842471`, `eb940a6c`, `91792d8f`, `339ed24a` | 215 | a row's name in a string | goes with **H** |
 | `e090bad1`, `c6a6250d`, `50bc4596` | 324, 325, 329 | `&&` → `\|\|`; `(array)` dropped; `true` → `false` in a map read by `isset()` | **equivalent**: only an owning to-one association has join columns at the mapping's top, so the others add nothing, and for that one the entry is always a list |
 | `7ddba305` | 343 | `true` → `false` for a column the INSERT wrote with a literal | **equivalent**: the value is read only as "not null", which both are |
 | `7cb8361c` | 350 | `\|\|` → `&&` | **equivalent**: an UPDATE fact's statement always has a shape, and an UPDATE always assigns something |
