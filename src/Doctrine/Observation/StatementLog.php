@@ -67,7 +67,7 @@ final class StatementLog
     /** @var array<int, array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>, key?: int|string}> by sequence number */
     private array $statements = [];
 
-    /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, open: bool, committed: bool, dead: bool}> by identity, in the order they were opened */
+    /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, committed: bool, dead: bool}> by identity, in the order they were opened */
     private array $frames = [];
 
     /** @var list<int> the frames open now, outermost first */
@@ -225,7 +225,9 @@ final class StatementLog
     public function committed(): void
     {
         foreach ($this->open as $frame) {
-            $this->close($frame, committed: true);
+            if (isset($this->frames[$frame])) {
+                $this->frames[$frame]['committed'] = true;
+            }
         }
 
         $this->open = [];
@@ -235,11 +237,7 @@ final class StatementLog
     public function rolledBack(): void
     {
         if ($this->open !== []) {
-            $this->voidFrom($this->open[0], 0);
-        }
-
-        foreach ($this->open as $frame) {
-            $this->close($frame);
+            $this->voidFrom($this->open[0]);
         }
 
         $this->open = [];
@@ -738,21 +736,10 @@ final class StatementLog
             'parent' => $parent,
             'label' => null,
             'savepoint' => $savepoint,
-            'open' => true,
             'committed' => false,
             'dead' => false,
         ];
         $this->open[] = $this->nextFrame;
-    }
-
-    private function close(int $frame, bool $committed = false): void
-    {
-        if (!isset($this->frames[$frame])) {
-            return;
-        }
-
-        $this->frames[$frame]['open'] = false;
-        $this->frames[$frame]['committed'] = $committed;
     }
 
     private function release(string $savepoint): void
@@ -761,10 +748,6 @@ final class StatementLog
 
         if ($at === null) {
             return; // a savepoint this log never saw opened: nothing to hand on
-        }
-
-        foreach (\array_slice($this->open, $at) as $frame) {
-            $this->close($frame);
         }
 
         $this->open = \array_slice($this->open, 0, $at);
@@ -779,14 +762,10 @@ final class StatementLog
         }
 
         $frame = $this->open[$at];
-        $this->voidFrom($frame, 0);
+        $this->voidFrom($frame);
 
         // Everything opened inside it is gone; it stays open itself, because the savepoint is
         // still there and a second ROLLBACK TO it voids what runs after the first.
-        foreach (\array_slice($this->open, $at + 1) as $inner) {
-            $this->close($inner);
-        }
-
         $this->open = \array_slice($this->open, 0, $at + 1);
 
         // But it no longer belongs to the flush that opened it. DBAL rolls a nested
@@ -799,11 +778,11 @@ final class StatementLog
         }
     }
 
-    /** Voids every statement executed in this frame, or in a frame inside it, after a sequence number. */
-    private function voidFrom(int $frame, int $after): void
+    /** Voids every statement executed in this frame, or in a frame inside it. */
+    private function voidFrom(int $frame): void
     {
         foreach ($this->statements as $sequence => $entry) {
-            if ($sequence > $after && !$entry['void'] && $this->isInside($entry['frame'], $frame)) {
+            if (!$entry['void'] && $this->isInside($entry['frame'], $frame)) {
                 $this->statements[$sequence]['void'] = true;
                 ++$this->voided;
             }

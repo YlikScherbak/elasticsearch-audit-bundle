@@ -432,6 +432,21 @@ leading and a trailing one; or document the order and have `audit:check` say so.
 middleware and the test-case hook are kept aside (scratchpad `commented-sql/`), not committed: a
 test now would pin the defect.
 
+### Dead code taken out (F of the reviewers' plan, 2026-10-04)
+
+Each a class of 1.3's or marked internal, so no public contract: StatementLog's `open` flag
+nothing read, the loops of `rolledBack()`, `release()` and `rollBackTo()` that wrote false over
+false, and `voidFrom()`'s `$after` every caller passed as 0; ChangeSetBuilder's change-set arm of
+`withAlwaysRecorded()`, which no caller reached (5.4's remains); RowBinding's `among()` and
+`inHierarchy()` — `of()` reads every mapping, the root of each hierarchy among them, and the one
+test that used `among()` for a table in a schema now reads the `Shop` mapping. The sort in
+`drafts()` stays, as the second reviewer asked. Fingerprints of the model — documents and
+queries — identical before and after on 1,000 sequences of the default vocabulary and 1,000 of
+5.3's. Their mutants go with them: StatementLog `a9090257`, `9eb4abfc`, `3b3dd746`, `139c0b74`,
+`75ef7ade`, `deedebdd`, `3e3b77ab`, `01ef8c19`, `6c80ade2`, `60a8c85e`, `3caab360`, `ded1ab2f`,
+`76f53404`, `f62486af`, `760f0ac7`; ChangeSetBuilder `1dbd887d`, `883e36c2`, `43270aee`,
+`5d51d1ff`; RowBinding `f35a22f4`, `1aa8bb81`, `e120f442`, `74a9e982`, `89fd2f81`.
+
 ### The last 193: HistoryReplay, RowBinding, LinkRuns, LinkFacts, EntityRowRuns, RowIdentity, ChangeSetBuilder (2026-10-04)
 
 Every one against the whole Doctrine suite as it stands: 4 red (HistoryReplay `95d5a713` 463,

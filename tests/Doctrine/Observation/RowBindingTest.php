@@ -49,15 +49,23 @@ final class RowBindingTest extends DoctrineTestCase
     public function testASchemaIsPartOfTheTablesName(): void
     {
         // A mapping with a schema is written schema-qualified, and only that statement is
-        // its; the same table name without it is another table. Postgres has schemas and
-        // the test databases do not declare one, so the mapping is a copy with one added.
-        $mapped = clone $this->em->getClassMetadata(CrateItem::class);
-        $mapped->table['schema'] = 'audit';
+        // its; the same table name without it is another table. The fixtures declare none, so
+        // the mapping is one of its own, of tables in a schema; only the mapping is read.
+        $config = new \Doctrine\ORM\Configuration();
+        $config->setMetadataDriverImpl(new \Doctrine\ORM\Mapping\Driver\AttributeDriver([__DIR__.'/../Shop']));
+        $config->setProxyDir(sys_get_temp_dir().'/borsche-audit-proxies');
+        $config->setProxyNamespace('BorscheAuditProxies');
 
-        foreach ([['UPDATE audit.CrateItem SET quantity = ? WHERE id = ?', 'row'], ['UPDATE CrateItem SET quantity = ? WHERE id = ?', 'unbound']] as [$sql, $kind]) {
+        if (\PHP_VERSION_ID >= 80400 && method_exists($config, 'enableNativeLazyObjects')) {
+            $config->enableNativeLazyObjects(true);
+        }
+
+        $shop = new \Doctrine\ORM\EntityManager(\Doctrine\DBAL\DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config), $config);
+
+        foreach ([['UPDATE Shop.ShelfLine SET shelf_id = ? WHERE id = ?', 'row'], ['UPDATE ShelfLine SET shelf_id = ? WHERE id = ?', 'unbound']] as [$sql, $kind]) {
             $shape = StatementShape::read($sql);
             self::assertNotNull($shape);
-            self::assertSame($kind, RowBinding::among($this->em, [$mapped], $shape, [1 => 2, 2 => 5])->kind, $sql);
+            self::assertSame($kind, RowBinding::of($shop, $shape, [1 => 2, 2 => 5])->kind, $sql);
         }
     }
 

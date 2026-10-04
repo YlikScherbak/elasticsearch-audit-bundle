@@ -80,7 +80,7 @@ final class ChangeSetBuilder
             }
         }
 
-        return $this->withAlwaysRecorded($entity, $metadata, $changes, [], $changeSet);
+        return $this->withAlwaysRecorded($entity, $metadata, $changes);
     }
 
     /**
@@ -92,11 +92,10 @@ final class ChangeSetBuilder
      *
      * @param array<string, Change|mixed> $changes
      * @param array<string, mixed>        $asFlushed what these fields held when the flush began
-     * @param array<string, mixed>        $changeSet what the flush wrote, where it wrote them
      *
      * @return array<string, Change|mixed>
      */
-    public function withAlwaysRecorded(object $entity, AuditMetadata $metadata, array $changes, array $asFlushed = [], array $changeSet = []): array
+    public function withAlwaysRecorded(object $entity, AuditMetadata $metadata, array $changes, array $asFlushed = []): array
     {
         if ($changes === [] || $metadata->alwaysRecorded === []) {
             return $changes;
@@ -111,20 +110,13 @@ final class ChangeSetBuilder
 
             // The value the row holds, which is not always the value the object holds.
             //
-            // In order: what the flush wrote, when this field was part of it — that
-            // covers a preUpdate listener correcting it, because Doctrine recomputes the
-            // change set for exactly that; then what the field held when the flush began,
-            // which is what the row kept if the flush did not write it; and the live
-            // object last, for a record built outside a flush.
+            // What the field held where the record stands -- the row's, read from the
+            // statements -- and the live object only for a record built outside a flush.
             //
             // Reading the object first was the mistake: a postUpdate listener that
             // touches the entity changes nothing in the database, and the context beside
             // the change then described a state nobody can find.
-            $value = match (true) {
-                \array_key_exists($field, $changeSet) && \is_array($changeSet[$field]) => $changeSet[$field][1] ?? null,
-                \array_key_exists($field, $asFlushed) => $asFlushed[$field],
-                default => $classMetadata->getFieldValue($entity, $field),
-            };
+            $value = \array_key_exists($field, $asFlushed) ? $asFlushed[$field] : $classMetadata->getFieldValue($entity, $field);
 
             $changes[$field] = new Change($value, $value);
         }

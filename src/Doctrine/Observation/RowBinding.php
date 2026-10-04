@@ -57,23 +57,14 @@ final class RowBinding
      */
     public static function of(EntityManagerInterface $em, StatementShape $shape, array $params): self
     {
-        return self::among($em, $em->getMetadataFactory()->getAllMetadata(), $shape, $params);
-    }
-
-    /**
-     * The same, among the mappings given rather than every one the manager knows.
-     *
-     * @param iterable<mixed>         $mappings
-     * @param array<array-key, mixed> $params
-     */
-    public static function among(EntityManagerInterface $em, iterable $mappings, StatementShape $shape, array $params): self
-    {
-        foreach ($mappings as $metadata) {
+        // Every mapping the manager knows, the root of each hierarchy among them: a statement of
+        // a root's table is the root's, whichever of its classes comes first.
+        foreach ($em->getMetadataFactory()->getAllMetadata() as $metadata) {
             if (!$metadata instanceof ClassMetadata) {
                 continue;
             }
 
-            if (self::tableOf($metadata) === $shape->table || self::inHierarchy($em, $metadata, $shape->table)) {
+            if (self::tableOf($metadata) === $shape->table) {
                 return self::entityRow($em, $metadata, $shape, $params);
             }
 
@@ -240,24 +231,6 @@ final class RowBinding
         }
 
         return $read;
-    }
-
-    /**
-     * @param ClassMetadata<object> $metadata
-     */
-    private static function inHierarchy(EntityManagerInterface $em, ClassMetadata $metadata, string $table): bool
-    {
-        if (!$metadata->isInheritanceTypeJoined()) {
-            return false;
-        }
-
-        foreach ($metadata->parentClasses as $parent) {
-            if (self::tableOf($em->getClassMetadata($parent)) === $table) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**
