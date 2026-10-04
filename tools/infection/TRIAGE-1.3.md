@@ -848,6 +848,22 @@ look was untested, on every database.
 | `30ba6192` | 485 | no return for a null key | **equivalent**: a null key finds nothing on every road, and `byForeignKey()` answers null for it |
 | `1eb142c1`, `3bd7857d` | 530 | the always-recorded fields not filtered to the row's, or not a list | **equivalent**: `withAlwaysRecorded()` skips an association, the only kind the filter takes out, and reads the values only |
 
+### LinkFacts (37)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `827db691` | 385 | an account's statements undone first to last | test gap — `WhatTheLinksSayAsAListTest::testAnAccountTakenAfterALinkWasWrittenAndTakenAgainIsUndoneLastFirst`. A first version did not reach it: the owner already had an account from before, so nothing was undone. Now the account is let go of first (the object cleared, a flush settling it) |
+| `44291fb4` | 236 | a target gone said as doubt only for an owner with an account *and* no holders read | test gap — `WhatTheListenerSeesOfACascadeTest::testOnceAListIsNotKnownEveryTargetThatGoesIsDoubtForItsOwner` |
+| `4110e3fc`, `866b9ebf`, `dcd51525` | 288, 291 | the counting of a join table's statement ended by a target gone by its row; counting facts of other positions | test gap — `WhatTheJoinRowsSayTest::testTheJoinTablesStatementIsCountedByItsOwnFactsAfterATargetThatWentByItsRow` |
+| `c9bff9c7`, `b73c6753`, `54cca641`, `5e30482b`, `0288692f`, `c3cdf59b`, `b262ab2b`, `05bdc1a7` | 389–399 | `\|\|` → `&&` among the guards of undoing | **equivalent** by an invariant: what an account holds to undo are the positions of statements bound to that owner's join rows (`HistoryReplay::linkPositionsOf()`), so each is in the log, read, bound, of that association and owner; the only one not undoable, all of an owner's rows taken at once, has no element, and the last guard returns for it whichever earlier one is mutated. `…::testAnAccountTakenAfterEveryLinkWasTakenCannotBeUndoneAndIsNotKnown` pins that case, which no test had |
+| `f70f6dd3` | 407 | `(int)` dropped | **equivalent**: PHP 8 compares a numeric string with 0 as a number |
+| `d9164260`, `851fe5c7`, `3b1b1131`, `27c15eb8`, `429b1d4f`, `bd887e6b`, `01ee01ac`, `970febc5`, `6c2cc532`, `bbf76f7b` | 133–144 | which of two events at one position comes first | **equivalent**: two events of one owner share a position only where its row is a target that went — a row that is its own target class, as a corner shelf is. Doctrine has deleted that owner's own join rows before its row, so its list is empty or unknown there, and either order leaves it so |
+| `b4637b08`, `9abe6b37` | 146 | the first start at −1 or 1 | **equivalent**: every fact is at a position of 1 or more |
+| `8b969fb3`, `974a2695` | 170 | the facts not made a list; another owner's emptied facts taken too | **equivalent**: the list is sorted, and so made one, before it is read. Another owner's emptied facts are never right before this owner's DELETE: Doctrine deletes this owner's own join rows between |
+| `c67c9a84`, `e18db39c` | 299 | the facts not sorted, or sorted by a broken comparator | **equivalent**: their one reader groups them by owner, each owner's already in the order they ran, and orders what it makes by position (`LinkRuns`, pinned above) |
+| `c7628561` | 126 | the owner's key from its statement before its account | **equivalent**: both are the owner's key, and every reader converts it through the identifier's type |
+| `847f10f7`, `b853c891`, `3ba1c35c`, `989153b7`, `308238ac`, `3f7c786f` | 89, 106, 357, 367, 75 | `explode(…, 3)`; `true` → `false` in maps read by `isset()`; `<` → `<=` | **equivalent**: neither a class name nor a field name has `::` in it; a fact's statement is never the DELETE of its owner's row, so the two positions are never equal |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

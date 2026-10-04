@@ -428,6 +428,37 @@ final class WhatTheJoinRowsSayTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testTheJoinTablesStatementIsCountedByItsOwnFactsAfterATargetThatWentByItsRow(): void
+    {
+        // b goes by its own row first, looked at right after; then the join table's statement for
+        // a takes two rows, of which one holder was known. Counted are the facts of that
+        // statement alone -- not b's, at another position -- and a target that went by its row
+        // before it does not end the counting.
+        $a = $this->aTag('a');
+        $b = $this->aTag('b');
+        [$one] = $this->anArticle('One', $a, $b);
+        [$two] = $this->anArticle('Two');
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->holdersOf($a);
+        $this->holdersOf($b);
+        $connection = $this->em->getConnection();
+        $connection->insert('article_tag', ['article_id' => $two->id, 'tag_id' => $a->id]);
+        $this->statements->watch(0, self::tags(), 'Tag', ['id'], [(string) $b->id => true], 'SELECT article_id FROM article_tag WHERE tag_id = ?');
+        $connection->executeStatement('DELETE FROM Tag WHERE id = ?', [$b->id]);
+        $connection->executeStatement('DELETE FROM article_tag WHERE tag_id = ?', [$a->id]);
+
+        $told = $this->told();
+        self::assertSame(['One -b (target)', 'One -a (target)'], $this->said($told));
+        self::assertSame([
+            'a link of '.self::tags().' '.$two->id.' added, and what its rows held is not known',
+            Tag::class.' '.$a->id.' taken out of 2 of '.self::tags().', and 1 were known to hold it',
+        ], array_column($told->doubts(), 'doubt'));
+        self::assertSame([], $this->heldBy($told, $one));
+        $this->end();
+    }
+
     public function testAnOwnerGoneHoldsNothingAndItsLinksAreNoFactsOfTheirOwn(): void
     {
         [$article] = $this->anArticle('One', 'php');

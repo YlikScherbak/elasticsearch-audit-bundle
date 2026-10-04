@@ -418,6 +418,30 @@ final class WhatTheListenerSeesOfACascadeTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testOnceAListIsNotKnownEveryTargetThatGoesIsDoubtForItsOwner(): void
+    {
+        // The first look fails: the article's list is not known from there. Its holders read for
+        // the second tag do not make that one known either: the article has an account, and an
+        // account that stopped being known may or may not have held it.
+        $a = $this->aTag('a');
+        $b = $this->aTag('b');
+        $one = $this->anArticle('One', $a, $b);
+        [$aId, $bId] = [$a->id, $b->id];
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->watchAsAFlushWould($aId, 'SELECT article_id FROM no_such_table WHERE tag_id = ?');
+        $this->em->getConnection()->executeStatement('DELETE FROM Tag WHERE id = ?', [$aId]);
+        $this->watchAsAFlushWould($bId, 'SELECT article_id FROM article_tag WHERE tag_id = ?');
+        $this->em->getConnection()->executeStatement('DELETE FROM Tag WHERE id = ?', [$bId]);
+
+        self::assertSame([
+            Tag::class.' '.$aId.' went, and whether '.self::tags().' '.$one->id.' still holds it was not seen',
+            Tag::class.' '.$bId.' went, and whether '.self::tags().' '.$one->id.' held it is not known',
+        ], array_values(array_filter(array_column($this->told()->doubts(), 'doubt'), static fn (string $d): bool => str_contains($d, self::tags()))));
+        $this->end();
+    }
+
     public function testWhatCouldNotBeAskedIsDoubtAndTheListStopsBeingKnown(): void
     {
         $a = $this->aTag('a');

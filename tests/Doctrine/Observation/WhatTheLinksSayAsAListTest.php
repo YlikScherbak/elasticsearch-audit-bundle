@@ -170,6 +170,64 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testAnAccountTakenAfterALinkWasWrittenAndTakenAgainIsUndoneLastFirst(): void
+    {
+        // The application writes a link and takes it away again, in its transaction, and then a
+        // flush touches the list: the rows it reads are after both, and undone from the last
+        // back they held neither -- not the link, which undoing the first first would put back.
+        $x = $this->aTag('x');
+        [$y, $z] = [$this->aTag('y'), $this->aTag('z')];
+        [$yId, $zId] = [$y->id, $z->id];
+        $id = $this->anArticle('One', $x)->id;
+        $this->unownedStatementsAreExpected = true;
+
+        // No account of its links from here: the object it was kept for is gone, and a flush
+        // settles that.
+        $this->em->clear();
+        unset($x, $y, $z);
+        gc_collect_cycles();
+        $this->aTag('w');
+        self::assertArrayNotHasKey((string) $id, $this->links()->links()[\Borsche\ElasticsearchAuditBundle\Doctrine\Observation\JoinRowMemory::associationOf(Article::class, 'tags')] ?? [], 'the premise: no account');
+
+        $this->begin();
+        $connection = $this->em->getConnection();
+        $connection->insert('article_tag', ['article_id' => $id, 'tag_id' => $yId]);
+        $connection->delete('article_tag', ['article_id' => $id, 'tag_id' => $yId]);
+        $article = $this->em->find(Article::class, $id);
+        self::assertInstanceOf(Article::class, $article);
+        $article->tags->add($this->em->getReference(Tag::class, $zId) ?? throw new \LogicException('no tag'));
+        $this->em->flush();
+
+        self::assertSame([['One', ['x'], ['x', 'y']], ['One', ['x', 'y'], ['x']], ['One', ['x'], ['x', 'z']]], $this->said());
+        $this->end();
+    }
+
+    public function testAnAccountTakenAfterEveryLinkWasTakenCannotBeUndoneAndIsNotKnown(): void
+    {
+        // Every link of the owner taken by one statement, before a flush reads the rows: which
+        // they were the statement does not say, so what the rows held before it is not known --
+        // and the flush's own move is not said from a list nobody knows.
+        $x = $this->aTag('x');
+        $z = $this->aTag('z');
+        $zId = $z->id;
+        $id = $this->anArticle('One', $x)->id;
+        $this->unownedStatementsAreExpected = true;
+        $this->em->clear();
+        unset($x, $z);
+        gc_collect_cycles();
+        $this->aTag('w');
+
+        $this->begin();
+        $this->em->getConnection()->delete('article_tag', ['article_id' => $id]);
+        $article = $this->em->find(Article::class, $id);
+        self::assertInstanceOf(Article::class, $article);
+        $article->tags->add($this->em->getReference(Tag::class, $zId) ?? throw new \LogicException('no tag'));
+        $this->em->flush();
+
+        self::assertSame([], $this->said());
+        $this->end();
+    }
+
     public function testAFlushBegunRightAfterAContributionsLastLinkDoesNotSplitIt(): void
     {
         // Two links written back to back, and only then a nested flush: one contribution. What
