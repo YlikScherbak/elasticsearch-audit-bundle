@@ -10,6 +10,7 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\EntityRowRuns;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\HistoryReplay;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowIdentity;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape;
 use Borsche\ElasticsearchAuditBundle\Coalescing\ValueComparator;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
@@ -95,6 +96,28 @@ final class WhatTheListenerLetsGoOfTest extends DoctrineTestCase
         $this->expectException(\LogicException::class);
         $this->expectExceptionMessage('was let go once its execution was written');
         $replay->rowFactAt($released[0]);
+    }
+
+    public function testTheUpdateThatCompletesACreationIsLetGoOfWithIt(): void
+    {
+        // Two relays pointing at each other: one of them is completed by an UPDATE whose fact
+        // joins its creation's. Written, both are let go of -- the completion's too.
+        $connection = $this->em->getConnection();
+        $connection->beginTransaction();
+        $one = new Relay('one');
+        $two = new Relay('two');
+        $one->next = $two;
+        $two->next = $one;
+        $this->em->persist($one);
+        $this->em->persist($two);
+        $this->em->flush();
+
+        $replay = $this->memory()->replayed($this->em);
+        $facts = array_values(array_filter($replay->rowFacts(), static fn (array $fact): bool => $fact['class'] === Relay::class));
+        $connection->rollBack();
+
+        self::assertSame([StatementShape::INSERT, StatementShape::INSERT, StatementShape::UPDATE], array_column($facts, 'statement'), 'the premise: one of them completed afterwards');
+        self::assertSame([true, true, true], array_map(static fn (array $fact): bool => ($fact['released'] ?? false) === true, $facts));
     }
 
     public function testAReadingThatDoesNotWriteLetsGoOfNothing(): void

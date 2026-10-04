@@ -91,7 +91,7 @@ final class EntityRowRuns
      *
      * @return \Generator<int, array{event: string, class: class-string, entity: object|null, objectType: string, id: int|string, flush: int, at: list<int>, changes: array<string, Change|mixed>, bare: array<string, Change>, context: array<string, mixed>}>
      */
-    public function each(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed = null, bool $consume = false, ?\Closure $duringAFlush = null, ?\Closure $failed = null): \Generator
+    public function each(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, int $readThrough, ?DepartedObjects $departed, bool $consume, ?\Closure $duringAFlush, ?\Closure $failed): \Generator
     {
         // Each execution as the places of its facts among the replay's (executionOf()): a
         // flush of twenty thousand rows held twenty thousand executions beside the facts they

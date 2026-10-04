@@ -824,6 +824,30 @@ look was untested, on every database.
 | `0625219d` | 213 | the managed entity asked before the object removed | **equivalent**: an object removed is no longer managed once its DELETE ran, and one persisted again before is no removal |
 | `74d2409a` | 189 | `?->` → `->` on the owner's declaration | **equivalent** by an invariant: a link is watched only for an audited association (`WatchedRows::areLinksWatched()`), so its owner always has a declaration; and either way the failure goes through `$failed` |
 
+### EntityRowRuns (34)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `b9cf1acc`, `92ab3d4d` | 248 | the places of a completion's facts not turned back | test gap — `WhatTheListenerLetsGoOfTest::testTheUpdateThatCompletesACreationIsLetGoOfWithIt`: the completing UPDATE's fact was kept whole after its record was written |
+| `6786ccef`, `ef0bc825` | 437, 438 | a reference's old side shown once the first statement ran, the new side before the last | test gap — `WhatTheLogMustKeepOfTheEventsTest::testAReferenceToTheRowItselfIsShownAsItStoodOnEachSide`: a relay that was, or becomes, its own next, renamed by the same UPDATE |
+| `770036b8` | 493 | a reference to a row an earlier DELETE of the reading took not shown as it stood before it went | test gap — `…::testAReferenceToARowAnEarlierFlushDeletedIsThatRowAsItStoodBeforeItWent` (no foreign key; skipped on PostgreSQL, whose keys a session cannot switch off) |
+| `c09682af`, `3153a06e` | 314 | the loop asking whether a flush began between a creation and its completion, not run | **killed on DBAL 3** (`orm_cell_probe`, es-audit-dbal3): `WhatAnEntitysRowsSayOfItsRecordsTest::testAReferenceGivenThroughAFlushRightAfterTheCreationIsAChange`, without savepoints. On DBAL 4, where the mutation run is, a nested flush always has a frame and an owner of its own, so the check of the flush above decides first: measured, the two statements are owned by 2 and 3 |
+| `085d24a7` | 397 | the next position *or* no flush begun | **killed on DBAL 3**, as above: `…::testTwoChangesOfAJoinedRowEachOfOneTableAreTwoExecutionsWithoutSavepoints` (three failures) |
+| `3f8684ca` | 314 | the loop asking one position further, past the completion | **open**: two attempts to begin a flush right after the completing UPDATE and before its flush is read (a second flush in the application's transaction; a `postFlush` listener ahead of the audit one) did not fail on it. Not classed as equivalent until the reason is found |
+| `c8894974` | 94 | `each()`'s `$consume` default | **dead code, taken away**: `each()`'s two callers pass every argument; its defaults are gone (`of()` keeps its own, for the readings of the tests) |
+| `cbb6b843` | 80 | `iterator_to_array(…, true)` | **equivalent**: a generator's own keys run 0, 1, 2, … as it yields |
+| `80e76eaf`, `4087a61e`, `4f4b022d`, `d245b722`, `db994545` | 111, 113, 116, 126 | `?->` on the shape of a fact's statement; `(string)` of its table; `&&` → `\|\|` of two variables set together; `true` → `false` in a map read by `isset()` | **equivalent**: a row fact is made only while its statement's shape is read (`HistoryReplay`), so the shape and the table are never null here; `$facts` and `$open` are set and cleared together |
+| `1aa246e0`, `06548cc7` | 148 | `$duringAFlush` tested against null | **equivalent** by the callers: the listener always passes it; null comes only from `of()`, read by tests without `$consume`, where this line is not reached |
+| `0cfd063f` | 494 | `?->` → `->` on the objects removed | **equivalent** by the callers, the same way: the listener always passes them |
+| `b48424719`, `eb940a6c`, `91792d8f`, `339ed24a` | 215 | a row's name in a string | goes with **H** |
+| `e090bad1`, `c6a6250d`, `50bc4596` | 324, 325, 329 | `&&` → `\|\|`; `(array)` dropped; `true` → `false` in a map read by `isset()` | **equivalent**: only an owning to-one association has join columns at the mapping's top, so the others add nothing, and for that one the entry is always a list |
+| `7ddba305` | 343 | `true` → `false` for a column the INSERT wrote with a literal | **equivalent**: the value is read only as "not null", which both are |
+| `7cb8361c` | 350 | `\|\|` → `&&` | **equivalent**: an UPDATE fact's statement always has a shape, and an UPDATE always assigns something |
+| `f9c2e4e2`, `e52d7e37` | 424 | `\|\|` → `&&` among three guards | **equivalent**: none of them is ever true — a row fact is made only for a class with a declaration (`HistoryReplay::rowFact()`), with its whole key, and of an INSERT, UPDATE or DELETE, each of which has an event |
+| `ae0310ba` | 443 | a new instance before the managed entity | **equivalent**: the builder reads the object only for an always-recorded field the row has no column of, and the context is the row's; an association, which has no column, is skipped |
+| `30ba6192` | 485 | no return for a null key | **equivalent**: a null key finds nothing on every road, and `byForeignKey()` answers null for it |
+| `1eb142c1`, `3bd7857d` | 530 | the always-recorded fields not filtered to the row's, or not a list | **equivalent**: `withAlwaysRecorded()` skips an association, the only kind the filter takes out, and reads the values only |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Kiln;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
+use Borsche\ElasticsearchAuditBundle\Tests\TestConnection;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
 
@@ -208,6 +209,74 @@ final class WhatTheLogMustKeepOfTheEventsTest extends DoctrineTestCase
         self::assertSame([
             ['oven', 'update', ['firing' => ['old' => 'raw', 'new' => 'raw'], 'label' => ['old' => 'one', 'new' => 'two'], 'site' => ['old' => 'north', 'new' => 'north']]],
         ], $this->said(), 'the context as the row held it beside the change');
+    }
+
+    /**
+     * A relay handing on to itself, renamed in the same UPDATE that moves its reference: the old
+     * side of the reference is the row before that UPDATE, the new side the row once it ran --
+     * each as it stood there, though both are the row the UPDATE wrote.
+     *
+     * @return iterable<string, array{bool}>
+     */
+    public static function whichSideIsItself(): iterable
+    {
+        yield 'it was its own next' => [true];
+        yield 'it becomes its own next' => [false];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('whichSideIsItself')]
+    public function testAReferenceToTheRowItselfIsShownAsItStoodOnEachSide(bool $itWas): void
+    {
+        $this->em->persist($relay = new Relay('a'));
+        $this->em->persist($other = new Relay('other'));
+        $this->em->flush();
+        $relay->next = $itWas ? $relay : $other;
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $relay->name = 'b';
+        $relay->next = $itWas ? $other : $relay;
+        $this->em->flush();
+
+        self::assertSame(
+            [['relay', 'update', ['name' => ['old' => 'a', 'new' => 'b'], 'next' => $itWas ? ['old' => 'a', 'new' => 'other'] : ['old' => 'other', 'new' => 'b']]]],
+            $this->said(),
+        );
+    }
+
+    public function testAReferenceToARowAnEarlierFlushDeletedIsThatRowAsItStoodBeforeItWent(): void
+    {
+        // No foreign key keeps the row pointed at: an earlier flush of the same transaction
+        // deletes it, renamed on the object and never written, and the next moves the reference
+        // off it. The old side is the row as it stood before its DELETE -- not the object the
+        // application left.
+        $connection = $this->em->getConnection();
+
+        if (TestConnection::isSqlite()) {
+            $connection->executeStatement('PRAGMA foreign_keys = OFF');
+        } elseif (str_contains($connection->getDatabasePlatform()::class, 'MySQL')) {
+            $connection->executeStatement('SET FOREIGN_KEY_CHECKS = 0');
+        } else {
+            self::markTestSkipped('PostgreSQL\'s foreign keys cannot be switched off for a session without altering the schema.');
+        }
+
+        $this->em->persist($gone = new Relay('gone'));
+        $this->em->persist($then = new Relay('then'));
+        $this->em->persist($relay = new Relay('relay'));
+        $relay->next = $gone;
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $connection->beginTransaction();
+        $gone->name = 'renamed, never written';
+        $this->em->remove($gone);
+        $this->em->flush();
+        $relay->next = $then;
+        $this->em->flush();
+        $connection->commit();
+
+        $updates = array_values(array_filter($this->said(), static fn (array $one): bool => $one[1] === 'update'));
+        self::assertSame([['relay', 'update', ['next' => ['old' => 'gone', 'new' => 'then']]]], $updates);
     }
 
     public function testTwoRelaysCreatedPointingAtEachOtherAreTwoCreations(): void
