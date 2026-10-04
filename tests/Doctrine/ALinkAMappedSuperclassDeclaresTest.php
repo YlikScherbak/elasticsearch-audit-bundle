@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\BadgeBoard;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Poster;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Sticker;
 
@@ -28,6 +29,31 @@ final class ALinkAMappedSuperclassDeclaresTest extends DoctrineTestCase
         $this->em->flush();
 
         self::assertSame([['update', ['old' => ['a'], 'new' => ['b']]]], array_map(static fn (array $d): array => [$d['event'], $d['changes']['stickers'] ?? null], $this->documents()));
+    }
+
+    public function testASuperclassThatDeclaresItselfAuditedIsStillNoOwnerOfRows(): void
+    {
+        // It can be made, and answers as audited: neither makes it a holder of the join rows,
+        // nor a second one of a target removed from under the board.
+        $this->em->persist($a = new Sticker('a'));
+        $this->em->persist($b = new Sticker('b'));
+        $board = new BadgeBoard();
+        $board->badges->add($a);
+        $board->badges->add($b);
+        $this->em->persist($board);
+        $this->em->flush();
+        $this->gateway->documents = [];
+
+        $board->badges->removeElement($b);
+        $this->em->flush();
+        $this->em->remove($a);
+        $this->em->flush();
+
+        self::assertSame(
+            [['badge_board', ['old' => ['a', 'b'], 'new' => ['a']]], ['badge_board', ['old' => ['a'], 'new' => []]]],
+            array_map(static fn (array $d): array => [$d['objectType'], $d['changes']['badges'] ?? null], $this->documents()),
+        );
+        self::assertSame([], $this->logs);
     }
 
     public function testATargetRemovedFromUnderItIsTheEntitysChange(): void

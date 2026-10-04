@@ -744,7 +744,31 @@ that run's; the earlier sections' are 4261bdb's, and the two are matched by file
 | `58d66810` | AuditMetadata 49 | `!== true \|\| !== false` before `=== []` | **equivalent**: an empty list is neither, so the first half decides nothing — a guard that can go |
 | `86f01d2d`, `dbae68c6` | JoinRowsQuery 122 | `array_fill()` from −1 or 1 | **equivalent**: `implode()` reads no keys |
 | `fdb755d0` | RowIdentity 48 | the key converted through its field's type for an association too | **equivalent**: an association field has no type, and the conversion hands the value back |
+| `2c22036c` | StatementShape 379 | a quoted name searched for its closing quote one place on | test gap (was "not reached": SQLite takes an empty quoted name) — `StatementShapeTest`, an empty quoted name |
+| `fcb7bb98`, `7d0f476c` | StatementShape 424 | a comment told by the character before | **equivalent**, and since A2 by an invariant: every reader of a statement in the bundle reads `ReadableSql`'s copy, with its comments taken out, so a comment outside a literal never reaches this tokenizer |
+| the other eight of StatementShape | 133, 401, 411, 428, 435, 436, 443, 444 | as classed against 4261bdb (the file did not change) | **equivalent** |
 | `b5a40063`, `67a21e20`, `263ef12c` | StatementLog 302, 696, 712 | `(int)` dropped; `break` → `continue` past the statements let go; `true` → `false` in a map intersected by its keys | **equivalent**: a count in a numeric string compares as a number; the statements are in order, so every one after is past it too; `array_intersect_key()` reads no values |
+
+### WatchedRows (17), and a defect found on the way
+
+No fixture had a mapped superclass, which three of its rules are about. Two are added —
+`Labelled`, abstract, declaring a `Poster`'s audited stickers, and `Badged`, one that can be made
+and declares itself audited — and they found a **code defect (MEDIUM, a regression of the 1.3
+branch, 1.2.5 records it; fixed `85f6e97`)**: `RowBinding::of()` read every mapping, mapped
+superclasses among them, and bound the join rows of a link a mapped superclass declares to the
+superclass, a class with no rows and no history — adding or taking off a poster's sticker left no
+record at all. Doctrine names the join column after the superclass (`labelled_id`), so the
+superclass's mapping was the first to fit. Now a mapped superclass owns no rows
+(`ALinkAMappedSuperclassDeclaresTest`, red before).
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `ae4625be` | 84 | a mapped superclass not passed over for the owners of a target's links | test gap — red with `Badged`: it would be a second owner of the board's links (`…::testASuperclassThatDeclaresItselfAuditedIsStillNoOwnerOfRows`) |
+| `694b9fe6`, `69f3f51f`, `49577eea`, `50a6842e`, `ed943cf6` | 130, 170 | a mapped superclass or an abstract class not passed over for what is shown as it stood and which tables are history | **equivalent**, now against both superclasses: an abstract one cannot be made (`newInstance()` throws and is caught), and one that can declares what its entity declares — the same target pointed at, the same join table; it adds only a table name of its own no statement names |
+| `2802eeea`, `d7654f66`, `097437ed`, `efaf8c44`, `e0e70282` | 50, 61, 76, 122, 198 | a cache not kept | **equivalent** in what is decided |
+| `c03a3388`, `c8e9afc1`, `5e6d8e4c`, `6f2c65e9` | 142, 175, 185, 193 | `true` → `false` in a map read by `isset()` | **equivalent** |
+| `dfde30e5` | 184 | a join table's name `\|\|` empty | **equivalent**: Doctrine always names it |
+| `13949965` | 265 | `return false` in the catch | **equivalent**: the method returns false right after |
 
 ## Killed outside coverage
 
