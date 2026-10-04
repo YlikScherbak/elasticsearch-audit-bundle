@@ -398,6 +398,31 @@ mutants (`MemberAccount`, whose collection is declared before its key). Fixed by
 apart by identity; `AReferenceToARowKeyedByAnAssociationTest::testAnEntryMovedBetweenTwoAccountsLeavesOneAndJoinsTheOther`
 dies under the old line. My own regression of the morning, through a line written on 2026-09-24.
 
+### For the reviewers: SQL with comments is not read (found 2026-10-04, NOT FIXED)
+
+Found by the mutants of `HistoryReplay::replay()` line 193 (the pattern that tells an unread
+statement that writes from one that does not). The log reads a statement only as the persisters
+write it; `StatementShape` refuses comments, the savepoint patterns want the whole statement, and the
+"writes but unread" pattern is anchored at the start. Measured:
+
+- by hand, against the fixtures' mapping: `/* why */ UPDATE CrateItem SET quantity = 2 WHERE id = 2`
+  and `WITH x AS (…) UPDATE CrateItem …` are neither a fact nor a doubt — a watched row changed in
+  silence; `update CrateItem c set …` (an alias) is doubt, as meant;
+- end to end, with a middleware of the application's around the observer that comments every
+  statement (what a query tagger does — sqlcommenter, OpenTelemetry's Doctrine instrumentation with
+  its option on): a comment **after** each statement — no record at all of a create or an update,
+  only "could not be followed" warnings; a comment **before** each statement — no record and **no
+  warning**: the whole history gone in silence. Without the middleware, the same flushes give
+  their records.
+
+It needs the tagger outside the observer: the bundle tags its middleware `doctrine.middleware`
+with no priority. 1.2.x read Doctrine's change sets and does not have it — a regression of the
+1.3 branch. Ways out, for the reviewers to choose: strip comments outside literals before the log
+reads a statement (one place; savepoints, shapes and the "unread" pattern all mend); strip only a
+leading and a trailing one; or document the order and have `audit:check` say so. The probe's
+middleware and the test-case hook are kept aside (scratchpad `commented-sql/`), not committed: a
+test now would pin the defect.
+
 ### Not triaged when the work stopped (2026-10-03)
 
 LinkRuns 16, LinkFacts 21, HistoryReplay ~100, RowBinding 34, RowIdentity 3, EntityRowRuns ~20,
