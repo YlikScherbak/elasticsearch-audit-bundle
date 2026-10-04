@@ -789,6 +789,23 @@ look was untested, on every database.
 | `ed67afe2` | ElementFieldRuns 118 | `MEMBER \|\| field === null` → `&&` | **equivalent** by construction: a member's fact is the only one with no field (`HistoryReplay::member()`, `FIELD` always names one). The second half stays for the type |
 | `572817c3`, `caeda453`, `a2b64dbb` | ElementFieldRuns 134 | the owner's name in a string: operands swapped or the separator dropped | goes with **H** (nested keys instead of strings). Until then: swapping is equivalent, and dropping the `\|` collides only for two owner classes whose names differ by a trailing digit, each with a key that makes up the difference |
 
+### JoinRowMemory (13)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `5c267775` | 188 | an account's `takenAt` | **dead code, taken away** (`e7c9077`): no reader asked where the log stood when a link account was taken, and `settle()` took a position only to write it there |
+| `4b076fc2` | 188 | a holder read with no key in its account | test gap — `WhatTheJoinRowsHeldTest::testSettlingKeeps…` says the whole account of a holder read |
+| `3900a9fe` | 253 | `continue` → `break` past an account let go at settling | test gap — the same test, with the ones let go first |
+| `a385a405` | 91 | `?->` → `->` on an account with no object yet | test gap — `…::testAHolderReadIsTheAccountOfTheOwnerThatComesForItsLinksLater` (an error before) |
+| `dfc64843` | 91 | an owner loaded again not taking the account over | test gap — `…::testAnOwnerLoadedAgainIsTheAccountsObjectFromThenOn`: settling let the account go with the dead object, and the next flush would ask again |
+| `49864ae3` | 238 | `&&` → `\|\|` for an owner with no key | test gap — `…::testAnOwnerWithNoKeyThatIsGoneBySettlingIsLetGo` (an error before) |
+| `d8a6a1fa` | 189 | `??= null` → `= null` | **equivalent** by an invariant: an object is kept only beside an account (lines 92, 117, 240, and `settle()` keeps them together), and this line runs only where there is none |
+| `10747716` | 240 | `??=` → `=` for an owner with no key when its links were remembered | **equivalent**: its key is new — its INSERT handed it out in this window — so no other object of that row can be beside an account for it |
+| `16d5fe8b` | 250 | the key from the account and from a new owner's, in the other order | **equivalent**: both are the key of the same row, the account's id being made from it |
+| `bb797b37` | 194 | `(string)` dropped from an array key | **equivalent**: PHP makes a string of digits an integer key anyway |
+| `a6e705d0` | 166 | `array_values()` dropped | **equivalent**: `JoinRowsQuery::holdersOf()` reads only the values |
+| `b59f136f`, `4283a305` | 152 | parts of 499 or 501 targets | test gap — no test had more than one part at all: `…::testTheHoldersOfManyTargetsAreReadFiveHundredAtATime` (500 targets one question, 501 two, a holder of the last part read as one of the first's; the docblock promises "a question for every five hundred targets") |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

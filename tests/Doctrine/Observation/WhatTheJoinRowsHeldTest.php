@@ -160,6 +160,30 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         self::assertSame(1, $this->memory->size());
     }
 
+    public function testTheHoldersOfManyTargetsAreReadFiveHundredAtATime(): void
+    {
+        // A statement's parameters are bounded, on some engines to under a thousand: five
+        // hundred targets are one question, five hundred and one are two -- and a holder of the
+        // last part is read as one of the first.
+        $a = new Tag('a');
+        $b = new Tag('b');
+        $this->em->persist($a);
+        $this->em->persist($b);
+        [$one] = $this->anArticleTagged(null, null, $a);
+        [$two] = $this->anArticleTagged(null, null, $b);
+        $none = fn (int $from, int $count): array => array_map(fn (int $id): Tag => $this->em->getReference(Tag::class, $id) ?? throw new \LogicException('no reference'), range($from, $from + $count - 1));
+
+        $this->memory->rememberTheHoldersOf($this->em, [$a, ...$none(900000, 499)], Article::class, 'tags', $this->includes([]));
+        self::assertSame(1, $this->memory->asked());
+
+        $this->memory->rememberTheHoldersOf($this->em, [...$none(910000, 500), $b], Article::class, 'tags', $this->includes([]));
+        self::assertSame(3, $this->memory->asked());
+
+        $links = $this->memory->links()[JoinRowMemory::associationOf(Article::class, 'tags')] ?? [];
+        ksort($links);
+        self::assertSame([(string) $one->id, (string) $two->id], array_map('strval', array_keys($links)));
+    }
+
     public function testAHolderReadIsTheAccountOfTheOwnerThatComesForItsLinksLater(): void
     {
         // Read as a holder, with no object of the application's beside it: the owner that comes
