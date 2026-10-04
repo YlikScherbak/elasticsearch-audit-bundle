@@ -37,12 +37,11 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         $this->em->clear();
         $article = $this->em->find(Article::class, $id);
         self::assertInstanceOf(Article::class, $article);
-        $position = $this->statements->position();
 
         $this->memory->rememberTheLinksOf($this->em, $article, 'tags', $this->includes([7]));
 
         self::assertSame(
-            ['owner' => ['id' => $id], 'targets' => [(string) $phpId => ['id' => $phpId], (string) $dbId => ['id' => $dbId]], 'takenAt' => $position, 'includes' => [7]],
+            ['owner' => ['id' => $id], 'targets' => [(string) $phpId => ['id' => $phpId], (string) $dbId => ['id' => $dbId]], 'includes' => [7]],
             self::normalised($this->memory->links()[JoinRowMemory::associationOf(Article::class, 'tags')][(string) $id]),
         );
         self::assertSame([[JoinRowMemory::associationOf(Article::class, 'tags'), (string) $id]], $this->includesAskedFor, 'the statements it already holds, asked where it was taken');
@@ -147,17 +146,72 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
         unset($other);
         $this->memory->rememberTheHoldersOf($this->em, [$a], Article::class, 'tags', $this->includes([]));
         $of = JoinRowMemory::associationOf(Article::class, 'tags');
-        self::assertArrayHasKey($otherId, $this->memory->links()[$of], 'the premise: a holder was read');
+        self::assertSame(['owner' => ['id' => (int) $otherId], 'targets' => [(string) $a->id => ['id' => $a->id]], 'includes' => []], self::normalised($this->memory->links()[$of][$otherId]), 'the premise: a holder was read, by its key');
 
+        // The ones let go first: letting one go is no end of settling.
         $this->memory->settle($this->em, [$of => [
-            (string) $held->id => ['9' => ['id' => 9]],
             (string) $followedNot->id => null,
             $otherId => [],
-        ]], 42);
+            (string) $held->id => ['9' => ['id' => 9]],
+        ]]);
 
-        self::assertSame([$of => [(string) $held->id => ['owner' => ['id' => $held->id], 'targets' => ['9' => ['id' => 9]], 'takenAt' => 42, 'includes' => []]]], $this->memory->links());
+        self::assertSame([$of => [(string) $held->id => ['owner' => ['id' => $held->id], 'targets' => ['9' => ['id' => 9]], 'includes' => []]]], $this->memory->links());
         self::assertSame([], $this->memory->holdersRead());
         self::assertSame(1, $this->memory->size());
+    }
+
+    public function testAHolderReadIsTheAccountOfTheOwnerThatComesForItsLinksLater(): void
+    {
+        // Read as a holder, with no object of the application's beside it: the owner that comes
+        // for its links afterwards is that account's, asked nothing, and kept at settling.
+        $a = new Tag('a');
+        $this->em->persist($a);
+        [$one] = $this->anArticleTagged(null, null, $a);
+        $of = JoinRowMemory::associationOf(Article::class, 'tags');
+        $this->memory->rememberTheHoldersOf($this->em, [$a], Article::class, 'tags', $this->includes([]));
+
+        $this->memory->rememberTheLinksOf($this->em, $one, 'tags', $this->includes([]));
+        $this->memory->settle($this->em, [$of => [(string) $one->id => [(string) $a->id => ['id' => $a->id]]]]);
+
+        self::assertSame(1, $this->memory->asked());
+        self::assertSame([(string) $one->id], array_map('strval', array_keys($this->memory->links()[$of] ?? [])));
+    }
+
+    public function testAnOwnerLoadedAgainIsTheAccountsObjectFromThenOn(): void
+    {
+        // The object an account was taken for is gone -- cleared and let go -- and the owner
+        // loaded again comes for its links: the account is that object's now, and kept.
+        [$article] = $this->anArticleTagged('a');
+        $id = $article->id;
+        $of = JoinRowMemory::associationOf(Article::class, 'tags');
+        $this->memory->rememberTheLinksOf($this->em, $article, 'tags', $this->includes([]));
+        $targets = $this->memory->links()[$of][(string) $id]['targets'];
+        $this->em->clear();
+        unset($article);
+        gc_collect_cycles();
+        $again = $this->em->find(Article::class, $id);
+        self::assertInstanceOf(Article::class, $again);
+
+        $this->memory->rememberTheLinksOf($this->em, $again, 'tags', $this->includes([]));
+        $this->memory->settle($this->em, [$of => [(string) $id => $targets]]);
+
+        self::assertSame([(string) $id], array_map('strval', array_keys($this->memory->links()[$of] ?? [])));
+        self::assertSame(1, $this->memory->asked());
+    }
+
+    public function testAnOwnerWithNoKeyThatIsGoneBySettlingIsLetGo(): void
+    {
+        // Persisted, never inserted, and let go before settling: no key, nothing kept.
+        $this->em->persist($article = new Article('Never'));
+        $this->memory->rememberTheLinksOf($this->em, $article, 'tags', $this->includes([]));
+        $this->em->clear();
+        unset($article);
+        gc_collect_cycles();
+
+        $this->memory->settle($this->em, []);
+
+        self::assertSame([], $this->memory->links());
+        self::assertSame(0, $this->memory->size());
     }
 
     public function testTheQuestionsAreAskedOfTheJoinTableAsTheMappingNamesIt(): void
@@ -321,9 +375,9 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
     /**
      * A key as a database hands it back may be a string where the statement bound an integer.
      *
-     * @param array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>} $account
+     * @param array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, includes: list<int>} $account
      *
-     * @return array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}
+     * @return array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, includes: list<int>}
      */
     private static function normalised(array $account): array
     {

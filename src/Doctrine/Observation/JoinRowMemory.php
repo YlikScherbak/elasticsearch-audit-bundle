@@ -34,7 +34,7 @@ final class JoinRowMemory
     /**
      * By association -- the owner's root class and the association's name -- and owner.
      *
-     * @var array<string, array<string, array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}>>
+     * @var array<string, array<string, array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, includes: list<int>}>>
      */
     private array $links = [];
 
@@ -113,7 +113,7 @@ final class JoinRowMemory
             }
         }
 
-        $this->links[$of][$id] = ['owner' => $key, 'targets' => $targets, 'takenAt' => $this->log->position(), 'includes' => $includes($of, $id)];
+        $this->links[$of][$id] = ['owner' => $key, 'targets' => $targets, 'includes' => $includes($of, $id)];
         $this->objects[$of][$id] = \WeakReference::create($owner);
     }
 
@@ -185,7 +185,7 @@ final class JoinRowMemory
 
         foreach ($held as ['id' => $id, 'owner' => $ownerKey, 'targets' => $targets]) {
             if (!isset($this->links[$of][$id])) {
-                $this->links[$of][$id] = ['owner' => $ownerKey, 'targets' => $targets, 'takenAt' => $this->log->position(), 'includes' => $includes($of, $id)];
+                $this->links[$of][$id] = ['owner' => $ownerKey, 'targets' => $targets, 'includes' => $includes($of, $id)];
                 $this->objects[$of][$id] ??= null;
             }
         }
@@ -196,7 +196,7 @@ final class JoinRowMemory
     }
 
     /**
-     * @return array<string, array<string, array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, takenAt: int, includes: list<int>}>>
+     * @return array<string, array<string, array{owner: array<string, mixed>, targets: array<string, array<string, mixed>>, includes: list<int>}>>
      */
     public function links(): array
     {
@@ -224,7 +224,7 @@ final class JoinRowMemory
      * @param array<string, array<string, array<string, array<string, mixed>>|null>> $states what each owner's rows hold where the
      *                                                                                     log is settled, null where it is not known
      */
-    public function settle(EntityManagerInterface $em, array $states, int $at): void
+    public function settle(EntityManagerInterface $em, array $states): void
     {
         $links = [];
         $objects = [];
@@ -253,7 +253,7 @@ final class JoinRowMemory
                     continue;
                 }
 
-                $links[$of][$id] = ['owner' => $owner, 'targets' => $targets, 'takenAt' => $at, 'includes' => []];
+                $links[$of][$id] = ['owner' => $owner, 'targets' => $targets, 'includes' => []];
                 $objects[$of][$id] = $object;
             }
         }

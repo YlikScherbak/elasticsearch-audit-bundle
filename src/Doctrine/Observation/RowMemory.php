@@ -506,9 +506,9 @@ final class RowMemory
         // And the links with them, as the replay tells them. An account it cannot tell is let go of
         // rather than believed: it is read again the next time a flush is about to touch it.
         try {
-            $this->links->settle($em, LinkFacts::of($em, $replay, $this->log, $this->links)->states(), $upTo);
+            $this->links->settle($em, LinkFacts::of($em, $replay, $this->log, $this->links)->states());
         } catch (\Throwable) {
-            $this->links->settle($em, [], $upTo);
+            $this->links->settle($em, []);
         }
 
         $this->settledAt = $upTo;
