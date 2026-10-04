@@ -13,6 +13,8 @@ use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\RowMemory;
 use Borsche\ElasticsearchAuditBundle\Tests\Doctrine\DoctrineTestCase;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CornerShelf;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ListFirst;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shelf;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
@@ -119,6 +121,55 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $runs = $this->runs();
         self::assertSame([['One', ['x'], ['x', 'a']], ['One', ['x', 'a'], ['x', 'a', 'b']]], $this->said($runs));
         self::assertSame($runs[0]['flush'], $runs[1]['flush'], 'both the outer flush\'s');
+        $this->end();
+    }
+
+    public function testContributionsAreSaidInTheOrderTheyBeganWhicheverOwnerWasKnownFirst(): void
+    {
+        // One was accounted for before Two, and Two's link was written first: Two's contribution
+        // comes first.
+        $a = $this->aTag('a');
+        $b = $this->aTag('b');
+        $one = $this->anArticle('One', $a);
+        $two = $this->anArticle('Two', $a);
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->afterTheUpdateOf($one, function () use ($one, $two, $b): void {
+            $connection = $this->em->getConnection();
+            $connection->insert('article_tag', ['article_id' => $two->id, 'tag_id' => $b->id]);
+            $connection->insert('article_tag', ['article_id' => $one->id, 'tag_id' => $b->id]);
+        });
+        $one->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame([['Two', ['a'], ['a', 'b']], ['One', ['a'], ['a', 'b']]], $this->said());
+        $this->end();
+    }
+
+    public function testAFlushBegunRightAfterAContributionsLastLinkDoesNotSplitIt(): void
+    {
+        // Two links written back to back, and only then a nested flush: one contribution. What
+        // began after its last link is after it, and not between its links.
+        $x = $this->aTag('x');
+        $a = $this->aTag('a');
+        $b = $this->aTag('b');
+        $article = $this->anArticle('One', $x);
+        $other = $this->anArticle('Other');
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->afterTheUpdateOf($article, function () use ($article, $other, $a, $b): void {
+            $connection = $this->em->getConnection();
+            $connection->insert('article_tag', ['article_id' => $article->id, 'tag_id' => $a->id]);
+            $connection->insert('article_tag', ['article_id' => $article->id, 'tag_id' => $b->id]);
+            $other->title = 'Other, nested';
+            $this->em->flush();
+        });
+        $article->title = 'Two';
+        $this->em->flush();
+
+        self::assertSame([['One', ['x'], ['x', 'a', 'b']]], $this->said());
         $this->end();
     }
 
@@ -386,6 +437,46 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testAWatchedTargetGoneIsShownAsItsRowStoodAndNotAsTheObjectWasLeft(): void
+    {
+        // A relay is a class the history watches. Its name changed on the object and never
+        // written -- Doctrine writes no UPDATE of a row it deletes: the list before the DELETE
+        // shows the row as it stood there, not the object the application removed, nor the row
+        // once the DELETE ran, which is none.
+        $this->em->persist($first = new ListFirst());
+        $first->relays->add($a = new Relay('a'));
+        $first->relays->add(new Relay('b'));
+        $this->em->persist($a);
+        $this->em->persist($first->relays[1] ?? throw new \LogicException('no relay'));
+        $this->em->flush();
+        $departed = new DepartedObjects();
+        $this->em->getEventManager()->addEventListener([Events::preRemove, Events::postRemove], new class($departed, $this->statements) {
+            public function __construct(private readonly DepartedObjects $departed, private readonly \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog $log)
+            {
+            }
+
+            public function preRemove(LifecycleEventArgs $args): void
+            {
+                $manager = $args->getObjectManager();
+                \assert($manager instanceof \Doctrine\ORM\EntityManagerInterface);
+                $this->departed->leaving($manager, $args->getObject());
+            }
+
+            public function postRemove(LifecycleEventArgs $args): void
+            {
+                $this->departed->gone($args->getObject(), $this->log->position());
+            }
+        });
+
+        $this->begin();
+        $a->name = 'a, renamed and never written';
+        $this->em->remove($a);
+        $this->em->flush();
+
+        self::assertSame([[['a', 'b'], ['b']]], array_map(static fn (array $run): array => [$run['old'], $run['new']], $this->runs($departed)));
+        $this->end();
+    }
+
     public function testAWatchedTargetGoneIsNamedByItsRowAsItStoodBeforeItWent(): void
     {
         // A corner shelf is a shelf the history watches: its row before the DELETE is what it is
@@ -512,7 +603,7 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
     }
 
     /**
-     * @return list<array{association: string, owner: class-string, ownerId: string, ownerKey: array<string, mixed>, collection: string, flush: int|null, at: list<int>, old: list<mixed>, new: list<mixed>}>
+     * @return list<array{owner: class-string, ownerId: string, ownerKey: array<string, mixed>, collection: string, flush: int|null, at: list<int>, old: list<mixed>, new: list<mixed>}>
      */
     private function runs(?DepartedObjects $departed = null, ?\Closure $failed = null): array
     {

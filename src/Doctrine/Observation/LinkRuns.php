@@ -52,7 +52,7 @@ final class LinkRuns
     /**
      * @param (\Closure(\Throwable): void)|null $failed what is done with a failure building one contribution; null throws it
      *
-     * @return list<array{association: string, owner: class-string, ownerId: string, ownerKey: array<string, mixed>, collection: string, flush: int|null, at: list<int>, old: list<mixed>, new: list<mixed>}>
+     * @return list<array{owner: class-string, ownerId: string, ownerKey: array<string, mixed>, collection: string, flush: int|null, at: list<int>, old: list<mixed>, new: list<mixed>}>
      */
     public function of(EntityManagerInterface $em, HistoryReplay $replay, StatementLog $log, LinkFacts $told, ?DepartedObjects $departed = null, ?\Closure $failed = null): array
     {
@@ -141,7 +141,6 @@ final class LinkRuns
 
             try {
                 $said[] = [
-                    'association' => $fact['association'],
                     'owner' => $fact['owner'],
                     'ownerId' => $fact['ownerId'],
                     'ownerKey' => $fact['ownerKey'],
