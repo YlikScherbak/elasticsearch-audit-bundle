@@ -482,6 +482,69 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
         self::assertSame([['items' => ['old' => ['SKU-A', 'SKU-B'], 'new' => []]]], $this->theCollectionsChanges());
     }
 
+    /**
+     * @return iterable<string, array{list<string>}>
+     */
+    public static function whichSockRefuses(): iterable
+    {
+        yield 'the first' => [['refuses', 'red']];
+        yield 'the last' => [['red', 'refuses']];
+    }
+
+    /**
+     * An emptying whose representer fails for one of the lines: the emptying is not written with
+     * a list nobody could show, and the failure goes through the policy -- whichever line it was.
+     *
+     * @param list<string> $colours
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('whichSockRefuses')]
+    public function testAnEmptyingARepresenterFailsForIsNotWrittenAndIsSaid(array $colours): void
+    {
+        $this->em->persist($drawer = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Drawer());
+
+        foreach ($colours as $colour) {
+            $drawer->add(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Sock($colour));
+        }
+
+        $this->attachListener(FailurePolicy::Log);
+        $this->em->flush();
+        $this->gateway->documents = [];
+        $this->logs = [];
+
+        $drawer->socks = new ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame([], array_values(array_filter($this->documents(), static fn (array $d): bool => isset($d['changes']['socks']))));
+        self::assertCount(1, array_filter($this->logs, static fn (string $line): bool => str_starts_with($line, 'Audit record could not be written: RuntimeException')));
+    }
+
+    public function testAnEmptyingListsItsLinesByTheirKeysWhicheverWasRememberedFirst(): void
+    {
+        // The second line loaded, and so remembered, before the first: the emptying lists them
+        // by their keys all the same.
+        $this->em->persist($crate = new Crate('C-7'));
+        $crate->add($first = new CrateItem('SKU-A'));
+        $crate->add($second = new CrateItem('SKU-B'));
+        $this->em->flush();
+        [$firstId, $secondId] = [$first->id, $second->id];
+        $this->em->clear();
+        unset($crate, $first, $second);
+        gc_collect_cycles();
+        $this->em->persist(new Crate('C-0'));
+        $this->em->flush();
+
+        $this->em->find(CrateItem::class, $secondId);
+        $this->em->find(CrateItem::class, $firstId);
+        $crate = $this->em->find(Crate::class, 'C-7');
+        self::assertNotNull($crate);
+        $this->gateway->documents = [];
+
+        $crate->items = new ArrayCollection();
+        $this->em->flush();
+
+        self::assertSame([['items' => ['old' => ['SKU-A', 'SKU-B'], 'new' => []]]], $this->theCollectionsChanges());
+    }
+
     public function testAnEmptyingReadAfterAStatementOfTheOuterFlushNamesWhatThatStatementWrote(): void
     {
         // The outer flush renames X; X's postUpdate starts a nested flush that empties the

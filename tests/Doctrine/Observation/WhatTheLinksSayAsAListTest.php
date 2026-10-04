@@ -202,6 +202,33 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testAnAccountTakenAfterTwoLinksWereWrittenIsUndoneOfBoth(): void
+    {
+        // Two links the application wrote before a flush reads the rows: both are undone, and
+        // the list before them holds neither.
+        $x = $this->aTag('x');
+        [$y, $z, $w] = [$this->aTag('y'), $this->aTag('z'), $this->aTag('w')];
+        [$yId, $zId, $wId] = [$y->id, $z->id, $w->id];
+        $id = $this->anArticle('One', $x)->id;
+        $this->unownedStatementsAreExpected = true;
+        $this->em->clear();
+        unset($x, $y, $z, $w);
+        gc_collect_cycles();
+        $this->aTag('v');
+
+        $this->begin();
+        $connection = $this->em->getConnection();
+        $connection->insert('article_tag', ['article_id' => $id, 'tag_id' => $yId]);
+        $connection->insert('article_tag', ['article_id' => $id, 'tag_id' => $zId]);
+        $article = $this->em->find(Article::class, $id);
+        self::assertInstanceOf(Article::class, $article);
+        $article->tags->add($this->em->getReference(Tag::class, $wId) ?? throw new \LogicException('no tag'));
+        $this->em->flush();
+
+        self::assertSame([['One', ['x'], ['x', 'y', 'z']], ['One', ['x', 'y', 'z'], ['x', 'y', 'z', 'w']]], $this->said());
+        $this->end();
+    }
+
     public function testAnAccountTakenAfterEveryLinkWasTakenCannotBeUndoneAndIsNotKnown(): void
     {
         // Every link of the owner taken by one statement, before a flush reads the rows: which
