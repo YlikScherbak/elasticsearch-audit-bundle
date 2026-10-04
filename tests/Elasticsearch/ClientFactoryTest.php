@@ -32,6 +32,31 @@ final class ClientFactoryTest extends TestCase
         self::assertInstanceOf(Client::class, ClientFactory::create(['http://localhost:9200']));
     }
 
+    public function testTheClientChecksTheClustersCertificateUnlessToldNotTo(): void
+    {
+        // Read off the client built: the HTTP client it sends through, and what that was told.
+        $verifies = static function (Client $client): mixed {
+            $http = $client->getTransport()->getClient();
+
+            if (!$http instanceof \GuzzleHttp\Client) {
+                self::markTestSkipped('The verification is read off Guzzle; this installation sends through '.$http::class.'.');
+            }
+
+            // The one public way Guzzle 7 says what it was configured with.
+            return $http->getConfig('verify');
+        };
+
+        self::assertTrue($verifies(ClientFactory::create(['https://localhost:9200'])), 'by default');
+        self::assertTrue($verifies(ClientFactory::create(['https://localhost:9200'], sslVerification: true)));
+        self::assertFalse($verifies(ClientFactory::create(['https://localhost:9200'], sslVerification: false)), 'only when told, in so many words');
+    }
+
+    public function testTheClientLogsThroughTheGateAndOnlyWhenGivenALogger(): void
+    {
+        self::assertInstanceOf(ClientLogGate::class, ClientFactory::create(['http://localhost:9200'], logger: new NullLogger())->getLogger());
+        self::assertNotInstanceOf(ClientLogGate::class, ClientFactory::create(['http://localhost:9200'])->getLogger());
+    }
+
     public function testWithoutHostsThereIsNothingToConnectTo(): void
     {
         $this->expectException(NotConfiguredException::class);

@@ -118,6 +118,9 @@ This file describes `main`. A setting the latest release does not have yet is ma
 borsche_elasticsearch_audit:
   client:
     hosts: ['%env(ELASTICSEARCH_URL)%']  # or: service: my_es_client (an Elastic\Elasticsearch\Client)
+    ssl_verification: true                # the default: the cluster's certificate is checked; false
+                                          # gives that up, and with it any say over who reads or
+                                          # changes the audit on its way to the cluster
   indices:
     default: audit_log                    # every record goes here...
     routing:                              # ...unless its object type is routed elsewhere

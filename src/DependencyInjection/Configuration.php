@@ -112,7 +112,9 @@ final class Configuration implements ConfigurationInterface
                 ->thenInvalid('client.service must be the id of a service, not %s.')
             ->end();
 
-        $children->booleanNode('ssl_verification')->defaultTrue();
+        $children->booleanNode('ssl_verification')
+            ->info('Whether the client built from client.hosts checks the cluster\'s certificate. true (the default) checks it; false gives that up, and with it any say over who reads or changes the audit on its way to the cluster. A client of your own (client.service) is configured by you.')
+            ->defaultTrue();
 
         $children->enumNode('include_source_on_error')
             ->info("What a cluster should do with a document it refused. false (what this bundle wants) sends include_source_on_error=false, so a refused audit document stays out of the error - a parameter Elasticsearch has known since 8.18, and answers with a 400 before that. true leaves the cluster's own default alone and sends nothing. auto (the default) sends it where the cluster knows it, at the cost of one info() call per process; set it explicitly to spend nothing and decide yourself.")
