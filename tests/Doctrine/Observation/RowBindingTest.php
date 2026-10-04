@@ -51,6 +51,71 @@ final class RowBindingTest extends DoctrineTestCase
         // A mapping with a schema is written schema-qualified, and only that statement is
         // its; the same table name without it is another table. The fixtures declare none, so
         // the mapping is one of its own, of tables in a schema; only the mapping is read.
+        $shop = self::shop();
+
+        foreach ([['UPDATE Shop.ShelfLine SET shelf_id = ? WHERE id = ?', 'row'], ['UPDATE ShelfLine SET shelf_id = ? WHERE id = ?', 'unbound']] as [$sql, $kind]) {
+            $shape = StatementShape::read($sql);
+            self::assertNotNull($shape);
+            self::assertSame($kind, RowBinding::of($shop, $shape, [1 => 2, 2 => 5])->kind, $sql);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, array<int, mixed>, array<string, mixed>}>
+     */
+    public static function keysOfTwoColumns(): iterable
+    {
+        // A bay is keyed by its code and its aisle: its join rows are named by both, and so is a
+        // slot's foreign key to it.
+        yield 'a join row of a key of two columns' => ['DELETE FROM Shop.Bay_Label WHERE bay_code = ? AND bay_aisle = ? AND label_id = ?', [1 => 'B', 2 => 3, 3 => 9], ['kind' => 'join row', 'class' => 'Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Bay', 'key' => ['code' => 'B', 'aisle' => 3], 'association' => 'labels', 'element' => ['id' => 9]]];
+        yield 'a key\'s join rows by both its columns' => ['DELETE FROM Shop.Bay_Label WHERE bay_code = ? AND bay_aisle = ?', [1 => 'B', 2 => 3], ['kind' => 'join rows of owner', 'class' => 'Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Bay', 'key' => ['code' => 'B', 'aisle' => 3], 'association' => 'labels']];
+        yield 'half a key\'s join rows is not the key' => ['DELETE FROM Shop.Bay_Label WHERE bay_code = ? AND label_id = ?', [1 => 'B', 2 => 9], ['kind' => 'unbound']];
+        yield 'a join row of a target keyed by two columns' => ['INSERT INTO Shop.Rack_Bay (rack_id, bay_code, bay_aisle) VALUES (?, ?, ?)', [1 => 4, 2 => 'B', 3 => 3], ['kind' => 'join row', 'class' => 'Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Rack', 'key' => ['id' => 4], 'association' => 'bays', 'element' => ['code' => 'B', 'aisle' => 3]]];
+        yield 'a target keyed by two columns taken out of every rack' => ['DELETE FROM Shop.Rack_Bay WHERE bay_code = ? AND bay_aisle = ?', [1 => 'B', 2 => 3], ['kind' => 'join rows of target', 'class' => 'Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Shop\Rack', 'association' => 'bays', 'element' => ['code' => 'B', 'aisle' => 3]]];
+        yield 'half a foreign key empties nothing' => ['DELETE FROM Shop.Slot WHERE bay_code = ?', [1 => 'B'], ['kind' => 'unbound']];
+    }
+
+    /**
+     * @param array<int, mixed>    $params
+     * @param array<string, mixed> $expected
+     */
+    #[DataProvider('keysOfTwoColumns')]
+    public function testAKeyOfTwoColumnsIsNamedByBoth(string $sql, array $params, array $expected): void
+    {
+        $shape = StatementShape::read($sql);
+        self::assertNotNull($shape);
+        $binding = RowBinding::of(self::shop(), $shape, $params);
+
+        self::assertSame($expected, array_filter(
+            ['kind' => $binding->kind, 'class' => $binding->class, 'key' => $binding->key, 'association' => $binding->association, 'element' => $binding->element],
+            static fn (mixed $value): bool => $value !== null,
+        ), $sql);
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function reasons(): iterable
+    {
+        yield 'a table nothing maps' => ['DELETE FROM probe_row WHERE id = ?', 'no mapped table is called probe_row'];
+        yield 'a join table not named by a key' => ['DELETE FROM catalogue_item WHERE item_id = ? AND position = ?', 'the join table of '.Catalogue::class.'::items is not named by the key of its rows'];
+        yield 'an inexact WHERE' => ['DELETE FROM CrateItem WHERE id = ? OR id = ?', 'the WHERE is not a conjunction of column = ?'];
+    }
+
+    /**
+     * What a statement it cannot bind is doubt for, said with it: which table, and what of it
+     * the rows could not be told by.
+     */
+    #[DataProvider('reasons')]
+    public function testAStatementItCannotBindSaysWhy(string $sql, string $why): void
+    {
+        $shape = StatementShape::read($sql);
+        self::assertNotNull($shape);
+        $binding = RowBinding::of($this->em, $shape, [1 => 2, 2 => 3]);
+
+        self::assertSame([RowBinding::UNBOUND, $why], [$binding->kind, $binding->reason]);
+    }
+
+    private static function shop(): \Doctrine\ORM\EntityManager
+    {
         $config = new \Doctrine\ORM\Configuration();
         $config->setMetadataDriverImpl(new \Doctrine\ORM\Mapping\Driver\AttributeDriver([__DIR__.'/../Shop']));
         $config->setProxyDir(sys_get_temp_dir().'/borsche-audit-proxies');
@@ -60,13 +125,7 @@ final class RowBindingTest extends DoctrineTestCase
             $config->enableNativeLazyObjects(true);
         }
 
-        $shop = new \Doctrine\ORM\EntityManager(\Doctrine\DBAL\DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config), $config);
-
-        foreach ([['UPDATE Shop.ShelfLine SET shelf_id = ? WHERE id = ?', 'row'], ['UPDATE ShelfLine SET shelf_id = ? WHERE id = ?', 'unbound']] as [$sql, $kind]) {
-            $shape = StatementShape::read($sql);
-            self::assertNotNull($shape);
-            self::assertSame($kind, RowBinding::of($shop, $shape, [1 => 2, 2 => 5])->kind, $sql);
-        }
+        return new \Doctrine\ORM\EntityManager(\Doctrine\DBAL\DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config), $config);
     }
 
     /**
@@ -96,6 +155,7 @@ final class RowBindingTest extends DoctrineTestCase
         // What Doctrine writes when a target of a collection whose join columns do not cascade
         // is removed from the other side: every owner's row of it, and no owner named.
         yield 'a target taken out of every owner\'s many-to-many' => ['DELETE FROM catalogue_item WHERE item_id = ?', [1 => 2], ['kind' => 'join rows of target', 'class' => Catalogue::class, 'association' => 'items', 'element' => ['id' => 2]]];
+        yield 'a join row\'s key and another condition do not prove the row' => ['DELETE FROM catalogue_item WHERE catalogue_code = ? AND item_id = ? AND position = ?', [1 => 'K-1', 2 => 2, 3 => 3], ['kind' => 'unbound']];
         yield 'a join table named by neither side\'s key' => ['DELETE FROM catalogue_item WHERE item_id = ? AND position = ?', [1 => 2, 2 => 3], ['kind' => 'unbound']];
         yield 'DQL by a column that is not the key' => ['DELETE FROM CrateItem WHERE sku = ?', [1 => 'S'], ['kind' => 'unbound']];
         yield 'the key and another condition do not prove the row' => ['DELETE FROM CrateItem WHERE id = ? AND quantity = ?', [1 => 5, 2 => 1], ['kind' => 'unbound']];

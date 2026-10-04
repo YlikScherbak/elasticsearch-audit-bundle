@@ -713,6 +713,23 @@ on another line than meant (`AuditWriter:581` was a comment) took reading each l
   escaped at the new line, and each reason still reads true of it; renumbered. Main's base is
   therefore 141 escaped, not 145.
 
+## G: the escaped of CI 37197603893 (`24d23d8`), by behaviour
+
+The reviewers' G: every mutant still escaped after A–F gets a class, grouped by what it changes,
+"not reached" only with an invariant of the supported code. Measured there: Doctrine 4,048 mutants,
+460 escaped, 23 timed out, 88.64 % (88.07 % counting only what a test failed on). The ids below are
+that run's; the earlier sections' are 4261bdb's, and the two are matched by file, mutator and diff.
+
+### RowBinding (22)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `31321aae`, `c47f54a8`, `ea0fb293`, `198037eb`, `53167af9`, `6dfe01dd`, `81bc976a`, `8e4c243d`, `a9ec028d`, `bb673421`, `bbdf12db`, `d2670637` | 80, 210 | the reason a statement is left unbound | test gap — the reason is the binding's to say, and is now said: `RowBindingTest::testAStatementItCannotBindSaysWhy` (it was classed "deliberately not tested" against 4261bdb; pinning it costs nothing) |
+| `8aee2111`, `fd444a46`, `b8e912f9`, `f10b6c61` | 139, 198, 233 | a key or a foreign key of two columns read as one | test gap — no fixture had one: `Bay` (keyed by code and aisle) in the `Shop` mapping, its own join rows, a `Rack`'s join rows to it, a `Slot`'s foreign key to it (`…::testAKeyOfTwoColumnsIsNamedByBoth`) |
+| `f380eb23` | 198 | both keys picked are enough, whatever else the WHERE names | test gap — `…::'a join row's key and another condition do not prove the row'` |
+| `858726c0`, `1d5ef5a2`, `31d08685`, `3f3d04d5` | 113, 150, 170, 228 | a version field without versioning; a join column without the column it references; a join table with no columns on a side; a join column without its name | **equivalent**, by Doctrine's completion of a mapping: it sets a version field only with versioning, completes every join column with its referenced column and name, and a join table with both sides' |
+| `e7a54efc` | 198 | `owner \|\| element` before the columns are compared | **equivalent** by construction: the columns are the same only when both keys were picked |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

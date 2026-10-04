@@ -24,8 +24,18 @@ class Rack
     #[AuditField(trackElements: true)]
     public Collection $items;
 
+    /** Bays, a target keyed by two columns. @var Collection<int, Bay> */
+    #[ORM\ManyToMany(targetEntity: Bay::class)]
+    #[ORM\JoinTable(name: 'Rack_Bay', schema: 'Shop')]
+    #[ORM\JoinColumn(name: 'rack_id', referencedColumnName: 'id')]
+    #[ORM\InverseJoinColumn(name: 'bay_code', referencedColumnName: 'code')]
+    #[ORM\InverseJoinColumn(name: 'bay_aisle', referencedColumnName: 'aisle')]
+    #[AuditField]
+    public Collection $bays;
+
     public function __construct()
     {
         $this->items = new ArrayCollection();
+        $this->bays = new ArrayCollection();
     }
 }
