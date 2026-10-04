@@ -35,6 +35,13 @@
         //
         // A mutant is ignored here again only when tools/infection/TRIAGE-1.3.md classes it
         // equivalent or deliberately not tested, by its line, with the reason beside it.
+
+        ReturnRemoval: {
+            // ReadableSql::of() returns a statement with nothing that could begin a comment
+            // as it is, before reading it: the reading would return the same text. Equivalent;
+            // what it saves is the reading of every statement the persisters write.
+            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\ReadableSql::of::39"],
+        },
     },
     // Its own floor, and well below the other run's, because this listener is the code
     // the bundle calls its price of complexity: one class answering for every shape a
