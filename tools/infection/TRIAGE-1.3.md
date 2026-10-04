@@ -806,6 +806,24 @@ look was untested, on every database.
 | `a6e705d0` | 166 | `array_values()` dropped | **equivalent**: `JoinRowsQuery::holdersOf()` reads only the values |
 | `b59f136f`, `4283a305` | 152 | parts of 499 or 501 targets | test gap — no test had more than one part at all: `…::testTheHoldersOfManyTargetsAreReadFiveHundredAtATime` (500 targets one question, 501 two, a holder of the last part read as one of the first's; the docblock promises "a question for every five hundred targets") |
 
+### LinkRuns (16)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `2f6024da`, `e99b5b6a` | 136 | the runs not sorted, or sorted by a comparator that always says "less" | test gap — `WhatTheLinksSayAsAListTest::testContributionsAreSaidInTheOrderTheyBeganAcrossOwners`: an owner's second contribution after another owner's first. (A first try with one contribution each did not fail: the facts come sorted, so the owners are already in the order their first contributions began) |
+| `afd80889`, `c4f66f00` | 151, 212 | the old list shown as the rows were once its first statement ran; the object removed asked before the row | test gap — `…::testAWatchedTargetGoneIsShownAsItsRowStoodAndNotAsTheObjectWasLeft`: a relay renamed on the object and removed, Doctrine writing no UPDATE of a row it deletes |
+| `61ae9bde` | 169 | a flush begun right after the last statement read as begun between | test gap — `…::testAFlushBegunRightAfterAContributionsLastLinkDoesNotSplitIt` |
+| `8f22585f` | 201 | keys compared as numbers where only one is | test gap — no fixture had a target keyed by text: `Ticket` (keyed by a code, some of them digits) and `TicketBook`; `…::testKeysOfTextAreComparedAsTextWhereEitherIsNoNumber` |
+| `291f1303` | 143 | the association in what a run says | **dead code, taken away** (`d74f422`): no reader asked for it |
+| `fcdc89d8` | 90 | a mark at the statement's own position applied after it | **equivalent** by an invariant of LinkFacts: marks are at the owner's own row statements and position 0, and no fact is made there — an INSERT of the owner's row is no link statement, and at its DELETE the row's event comes before a target's at the same position (a row that is its own target) and leaves nothing to take |
+| `96367b85` | 152 | the new list shown as the rows were before its last statement | **equivalent** by the same: a contribution's statements write join rows or delete a target, and a target deleted is in no new list, so no target in it has its row changed by the last statement |
+| `36300b66` | 122 | `true` → `false` in a map read by `isset()` | **equivalent** |
+| `c247f4f8` | 70 | `(string)` dropped from an array key | **equivalent**: PHP makes a string of digits an integer key anyway |
+| `340f5449` | 196 | `array_values()` dropped before `usort()` | **equivalent**: `usort()` gives a list |
+| `14697271`, `e1dfdaf5` | 201 | one `(float)` dropped where both are numeric | **equivalent**: PHP 8 compares a numeric string with a float as numbers |
+| `0625219d` | 213 | the managed entity asked before the object removed | **equivalent**: an object removed is no longer managed once its DELETE ran, and one persisted again before is no removal |
+| `74d2409a` | 189 | `?->` → `->` on the owner's declaration | **equivalent** by an invariant: a link is watched only for an audited association (`WatchedRows::areLinksWatched()`), so its owner always has a declaration; and either way the failure goes through `$failed` |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

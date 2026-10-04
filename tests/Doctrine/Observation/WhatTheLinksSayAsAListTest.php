@@ -17,6 +17,8 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\ListFirst;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Relay;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Shelf;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Ticket;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\TicketBook;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Doctrine\ORM\Events;
 use Doctrine\Persistence\Event\LifecycleEventArgs;
@@ -72,6 +74,26 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
+    public function testKeysOfTextAreComparedAsTextWhereEitherIsNoNumber(): void
+    {
+        // As numbers where both are -- 9 before 10 -- and as text where one is not: "10" before
+        // "A", as "9" is. Not "A" first, which comparing "A" as a number, 0, would make it.
+        $this->em->persist($book = new TicketBook());
+        $this->em->flush();
+
+        $this->begin();
+
+        foreach (['A', '10', '9'] as $code) {
+            $this->em->persist($ticket = new Ticket($code));
+            $book->tickets->add($ticket);
+        }
+
+        $this->em->flush();
+
+        self::assertSame([[[], ['9', '10', 'A']]], array_map(static fn (array $run): array => [$run['old'], $run['new']], $this->runs()));
+        $this->end();
+    }
+
     public function testTheSameLinkMetTwiceInOneFlushIsTwoMovesOfTheList(): void
     {
         // A listener of the application's writes a link and takes it away again, inside the
@@ -124,10 +146,10 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->end();
     }
 
-    public function testContributionsAreSaidInTheOrderTheyBeganWhicheverOwnerWasKnownFirst(): void
+    public function testContributionsAreSaidInTheOrderTheyBeganAcrossOwners(): void
     {
-        // One was accounted for before Two, and Two's link was written first: Two's contribution
-        // comes first.
+        // One's link written, Two's, then One's taken away again -- One's second contribution:
+        // said where it began, after Two's, and not with One's first.
         $a = $this->aTag('a');
         $b = $this->aTag('b');
         $one = $this->anArticle('One', $a);
@@ -137,13 +159,14 @@ final class WhatTheLinksSayAsAListTest extends DoctrineTestCase
         $this->begin();
         $this->afterTheUpdateOf($one, function () use ($one, $two, $b): void {
             $connection = $this->em->getConnection();
-            $connection->insert('article_tag', ['article_id' => $two->id, 'tag_id' => $b->id]);
             $connection->insert('article_tag', ['article_id' => $one->id, 'tag_id' => $b->id]);
+            $connection->insert('article_tag', ['article_id' => $two->id, 'tag_id' => $b->id]);
+            $connection->delete('article_tag', ['article_id' => $one->id, 'tag_id' => $b->id]);
         });
         $one->title = 'One, again';
         $this->em->flush();
 
-        self::assertSame([['Two', ['a'], ['a', 'b']], ['One', ['a'], ['a', 'b']]], $this->said());
+        self::assertSame([['One', ['a'], ['a', 'b']], ['Two', ['a'], ['a', 'b']], ['One', ['a', 'b'], ['a']]], $this->said());
         $this->end();
     }
 
