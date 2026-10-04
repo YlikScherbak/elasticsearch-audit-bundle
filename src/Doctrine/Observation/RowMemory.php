@@ -253,10 +253,14 @@ final class RowMemory
 
     /**
      * What the rows about to go hold, read before they go, and each watched right after its
-     * DELETE: the holders of every target among them, and the links of an owner among them
-     * whose join columns do not cascade. From onFlush for all the flush plans, and from
-     * preRemove for one a listener removes while the flush runs -- after onFlush, and so
-     * planned where nothing else would read it.
+     * DELETE: the holders of every target among them. From onFlush for all the flush plans,
+     * and from preRemove for one a listener removes while the flush runs -- after onFlush,
+     * and so planned where nothing else would read it.
+     *
+     * Not the links of an owner among them. Where its join columns do not cascade, Doctrine
+     * deletes its join rows by its key right before its row, in the same transaction, and
+     * the replay takes them as its removal's (5.3c): the two stand or fall together, and
+     * what an owner going took is said by its going, never by an account read first.
      *
      * @param list<object> $entities
      *
@@ -277,12 +281,6 @@ final class RowMemory
 
                 foreach ($this->watched->linksTo($em, $metadata) as [$owner, $association]) {
                     $going[$owner][$association][] = $entity;
-                }
-
-                foreach ($metadata->getAssociationNames() as $association) {
-                    if ($this->watched->areLinksWatched($metadata, $association) && !self::cascades($metadata->getAssociationMapping($association))) {
-                        $this->links->rememberTheLinksOf($em, $entity, $association, $includes);
-                    }
                 }
             } catch (\Throwable $e) {
                 $failures[] = $e;
@@ -361,30 +359,6 @@ final class RowMemory
     public function links(): JoinRowMemory
     {
         return $this->links;
-    }
-
-    /**
-     * Whether the database takes an owner's join rows with its row: every join column of the
-     * owner's side cascading on delete, which is Doctrine's default -- and then Doctrine writes
-     * no statement of the join table for it.
-     */
-    private static function cascades(mixed $mapping): bool
-    {
-        $columns = CollectionRowsQuery::entry(CollectionRowsQuery::entry($mapping, 'joinTable'), 'joinColumns');
-
-        if (!\is_array($columns) || $columns === []) {
-            return false;
-        }
-
-        foreach ($columns as $column) {
-            $onDelete = CollectionRowsQuery::entry($column, 'onDelete');
-
-            if (!\is_string($onDelete) || strtoupper($onDelete) !== 'CASCADE') {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /**
