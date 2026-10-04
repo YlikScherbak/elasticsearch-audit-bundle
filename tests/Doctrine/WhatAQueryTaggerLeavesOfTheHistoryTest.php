@@ -26,7 +26,7 @@ final class WhatAQueryTaggerLeavesOfTheHistoryTest extends DoctrineTestCase
         ['article', 'remove', []],
     ];
 
-    /** @return iterable<string, array{string, string, bool}> */
+    /** @return iterable<string, array{string, string, bool, 3?: bool}> */
     public static function taggers(): iterable
     {
         yield 'no tagger' => ['', '', true];
@@ -36,13 +36,26 @@ final class WhatAQueryTaggerLeavesOfTheHistoryTest extends DoctrineTestCase
             yield "a comment before, $where" => ["/* app:checkout */ ", '', $outside];
             yield "a line comment after, $where" => ['', ' -- tagged', $outside];
         }
+
+        // MySQL's own comment, read as one only on MySQL: the connection's dialect, told by its
+        // platform when it connects.
+        yield 'a hash comment after, outside the observer, on MySQL' => ['', ' # tagged', true, true];
     }
 
     protected function middlewaresAroundTheObserver(): array
     {
-        [$before, $after, $outside] = $this->providedData() + ['', '', true];
+        [$before, $after, $outside, $mysqlOnly] = $this->providedData() + ['', '', true, false];
+
+        if ($mysqlOnly && !self::onMySql()) {
+            return []; // elsewhere the comment is SQL the database refuses, the schema's first
+        }
 
         return $outside && ($before !== '' || $after !== '') ? [new CommentingMiddleware($before, $after)] : [];
+    }
+
+    private static function onMySql(): bool
+    {
+        return str_starts_with((string) getenv('AUDIT_DB_URL'), 'mysql');
     }
 
     protected function middlewaresOfTheTest(): array
@@ -53,8 +66,12 @@ final class WhatAQueryTaggerLeavesOfTheHistoryTest extends DoctrineTestCase
     }
 
     #[DataProvider('taggers')]
-    public function testTheHistoryIsTheOneWrittenWithoutATagger(string $before, string $after, bool $outside): void
+    public function testTheHistoryIsTheOneWrittenWithoutATagger(string $before, string $after, bool $outside, bool $mysqlOnly = false): void
     {
+        if ($mysqlOnly && !self::onMySql()) {
+            self::markTestSkipped('A hash begins a comment on MySQL alone.');
+        }
+
         $this->em->persist($a = new Tag('a'));
         $this->em->persist($b = new Tag('b'));
         $article = new Article('One /* not */ -- a comment');

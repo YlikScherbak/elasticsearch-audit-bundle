@@ -200,6 +200,19 @@ final class WhatTheJoinRowsHeldTest extends DoctrineTestCase
             JoinRowsQuery::holdersOf($platform, $single, [['id' => 3], ['id' => 4], ['id' => 5]]),
         );
 
+        // -- and an equals for one of them.
+        self::assertSame(
+            'SELECT j.article_id, j.tag_id FROM article_tag j WHERE EXISTS (SELECT 1 FROM article_tag h WHERE h.article_id = j.article_id AND h.tag_id = ?)',
+            JoinRowsQuery::holdersOf($platform, $single, [['id' => 3]])['sql'] ?? null,
+        );
+
+        // An owner keyed by two columns: both, in each place an owner's columns are named.
+        $twoColumnOwners = ['joinTable' => ['name' => 'bay_label', 'joinColumns' => [['name' => 'bay_code', 'referencedColumnName' => 'code'], ['name' => 'bay_aisle', 'referencedColumnName' => 'aisle']], 'inverseJoinColumns' => [['name' => 'label_id', 'referencedColumnName' => 'id']]]];
+        self::assertSame(
+            ['sql' => 'SELECT j.bay_code, j.bay_aisle, j.label_id FROM bay_label j WHERE EXISTS (SELECT 1 FROM bay_label h WHERE h.bay_code = j.bay_code AND h.bay_aisle = j.bay_aisle AND h.label_id = ?)', 'params' => [9], 'owners' => ['code', 'aisle'], 'targets' => ['id']],
+            JoinRowsQuery::holdersOf($platform, $twoColumnOwners, [['id' => 9]]),
+        );
+
         // And nothing, where the mapping cannot say or the key is not what the rows carry.
         self::assertNull(JoinRowsQuery::linksOf($platform, $mapping, ['uuid' => 5]));
         self::assertNull(JoinRowsQuery::holdersOf($platform, $mapping, [['id' => 3]]));

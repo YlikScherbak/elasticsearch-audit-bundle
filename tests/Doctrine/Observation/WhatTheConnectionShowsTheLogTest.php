@@ -105,6 +105,26 @@ final class WhatTheConnectionShowsTheLogTest extends TestCase
         self::assertSame([StatementLog::COMMITTED, StatementLog::VOID], [$this->log->fate($released), $this->log->fate($dead)]);
     }
 
+    public function testAStatementThatFailsWithoutParametersIsRecordedToo(): void
+    {
+        // Run as it is, not prepared -- exec() for a write, query() for a read: each failure
+        // has its place in the log, as a prepared one's has.
+        $connection = $this->observed(true);
+        $this->aRow($connection, 1);
+
+        foreach (['UPDATE probe_row SET quantity = NULL WHERE id = 1' => 'executeStatement', 'SELECT * FROM no_such_table' => 'executeQuery'] as $sql => $how) {
+            try {
+                $connection->{$how}($sql);
+                self::fail('the premise: the database refuses '.$sql);
+            } catch (\Doctrine\DBAL\Exception $e) {
+                // the application's own exception, untouched
+            }
+
+            $failed = $this->log->statement($this->log->position());
+            self::assertSame([$sql, true], [$failed['sql'] ?? null, $failed['failed'] ?? null], $how);
+        }
+    }
+
     #[DataProvider('savepointModes')]
     public function testAFailingStatementIsRecordedAndItsExceptionLeavesUntouched(bool $savepoints): void
     {

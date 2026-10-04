@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Attribute\Auditable;
 use Borsche\ElasticsearchAuditBundle\Attribute\AuditField;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadata;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Author;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Comment;
@@ -136,6 +137,38 @@ final class AuditMetadataFactoryTest extends TestCase
         $this->expectExceptionMessage('tracks no field of its elements');
 
         new AuditMetadata('shipment', ['lines' => null], [], ['lines' => []]);
+    }
+
+    /** @return iterable<string, array{list<mixed>}> */
+    public static function fieldsThatAreNoNames(): iterable
+    {
+        yield 'an empty name' => [['quantity', '']];
+        yield 'a number' => [['quantity', 5]];
+        yield 'nothing' => [[null]];
+    }
+
+    /**
+     * Through the interface, what a collection tracks of its elements arrives from application
+     * code at runtime: a field named by anything but a name is refused, not tracked as nothing.
+     *
+     * @param list<mixed> $tracked
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('fieldsThatAreNoNames')]
+    public function testAFieldOfAnElementIsNamedByAName(array $tracked): void
+    {
+        $this->expectException(DeclarationMistake::class);
+        $this->expectExceptionMessage('"lines" tracks a field of its elements whose name is not a name.');
+
+        /** @phpstan-ignore argument.type (what the interface's promise does not keep) */
+        new AuditMetadata('shipment', ['lines' => null], [], ['lines' => $tracked]);
+    }
+
+    public function testACollectionWhoseElementsAreNotTrackedIsNoneOfTheTrackedOnes(): void
+    {
+        $metadata = new AuditMetadata('shipment', ['tags' => null, 'lines' => null, 'fees' => null], [], ['tags' => false, 'lines' => ['quantity'], 'fees' => true]);
+
+        self::assertSame(['lines', 'fees'], $metadata->trackedCollections(), 'in their order, and a list');
+        self::assertSame([null, ['quantity'], true], [$metadata->trackedElementFields('tags'), $metadata->trackedElementFields('lines'), $metadata->trackedElementFields('fees')]);
     }
 
     public function testAClassDeclaredByAttributesIsReadWithoutAnInstance(): void

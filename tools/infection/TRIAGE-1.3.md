@@ -730,6 +730,22 @@ that run's; the earlier sections' are 4261bdb's, and the two are matched by file
 | `858726c0`, `1d5ef5a2`, `31d08685`, `3f3d04d5` | 113, 150, 170, 228 | a version field without versioning; a join column without the column it references; a join table with no columns on a side; a join column without its name | **equivalent**, by Doctrine's completion of a mapping: it sets a version field only with versioning, completes every join column with its referenced column and name, and a join table with both sides' |
 | `e7a54efc` | 198 | `owner \|\| element` before the columns are compared | **equivalent** by construction: the columns are the same only when both keys were picked |
 
+### AuditMetadata, RowIdentity, JoinRowsQuery, the log's new lines, the middleware (16)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `e1188b37` | AuditMetadata 56 | a field of an element named by no name let through | test gap — `AuditMetadataFactoryTest::testAFieldOfAnElementIsNamedByAName` |
+| `87aa1fff`, `91c0887c` | AuditMetadata 89 | a collection tracked as `false` among the tracked ones; the list's keys | test gap — `…::testACollectionWhoseElementsAreNotTrackedIsNoneOfTheTrackedOnes` |
+| `7c90e87c`, `5a4b8732` | RowIdentity 43, 52 | a key of two columns followed by one; the entity held not returned unless a reference was asked for | test gap — `WhichEntityAForeignKeyNamesTest` |
+| `c97c76db` | JoinRowsQuery 128 | an owner keyed by two columns selected by one | test gap — `WhatTheJoinRowsHeldTest`, an owner of two columns |
+| `b6783bb2` | Dbal4/ObservedConnection 53 | a failed `exec()` not in the log | test gap — `WhatTheConnectionShowsTheLogTest::testAStatementThatFailsWithoutParametersIsRecordedToo` (exec and query) |
+| `376fa815` | StatementLog 674 | an INSERT anywhere in the statement taken for its own | test gap — `WhatACommentLeavesOfAStatementTest::testAKeyIsNotTakenForAStatementWithAnInsertInItsValues` (comments are taken out, literals kept) |
+| `cdf96c70` | ObservingMiddleware 54 | the log told no dialect | **equivalent on SQLite** — SQLite's rules and the ones all share read alike — and **killed on MySQL**: `WhatAQueryTaggerLeavesOfTheHistoryTest`, a hash comment, MySQL only (red there, two failures) |
+| `58d66810` | AuditMetadata 49 | `!== true \|\| !== false` before `=== []` | **equivalent**: an empty list is neither, so the first half decides nothing — a guard that can go |
+| `86f01d2d`, `dbae68c6` | JoinRowsQuery 122 | `array_fill()` from −1 or 1 | **equivalent**: `implode()` reads no keys |
+| `fdb755d0` | RowIdentity 48 | the key converted through its field's type for an association too | **equivalent**: an association field has no type, and the conversion hands the value back |
+| `b5a40063`, `67a21e20`, `263ef12c` | StatementLog 302, 696, 712 | `(int)` dropped; `break` → `continue` past the statements let go; `true` → `false` in a map intersected by its keys | **equivalent**: a count in a numeric string compares as a number; the statements are in order, so every one after is past it too; `array_intersect_key()` reads no values |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

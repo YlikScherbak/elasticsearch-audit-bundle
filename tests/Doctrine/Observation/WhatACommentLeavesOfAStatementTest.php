@@ -90,6 +90,17 @@ final class WhatACommentLeavesOfAStatementTest extends TestCase
         self::assertSame(7, $log->statement($at)['key'] ?? null);
     }
 
+    public function testAKeyIsNotTakenForAStatementWithAnInsertInItsValues(): void
+    {
+        // Comments taken out, literals kept: an INSERT inside one is no INSERT.
+        $log = new StatementLog();
+        $at = $log->executed("UPDATE Article SET title = 'INSERT INTO' WHERE id = ?", [1], 1);
+        $log->keyHandedOut(7);
+
+        self::assertNotNull($at);
+        self::assertNull($log->statement($at)['key'] ?? null);
+    }
+
     public function testATaggedDeleteOfAWatchedKeyIsLookedAfterAndOneThatCannotBeReadIsNot(): void
     {
         $log = new StatementLog();
