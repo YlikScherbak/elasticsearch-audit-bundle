@@ -88,7 +88,7 @@ final class WhatTheWriterPromisesAtItsEdgesTest extends TestCase
         });
         $writer = new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'system'), $this->clock(), [], FailurePolicy::Throw, null, $events, $frame);
 
-        (new \Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame($frame, $writer))->coalesce(static fn (): null => null);
+        (new \Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame($frame, $writer))->coalesce(static fn (): mixed => null);
         $writer->writeAll([new AuditRecord('order', 1, AuditEvent::CREATE)]);
 
         self::assertSame(0, $transport->batches);
