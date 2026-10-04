@@ -460,9 +460,13 @@ Tier (b) had run all of them against 2,000 seeds of the model with no kill. Then
   place never filled, and for a manager gone — a caller's mistake); 1250 `edc2125b`, 753 `824f44e8`,
   1004 `313bf209` beyond what the database cells below say (a count in a string is a driver's for
   counts past an integer); 1473 (3) — a key that is a backed enum, which no fixture has.
-- **Killed outside coverage / not**: HistoryReplay 729 `052a74b9`, 745 `9ab1e512`, 755 `9537630d`,
-  `5766f978`, 756 `97559c8c`, 790 `aad5f8b4` — what an UPDATE that reached nothing means where the
-  database counts the rows it changed rather than the ones it found: MySQL. See the cells below.
+- **Killed outside coverage**: HistoryReplay 745 `9ab1e512`, 755 `9537630d`, 790 `aad5f8b4` — red on
+  MySQL (DBAL 4), which counts the rows an UPDATE changed rather than the ones it found
+  (`AnUpdateThatReachedNoRowTest`, `ShadowHistoryTest`, `WhatANestedFlushLeavesOfTheOuterOneTest`).
+  Not red on MySQL: 729 `052a74b9` (the platform test negated), 755 `5766f978`, 756 `97559c8c`, and
+  753, 1004, 1250 — not yet told apart. On PostgreSQL (DBAL 4) none of the ten is red: it counts
+  the rows it found, as SQLite does. The gate runs SQLite only; the three are in the matrix's MySQL
+  cells, which CI runs — whether the gate should count them is for the reviewers.
 - **Not yet told apart** (the rest, about 110): HistoryReplay 187, 232, 252, 287, 289, 312, 393 (2),
   394 `c986ae11`, 447 (3), 496, 525 `ae14d94a`, 544, 603 `9bd7d2fa`, 611, 626, 638, 654 (2), 709, 813, 832, 839, 858, 876, 885, 966, 972 (2), 1031, 1066, 1067,
   1071, 1073, 1097, 1100, 1142, 1146 (3), 1221 (2), 1257, 1264, 1268, 1304, 1336, 1367, 1449, 1462,
