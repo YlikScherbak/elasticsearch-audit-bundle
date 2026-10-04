@@ -177,7 +177,8 @@ final class HistoryReplay
                 continue;
             }
 
-            $shape = StatementShape::read($statement['sql']);
+            // Read without its comments; named in a doubt as it ran.
+            $shape = $statement['read'] === null ? null : StatementShape::read($statement['read']);
             $binding = $shape === null ? null : RowBinding::of($this->em(), $shape, $statement['params']);
 
             if ($log->fate($at) === StatementLog::VOID) {
@@ -189,8 +190,11 @@ final class HistoryReplay
                 // write -- the schema's DDL, say -- is nothing a row history holds. Nor is one
                 // that writes a table of the application's own, read or not: the same rule as
                 // for a statement read and not bound, below, by the table it names. A table it
-                // cannot name is doubt: it may be any of them.
-                if (preg_match('~^\s*(?:INSERT\s+(?:INTO\s+)?|UPDATE\s+|DELETE\s+(?:FROM\s+)?)([`"\[]?[\w.]+[`"\]]?)?~i', $statement['sql'], $writes) === 1) {
+                // cannot name is doubt: it may be any of them. So is one whose comments could not
+                // be taken out ({@see ReadableSql}): what it does is not known, nor where.
+                if ($statement['read'] === null) {
+                    $this->doubt('not read: '.$statement['sql'], null);
+                } elseif (preg_match('~^\s*(?:INSERT\s+(?:INTO\s+)?|UPDATE\s+|DELETE\s+(?:FROM\s+)?)([`"\[]?[\w.]+[`"\]]?)?~i', $statement['read'], $writes) === 1) {
                     $table = isset($writes[1]) ? trim($writes[1], '`"[]') : null;
                     $watched = $table === null ? null : $this->watchedClassOf($table);
 

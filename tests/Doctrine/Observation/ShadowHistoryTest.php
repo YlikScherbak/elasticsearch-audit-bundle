@@ -227,6 +227,10 @@ final class ShadowHistoryTest extends DoctrineTestCase
         yield 'in lower case' => ['update CrateItem c set quantity = 2 where c.id = 2', ['not read: update CrateItem c set quantity = 2 where c.id = 2']];
         yield 'with the table quoted' => ['UPDATE `CrateItem` c SET quantity = 2 WHERE c.id = 2', ['not read: UPDATE `CrateItem` c SET quantity = 2 WHERE c.id = 2']];
         yield 'of a table nothing watched' => ['update Tag t set label = \'x\' where t.id = 2', []];
+        // A comment before it does not hide it: read without the comment, it is the same doubt.
+        yield 'behind a comment' => ['/* tag */ update CrateItem c set quantity = 2 where c.id = 2', ['not read: /* tag */ update CrateItem c set quantity = 2 where c.id = 2']];
+        // One whose comment cannot be taken out may write anything anywhere.
+        yield 'behind a comment the server executes' => ['/*!50000 x */ UPDATE CrateItem SET quantity = 2 WHERE id = 2', ['not read: /*!50000 x */ UPDATE CrateItem SET quantity = 2 WHERE id = 2']];
         yield 'of a table it cannot name' => ['UPDATE (SELECT id FROM CrateItem) x SET quantity = 2', ['not read: UPDATE (SELECT id FROM CrateItem) x SET quantity = 2']];
     }
 
@@ -241,6 +245,25 @@ final class ShadowHistoryTest extends DoctrineTestCase
         $log->committed();
 
         self::assertSame(['facts' => [], 'unsure' => $unsure], $this->replayed($log));
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function taggedWrites(): iterable
+    {
+        yield 'a comment before' => ['/* tag */ UPDATE CrateItem SET quantity = ? WHERE id = ?'];
+        yield 'a comment inside' => ['UPDATE CrateItem SET quantity = ? /* why */ WHERE id = ?'];
+        yield 'a comment after' => ["UPDATE CrateItem SET quantity = ? WHERE id = ? /*traceparent='00-ab'*/"];
+        yield 'a line comment after' => ['UPDATE CrateItem SET quantity = ? WHERE id = ? -- tag'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('taggedWrites')]
+    public function testAWriteWithACommentIsTheWriteItIs(string $sql): void
+    {
+        $log = $this->begun();
+        $log->executed($sql, [1 => 2, 2 => 2], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => ['crate C-1 items.2.quantity: 1 -> 2'], 'unsure' => []], $this->replayed($log));
     }
 
     private function replayed(StatementLog $log, array $rows = self::ROWS): array

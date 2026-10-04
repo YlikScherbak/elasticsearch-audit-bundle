@@ -386,7 +386,7 @@ final class LinkFacts
 
         foreach ($includes as $at) {
             $statement = $log->statement($at);
-            $shape = $statement === null ? null : StatementShape::read($statement['sql']);
+            $shape = $statement === null || $statement['read'] === null ? null : StatementShape::read($statement['read']);
             $binding = $shape === null || $statement === null ? null : RowBinding::of($em, $shape, $statement['params']);
 
             if ($shape === null || $binding === null || $binding->kind !== RowBinding::JOIN_ROW || $binding->class === null || $binding->association === null || $binding->element === null) {

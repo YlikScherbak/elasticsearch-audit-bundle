@@ -76,7 +76,7 @@ final class ObservedStatement extends AbstractStatementMiddleware
             throw $e;
         }
 
-        if (!StatementLog::onlyReads($this->sql)) {
+        if (!$this->log->onlyReads($this->sql)) {
             LookRightAfter::aStatement($this->log, $this->inner, $this->log->executed($this->sql, $bound, $result->rowCount()), $this->sql, $bound, $result->rowCount());
         }
 

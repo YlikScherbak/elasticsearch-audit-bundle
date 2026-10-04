@@ -76,7 +76,7 @@ final class WhatTheConnectionShowsTheLogTest extends TestCase
             [StatementLog::COMMITTED, StatementLog::VOID, StatementLog::COMMITTED],
             [$this->log->fate($outer), $this->log->fate($nested), $this->log->fate($after)],
         );
-        self::assertSame(['sql' => 'UPDATE probe_row SET quantity = ? WHERE id = ?', 'params' => [1 => 7, 2 => 1], 'affected' => 1, 'failed' => false, 'key' => null], $this->log->statement($nested), 'the parameters as bound, and the count the driver gave');
+        self::assertSame(['sql' => 'UPDATE probe_row SET quantity = ? WHERE id = ?', 'read' => 'UPDATE probe_row SET quantity = ? WHERE id = ?', 'params' => [1 => 7, 2 => 1], 'affected' => 1, 'failed' => false, 'key' => null], $this->log->statement($nested), 'the parameters as bound, and the count the driver gave');
     }
 
     #[DataProvider('savepointModes')]

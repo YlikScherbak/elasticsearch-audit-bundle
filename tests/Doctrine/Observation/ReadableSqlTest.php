@@ -141,11 +141,23 @@ final class ReadableSqlTest extends TestCase
 
     public function testTheDialectIsThePlatforms(): void
     {
-        self::assertSame(
-            [SqlDialect::MySql, SqlDialect::PostgreSql, SqlDialect::Other],
-            [SqlDialect::ofPlatform(new MySQLPlatform()), SqlDialect::ofPlatform(new PostgreSQLPlatform()), SqlDialect::ofPlatform(new SQLServerPlatform())],
-        );
-        $sqlite = class_exists('Doctrine\DBAL\Platforms\SQLitePlatform') ? 'Doctrine\DBAL\Platforms\SQLitePlatform' : 'Doctrine\DBAL\Platforms\SqlitePlatform';
-        self::assertSame(SqlDialect::Sqlite, SqlDialect::ofPlatform(new $sqlite()));
+        // The concrete platforms an installation has, each of DBAL 3's and 4's by its name -- MySQL's
+        // through the abstract one MariaDB's extend too.
+        $platforms = [
+            MySQLPlatform::class => SqlDialect::MySql,
+            PostgreSQLPlatform::class => SqlDialect::PostgreSql,
+            'Doctrine\DBAL\Platforms\SQLitePlatform' => SqlDialect::Sqlite,
+            SQLServerPlatform::class => SqlDialect::Other,
+        ];
+        $told = 0;
+
+        foreach ($platforms as $class => $dialect) {
+            if (class_exists($class)) {
+                self::assertSame($dialect, SqlDialect::ofPlatform($this->createStub($class)), $class);
+                ++$told;
+            }
+        }
+
+        self::assertGreaterThan(0, $told, 'the premise: some platform is installed');
     }
 }

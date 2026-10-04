@@ -42,7 +42,7 @@ final class ObservedConnection extends AbstractConnectionMiddleware
             throw $e;
         }
 
-        if (!StatementLog::onlyReads($sql)) {
+        if (!$this->log->onlyReads($sql)) {
             LookRightAfter::aStatement($this->log, $this->inner, $this->log->executed($sql, [], $result->rowCount()), $sql, [], $result->rowCount());
         }
 

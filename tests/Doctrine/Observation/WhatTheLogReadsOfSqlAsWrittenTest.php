@@ -35,11 +35,11 @@ final class WhatTheLogReadsOfSqlAsWrittenTest extends TestCase
     public static function lookAlikes(): iterable
     {
         yield 'a savepoint with something after its name' => ['SAVEPOINT mine AND MORE'];
-        yield 'a savepoint after something else' => ['/* x */ SAVEPOINT mine'];
+        yield 'a savepoint after something else' => ['SET x; SAVEPOINT mine'];
         yield 'a release with something after its name' => ['RELEASE SAVEPOINT mine AND MORE'];
-        yield 'a release after something else' => ['/* x */ RELEASE SAVEPOINT mine'];
+        yield 'a release after something else' => ['SET x; RELEASE SAVEPOINT mine'];
         yield 'a rollback to with something after its name' => ['ROLLBACK TO SAVEPOINT mine AND MORE'];
-        yield 'a rollback to after something else' => ['/* x */ ROLLBACK TO SAVEPOINT mine'];
+        yield 'a rollback to after something else' => ['SET x; ROLLBACK TO SAVEPOINT mine'];
     }
 
     /**
@@ -87,7 +87,7 @@ final class WhatTheLogReadsOfSqlAsWrittenTest extends TestCase
     #[\PHPUnit\Framework\Attributes\DataProvider('reads')]
     public function testOnlyAStatementThatBeginsWithAReadIsOne(string $sql, bool $reads): void
     {
-        self::assertSame($reads, StatementLog::onlyReads($sql));
+        self::assertSame($reads, (new StatementLog())->onlyReads($sql));
     }
 
     public function testADeleteInLowerCaseIsLookedAfter(): void

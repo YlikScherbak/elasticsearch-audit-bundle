@@ -176,7 +176,7 @@ abstract class DoctrineTestCase extends TestCase
         $this->statements = new StatementLog($letsGo);
 
         $middlewares = $this->ormConfig->getMiddlewares();
-        $this->ormConfig->setMiddlewares([...$middlewares, ...$this->middlewaresOfTheTest(), new ObservingMiddleware($this->statements)]);
+        $this->ormConfig->setMiddlewares([...$middlewares, ...$this->middlewaresOfTheTest(), new ObservingMiddleware($this->statements), ...$this->middlewaresAroundTheObserver()]);
 
         $this->connection = DriverManager::getConnection(TestConnection::params(), $this->ormConfig);
         $this->ormConfig->setMiddlewares($middlewares);
@@ -198,6 +198,17 @@ abstract class DoctrineTestCase extends TestCase
      * @return list<\Doctrine\DBAL\Driver\Middleware>
      */
     protected function middlewaresOfTheTest(): array
+    {
+        return [];
+    }
+
+    /**
+     * What wraps the observer from outside: a middleware of the application's that the
+     * statements pass through before the observer sees them -- one that rewrites them, say.
+     *
+     * @return list<\Doctrine\DBAL\Driver\Middleware>
+     */
+    protected function middlewaresAroundTheObserver(): array
     {
         return [];
     }

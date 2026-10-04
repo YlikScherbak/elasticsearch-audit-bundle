@@ -108,7 +108,7 @@ final class EntityRowRuns
                 continue;
             }
 
-            $table = StatementShape::read($log->statement($fact['at'])['sql'] ?? '')?->table;
+            $table = StatementShape::read($log->statement($fact['at'])['read'] ?? '')?->table;
 
             if ($facts !== null && $open !== null && $table !== null && self::continues($log, $open, $fact, $table)) {
                 $facts[] = $index;
@@ -337,7 +337,7 @@ final class EntityRowRuns
 
         foreach ($creation['at'] as $at) {
             $statement = $log->statement($at);
-            $shape = StatementShape::read($statement['sql'] ?? '');
+            $shape = StatementShape::read($statement['read'] ?? '');
 
             foreach ($shape === null ? [] : $shape->assigned as $column => $parameter) {
                 $inserted[$column] = $parameter === null ? true : ($statement['params'][$parameter] ?? null);
@@ -345,7 +345,7 @@ final class EntityRowRuns
         }
 
         foreach ($update['at'] as $at) {
-            $shape = StatementShape::read($log->statement($at)['sql'] ?? '');
+            $shape = StatementShape::read($log->statement($at)['read'] ?? '');
 
             if ($shape === null || $shape->assigned === []) {
                 return false;

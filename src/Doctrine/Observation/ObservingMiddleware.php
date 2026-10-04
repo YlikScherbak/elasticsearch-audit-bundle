@@ -51,6 +51,7 @@ final class ObservingMiddleware implements Middleware
                 array $params,
             ): DriverConnection {
                 $connection = parent::connect($params);
+                $this->log->speaks(ObservingMiddleware::dialectOf($this, $connection));
 
                 if (ObservingMiddleware::onDbal3()) {
                     return new Dbal3\ObservedConnection($connection, $this->log);
@@ -69,6 +70,23 @@ final class ObservingMiddleware implements Middleware
      * signature the adapter has to match that differs, and the same answer decides whether
      * a nested flush can be told apart on the wire.
      */
+    /**
+     * The dialect the connection's statements are written in, told by its platform: DBAL 4
+     * asks the server's version of the connection itself -- a driver attribute, no statement --
+     * and DBAL 3 needs none. A platform that cannot be told reads by the rules all share.
+     */
+    public static function dialectOf(Driver $driver, DriverConnection $connection): SqlDialect
+    {
+        try {
+            /** @phpstan-ignore arguments.count (DBAL 3's takes no argument, DBAL 4's the version provider) */
+            $platform = self::onDbal3() ? $driver->getDatabasePlatform() : $driver->getDatabasePlatform($connection);
+        } catch (\Throwable) {
+            return SqlDialect::Other;
+        }
+
+        return SqlDialect::ofPlatform($platform);
+    }
+
     public static function onDbal3(): bool
     {
         return (string) (new \ReflectionMethod(DriverConnection::class, 'commit'))->getReturnType() !== 'void';

@@ -64,7 +64,7 @@ final class StatementLog
     public const VOID = 'void';
     public const COMMITTED = 'committed';
 
-    /** @var array<int, array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>, key?: int|string}> by sequence number */
+    /** @var array<int, array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>, key?: int|string}> by sequence number */
     private array $statements = [];
 
     /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, open: bool, committed: bool, dead: bool}> by identity, in the order they were opened */
@@ -107,12 +107,15 @@ final class StatementLog
     /**
      * The entry of the last statement not kept, which the next one of its frame shares.
      *
-     * @var array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool}|null
+     * @var array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool}|null
      */
     private ?array $unkept = null;
 
     /** @var array<string, array<string, array{label: string, flush: int, columns: list<string>, keys: array<string, true>, going: array<string, true>, linkedBy: array{table: string, columns: list<string>}|null, read: string}>> by table */
     private array $watches = [];
+
+    /** How the connection's statements are written: the rules their comments are taken out by ({@see ReadableSql}). */
+    private SqlDialect $dialect = SqlDialect::Other;
 
     /** @var array<int, true> the statements after which a flush began, by sequence number */
     private array $flushesStartedAfter = [];
@@ -126,6 +129,12 @@ final class StatementLog
      */
     public function __construct(private readonly bool $letsGo = true)
     {
+    }
+
+    /** The connection's dialect, told when it connects ({@see ObservingMiddleware::dialectOf()}). */
+    public function speaks(SqlDialect $dialect): void
+    {
+        $this->dialect = $dialect;
     }
 
     /**
@@ -245,19 +254,23 @@ final class StatementLog
      */
     public function executed(string $sql, array $params, int|string|null $affected, bool $failed = false): ?int
     {
-        if (preg_match('/^\s*SAVEPOINT\s+(\S+)\s*$/i', $sql, $m) === 1) {
+        // What is read is the statement without its comments -- a query tagger's, before or
+        // after it. What is kept is the statement as it ran: the copy is never its text.
+        $read = ReadableSql::of($sql, $this->dialect)->text;
+
+        if (preg_match('/^\s*SAVEPOINT\s+(\S+)\s*$/i', $read ?? '', $m) === 1) {
             $this->open($m[1]);
 
             return null;
         }
 
-        if (preg_match('/^\s*RELEASE\s+SAVEPOINT\s+(\S+)\s*$/i', $sql, $m) === 1) {
+        if (preg_match('/^\s*RELEASE\s+SAVEPOINT\s+(\S+)\s*$/i', $read ?? '', $m) === 1) {
             $this->release($m[1]);
 
             return null;
         }
 
-        if (preg_match('/^\s*ROLLBACK\s+TO\s+SAVEPOINT\s+(\S+)\s*$/i', $sql, $m) === 1) {
+        if (preg_match('/^\s*ROLLBACK\s+TO\s+SAVEPOINT\s+(\S+)\s*$/i', $read ?? '', $m) === 1) {
             $this->rollBackTo($m[1]);
 
             return null;
@@ -273,13 +286,13 @@ final class StatementLog
         // owner's only with nothing standing between. One entry, shared by every such statement
         // of a frame that runs back to back, until a rollback marks it.
         if ($this->keeps !== null) {
-            $shape = StatementShape::read($sql);
+            $shape = $read === null ? null : StatementShape::read($read);
 
             if ($shape !== null && !($this->keeps)($shape->table)) {
                 $frame = $this->open === [] ? -1 : $this->open[\count($this->open) - 1];
 
                 if ($this->unkept === null || $this->unkept['frame'] !== $frame || $this->unkept['failed'] !== $failed) {
-                    $this->unkept = ['sql' => '', 'params' => [], 'affected' => null, 'failed' => $failed, 'frame' => $frame, 'void' => false];
+                    $this->unkept = ['sql' => '', 'read' => '', 'params' => [], 'affected' => null, 'failed' => $failed, 'frame' => $frame, 'void' => false];
                 }
 
                 $this->statements[++$this->sequence] = $this->unkept;
@@ -288,12 +301,13 @@ final class StatementLog
             }
         }
 
-        if (!$failed && (int) $affected > 0) {
-            $this->aJoinRowWritten($sql, $params);
+        if ($read !== null && !$failed && (int) $affected > 0) {
+            $this->aJoinRowWritten($read, $params);
         }
 
         $this->statements[++$this->sequence] = [
             'sql' => $sql,
+            'read' => $read,
             'params' => $params,
             'affected' => $affected,
             'failed' => $failed,
@@ -377,11 +391,13 @@ final class StatementLog
      */
     public function toObserveAfter(string $sql, array $params, int|string|null $affected): array
     {
-        if ($this->watches === [] || (int) $affected === 0 || preg_match('/^\s*DELETE\b/i', $sql) !== 1) {
+        $read = ReadableSql::of($sql, $this->dialect)->text;
+
+        if ($read === null || $this->watches === [] || (int) $affected === 0 || preg_match('/^\s*DELETE\b/i', $read) !== 1) {
             return [];
         }
 
-        $shape = StatementShape::read($sql);
+        $shape = StatementShape::read($read);
 
         if ($shape === null || !$shape->exact || !isset($this->watches[$shape->table])) {
             return [];
@@ -499,10 +515,14 @@ final class StatementLog
      * A read changes nothing a history could be about, and a batch import runs a great many
      * of them inside the transaction the log has to hold until it ends. A statement this
      * cannot tell about -- a CTE that writes starts with WITH -- is kept.
+     *
+     * Told by the statement without its comments. One whose comments cannot be taken out
+     * is told as written, and so a read only when nothing stands before its first word: a
+     * comment the server executes, put before it, could be anything.
      */
-    public static function onlyReads(string $sql): bool
+    public function onlyReads(string $sql): bool
     {
-        return preg_match('/^\s*(SELECT|SHOW|PRAGMA|EXPLAIN)\b/i', $sql) === 1;
+        return preg_match('/^\s*(SELECT|SHOW|PRAGMA|EXPLAIN)\b/i', ReadableSql::of($sql, $this->dialect)->text ?? $sql) === 1;
     }
 
     /**
@@ -621,7 +641,7 @@ final class StatementLog
     }
 
     /**
-     * @return array{sql: string, params: array<array-key, mixed>, affected: int|string|null, failed: bool, key: int|string|null}|null
+     * @return array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|string|null, failed: bool, key: int|string|null}|null
      */
     public function statement(int $statement): ?array
     {
@@ -630,6 +650,7 @@ final class StatementLog
         // One not kept has a place and a fate, and no text to read.
         return $entry === null || $entry['sql'] === '' ? null : [
             'sql' => $entry['sql'],
+            'read' => $entry['read'],
             'params' => $entry['params'],
             'affected' => $entry['affected'],
             'failed' => $entry['failed'],
@@ -652,7 +673,7 @@ final class StatementLog
     {
         $last = $this->statements[$this->sequence] ?? null;
 
-        if ($last === null || $last['failed'] || isset($last['key']) || preg_match('/^\s*INSERT\b/i', $last['sql']) !== 1) {
+        if ($last === null || $last['failed'] || isset($last['key']) || preg_match('/^\s*INSERT\b/i', $last['read'] ?? '') !== 1) {
             return;
         }
 

@@ -277,7 +277,7 @@ final class StatementLogTest extends TestCase
         self::assertNotNull($failed);
         self::assertSame([StatementLog::COMMITTED, null], [$log->fate($ran), $log->ownerOf($ran)]);
         self::assertSame(StatementLog::VOID, $log->fate($failed));
-        self::assertSame(['sql' => 'UPDATE Article SET title = ? WHERE id = ?', 'params' => [null, 1], 'affected' => null, 'failed' => true, 'key' => null], $log->statement($failed));
+        self::assertSame(['sql' => 'UPDATE Article SET title = ? WHERE id = ?', 'read' => 'UPDATE Article SET title = ? WHERE id = ?', 'params' => [null, 1], 'affected' => null, 'failed' => true, 'key' => null], $log->statement($failed));
     }
 
     public function testWhatIsLetGoOfDoesNotComeBackAndTheLogDoesNotGrow(): void
