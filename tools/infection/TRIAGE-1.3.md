@@ -423,10 +423,57 @@ leading and a trailing one; or document the order and have `audit:check` say so.
 middleware and the test-case hook are kept aside (scratchpad `commented-sql/`), not committed: a
 test now would pin the defect.
 
-### Not triaged when the work stopped (2026-10-03)
+### The last 193: HistoryReplay, RowBinding, LinkRuns, LinkFacts, EntityRowRuns, RowIdentity, ChangeSetBuilder (2026-10-04)
 
-LinkRuns 16, LinkFacts 21, HistoryReplay ~100, RowBinding 34, RowIdentity 3, EntityRowRuns ~20,
-ChangeSetBuilder 5 — 193 ids in all, none probed against today's tests.
+Every one against the whole Doctrine suite as it stands: 4 red (HistoryReplay `95d5a713` 463,
+`1d9ea283` 967, `337e810f` 1149, `fb088d73` 1299 — closed by the tests of this triage), 189 not.
+Tier (b) had run all of them against 2,000 seeds of the model with no kill. Then:
+
+- **Test gaps, closed**: HistoryReplay 193 `c1354d7d` and 194 `1c0af2ce`, `f41191f6` — a write that
+  cannot be read is doubt in lower case, with its table quoted, and where it cannot name the table
+  (`ShadowHistoryTest::testAWriteThatCannotBeReadIsDoubtWhereItWritesAWatchedTable`); RowBinding 140,
+  149, 185, 186, 211 (×2), 215 — an UPDATE of an owner's column or of a join table is no emptying and
+  no target taken out, an emptying by a to-one declared after others, an inexact WHERE on a join
+  table (`RowBindingTest`, six cases).
+- **For the reviewers**: HistoryReplay 193 `07fb9e35` (the caret) — the mutant is the better
+  behaviour: it makes `/* … */ UPDATE watched …` doubt instead of silence; see "SQL with comments".
+  RowBinding 250–256 (`f35a22f4`, `1aa8bb81`, `e120f442`, `74a9e982`, `89fd2f81`): `inHierarchy()`
+  changes nothing while `among()` is given every mapping — the root is always among them, and
+  `among()` has no other caller: a seam and a rule that can go. ChangeSetBuilder 123–124 (`1dbd887d`,
+  `883e36c2`, `43270aee`, `5d51d1ff`): the change-set arm of `withAlwaysRecorded()` is unreachable —
+  its one caller with a change set, `build()`, hands it a declaration without always-recorded
+  fields; the `$changeSet` parameter is dead.
+- **Deliberately not tested**: the reason a doubt or a binding carries, read only by the tests'
+  shadow — HistoryReplay 198 (`373d055b`, `00deabfb`, `53b10853`), RowBinding 89 (3) and 219 (9).
+- **Equivalent**: defaults every caller passes (HistoryReplay 158 `f5a70d18`, 159 `042324c2`, 168
+  `af339386`); `$this->log?->` where facts are made only inside `replay()`, after the log is set
+  (336 `44f91824`, 394 `36b00d72`, 403 `601cc4dc`, 525 `f613cd77`, 1208 `5439188e`); keys of lists
+  read by `foreach` or made a list again (323 `66fc8acf`, 365 `c8c70b7c`, 378 `a75b2d0f`, 463
+  `4283701e`, 603 `b574ac19`); casts the comparison makes anyway (241 `f8b9c813`, 511 `b5511170`,
+  1228 `e32d3298`); maps read by `isset()`/`array_keys()` (1029 `bacb9707`, 1267 `e9540ccc`, LinkRuns
+  122 `36300b66`); caches (884 `7ce508f8`, 1157 `118efc65`, 729 `5f262861`); RowBinding 122
+  `78edd2b8`, 159 `3a9bfaed`, 179 `c3ce6a84`, 237 `f318dfdb` (a version field without versioning, a
+  referenced column or a join column without its name — the mapping never has one); RowBinding 207
+  `2419511a`, `3333c99a` (both keys picked is what makes the columns the same); ChangeSetBuilder 123
+  `c9ba90cc` (the context holds every always-recorded column the row has).
+- **Not reached**: HistoryReplay 417 `f3405c15`, 468 `d56b625a` (an exception for a fact asked of a
+  place never filled, and for a manager gone — a caller's mistake); 1250 `edc2125b`, 753 `824f44e8`,
+  1004 `313bf209` beyond what the database cells below say (a count in a string is a driver's for
+  counts past an integer); 1473 (3) — a key that is a backed enum, which no fixture has.
+- **Killed outside coverage / not**: HistoryReplay 729 `052a74b9`, 745 `9ab1e512`, 755 `9537630d`,
+  `5766f978`, 756 `97559c8c`, 790 `aad5f8b4` — what an UPDATE that reached nothing means where the
+  database counts the rows it changed rather than the ones it found: MySQL. See the cells below.
+- **Not yet told apart** (the rest, about 110): HistoryReplay 187, 232, 252, 287, 289, 312, 393 (2),
+  394 `c986ae11`, 447 (3), 496, 525 `ae14d94a`, 544, 603 `9bd7d2fa`, 611, 626, 638, 654 (2), 709, 813, 832, 839, 858, 876, 885, 966, 972 (2), 1031, 1066, 1067,
+  1071, 1073, 1097, 1100, 1142, 1146 (3), 1221 (2), 1257, 1264, 1268, 1304, 1336, 1367, 1449, 1462,
+  1463; RowBinding 148 `de305c8d`, 207 `7838e574`, `a0909469`, 242 `34b1697a`; LinkRuns 70, 90, 136
+  (2), 143, 151, 152, 169, 189, 196, 201 (3), 212, 213; LinkFacts 75, 126 (3), 170 (2), 236, 288, 291
+  (2), 299 (2), 385, 390, 392 (5), 399, 407; EntityRowRuns 248 (2), 314 (3), 397, 424 (2), 437, 438,
+  443, 485, 493, 530 (2); RowIdentity 43, 48, 52. Among them, worth a fixture each: an `old`/`new`
+  flag handed to a representer (LinkRuns 151–152, EntityRowRuns 437–438 — whether the target is shown
+  as it stood once or each time), the order of a list of mixed numeric and string keys (LinkRuns 201),
+  and RowIdentity's derived and composite keys, which the new `MemberAccount` fixtures reach but did
+  not tell apart.
 
 ### Code defects found (continued)
 

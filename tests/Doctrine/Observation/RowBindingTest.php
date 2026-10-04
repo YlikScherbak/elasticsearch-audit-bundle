@@ -13,6 +13,7 @@ use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\CrateItem;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Vehicle;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\VersionedOrder;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Yard;
 use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
@@ -93,5 +94,15 @@ final class RowBindingTest extends DoctrineTestCase
         yield 'an inexact WHERE' => ['DELETE FROM CrateItem WHERE id = ? OR id = ?', [1 => 5, 2 => 6], ['kind' => 'unbound']];
         yield 'a table in another schema is another table' => ['UPDATE audit.CrateItem SET quantity = ? WHERE id = ?', [1 => 2, 2 => 5], ['kind' => 'unbound']];
         yield 'a table nothing maps' => ['DELETE FROM probe_row WHERE id = ?', [1 => 1], ['kind' => 'unbound']];
+        // Only a DELETE by the one column pointing at an owner empties its collection; the owner
+        // is whichever to-one that column is, not the first one declared.
+        yield 'an update by the owner\'s column is no emptying' => ['UPDATE CrateItem SET quantity = ? WHERE crate_id = ?', [1 => 2, 2 => 'C-1'], ['kind' => 'unbound']];
+        yield 'an emptying by a to-one declared after others' => ['DELETE FROM PackingCase WHERE yard_id = ?', [1 => 3], ['kind' => 'rows of owner', 'class' => Yard::class, 'key' => ['id' => 3], 'association' => 'yard']];
+        // A join table is written by INSERT and DELETE alone: an UPDATE of it is the
+        // application's, and neither an emptying nor a target taken out.
+        yield 'a join table updated by its owner\'s column' => ['UPDATE catalogue_item SET item_id = ? WHERE catalogue_code = ?', [1 => 2, 2 => 'K-1'], ['kind' => 'unbound']];
+        yield 'a join table updated by its target\'s column' => ['UPDATE catalogue_item SET catalogue_code = ? WHERE item_id = ?', [1 => 'K-2', 2 => 2], ['kind' => 'unbound']];
+        yield 'an inexact WHERE on a join table' => ['DELETE FROM catalogue_item WHERE catalogue_code = ? OR item_id = ?', [1 => 'K-1', 2 => 2], ['kind' => 'unbound']];
+        yield 'a join row inserted with its owner alone' => ['INSERT INTO catalogue_item (catalogue_code) VALUES (?)', [1 => 'K-1'], ['kind' => 'unbound']];
     }
 }

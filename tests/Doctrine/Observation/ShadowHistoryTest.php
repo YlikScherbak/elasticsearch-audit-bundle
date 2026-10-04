@@ -219,6 +219,30 @@ final class ShadowHistoryTest extends DoctrineTestCase
      *
      * @return array{facts: list<string>, unsure: list<string>}
      */
+    /** @return iterable<string, array{string, list<string>}> */
+    public static function writesThatCannotBeRead(): iterable
+    {
+        // An alias is not a shape the persisters write: the statement is not read, and it
+        // writes a table history is written about, however it spells the statement or the name.
+        yield 'in lower case' => ['update CrateItem c set quantity = 2 where c.id = 2', ['not read: update CrateItem c set quantity = 2 where c.id = 2']];
+        yield 'with the table quoted' => ['UPDATE `CrateItem` c SET quantity = 2 WHERE c.id = 2', ['not read: UPDATE `CrateItem` c SET quantity = 2 WHERE c.id = 2']];
+        yield 'of a table nothing watched' => ['update Tag t set label = \'x\' where t.id = 2', []];
+        yield 'of a table it cannot name' => ['UPDATE (SELECT id FROM CrateItem) x SET quantity = 2', ['not read: UPDATE (SELECT id FROM CrateItem) x SET quantity = 2']];
+    }
+
+    /**
+     * @param list<string> $unsure
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('writesThatCannotBeRead')]
+    public function testAWriteThatCannotBeReadIsDoubtWhereItWritesAWatchedTable(string $sql, array $unsure): void
+    {
+        $log = $this->begun();
+        $log->executed($sql, [], 1);
+        $log->committed();
+
+        self::assertSame(['facts' => [], 'unsure' => $unsure], $this->replayed($log));
+    }
+
     private function replayed(StatementLog $log, array $rows = self::ROWS): array
     {
         $replayed = ShadowHistory::fromWhatWasRemembered($this->em, $rows)->replay($log, 0);
