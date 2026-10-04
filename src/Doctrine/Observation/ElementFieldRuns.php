@@ -55,11 +55,11 @@ final class ElementFieldRuns
      *                      up by reference when the identity map does not hold it, and says
      *                      what it cannot write. Counting, for a warning, does neither.
      *
-     * @param (\Closure(int): bool)|null $duringAFlush whether the statement at a position ran while a flush of the listener's did
+     * @param \Closure(int): bool $duringAFlush whether the statement at a position ran while a flush of the listener's did
      *
      * @return list<array{owner: object|null, class: class-string, key: mixed, flush: int, changes: array<string, Change>, since: int, at: int, context: array<string, mixed>}>
      */
-    public function of(EntityManagerInterface $em, HistoryReplay $replay, int $readThrough, bool $consume = false, ?\Closure $duringAFlush = null): array
+    public function of(EntityManagerInterface $em, HistoryReplay $replay, int $readThrough, bool $consume, \Closure $duringAFlush): array
     {
         $builder = new ChangeSetBuilder($em, $this->comparator);
         $runs = [];
@@ -78,7 +78,7 @@ final class ElementFieldRuns
 
             if ($fact['flush'] === null) {
                 if ($consume) {
-                    NobodysStatement::say($this->logger, $duringAFlush !== null && $duringAFlush($fact['at']), $element['field'] ?? 'its place in '.$element['collection'], $element['class'], array_keys($element['key']));
+                    NobodysStatement::say($this->logger, $duringAFlush($fact['at']), $element['field'] ?? 'its place in '.$element['collection'], $element['class'], array_keys($element['key']));
                 }
 
                 continue;
@@ -149,7 +149,7 @@ final class ElementFieldRuns
         $read = [];
 
         foreach ($runs as $at => $run) {
-            $read[] = ['owner' => $run['owner'], 'class' => $run['class'], 'key' => $run['key'], 'flush' => $run['flush'], 'changes' => $changes[$at] ?? [], 'since' => $ranFrom[$at] ?? 0, 'at' => $ranTo[$at] ?? 0, 'context' => $contexts[$at] ?? []];
+            $read[] = ['owner' => $run['owner'], 'class' => $run['class'], 'key' => $run['key'], 'flush' => $run['flush'], 'changes' => $changes[$at], 'since' => $ranFrom[$at], 'at' => $ranTo[$at], 'context' => $contexts[$at]];
         }
 
         // What the log could not be followed through, said once for the reading and by class

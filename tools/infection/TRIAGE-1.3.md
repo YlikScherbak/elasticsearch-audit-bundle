@@ -770,6 +770,25 @@ superclass's mapping was the first to fit. Now a mapped superclass owns no rows
 | `dfde30e5` | 184 | a join table's name `\|\|` empty | **equivalent**: Doctrine always names it |
 | `13949965` | 265 | `return false` in the catch | **equivalent**: the method returns false right after |
 
+### LookRightAfter (15), NobodysStatement (2), ElementFieldRuns (13)
+
+No test made the look fail, and none had a key that is not a number: the whole road of a refused
+look was untested, on every database.
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `7cff9aba`, `4103b9cf`, `ba57a98f`, `b2a992f2`, `b317c982`, `b1fcc099`, `e34928dd`, `f42f4bb6`, `c3fda286`, `b519fdca` | LookRightAfter 73, 92, 97, 98 | a refused look inside a transaction not rolled back to its savepoint, or the statements that do it changed | test gap — `ALookThatFailsTest` (the look refused by the database below the observer: exactly `SAVEPOINT`, `ROLLBACK TO SAVEPOINT`, `RELEASE SAVEPOINT`, the flush commits, the doubt is said); green on all four database cells |
+| `ed6ab06d` | LookRightAfter 68 | a value that is no number bound as one, and a number as text | test gap — `WhatALookBindsTest`: a key `'abc'` bound as a number is 0, and finds the holder of `'0'`. The other half, a number bound as text, is **equivalent** on the three databases: each compares `'5'` with an integer column as 5 |
+| `ec4d37f8` | LookRightAfter 41 | the return for a statement the log did not keep | **equivalent** by an invariant: the log keeps no position only for a savepoint's statements (never a `DELETE`) and for a table no history is about, and a watched table is one — the target of a watched link is a history table (`WatchedRows::isAHistoryTable()`, `linksTo()`), and the manager that watches has flushed, so its tables are kept. Without the return the loop has nothing to ask |
+| `a9a2b2de`, `a36c96f7` | LookRightAfter 71 | `array_map('array_values')`, `array_values()` taken away | **equivalent**: `fetchAllNumeric()` gives a list of lists |
+| `33124d94` | LookRightAfter 93 | a refused look outside a transaction rolled back to a savepoint all the same | **equivalent**: outside a transaction no savepoint was taken, the `ROLLBACK TO` and `RELEASE` fail on every database and are caught, and in autocommit a failed statement leaves nothing behind. Reached only by a watch that outlived its flush |
+| `2d8f3cd4`, `a01458ce` | NobodysStatement 35, 37 | the warning said while a flush ran dropped; both warnings said | test gap — `NobodysStatementTest`, of the rule alone: the statement no flush claimed while one ran is a hole no flush test reaches while the listener works, which is why it is a warning |
+| `4954b786` | ElementFieldRuns 97 | `continue` → `break` past a removed owner's lines | test gap — `WhatAnOwnersRemovalLeavesOfTheNextFlushTest`: a line of another owner deleted after the removed one's lost its record |
+| `0ebd03d1`, `23aa8e10`, `abb4db75` | ElementFieldRuns 62, 81 | `$consume`'s default; `$duringAFlush` tested against null | **dead code, taken away**: the one caller passes both. Both are required now, and the mutants are gone with them |
+| `e8c95e51`, `53bbe34b`, `727edcba`, `c8d6bfd4`, `33d6122c` | ElementFieldRuns 152 | the `?? 0` of a run's positions | **dead code, taken away**: every run has its changes, its positions and its context, set where the run is made. `33d6122c` (`'at' => 0`) also asked whether a run's last position is observable: it decides only the context, when the run joins an owner's record and ran after it, and within one flush nothing changes the owner's row after the record's last statement — the row the line saw is the record's; and a link run that joins the line's record runs after it (Doctrine writes join rows after every entity's UPDATE), so it gives its context either way. Ordering reads `since`, which is set |
+| `ed67afe2` | ElementFieldRuns 118 | `MEMBER \|\| field === null` → `&&` | **equivalent** by construction: a member's fact is the only one with no field (`HistoryReplay::member()`, `FIELD` always names one). The second half stays for the type |
+| `572817c3`, `caeda453`, `a2b64dbb` | ElementFieldRuns 134 | the owner's name in a string: operands swapped or the separator dropped | goes with **H** (nested keys instead of strings). Until then: swapping is equivalent, and dropping the `\|` collides only for two owner classes whose names differ by a trailing digit, each with a key that makes up the difference |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
