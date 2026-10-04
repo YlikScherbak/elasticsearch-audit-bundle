@@ -476,6 +476,35 @@ Tier (b) had run all of them against 2,000 seeds of the model with no kill. Then
   753, 1004, 1250 — not yet told apart. On PostgreSQL (DBAL 4) none of the ten is red: it counts
   the rows it found, as SQLite does. The gate runs SQLite only; the three are in the matrix's MySQL
   cells, which CI runs — whether the gate should count them is for the reviewers.
+
+  **Since (2026-10-04, B of the reviewers' plan):** the rule is the bundle's, not MySQL's, and now
+  runs where the gate does. `HistoryReplay` takes what an UPDATE's count is of as an optional
+  argument (null, the platform's, as before); `WhatAnUpdatesCountMeansTest` replays the same
+  statements counted both ways on SQLite, and pins separately which platform counts which
+  (MySQL changed, PostgreSQL and SQLite found). The reviewers' other way — a test middleware
+  forging the count of one UPDATE — was not taken: the count alone does not reach the rule, which
+  asks the platform, and a platform cannot be forged under a live SQLite connection. MySQL's cells
+  stay the proof on the real thing. Recorded "killed on MySQL" (CI 37184194983's matrix, the three
+  tests above). On SQLite now, by hand on today's code (the targeted Infection run was stopped:
+  with one test, HistoryReplay's ~1,300 mutants spend an hour in time-outs): the gone row's return
+  removed (`9ab1e512`), the condition negated (`9537630d`), the found-rows return removed, the
+  rule never or always applied, a missing count read as none — six of six red. `aad5f8b4`'s line
+  is gone with the defect below.
+
+  **Code defect found by it (MEDIUM, MySQL only, in 1.3 from its start, no release had it):** the
+  rule believed MySQL's "no row changed" only for a row's own audited fields. A line of a
+  collection is no audited row, so its UPDATE was read as any other: a crate's line that **another
+  process deleted**, then changed through Doctrine, came out as a change of `items.N.quantity` — a
+  line that was not there, in the crate's history. PostgreSQL and SQLite were right, by their
+  count. Measured on MySQL (`AnUpdateOfALineThatWasGoneTest::testALineAnotherProcessDeletedChangesNothingEither`,
+  red before, green after; a line the application deleted on the same connection was right
+  already — the log hears that DELETE). Fixed by believing MySQL's count as it is said: none
+  changed means the row is as it was, line or audited row, whatever is remembered of it. The rule
+  it replaces read the statement "as any other" where what is remembered agreed nothing moved —
+  which wrote an expression's column as unknown in a row the database had just said was unchanged.
+  A row nothing remembered, counted none, stays doubt on MySQL (there may have been one) and
+  nothing on the engines that count what they found
+  (`WhatAnUpdatesCountMeansTest::testAnUpdateThatCountedNoneOfARowNothingRememberedIsDoubtOnlyWhereNoneMayBeARowThatWasThere`).
 - **Not yet told apart** (the rest, about 110): HistoryReplay 187, 232, 252, 287, 289, 312, 393 (2),
   394 `c986ae11`, 447 (3), 496, 525 `ae14d94a`, 544, 603 `9bd7d2fa`, 611, 626, 638, 654 (2), 709, 813, 832, 839, 858, 876, 885, 966, 972 (2), 1031, 1066, 1067,
   1071, 1073, 1097, 1100, 1142, 1146 (3), 1221 (2), 1257, 1264, 1268, 1304, 1336, 1367, 1449, 1462,

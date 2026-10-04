@@ -146,12 +146,16 @@ final class HistoryReplay
     private array $doubtsAt = [];
 
     /**
-     * @param array<string, array<string, array<string, mixed>>> $rows    what the rows held, by root class and key
-     * @param array<string, array<string, int>>                 $takenAt where the log stood when each was taken: a row
-     *                                                                   taken after a statement ran is no account of it
+     * @param array<string, array<string, array<string, mixed>>> $rows              what the rows held, by root class and key
+     * @param array<string, array<string, int>>                 $takenAt          where the log stood when each was taken: a row
+     *                                                                            taken after a statement ran is no account of it
+     * @param bool|null                                         $countsChangedRows whether an UPDATE's count is of the rows it changed
+     *                                                                            rather than those it found; null, by the platform
+     *                                                                            ({@see countsTheRowsItChanged()})
      */
-    public function __construct(EntityManagerInterface $em, array $rows, array $takenAt = [], ?AuditMetadataFactory $audited = null, ?WatchedRows $watched = null)
+    public function __construct(EntityManagerInterface $em, array $rows, array $takenAt = [], ?AuditMetadataFactory $audited = null, ?WatchedRows $watched = null, ?bool $countsChangedRows = null)
     {
+        $this->countsChanged = $countsChangedRows;
         $this->em = \WeakReference::create($em);
         $this->rows = $rows;
         $this->takenAt = $takenAt;
@@ -752,8 +756,8 @@ final class HistoryReplay
         // An UPDATE the database says reached no row: none was there, whatever is remembered of
         // it -- ORM 2.19 writes the changes of an entity it has just removed, and the row it is
         // remembered by at the next preFlush is Doctrine's, not the database's. MySQL counts the
-        // rows it changed instead, and there none may be a row that took no new value: told apart
-        // below. A count the driver did not give says nothing.
+        // rows it changed instead, and there none is no row that took a new value: below. A count
+        // the driver did not give says nothing.
         $reachedNothing = $affected !== null && (int) $affected === 0;
 
         if ($reachedNothing && !$this->countsTheRowsItChanged()) {
@@ -767,6 +771,19 @@ final class HistoryReplay
         }
 
         $before = $this->rows[$root][$id];
+
+        // On MySQL: the database says no row took a new value -- the row was not there, or held
+        // the values already. Either way the row is as it was, whatever is remembered of it, and
+        // the database is believed: the statement ran and changed nothing. For a line of a
+        // collection too, which is no audited row of its own -- a line another process deleted
+        // was read as changed, in its owner's history, when only an audited row's own fields were
+        // asked.
+        if ($reachedNothing) {
+            $this->rowFact(StatementShape::UPDATE, $metadata, $before, []);
+
+            return;
+        }
+
         $after = $before;
 
         foreach ($shape->assigned as $column => $parameter) {
@@ -784,17 +801,6 @@ final class HistoryReplay
             if (!self::same($was[$field] ?? null, $value)) {
                 $changed[$field] = ['old' => $was[$field] ?? null, 'new' => $value];
             }
-        }
-
-        // On MySQL: the database says no row took a new value where what is remembered says one
-        // did -- the row that was not there, or one whose value the column held already. The
-        // database is believed: the statement ran and said nothing, and the row is as it was. Where
-        // what is remembered agrees that nothing moved, the statement is read as any other, as on
-        // every other engine.
-        if ($reachedNothing && $changed !== []) {
-            $this->rowFact(StatementShape::UPDATE, $metadata, $before, []);
-
-            return;
         }
 
         $this->rows[$root][$id] = $after;

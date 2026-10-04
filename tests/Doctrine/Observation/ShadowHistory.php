@@ -66,17 +66,23 @@ final class ShadowHistory
      * @param array<string, array<string, array<string, mixed>>> $rows
      * @param array<string, array<string, int>>                 $takenAt
      */
-    public static function fromWhatWasRemembered(EntityManagerInterface $em, array $rows, array $takenAt = []): self
+    public static function fromWhatWasRemembered(EntityManagerInterface $em, array $rows, array $takenAt = [], ?bool $countsChangedRows = null): self
     {
-        return new self($em, $rows, $takenAt);
+        $shadow = new self($em, $rows, $takenAt);
+        $shadow->countsChangedRows = $countsChangedRows;
+
+        return $shadow;
     }
+
+    /** Whether an UPDATE's count is of the rows it changed (MySQL's) -- null, by the platform. */
+    private ?bool $countsChangedRows = null;
 
     /**
      * @return array{facts: list<string>, unsure: list<string>, owners: list<int|null>}
      */
     public function replay(StatementLog $log, int $from): array
     {
-        $replay = new HistoryReplay($this->em, $this->rows, $this->takenAt);
+        $replay = new HistoryReplay($this->em, $this->rows, $this->takenAt, countsChangedRows: $this->countsChangedRows);
         $replay->replay($log, $from);
 
         $facts = [];
