@@ -229,7 +229,7 @@ final class RowMemory
      *
      * @return list<\Throwable>
      */
-    public function rememberTheLinksAboutToChange(EntityManagerInterface $em, int $flush = 0): array
+    public function rememberTheLinksAboutToChange(EntityManagerInterface $em, int $flush): array
     {
         $uow = $em->getUnitOfWork();
         $includes = fn (string $of, string $id): array => $this->replayed($em)->linkPositionsOf($of, $id);
@@ -391,9 +391,9 @@ final class RowMemory
      * What the rows hold now: as last settled, with everything since that the log has not
      * voided replayed over them.
      */
-    public function replayed(EntityManagerInterface $em, ?int $upTo = null): HistoryReplay
+    public function replayed(EntityManagerInterface $em): HistoryReplay
     {
-        $upTo ??= $this->log->position();
+        $upTo = $this->log->position();
 
         if ($this->current === null
             || $this->currentManager?->get() !== $em
@@ -485,7 +485,7 @@ final class RowMemory
         }
 
         $upTo = $this->log->position();
-        $replay = $this->replayed($em, $upTo);
+        $replay = $this->replayed($em);
         $this->rows = $replay->rows();
 
         foreach ($replay->goneRows() as $root => $ids) {

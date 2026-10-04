@@ -31,4 +31,10 @@ class Pouch
         $this->id = $id;
         $this->contents = $contents;
     }
+
+    /** What a {@see Satchel} pointing at it shows it as. */
+    public function getContents(): string
+    {
+        return $this->contents;
+    }
 }

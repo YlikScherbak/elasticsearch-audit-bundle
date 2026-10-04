@@ -188,9 +188,34 @@ final class RowMemoryTest extends DoctrineTestCase
         self::assertArrayHasKey($id, $this->memory->rows()[CrateItem::class] ?? [], 'what is not settled is not forgotten');
         self::assertSame([' items.'.$id.'.quantity: 1 -> 2'], array_map(static fn (string $fact): string => strstr($fact, ' items.') ?: $fact, $this->facts()));
 
+        self::assertGreaterThan(0, $this->memory->size(), 'the premise: rows held');
         self::assertTrue($this->memory->settle($this->em));
 
         self::assertSame(0, $this->memory->size(), 'settled, and nothing holds it: forgotten');
+    }
+
+    public function testWhatAReplayLetGoOfReadStillCountsAmongTheStatementsRead(): void
+    {
+        // Asked for another manager, the replay is made again and reads the same statements
+        // again: each reading counts, the ones of the replays let go of among them.
+        $x = $this->aLine();
+        $this->em->getConnection()->beginTransaction();
+        $x->quantity = 2;
+        $this->em->flush();
+        $other = new \Doctrine\ORM\EntityManager($this->em->getConnection(), $this->em->getConfiguration());
+        $read = [];
+
+        foreach ([$this->em, $other, $this->em, $other] as $manager) {
+            $before = $this->memory->statementsRead();
+            $this->memory->replayed($manager);
+            $read[] = $this->memory->statementsRead() - $before;
+        }
+
+        $this->em->getConnection()->rollBack();
+
+        $each = $this->log->position() - $this->memory->settledAt();
+        self::assertGreaterThan(0, $each, 'the premise: something to read');
+        self::assertSame([$each, $each, $each, $each], $read);
     }
 
     public function testReadingWhatTheRowsHoldInALongTransactionReadsEachStatementOnce(): void

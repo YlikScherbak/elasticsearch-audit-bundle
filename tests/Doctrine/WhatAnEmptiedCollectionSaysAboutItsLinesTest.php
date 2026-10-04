@@ -430,6 +430,58 @@ final class WhatAnEmptiedCollectionSaysAboutItsLinesTest extends DoctrineTestCas
         self::assertSame(['SELECT id, sku, quantity, crate_id FROM CrateItem WHERE crate_id = ?'], $ran, 'as rows, not as entities');
     }
 
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function whetherAFlushRanBefore(): iterable
+    {
+        yield 'the first flush the listener sees' => ['none'];
+        yield 'after another flush, settled' => ['settled'];
+        yield 'after another flush in the application\'s transaction, its replay still running' => ['in a transaction'];
+    }
+
+    /**
+     * A crate's lines read as rows before its emptying, one of them already remembered and one
+     * the application wrote itself: the one remembered keeps its account and does not end the
+     * reading, and the other is remembered -- by the replay already running too, if one is.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('whetherAFlushRanBefore')]
+    public function testACollectionNothingLoadedIsReadPastALineAlreadyRemembered(string $before): void
+    {
+        $this->em->persist($crate = new Crate('C-8'));
+        $crate->add(new CrateItem('SKU-A'));
+        $this->em->flush();
+        $this->em->getConnection()->insert('CrateItem', ['sku' => 'SKU-B', 'quantity' => 1, 'crate_id' => 'C-8', 'id' => 900801]);
+        $this->em->clear();
+        $this->unownedStatementsAreExpected = true;
+
+        if ($before === 'none') {
+            // A listener of its own, which has seen nothing yet.
+            $this->attachListener(FailurePolicy::Throw);
+        } else {
+            if ($before === 'in a transaction') {
+                $this->em->getConnection()->beginTransaction();
+            }
+
+            $this->em->persist(new Crate('C-0'));
+            $this->em->flush();
+        }
+
+        $crate = $this->em->find(Crate::class, 'C-8');
+        self::assertNotNull($crate);
+        self::assertFalse($crate->items->isInitialized(), 'the premise: nothing loaded the lines');
+        $this->gateway->documents = [];
+
+        $crate->items = new ArrayCollection();
+        $this->em->flush();
+
+        if ($before === 'in a transaction') {
+            $this->em->getConnection()->commit();
+        }
+
+        self::assertSame([['items' => ['old' => ['SKU-A', 'SKU-B'], 'new' => []]]], $this->theCollectionsChanges());
+    }
+
     public function testAnEmptyingReadAfterAStatementOfTheOuterFlushNamesWhatThatStatementWrote(): void
     {
         // The outer flush renames X; X's postUpdate starts a nested flush that empties the

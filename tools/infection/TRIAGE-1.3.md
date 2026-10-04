@@ -864,6 +864,30 @@ look was untested, on every database.
 | `c7628561` | 126 | the owner's key from its statement before its account | **equivalent**: both are the owner's key, and every reader converts it through the identifier's type |
 | `847f10f7`, `b853c891`, `3ba1c35c`, `989153b7`, `308238ac`, `3f7c786f` | 89, 106, 357, 367, 75 | `explode(…, 3)`; `true` → `false` in maps read by `isset()`; `<` → `<=` | **equivalent**: neither a class name nor a field name has `::` in it; a fact's statement is never the DELETE of its owner's row, so the two positions are never equal |
 
+### RowMemory (48)
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `66b90840`, `f2aad7b5` | 114, 115 | the rows about to be removed not remembered at preFlush | **killed on ORM 2.19** (`orm_cell_probe`, es-audit-orm219, two failures of `WhatTheListenerRemembersTest`): 2.19 takes them out of the identity map at `remove()`. On 2.20 and 3, where the mutation run is, the identity map still holds them |
+| `2ac5dbac`, `a286c2b8` | 211, 216 | `continue` → `break` past a row already remembered; `?->` → `->` on a replay not made yet | test gap — `WhatAnEmptiedCollectionSaysAboutItsLinesTest::testACollectionNothingLoadedIsReadPastALineAlreadyRemembered`: one line remembered, one the application wrote, the first flush the listener sees among the cases |
+| `1e53fdbe` | 216 | the replay running not told of a row read | **open**: the same test with a replay kept across a flush in the application's transaction did not fail on it |
+| `4a661015`, `50627fbf`, `9925a9c7`, `de255a3d`, `da21bd48`, `2db8aa28` | 589, 624, 647, 660, 667 | a row remembered of a reference Doctrine holds nothing of; `continue` → `break` past a collection; a foreign key to a row keyed by an object or by an association | test gap — `WhatARowRememberedFromDoctrineHoldsTest` (new fixture `Satchel`, pointing at the Sku-keyed `Pouch`; `Locker` → `MemberCard`): no test had a row remembered from Doctrine's memory rather than from its INSERT |
+| `a0ec5987`, `12801b50`, `076ee050`, `d803edcc` | 403, 542 | what a replay let go of read not counted; `size()` | test gap — `RowMemoryTest::testWhatAReplayLetGoOfReadStillCountsAmongTheStatementsRead`, and a size asserted before settling |
+| `d27152f3`, `4cbec281` | 251, 301 | the failures of reading the links dropped; only the first failure of reading the holders returned | test gap — `WhatTheListenerSaysOfAQuestionThatFailsTest` (the questions refused by the database: one failure said, then three) |
+| `d96a84ef` | 396 | `??=` → `=` | **dead code, taken away**: the one caller passing a position passed the log's own; `replayed()` takes none now |
+| `b5a16668`, `d63cc505` | 232 | the `$flush` default | **dead code, taken away**: the one caller passes it |
+| `5686048d` | 89 | a new `WatchedRows` before the one given | **equivalent**: it decides from the mapping alone; the one given is a shared cache |
+| `ee3ebad6` | 156 | `\|\|` → `&&` | **equivalent** by the caller: this runs only for an audited inverse collection with orphanRemoval, whose elements are always watched (`WatchedRows::decide()`), and an inverse side's `mappedBy` is always an association |
+| `164c18a1`, `cc03a315`, `eecd13fc`, `e9a28eec`, `362b9103` | 165, 185, 189, 623, 634 | guards on join columns | **equivalent**: Doctrine completes every join column with its name and referenced column, and only an owning to-one association has join columns at the mapping's top |
+| `6ca0865c`, `eca40afe` | 161, 170 | an owner keyed by two columns read by its first; the owner's key converted the other way | test gap, **not written**: no fixture has an inverse orphanRemoval collection of an owner keyed by two columns or by a type that converts. Today such an owner's lines are not read before an emptying, and it is doubt |
+| `8317afec` | 641 | `continue` → `break` after a null reference's first column | **not reached**: no fixture has a nullable foreign key of two columns in the main mapping |
+| `9ac9948f` | 673 | a derived key's own key converted the other way | **equivalent** for every fixture (a derived key over an integer, whose database value is itself); not tested over a converting type |
+| `2fc4465e`, `26ee4f4a`, `8de6bebb` | 619, 685, 671 | `\|\|` → `&&` before converting a value; `(string)` dropped | **equivalent**: DBAL's types give null for null, every field has a type, and a field name is a string |
+| `dc641cb8`, `edeee574`, `2a6860e7`, `f1e80c04`, `9a54330b`, `0c66492a`, `eb010b9f`, `17f0e5e5`, `e090bad1`… | 238, 243, 251, 336, 339, 399, 422 | `array_values()` dropped; `&&` → `\|\|` on an owner a collection always has; `true` → `false` in maps read by `isset()`; `?->` on a manager set with the replay; `replayedApart()`'s position | **equivalent**: the spread renumbers integer keys; a scheduled collection always has an owner and a field name; the manager is null only with the replay, which the line before asks about; the one caller asking `replayedApart()` for less replays the rest itself before reading |
+| `d5fa0382`, `e12d46c4` | 445 | the key and the class tested by `\|\|` | **equivalent**: at postPersist the key is there (its INSERT ran), and an object kept for a class nobody watches is held by no row |
+| `2097b891`, `f3bf97a0`, `83f6ede3` | 499–501 | the objects a DELETE left behind not let go | **equivalent** in what is recorded: such an object is passed over by `remember()`, and a row that is back has its own object from its INSERT; they are only held longer |
+| `98b60ff4` | 579 | `?->` → `->` for a row held with no object | **not reached**: a row is held with no object only when read for an emptying, which deletes it in the same flush |
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
