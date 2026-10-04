@@ -125,6 +125,9 @@ final class StatementShapeTest extends TestCase
         yield 'a key with arithmetic after it is not a key compared' => ['DELETE FROM t WHERE id = ? + 1', ['delete', 't', [], [], false]];
         yield 'a parenthesised condition is not exact' => ['DELETE FROM t WHERE (id = ? OR id = ?)', ['delete', 't', [], [], false]];
         // Written the way an application writes it, tight against its punctuation.
+        // A name of nothing in quotes is a name, and the quote that closes it closes it: SQLite
+        // takes one, where PostgreSQL and MySQL refuse it.
+        yield 'an empty quoted name' => ['UPDATE "" SET a = ? WHERE id = ?', ['update', '', ['a' => 1], ['id' => 2], true]];
         yield 'quoted names with nothing around the equals' => ['UPDATE "t" SET "a"=? WHERE "id"=?', ['update', 't', ['a' => 1], ['id' => 2], true]];
         yield 'an empty literal' => ["UPDATE t SET note = '' WHERE id = ?", ['update', 't', ['note' => null], ['id' => 1], true]];
         yield 'a literal of one escaped quote' => ["UPDATE t SET note = '''' WHERE id = ?", ['update', 't', ['note' => null], ['id' => 1], true]];

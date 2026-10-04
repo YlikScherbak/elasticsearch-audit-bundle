@@ -58,9 +58,11 @@ final class RowBinding
     public static function of(EntityManagerInterface $em, StatementShape $shape, array $params): self
     {
         // Every mapping the manager knows, the root of each hierarchy among them: a statement of
-        // a root's table is the root's, whichever of its classes comes first.
+        // a root's table is the root's, whichever of its classes comes first. Not a mapped
+        // superclass: it has no rows, and a link it declares is its entities' -- bound to it, a
+        // join row went to a class nothing writes a history of, and the link was never recorded.
         foreach ($em->getMetadataFactory()->getAllMetadata() as $metadata) {
-            if (!$metadata instanceof ClassMetadata) {
+            if (!$metadata instanceof ClassMetadata || $metadata->isMappedSuperclass) {
                 continue;
             }
 
