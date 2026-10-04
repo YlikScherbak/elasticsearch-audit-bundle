@@ -182,8 +182,10 @@ final class RecordIdTest extends TestCase
             $seen[RecordId::v7(new \DateTimeImmutable('@0'))[19]] = true;
         }
 
-        ksort($seen);
-        self::assertSame(['8', '9', 'a', 'b'], array_map('strval', array_keys($seen)));
+        // As strings: PHP 8.1's ksort() still orders 8 and 'a' by the comparison PHP 8 replaced.
+        $nibbles = array_map('strval', array_keys($seen));
+        sort($nibbles, \SORT_STRING);
+        self::assertSame(['8', '9', 'a', 'b'], $nibbles);
     }
 
     public function testATimestampPastWhatFortyEightBitsHoldIsTheLastMillisecondTheyDo(): void
