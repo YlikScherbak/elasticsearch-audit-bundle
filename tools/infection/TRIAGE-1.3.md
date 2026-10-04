@@ -398,7 +398,16 @@ mutants (`MemberAccount`, whose collection is declared before its key). Fixed by
 apart by identity; `AReferenceToARowKeyedByAnAssociationTest::testAnEntryMovedBetweenTwoAccountsLeavesOneAndJoinsTheOther`
 dies under the old line. My own regression of the morning, through a line written on 2026-09-24.
 
-### For the reviewers: SQL with comments is not read (found 2026-10-04, NOT FIXED)
+### SQL with comments is not read (found 2026-10-04, FIXED: `e41a29c`, `e01c2c9`, README in the next)
+
+The reviewers chose to take comments out outside literals and quoted names, by the connection's
+dialect (`#` on MySQL only), with what the rules leave in doubt said as doubt and never passed over
+as a read; a middleware's order documented besides, not instead. `ReadableSql` reads a copy; the log
+keeps each statement as it ran. Guarded end to end
+(`WhatAQueryTaggerLeavesOfTheHistoryTest`: the same history with no tagger and with a comment
+before, after and to the end of the line, each outside the observer and between it and the
+driver) and in the log and the replay (`WhatACommentLeavesOfAStatementTest`, `ShadowHistoryTest`);
+each part seen failing with it taken out. Green on the seven cells. The finding as it stood:
 
 Found by the mutants of `HistoryReplay::replay()` line 193 (the pattern that tells an unread
 statement that writes from one that does not). The log reads a statement only as the persisters

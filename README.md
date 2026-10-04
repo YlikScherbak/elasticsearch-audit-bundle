@@ -366,6 +366,18 @@ driver middleware it registers on that connection (**since 1.3**); DoctrineBundl
 applies it, so entity auditing needs DoctrineBundle. `audit:check` says whether the audited
 connection is watched.
 
+**A middleware that puts comments on your SQL** — a query tagger such as sqlcommenter, or a
+tracer's — may stand on either side of the bundle's: a statement is read without its comments,
+by the rules of the connection's platform (`#` is a comment on MySQL only, block comments nest
+on PostgreSQL, nothing inside a string literal or a quoted name is a comment), and kept as it
+ran (**since 1.3**). What those rules leave in doubt is not read as anything: a comment the
+server executes or takes as a hint (`/*! … */`, `/*+ … */`), an unterminated literal or comment,
+and a backslash before a quote where the server's mode decides where a literal ends. Such a
+statement is said once, as a statement the history may be missing, and never passed over as a
+read. If you control the order, put a middleware that rewrites SQL beyond comments **between
+the bundle's and the driver**: the bundle reads what your application ran, not what it was
+rewritten into.
+
 **A flush run inside another flush** — from a listener, a lifecycle callback, a subscriber —
 is its own flush, with its own moment, actor and context, and it can only be told apart from
 the flush around it by the savepoint its transaction opens. DBAL 4 always opens one. DBAL 3
