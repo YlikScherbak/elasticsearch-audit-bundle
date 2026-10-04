@@ -888,6 +888,53 @@ look was untested, on every database.
 | `2097b891`, `f3bf97a0`, `83f6ede3` | 499–501 | the objects a DELETE left behind not let go | **equivalent** in what is recorded: such an object is passed over by `remember()`, and a row that is back has its own object from its INSERT; they are only held longer |
 | `98b60ff4` | 579 | `?->` → `->` for a row held with no object | **not reached**: a row is held with no object only when read for an emptying, which deletes it in the same flush |
 
+### HistoryReplay (92)
+
+All 92 run against the whole Doctrine suite as it stands after the groups above: 4 red
+(`4864bbd6` 1041, `22b4e97d`, `dc372555`, `8fcfd0cd` 1131 — the self-referencing relay of
+EntityRowRuns' tests). Five more killed by tests written for them, by hand.
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `4864bbd6`, `22b4e97d`, `dc372555`, `8fcfd0cd` | 1041, 1131 | a DELETE's version of the row not kept; which version is the row at a position | test gap, closed above (`WhatTheLogMustKeepOfTheEventsTest::testAReferenceToTheRowItselfIsShownAsItStoodOnEachSide`) |
+| `62882ec5`, `66dad2db` | 842, 849 | `continue` → `break` past a reference, or past a column written as it was | test gap — `ALineMovedAndChangedByOneUpdateTest` (a listener's own UPDATE; Doctrine writes fields before references, so its own never reaches it) |
+| `09f0e782` | 297 | only the first position an account holds | test gap — `WhatTheLinksSayAsAListTest::testAnAccountTakenAfterTwoLinksWereWrittenIsUndoneOfBoth` |
+| `c605b0d2` | 1267 | an emptying's lines not listed by key | test gap — `WhatAnEmptiedCollectionSaysAboutItsLinesTest::testAnEmptyingListsItsLinesByTheirKeysWhicheverWasRememberedFirst` |
+| `c6308174` | 1274 | a representer that failed for one line forgotten | test gap — `…::testAnEmptyingARepresenterFailsForIsNotWrittenAndIsSaid` (new fixtures `Drawer`, `Sock`) |
+| `c1090888` | 201 | the caret of the pattern that tells a write | **for the reviewers** — see "A write behind a common table expression" below |
+| `5a41dcb2`, `c0063ec5`, `16403fa1`, `086dc650` | 162, 163, 1167, 894 | defaults built afresh; caches | **equivalent**: they decide from the mapping alone |
+| `f37f8691` | 172 | `??=` → `=` | **equivalent**: the bundle's callers ask up to the log's position; the one caller asking for less (a test) replays the rest before reading |
+| `89f09a7c`, `7d79e7ed`, `84749b44`, `369b0960`, `8ced9b6a`, `f4b079ba`, `6b877b17` | 192, 240, 619, 1231, 1377, 1459 | `\|\|` → `&&` on guards | **equivalent**: `RowBinding::of()` always returns a binding, a row's binding always names its class, a join row's and an emptying's their class and association, and the declaration `represent()` asks for is the one `collectionOf()` found |
+| `674c3534`, `774a43dd`, `02552f07`, `4de10d15`, `d3a6047c`, `20a8fcd2`, `38702258`, `723048e8`, `32d02daf` | 249, 761, 1014, 1260, 634, 646, 1238, 519, 504 | casts and `strval` dropped | **equivalent**: DBAL counts in integers here, PHP 8 compares a numeric string as a number, and array keys of digits are integers anyway |
+| `da2a27e1` | 295 | an account's positions not sorted | **equivalent**: their one reader sorts them itself (`LinkFacts::undone()`, `rsort`) |
+| `ae685092`, `0a351237`, `b681eee7`, `496bd941`, `1924cac2`, `c1e2fb7a` | 331, 373, 386, 471, 611, 895 | keys kept, or a list not made one | **equivalent**: the facts are a list kept in place (`letGoOf()` writes over a place, never removes one), and the readers read values |
+| `d2385456`, `c2a46b31`, `25d979a2`, `017983a3`, `e7af4000` | 344, 402, 411, 533, 1218 | `?->` → `->` on the log | **equivalent**: facts are made only inside `replay()`, after the log is set |
+| `b8e9f9f0`, `e3c101e9` | 402, 533 | the `flush` of a fact not kept | **equivalent**: `eachFact()` writes it again from the log as it hands a fact out, and a released fact is past every reading |
+| `cdbef648`, `3c326306` | 425, 476 | `throw` dropped | **not reached**: a fact asked of a place never filled, a manager gone — a caller's mistake |
+| `6cec904a`, `479f63a5`, `e28e846f` | 455 | `letGoOf()`'s guard | **equivalent**: the places it is given are always filled, and letting go of a fact again writes the same nulls |
+| `ce532db6`, `e2ee54ef` | 662 | a target gone by its row counted 0 or 2 | **equivalent**: the count is read only of a join table's own statement |
+| `8c8bed58`, `64d7bcee` | 1039, 1277 | `true` → `false` in a map read by `isset()` | **equivalent** |
+| `00f9cef1` | 886 | facts made for a class nobody audits | **equivalent** in what is recorded: such a fact makes no record (`EntityRowRuns::recordOf()`, no declaration) |
+| `4c0b1b0f`, `75264ca3`, `bb6ab0c9`, `556c6b80`, `a5b0d93b`, `9febb66d`, `5cb60f2d`, `52c74463`, `1644278c`, `e7bdfe22` | 976–1083, 1314, 1472, 1473 | guards on join columns and on converting a value | **equivalent**: only an owning to-one association has join columns at the mapping's top, always a list; a null converts to null |
+| `148ba6a7`, `30f45406`, `08abb008`, `46a5b11b`, `f2e14531` | 1132, 1152, 1156 | `break` → `continue` among ordered versions; versions kept of a class nobody shows; the first version at 0, ±1 | **equivalent**: the versions are in order, so every one after is later too; nobody asks for the versions of such a class; positions start at 1, and the first version's is only compared with `>` |
+| `9e662660`, `9ba74dd5`, `7b46b3c0` | 1483 | a backed enum's key | **not reached**: no fixture has a key that is a backed enum (as against 4261bdb) |
+| `eb0bb27c`, `97f13ff2` | 823, 868 | `continue` → `break` past an owner a line keeps; a field said as the line's own where it has an owner on one side | **not reached**: no fixture has a line of two tracked collections through two columns, or a line that is itself audited |
+| `189f28e8`, `785505e5`, `981c7169`, `55a64a2a`, `63b1120b`, `9f70ec36`, `2376e900`, `3f5d720d`, `54921399`, `f0de70fd`, `9f7d31fa`, `9bfe894a`, `8d12c5c3`, `67d582a8`, `590733cb` | 260, 320, 552, 717, 1278, 782, 1107, 1110, 1122, 1124, 1128, 1346, 1455, 611 | forgetting a row taken after a statement; learning a row; the context of a row not known; versions of an inserted or emptied row; a reached-nothing UPDATE's empty fact (survives on MySQL too, measured); a reference over a derived key; which version before any move; an unaudited owner's emptying; a table of a root's own; a doubt at the position last read | **open**: not told apart in this pass. One attempt (a doubt at the last position of a reading, said again by the next) did not fail on `590733cb` |
+
+#### A write behind a common table expression (for the reviewers)
+
+Found by `c1090888` (the caret): `WITH gone AS (SELECT ? AS id) DELETE FROM Article WHERE id IN
+(SELECT id FROM gone)` is logged (it is no read), cannot be read, and — not beginning with
+INSERT, UPDATE or DELETE — is neither replayed nor doubt: the article's row is still held as
+there, and nothing says the history may be missing what the statement did. The comment above the
+line says a write that cannot be read is doubt. Measured on SQLite, red
+(`AStatementThatOnlyMentionsAWriteTest`, kept aside in the scratchpad, not committed: it would pin
+the defect). Severity LOW: the application's own SQL, in a form Doctrine never writes; 1.2.x read
+change sets and had no such road. Ways out: (a) a logged statement beginning with `WITH` that names
+INSERT, UPDATE or DELETE anywhere outside a literal is doubt, of the table it names where it can
+— a `WITH … SELECT` quoting such a word would be doubt too, wrongly but loudly; (b) drop the caret,
+as the mutant does — the same, for every unreadable statement; (c) document it. Recommended: (a).
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
