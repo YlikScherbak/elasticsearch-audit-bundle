@@ -55,8 +55,9 @@ final class ALinkThatDoesNotCascadeTest extends DoctrineTestCase
         $this->em->persist($red = new Baton('red'));
         $this->em->flush();
         $connection = $this->em->getConnection();
-        $connection->insert('RelayTeam', ['name' => 'written elsewhere']);
-        $id = (int) $connection->lastInsertId();
+        // Its key given: on PostgreSQL under DBAL 3 the column takes it from a sequence nobody asked.
+        $id = 1000;
+        $connection->insert('RelayTeam', ['id' => $id, 'name' => 'written elsewhere']);
         $connection->insert('relay_team_baton', ['team_id' => $id, 'baton_id' => $red->id]);
         $this->unownedStatementsAreExpected = true;
         $this->em->clear();
