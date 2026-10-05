@@ -354,6 +354,158 @@ final class StatementShape
     }
 
     /**
+     * The tables a statement that begins with WITH writes behind its common table expressions --
+     * by an INSERT, an UPDATE or a DELETE that is a word of its own, outside every literal and
+     * quoted name -- each as it is named (a quoted name unquoted, a schema kept), or null for one
+     * whose name cannot be read; null for a statement that does not begin with WITH, and an empty
+     * list for one that writes nothing.
+     *
+     * Read only to say that such a statement is doubt: nothing is made of what it did. A word is
+     * told from a literal by the quotes every dialect shares -- '…' with '' inside it, E'…' with a
+     * backslash, $tag$…$tag$, "…", `…`, […] -- and the statement is the one the comments have
+     * been taken out of ({@see ReadableSql}).
+     *
+     * @return list<string|null>|null
+     */
+    public static function writtenBehindAWith(string $read): ?array
+    {
+        if (preg_match('/^\s*WITH\b/i', $read) !== 1) {
+            return null;
+        }
+
+        $words = [];
+        $length = \strlen($read);
+
+        for ($i = 0; $i < $length;) {
+            $c = $read[$i];
+
+            if (ctype_space($c)) {
+                ++$i;
+
+                continue;
+            }
+
+            if (($c === 'E' || $c === 'e') && ($read[$i + 1] ?? '') === "'" && ($i === 0 || !ctype_alnum($read[$i - 1]))) {
+                $i = self::pastALiteral($read, $i + 1, backslash: true);
+
+                continue;
+            }
+
+            if ($c === "'") {
+                $i = self::pastALiteral($read, $i, backslash: false);
+
+                continue;
+            }
+
+            if ($c === '"' || $c === '`' || $c === '[') {
+                $end = strpos($read, $c === '[' ? ']' : $c, $i + 1);
+                $words[] = ['quoted', substr($read, $i + 1, ($end === false ? $length : $end) - $i - 1)];
+                $i = $end === false ? $length : $end + 1;
+
+                continue;
+            }
+
+            if ($c === '$' && preg_match('/\G\$([A-Za-z_][A-Za-z0-9_]*)?\$/', $read, $m, 0, $i) === 1) {
+                $end = strpos($read, $m[0], $i + \strlen($m[0]));
+                $i = $end === false ? $length : $end + \strlen($m[0]);
+
+                continue;
+            }
+
+            if (preg_match('/\G[A-Za-z_][A-Za-z0-9_$]*/', $read, $m, 0, $i) === 1) {
+                $words[] = ['word', $m[0]];
+                $i += \strlen($m[0]);
+
+                continue;
+            }
+
+            $words[] = ['symbol', $c];
+            ++$i;
+        }
+
+        $tables = [];
+
+        foreach ($words as $at => [$kind, $word]) {
+            $keyword = $kind === 'word' ? strtoupper($word) : '';
+
+            if ($keyword !== 'INSERT' && $keyword !== 'UPDATE' && $keyword !== 'DELETE') {
+                continue;
+            }
+
+            // Not a write of its own: a lock taken by a read (FOR UPDATE, FOR NO KEY UPDATE), or
+            // the other arm of an INSERT (ON CONFLICT DO UPDATE, ON DUPLICATE KEY UPDATE).
+            if ($keyword === 'UPDATE' && ($words[$at - 1][0] ?? '') === 'word' && \in_array(strtoupper($words[$at - 1][1]), ['FOR', 'KEY', 'DO'], true)) {
+                continue;
+            }
+
+            $next = $at + 1;
+
+            foreach ($keyword === 'INSERT' ? ['INTO'] : ($keyword === 'DELETE' ? ['FROM', 'ONLY'] : ['ONLY']) as $skipped) {
+                if (($words[$next][0] ?? '') === 'word' && strtoupper($words[$next][1]) === $skipped) {
+                    ++$next;
+                }
+            }
+
+            $tables[] = self::nameAt($words, $next);
+        }
+
+        return $tables;
+    }
+
+    /** Where a literal that opens at $at ends, the position after its closing quote. */
+    private static function pastALiteral(string $sql, int $at, bool $backslash): int
+    {
+        $length = \strlen($sql);
+
+        for ($j = $at + 1; $j < $length; ++$j) {
+            if ($backslash && $sql[$j] === '\\') {
+                ++$j;
+
+                continue;
+            }
+
+            if ($sql[$j] === "'") {
+                if (($sql[$j + 1] ?? '') === "'") {
+                    ++$j;
+
+                    continue;
+                }
+
+                return $j + 1;
+            }
+        }
+
+        return $length;
+    }
+
+    /**
+     * The name that begins at a word: a word or a quoted name, a schema and a dot before it.
+     *
+     * @param list<array{0: string, 1: string}> $words
+     */
+    private static function nameAt(array $words, int $at): ?string
+    {
+        $parts = [];
+
+        while (isset($words[$at]) && ($words[$at][0] === 'quoted' || ($words[$at][0] === 'word' && !self::isAWriteOrClause($words[$at][1])))) {
+            $parts[] = $words[$at][1];
+
+            if (($words[$at + 1] ?? null) !== ['symbol', '.']) {
+                return implode('.', $parts);
+            }
+
+            $at += 2;
+        }
+
+        return null;
+    }
+
+    private static function isAWriteOrClause(string $word): bool
+    {
+        return \in_array(strtoupper($word), ['SELECT', 'SET', 'WHERE', 'VALUES', 'INSERT', 'UPDATE', 'DELETE', 'INTO', 'FROM', 'USING', 'RETURNING', 'ONLY'], true);
+    }
+
+    /**
      * The statement as words, quoted names, placeholders and symbols -- with string literals
      * swallowed, so a question mark inside one is not taken for a placeholder.
      *

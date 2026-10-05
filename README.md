@@ -432,9 +432,9 @@ that made them. Until such a flush runs they are neither written nor dropped: a 
 first ends without them, and a worker that never flushes again never writes them. Written inside a
 frame, a late record is held by it like any other record: a step of the same actor on the same
 object merges with it, one record for the two operations. A late record's ids are as true as
-any; its labels are not always of the moment it describes: for a related class the bundle does not
-watch, the representer is handed the object as the application holds it when the record is
-written — after anything the application changed in it since. Give the audit listener a higher
+any, and so are its actor, its moment and its own fields; for a related class the bundle does not
+watch, its label is the object as the application holds it when the representer runs — on the late
+road, when the record is written, after anything the application changed in it since. Give the audit listener a higher
 priority than listeners that may fail, and the late road is never taken.
 
 When the application owns the wider transaction, close the gap with a frame — the same

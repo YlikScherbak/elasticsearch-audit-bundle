@@ -730,8 +730,8 @@ AuditSubscriber with the 69 that keep a class given against 4261bdb: of about 46
 | open | 57 | searched and not told apart; 38 of them the flush stack of AuditSubscriber |
 
 Code defects found in G: **MEDIUM**, a link a mapped superclass declares left no record (a 1.3
-regression; fixed, `85f6e97`); **LOW**, a write behind a common table expression is no doubt (not
-fixed, for the reviewers). Measured on `8e15dc2` (CI 37216755055): Doctrine 4,041 mutants, 359
+regression; fixed, `85f6e97`); **LOW**, a write behind a common table expression is no doubt (fixed
+after the reviewers chose (a), below). Measured on `8e15dc2` (CI 37216755055): Doctrine 4,041 mutants, 359
 escaped, 25 timed out, **91.12 %** (90.50 % counting only what a test failed on), floor 94; main
 98.16 %. Not measured since: H. On the threshold the two
 of you differ (R1: the measured value with its reason, 94 for 1.4; R2: 94 stays the condition) —
@@ -956,6 +956,26 @@ change sets and had no such road. Ways out: (a) a logged statement beginning wit
 INSERT, UPDATE or DELETE anywhere outside a literal is doubt, of the table it names where it can
 — a `WITH … SELECT` quoting such a word would be doubt too, wrongly but loudly; (b) drop the caret,
 as the mutant does — the same, for every unreadable statement; (c) document it. Recommended: (a).
+
+**Decided and FIXED (2026-10-05).** Both reviewers: (a), by lexical tokens — a write token
+outside literals and quoted names, no replay of what the statement did. `StatementShape::
+writtenBehindAWith()` reads the words of a statement that begins with WITH (comments already
+taken out), skipping '…' with '' inside, E'…' with a backslash, $tag$…$tag$, "…", `…` and […];
+an INSERT, UPDATE or DELETE that is a word of its own is a write of the table named after it
+(INTO, FROM, ONLY passed over; a schema kept; a name it cannot read is "any table"), except
+FOR UPDATE, FOR NO KEY UPDATE, ON CONFLICT DO UPDATE and ON DUPLICATE KEY UPDATE, which are a
+lock or an INSERT's other arm. `HistoryReplay` makes it doubt of that table where the history
+watches it, and of any table where the name is not read; a table nobody audits is nothing, as for
+every other statement. The whole road holds: such a statement is logged (it is no read), kept by
+the filter of history tables (it has no shape), and replayed. Guards
+(`AWriteBehindACommonTableExpressionTest`): the write into an audited table is the warning, red
+before the fix; a DELETE in a value and a column named "DELETE" are none; a write behind WITH
+into a table nobody audits is none. Each part of the fix neutralised in turn — literals not
+skipped, quoted names not skipped, the branch gone, every name taken for unreadable — makes the
+test red. `StatementShapeTest` reads 29 statements. Green on SQLite, the ORM 2.19, ORM 2 and
+DBAL 3 cells, and MySQL and PostgreSQL under DBAL 3 and 4 (the test writes its key in, as
+PostgreSQL types a bound one in a CTE as text; and deletes behind WITH, as MySQL takes no WITH
+before an INSERT).
 
 ### AuditSubscriber (118)
 

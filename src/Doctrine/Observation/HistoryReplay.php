@@ -198,6 +198,24 @@ final class HistoryReplay
                 // be taken out ({@see ReadableSql}): what it does is not known, nor where.
                 if ($statement['read'] === null) {
                     $this->doubt('not read: '.$statement['sql'], null);
+                } elseif (($behind = StatementShape::writtenBehindAWith($statement['read'])) !== null) {
+                    // A write behind a common table expression: doubt of the table it names, if
+                    // the history watches it -- or of any, if its name cannot be read.
+                    $watched = null;
+                    $doubt = false;
+
+                    foreach ($behind as $table) {
+                        $class = $table === null ? null : $this->watchedClassOf(trim($table, '`"[]'));
+
+                        if ($table === null || $class !== null) {
+                            $doubt = true;
+                            $watched ??= $class;
+                        }
+                    }
+
+                    if ($doubt) {
+                        $this->doubt('not read: '.$statement['sql'], $watched);
+                    }
                 } elseif (preg_match('~^\s*(?:INSERT\s+(?:INTO\s+)?|UPDATE\s+|DELETE\s+(?:FROM\s+)?)([`"\[]?[\w.]+[`"\]]?)?~i', $statement['read'], $writes) === 1) {
                     $table = isset($writes[1]) ? trim($writes[1], '`"[]') : null;
                     $watched = $table === null ? null : $this->watchedClassOf($table);

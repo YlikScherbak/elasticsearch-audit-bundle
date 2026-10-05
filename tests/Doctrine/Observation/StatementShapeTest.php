@@ -161,4 +161,49 @@ final class StatementShapeTest extends TestCase
         yield 'an unterminated quote is not read' => ["UPDATE t SET a = 'x WHERE id = ?", null];
         yield 'nothing is not read' => ['', null];
     }
+
+    /**
+     * @param list<string|null>|null $expected
+     */
+    #[DataProvider('commonTableExpressions')]
+    public function testWhatAStatementBeginningWithWithWrites(string $sql, ?array $expected): void
+    {
+        self::assertSame($expected, StatementShape::writtenBehindAWith($sql));
+    }
+
+    /**
+     * @return iterable<string, array{string, list<string|null>|null}>
+     */
+    public static function commonTableExpressions(): iterable
+    {
+        yield 'not a WITH' => ['DELETE FROM a WHERE id = ?', null];
+        yield 'a word beginning with with' => ['WITHIN GROUP', null];
+        yield 'a read' => ['WITH x AS (SELECT 1) SELECT * FROM x', []];
+        yield 'lower case, and a DELETE' => ['with x as (select 1 as id) delete from a where id in (select id from x)', ['a']];
+        yield 'an INSERT INTO' => ['WITH x AS (SELECT 1 AS id) INSERT INTO a (id) SELECT id FROM x', ['a']];
+        yield 'an INSERT without INTO' => ['WITH x AS (SELECT 1 AS id) INSERT a (id) SELECT id FROM x', ['a']];
+        yield 'an UPDATE' => ['WITH x AS (SELECT 1 AS id) UPDATE a SET b = 1 WHERE id IN (SELECT id FROM x)', ['a']];
+        yield 'a write inside the expression' => ['WITH gone AS (DELETE FROM a RETURNING id) SELECT * FROM gone', ['a']];
+        yield 'two writes' => ['WITH gone AS (DELETE FROM a RETURNING id) INSERT INTO b SELECT id FROM gone', ['a', 'b']];
+        yield 'a schema' => ['WITH x AS (SELECT 1) DELETE FROM audit.a', ['audit.a']];
+        yield 'a quoted name' => ['WITH x AS (SELECT 1) DELETE FROM "a b"', ['a b']];
+        yield 'a quoted schema and name' => ['WITH x AS (SELECT 1) DELETE FROM `s`.`a`', ['s.a']];
+        yield 'a bracketed name' => ['WITH x AS (SELECT 1) DELETE FROM [a]', ['a']];
+        yield 'ONLY' => ['WITH x AS (SELECT 1) DELETE FROM ONLY a', ['a']];
+        yield 'an UPDATE of ONLY' => ['WITH x AS (SELECT 1) UPDATE ONLY a SET b = 1', ['a']];
+        yield 'a name that cannot be read' => ['WITH x AS (SELECT 1) DELETE FROM (SELECT 1)', [null]];
+        yield 'a write in a literal' => ["WITH x AS (SELECT 'DELETE FROM a' AS t) SELECT t FROM x", []];
+        yield 'a quote doubled in a literal' => ["WITH x AS (SELECT 'it''s DELETE FROM a' AS t) SELECT t FROM x", []];
+        yield 'a backslash in an escape string' => ["WITH x AS (SELECT E'\\' DELETE FROM a' AS t) SELECT t FROM x", []];
+        yield 'an escape string is not a word ending in e' => ["WITH x AS (SELECT name'DELETE' AS t) SELECT t FROM x", []];
+        yield 'a dollar quote' => ['WITH x AS (SELECT $$DELETE FROM a$$ AS t) SELECT t FROM x', []];
+        yield 'a tagged dollar quote' => ['WITH x AS (SELECT $q$DELETE FROM a$q$ AS t) SELECT t FROM x', []];
+        yield 'a quoted name of a write' => ['WITH x AS (SELECT 1 AS "DELETE") SELECT * FROM x', []];
+        yield 'FOR UPDATE' => ['WITH x AS (SELECT id FROM a FOR UPDATE) SELECT * FROM x', []];
+        yield 'FOR NO KEY UPDATE' => ['WITH x AS (SELECT id FROM a FOR NO KEY UPDATE) SELECT * FROM x', []];
+        yield 'ON CONFLICT DO UPDATE' => ['WITH x AS (SELECT 1 AS id) INSERT INTO a (id) SELECT id FROM x ON CONFLICT (id) DO UPDATE SET id = 1', ['a']];
+        yield 'ON DUPLICATE KEY UPDATE' => ['WITH x AS (SELECT 1 AS id) INSERT INTO a (id) SELECT id FROM x ON DUPLICATE KEY UPDATE id = 1', ['a']];
+        yield 'an unterminated literal' => ["WITH x AS (SELECT 'DELETE FROM a", []];
+        yield 'an unterminated quoted name' => ['WITH x AS (SELECT 1) DELETE FROM "a', ['a']];
+    }
 }
