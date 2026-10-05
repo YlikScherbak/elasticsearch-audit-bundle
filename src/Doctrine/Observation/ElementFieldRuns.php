@@ -131,12 +131,12 @@ final class ElementFieldRuns
                     [$name, $value] = $change;
                 }
             }
-            $who = $element['owner'].'|'.json_encode($element['ownerKey']);
-            $at = $last[$who] ?? null;
+            $key = (string) json_encode($element['ownerKey']);
+            $at = $last[$element['owner']][$key] ?? null;
 
             if ($at === null || $runs[$at]['flush'] !== $fact['flush'] || isset($changes[$at][$name])) {
                 $runs[] = ['owner' => $owner, 'class' => $element['owner'], 'key' => $element['ownerKey'], 'flush' => $fact['flush']];
-                $at = $last[$who] = array_key_last($runs);
+                $at = $last[$element['owner']][$key] = array_key_last($runs);
                 $ranFrom[$at] = $fact['at'];
             }
 

@@ -212,11 +212,11 @@ final class EntityRowRuns
 
         foreach ($executions as $facts) {
             $execution = self::executionOf($replay, $facts);
-            $row = $execution['class'].'|'.$execution['id'];
+            [$class, $id] = [$execution['class'], $execution['id']];
 
             // Asked of the INSERT, not of what came between: Doctrine runs its completions once
             // every INSERT has, and a listener's own statement may have run in between.
-            $at = $creations[$row] ?? null;
+            $at = $creations[$class][$id] ?? null;
 
             if ($at !== null && $execution['statement'] === StatementShape::UPDATE && self::completes($em, $log, self::executionOf($replay, $kept[$at]), $execution)) {
                 foreach ($facts as $index) {
@@ -229,7 +229,7 @@ final class EntityRowRuns
             $kept[] = $facts;
 
             if ($execution['statement'] === StatementShape::INSERT) {
-                $creations[$row] = array_key_last($kept);
+                $creations[$class][$id] = array_key_last($kept);
             }
         }
 
