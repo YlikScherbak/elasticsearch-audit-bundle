@@ -20,3 +20,5 @@ coverage.xml
 /tools/bc-check/vendor/
 !/tools/*/composer.lock
 /var/
+/infection.*.run.json
+/infection.*.whole.json

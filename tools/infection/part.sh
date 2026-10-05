@@ -39,26 +39,48 @@ else
     what="--filter=$(php tools/infection/gate.php files "$set_name" "$part")"
 fi
 
+# Infection runs on the set's configuration with its exclusions added (configure.php), never on
+# the set's file as it is: the exclusions are argued for in tools/infection/exclusions.json, with
+# the line's text and the mutation's diff, and held to them below.
+run_config=$(php tools/infection/configure.php "$set_name" with)
+
 log="var/infection/$set_name.json"
 before=$(php tools/infection/gate.php fingerprint "$set_name")
-rm -f "$log"
-code=0
+
+infection() {
+    rm -f "$log"
+
+    if [ "${INFECTION_RUNNER:-docker}" = direct ]; then
+        php -d memory_limit=-1 tools/infection/vendor/bin/infection \
+            --configuration="$1" \
+            --initial-tests-php-options="-d memory_limit=-1" \
+            --threads="$threads" \
+            --min-covered-msi=0 \
+            --no-progress \
+            --no-interaction \
+            "$what"
+    else
+        INFECTION_THREADS=$threads sh tools/infection/run.sh --configuration="$1" --min-covered-msi=0 "$what"
+    fi
+}
 
 if [ "${INFECTION_RUNNER:-docker}" = direct ]; then
     cpus=$(nproc)
-    php -d memory_limit=-1 tools/infection/vendor/bin/infection \
-        --configuration="$config" \
-        --initial-tests-php-options="-d memory_limit=-1" \
-        --threads="$threads" \
-        --min-covered-msi=0 \
-        --no-progress \
-        --no-interaction \
-        "$what" || code=$?
 else
     # The CPUs the tests run on: run.sh runs them in a container, whose machine is not this one.
     cpus=$(docker run --rm es-audit-infection nproc)
-    INFECTION_THREADS=$threads sh tools/infection/run.sh --configuration="$config" --min-covered-msi=0 "$what" || code=$?
 fi
+
+# The plan is made twice: without the exclusions, which each must match exactly one mutation of,
+# and with them -- the one the parts are held to, which must be the first less exactly those.
+if [ "$part" = plan ]; then
+    infection "$(php tools/infection/configure.php "$set_name" without)"
+    cp "$log" "var/infection/$set_name.whole.json"
+    php -d memory_limit=-1 tools/infection/gate.php excluded "$set_name" "var/infection/$set_name.whole.json" "$out"
+fi
+
+code=0
+infection "$run_config" || code=$?
 
 # Infection's log repeats the whole source file with every mutant: no memory limit to read it.
 php -d memory_limit=-1 tools/infection/gate.php record "$set_name" "$part" "$log" "$code" "$before" "$threads" "$cpus" "$out"

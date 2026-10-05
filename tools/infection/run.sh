@@ -43,7 +43,15 @@ esac
 
 mkdir -p var/infection
 
+# The configurations configure.php writes, with the exclusions and without, beside the sets' own.
+generated=""
+for file in infection.*.run.json infection.*.whole.json; do
+    [ -f "$file" ] && generated="$generated -v $root/$file:/app/$file"
+done
+
+# shellcheck disable=SC2086 # the generated mounts are words of their own
 MSYS_NO_PATHCONV=1 exec docker run --rm \
+    $generated \
     -v "$root/src:/app/src" \
     -v "$root/tests:/app/tests" \
     -v "$root/examples:/app/examples" \
