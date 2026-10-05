@@ -27,7 +27,7 @@ use Doctrine\ORM\EntityManagerInterface;
  */
 final class DepartedObjects
 {
-    /** @var array<string, array{object: object, at: int|null}> by root class and row key */
+    /** @var array<string, array<array-key, array{object: object, at: int|null}>> by root class, then row key */
     private array $objects = [];
 
     /** At preRemove: the object, under the key its row has now. */
@@ -40,15 +40,17 @@ final class DepartedObjects
         }
 
         $root = $em->getClassMetadata($em->getClassMetadata($entity::class)->rootEntityName);
-        $this->objects[$root->name.'|'.HistoryReplay::keyOf($root, $key)] = ['object' => $entity, 'at' => null];
+        $this->objects[$root->name][HistoryReplay::keyOf($root, $key)] = ['object' => $entity, 'at' => null];
     }
 
     /** At postRemove: its row was taken by the statement at this position. */
     public function gone(object $entity, int $at): void
     {
-        foreach ($this->objects as $name => $departed) {
-            if ($departed['object'] === $entity) {
-                $this->objects[$name]['at'] = $at;
+        foreach ($this->objects as $root => $rows) {
+            foreach ($rows as $id => $departed) {
+                if ($departed['object'] === $entity) {
+                    $this->objects[$root][$id]['at'] = $at;
+                }
             }
         }
     }
@@ -63,7 +65,7 @@ final class DepartedObjects
     {
         $root = $em->getClassMetadata($em->getClassMetadata($class)->rootEntityName);
 
-        return $this->objects[$root->name.'|'.HistoryReplay::keyOf($root, $key)]['object'] ?? null;
+        return $this->objects[$root->name][HistoryReplay::keyOf($root, $key)]['object'] ?? null;
     }
 
     /**
@@ -73,9 +75,15 @@ final class DepartedObjects
      */
     public function forgetThrough(int $readThrough, bool $keepingTheUnwritten): void
     {
-        foreach ($this->objects as $name => $departed) {
-            if ($departed['at'] === null ? !$keepingTheUnwritten : $departed['at'] <= $readThrough) {
-                unset($this->objects[$name]);
+        foreach ($this->objects as $root => $rows) {
+            foreach ($rows as $id => $departed) {
+                if ($departed['at'] === null ? !$keepingTheUnwritten : $departed['at'] <= $readThrough) {
+                    unset($this->objects[$root][$id]);
+                }
+            }
+
+            if ($this->objects[$root] === []) {
+                unset($this->objects[$root]);
             }
         }
     }
@@ -83,6 +91,6 @@ final class DepartedObjects
     /** How many are held, for the tests that pin that it does not grow. */
     public function size(): int
     {
-        return \count($this->objects);
+        return array_sum(array_map('count', $this->objects));
     }
 }
