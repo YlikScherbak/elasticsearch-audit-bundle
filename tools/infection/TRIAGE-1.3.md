@@ -1181,6 +1181,61 @@ driver's habit is not DBAL's contract.
 The one ignore of `infection.doctrine.json5` (`ReadableSql::of::39`) argued from this bundle's own
 reading and is gone; that mutant is a survivor now.
 
+## The roll-call of CI 37312316628 (`7c0c15c`)
+
+The first run with the exclusions: 4212 planned, 58 excluded, 4154 counted; 3801 killed, 325
+escaped, 28 timed out — 92.18% (91.50% counting only what a test failed on), floor 94; main 98.16%.
+Without the exclusions the same run is about 90.9% (90.2%). `rollcall.py` against the runs before:
+
+| Class | Escaped |
+|---|---|
+| equivalent (each in its row above; none of the 58) | 162 |
+| open | 84 |
+| gap, not written | 18 |
+| not reached (an invariant) | 11 |
+| killed elsewhere (DBAL 3 without savepoints, ORM 2.19; and `c07c1e96`, `cdf96c70`, which the script read as "killed") | 8 |
+| new: the lexer of (a′) (40) and `read()`'s INSERT (1) | 41 |
+| new: HistoryReplay 214, below | 1 |
+| **all** | **325** |
+
+The 41 new: every case of `writesItCannotRead()` had its write inside the literal, so where a
+literal or a quoted name ends was never asked. Cases with a write after one (8bf0c17), run locally
+under Infection on `StatementShape.php`: all 41 red or never ending. The 3 new timeouts: two
+`++$j` → `--$j` in `pastALiteral()` (a loop that never ends), and `ReadableSql::of()`'s early return
+taken away — every statement then read a character at a time, which the slow tests do not finish.
+
+### For the reviewers: the doubt names the first watched table only (found by the roll-call)
+
+`fd772229`, HistoryReplay 214, `$watched ??= $class` → `=`. Under (a′) a statement that writes two
+watched tables gives one doubt, of the class of the first. On PostgreSQL, `WITH gone AS (DELETE FROM
+Comment … RETURNING id) DELETE FROM Article …` takes both rows, and the warning says
+"1 statement(s) of …\Comment" only; a statement naming first a table it cannot read and then
+Article says Article, where the first could be any table. The doubt is kept — a warning is given;
+what it says is wrong. Probe: `scratchpad/ZzMultiTableProbeTest.php.red`,
+`testADoubtOfTwoWatchedTablesNamesBoth`, red on PG16. LOW, 1.3 only (the rule is (a′)'s).
+
+Options: (a) the doubt of every class named, one doubt per statement with the classes joined, so the
+count stays one per statement; (b) null — "an unknown table" — whenever the names are not all of one
+class or one cannot be read. **Recommended: (a)**, with null among them if a name cannot be read:
+it says what is known and no less.
+
+### For the reviewers: a write of several tables is named by its first (found on the way)
+
+MySQL's multi-table forms — `UPDATE scratch s JOIN Article a … SET a.title = …`,
+`UPDATE scratch s, Article a SET …`, `DELETE s, a FROM scratch s JOIN Article a …`,
+`DELETE FROM s, a USING …` — are read as a write of the first name only (`scratch`, or the alias `s`),
+and so is `DELETE a FROM Article a JOIN …` of the alias alone. A watched table behind an unwatched
+one, or behind an alias, is then **no doubt at all**: on MySQL 8 the probe's UPDATE changes an
+Article's title and the history says nothing
+(`testAMultiTableUpdateOfAWatchedTableBehindAnUnwatchedOneIsDoubt`, red). Not (a′)'s regression —
+the caret rule before it took the first name too — but a hole in what 1.3 promises of a write it
+cannot read. MEDIUM: a silent miss, on a form the application writes and the persisters never do.
+
+Options: (a) null, any table, for an UPDATE whose first name is followed by `,` or a join before
+`SET`, and for a DELETE with names before its `FROM` or a `,` after its first name; (b) read every
+name of those forms, aliases resolved. **Recommended: (a)** — the rule only says doubt, and (b)
+would be a parser of MySQL's join syntax for a warning.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
