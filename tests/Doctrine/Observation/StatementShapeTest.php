@@ -155,6 +155,9 @@ final class StatementShapeTest extends TestCase
         yield 'a CTE is not read' => ['WITH x AS (SELECT 1) UPDATE t SET a = ? WHERE id = ?', null];
         yield 'two rows at once is not read' => ['INSERT INTO t (a) VALUES (?), (?)', null];
         yield 'an INSERT from a SELECT is not read' => ['INSERT INTO t (a) SELECT a FROM u', null];
+        yield 'an INSERT without INTO is not read' => ['INSERT t (a) VALUES (?)', null];
+        yield 'an INSERT without its columns is not read' => ['INSERT INTO t VALUES (?)', null];
+        yield 'an insert whose columns have no opening parenthesis' => ['INSERT INTO t a) VALUES (?)', null];
         yield 'fewer values than columns is not read' => ['INSERT INTO t (a, b) VALUES (?)', null];
         yield 'an UPDATE of every row is not read' => ['UPDATE t SET a = ?', null];
         yield 'a DELETE of every row is not read' => ['DELETE FROM t', null];
@@ -223,5 +226,27 @@ final class StatementShapeTest extends TestCase
         yield 'a foreign key that cascades' => ['CREATE TABLE b (a_id INT REFERENCES a (id) ON DELETE CASCADE ON UPDATE CASCADE)', []];
         yield 'a foreign key that sets null' => ['ALTER TABLE b ADD FOREIGN KEY (a_id) REFERENCES a (id) ON DELETE SET NULL', []];
         yield 'a column updated on its own' => ['CREATE TABLE a (at TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)', []];
+
+        // Where a literal or a quoted name ends: the words after it are read again.
+        yield 'a write after an escape string that opens the statement' => ["E'\\'' DELETE FROM a", ['a']];
+        yield 'a write after an escape string in lower case' => ["WITH x AS (SELECT e'\\'' AS t) DELETE FROM a", ['a']];
+        yield 'a write after a literal behind a word ending in e' => ["WITH x AS (SELECT name'\\' AS t) DELETE FROM a", ['a']];
+        yield 'a write after an escaped backslash' => ["WITH x AS (SELECT E'\\\\' AS t) DELETE FROM a", ['a']];
+        yield 'a write after a doubled quote' => ["WITH x AS (SELECT 'it''s' AS t) DELETE FROM a", ['a']];
+        yield 'a write right after a literal' => ["WITH x AS (SELECT 1) DELETE FROM a WHERE b = 'x'OR c IN (DELETE FROM d)", ['a', 'd']];
+        yield 'a write after an empty quoted name' => ['WITH x AS (SELECT 1 AS "") DELETE FROM "a"', ['a']];
+        yield 'a write after a dollar quote' => ['WITH x AS (SELECT $$a$$ AS t) DELETE FROM b', ['b']];
+        yield 'a write after a positional parameter' => ['WITH x AS (SELECT $1 AS n) DELETE FROM a', ['a']];
+        yield 'a write after a lock in lower case' => ['with x as (select id from a for update) delete from b', ['b']];
+        yield 'a quoted name that is a word passed' => ['DELETE FROM "from"', ['from']];
+        yield 'INSERT OR REPLACE in lower case' => ['insert or replace into a (id) values (?)', ['a']];
+        yield 'INSERT OR a word SQLite has not, in lower case' => ['insert or nothing into a (id) values (?)', [null]];
+        yield 'OR and its word passed only after INSERT and UPDATE' => ['DELETE OR REPLACE a', [null]];
+        yield 'a write after a literal behind a symbol' => ["WITH x AS (SELECT ('\\') AS t) DELETE FROM a", ['a']];
+        yield 'a write of a name beginning with e' => ['WITH x AS (SELECT 1) DELETE FROM entries', ['entries']];
+        yield 'a literal behind a number and an E' => ["WITH x AS (SELECT 1E'\\' AS t) DELETE FROM a", ['a']];
+        yield 'a literal that ends before a quote' => ["WITH x AS (SELECT 'a'x' DELETE FROM b", []];
+        yield 'a doubled quote in an escape string' => ["WITH x AS (SELECT E'a''\\' DELETE FROM b' AS t) SELECT t FROM x", []];
+        yield 'a write right after a literal, with no space' => ["SELECT 'x'DELETE FROM a", ['a']];
     }
 }
