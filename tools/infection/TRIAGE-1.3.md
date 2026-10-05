@@ -935,6 +935,41 @@ INSERT, UPDATE or DELETE anywhere outside a literal is doubt, of the table it na
 — a `WITH … SELECT` quoting such a word would be doubt too, wrongly but loudly; (b) drop the caret,
 as the mutant does — the same, for every unreadable statement; (c) document it. Recommended: (a).
 
+### AuditSubscriber (118)
+
+Of CI 37216755055 (`8e15dc2`). 69 match a mutant already classed against 4261bdb by file,
+mutator and diff (`g_inventory.py`, `NOW=ci-8e1`) and keep that class: 40 equivalent, 29 not
+reached, each with its reason in the sections near the top. The other 49 — the flush stack, the
+order and joining of drafts, the context of a link's record, the owners an element is checked
+for, and the late write — were "not yet told apart" there.
+
+**The search, this time.** A differential probe, not committed (`ZzStackProbeTest`, scratchpad):
+thirteen scenarios of the stack — a flush refused in, between and after the application's
+transactions; refused with only a collection's rows planned and followed by the application's
+own transaction or SQL; a publishing swallowed, then the next flush, in and out of a transaction,
+and with only a collection's rows; a nested flush refused, refused in a transaction, refused
+with only a collection's rows; two nested flushes in a row; a swallowed publishing followed by a
+refused flush — each with and without savepoints, their documents and log lines held to what the
+code gives. All 49 survive it on DBAL 4 and on DBAL 3 (es-audit-dbal3, where without savepoints
+nested flushes share a frame). With the model's 2,000 seeds before it, that is the evidence.
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `fa502b43`, `41e714d2`, `35db3e61`, `6e5293d9`, `756d740d` | 1417–1435 | the late write with the manager that found it | **for the reviewers**, as before: they tell apart the code defect "a late record's label from a later moment" (Code defects found), not fixed until the reviewers choose the fix |
+| `2008c7e5`, `d9e0f6d5` | 678, 686 | the stack read from the bottom; `break` → `continue` | **equivalent** by an invariant: the levels on the stack strictly increase — `beginFlush()` unwinds every entry at or above a level before it pushes one there — so at most one entry has the level asked for |
+| `ac610dbe`, `ebdd1399`, `952df9bd` | 697 | the second half of "is an inner flush over" mutated | **equivalent**: `collectingNow()` answers NO_FLUSH exactly when the stack is empty, so with a manager the second half says what the first does; without one — a manager that is no EntityManager — the ORM never calls |
+| `622b66e7` | 695 | the finishing flush not taken as committed | **equivalent**: the flush finishing at this level either ran a statement, which the log answers for (`hasDoneAnythingFor()`, its frame claimed two lines up), or has nothing to publish |
+| `ce553d62`, `59ae5ac5`, `cc74ec7d`, `276a4be2`, `5dbf9dac`, `72b11801`, `6d76930b`, `45069cc9`, `9b86aba4`, `589b4682`, `aad09556`, `c76ed71d`, `5bae75d9`, `63b7b096`, `2c23aa75`, `0e6d8aae`, `983bd0ef`, `320824e5`, `bf912738`, `d8f66b3a`, `9672c382` | 431, 445, 680, 1195–1293, 1323, 1324, 1463 | which flush on the stack claims a frame, counts as having run, or is forgotten; what a flush planned | **open, searched**: no road found by the probe above or the model. The argument against 4261bdb stands (the answers of `unwindTo()` are read only where a record is built from a statement that stayed done, whose flush the log answers for; forgetting decides only the lost-change-set warning) and its gap with it: an owner popped before the unwinding |
+| `67cbe2c9`, `4373cc8c`, `be50f3a7`, `2d5d22a6`, `0e2ead7d`, `1168bd9c`, `df1f0cea` | 885–1040 | the drafts' order past sixteen executions; context from whichever ran first; the key a list joins under without its flush; `??=` → `=` | **open, searched**: each needs an owner with two records of one publishing (a nested flush writing the same owner), which the probe's two nested flushes did not make |
+| `14b0b9f3`, `570a9cc4`, `f98ba6e1`, `7e8a205b` | 1060, 1150–1160 | a link's context as the row stands now; a doubt at the last position read | **open, searched**, as against 4261bdb |
+| `731b0792`, `502c32b6` | 1125, 1173 | the context through a fresh instance; the last failure raised | **open**: a declaration by interface varying by instance; which of two equal sentences is raised, seen only with `failure_details: full` |
+| `02636704`, `455af5af`, `c0364a90`, `9dd3b17f` | 1494–1541 | which associations of an element lead to its owner | **open**: different only for an owner that does not hold the element through that association and whose declaration is wrong; no fixture |
+
+So AuditSubscriber stands at 69 + 9 classed and 40 open: the flush stack is where this
+gate's search ends. A word the model lacks — a transaction of the application's own around and
+between its flushes — is what the remaining stack mutants need, and adding one redraws every
+seed (the corpora's baseline with it); for the reviewers whether that belongs to 1.3 or 1.4.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
