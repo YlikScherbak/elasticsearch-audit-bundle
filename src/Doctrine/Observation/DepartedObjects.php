@@ -49,7 +49,7 @@ final class DepartedObjects
         foreach ($this->objects as $root => $rows) {
             foreach ($rows as $id => $departed) {
                 if ($departed['object'] === $entity) {
-                    $this->objects[$root][$id]['at'] = $at;
+                    $this->objects[$root][$id] = ['object' => $entity, 'at' => $at];
                 }
             }
         }
