@@ -900,8 +900,8 @@ look was untested, on every database.
 | `b5a16668`, `d63cc505` | 232 | the `$flush` default | **dead code, taken away**: the one caller passes it |
 | `5686048d` | 89 | a new `WatchedRows` before the one given | **equivalent**: it decides from the mapping alone; the one given is a shared cache |
 | `ee3ebad6` | 156 | `\|\|` → `&&` | **equivalent** by the caller: this runs only for an audited inverse collection with orphanRemoval, whose elements are always watched (`WatchedRows::decide()`), and an inverse side's `mappedBy` is always an association |
-| `164c18a1`, `cc03a315`, `eecd13fc`, `e9a28eec`, `362b9103` | 165, 185, 189, 623, 634 | guards on join columns | **equivalent**: Doctrine completes every join column with its name and referenced column, and only an owning to-one association has join columns at the mapping's top |
-| `6ca0865c`, `eca40afe` | 161, 170 | an owner keyed by two columns read by its first; the owner's key converted the other way | test gap, **not written**: no fixture has an inverse orphanRemoval collection of an owner keyed by two columns or by a type that converts. Today such an owner's lines are not read before an emptying, and it is doubt |
+| `164c18a1`, `cc03a315`, `eecd13fc`, `e9a28ece`, `362b9103` | 165, 185, 189, 623, 634 | guards on join columns | **equivalent**: Doctrine completes every join column with its name and referenced column, and only an owning to-one association has join columns at the mapping's top |
+| `6ca08650`, `eca40afe` | 161, 170 | an owner keyed by two columns read by its first; the owner's key converted the other way | test gap, **not written**: no fixture has an inverse orphanRemoval collection of an owner keyed by two columns or by a type that converts. Today such an owner's lines are not read before an emptying, and it is doubt |
 | `8317afec` | 641 | `continue` → `break` after a null reference's first column | **not reached**: no fixture has a nullable foreign key of two columns in the main mapping |
 | `9ac9948f` | 673 | a derived key's own key converted the other way | **equivalent** for every fixture (a derived key over an integer, whose database value is itself); not tested over a converting type |
 | `2fc4465e`, `26ee4f4a`, `8de6bebb` | 619, 685, 671 | `\|\|` → `&&` before converting a value; `(string)` dropped | **equivalent**: DBAL's types give null for null, every field has a type, and a field name is a string |
@@ -1011,6 +1011,86 @@ So AuditSubscriber stands at 69 + 11 classed and 38 open: the flush stack is whe
 gate's search ends. A word the model lacks — a transaction of the application's own around and
 between its flushes — is what the remaining stack mutants need, and adding one redraws every
 seed (the corpora's baseline with it); for the reviewers whether that belongs to 1.3 or 1.4.
+
+## The roll-call of CI 37279462334 (`9fdd578`)
+
+The reviewers asked for the classes of **this** run's 346 escaped and 25 timed out, not an
+estimate carried from another tree; and that a missing fixture be a gap of the testing, not
+unreachability — which only an invariant of the supported code proves. `rollcall.py`
+(scratchpad) matches each of this run's mutants to the mutant of the same file, mutator and diff
+nearest its line in each earlier run (`4261bdb`, `6bb3945`, `24d23d8`, `8e15dc2`), and reads the
+class off the newest place in this journal that names one of their ids. The ids below are this
+run's; a row here supersedes what an earlier section says of the same mutant.
+
+### The count
+
+| Class | Escaped | What it rests on |
+|---|---|---|
+| equivalent | 242 | each with its reason in its row: an invariant of the supported code, PHP's semantics, or a reader that reads nothing the mutant changes |
+| open | 72 | searched and not told apart: AuditSubscriber 54 (the flush stack, the operation's windows, the drafts of an owner with two records), HistoryReplay 16, EntityRowRuns 1, RowMemory 1 |
+| gap, not written | 11 | a form no fixture has — a gap of the testing, listed with what would reach it |
+| not reached | 11 | an invariant of the supported code, named in its row |
+| killed elsewhere | 7 | red in a cell the gate does not run, confirmed there: DBAL 3 without savepoints 4, ORM 2.19 3 — not added to the SQLite score |
+| killed since the run | 3 | by `WhatALateRecordShowsOfAnUnwatchedTargetTest`, written after it |
+| **all** | **346** | |
+
+The 25 timed out: 23 a loop that never ends under the mutant, 2 killed by a test that a slower
+one ran ahead of (below). The ObservingMiddleware mutant red on MySQL (`cdf96c70` of `24d23d8`)
+is among the equivalents: on SQLite it changes nothing.
+
+### Changed by the criterion
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `e7828d2e`, `ef1920f0` | AuditSubscriber 927, 991 | a draft for an owner with no id | **gap, not written** (was "not reached"): the id is null for a composite key no manager holds, which no fixture has |
+| `5c70d686` | AuditSubscriber 1512 | `continue` → `break` past an association that is not the owner's | **gap, not written** (was "not reached"): no element in the fixtures has such an association ahead of its owner's |
+| `eadb26f2` | RowMemory 641 | `continue` → `break` after a null reference's first column | **gap, not written** (was "not reached"): no nullable foreign key of two columns in the main mapping |
+| `9e662660`, `9ba74dd5`, `7b46b3c0` | HistoryReplay 1483 | a backed enum's key | **gap, not written** (was "not reached"): no fixture is keyed by a backed enum |
+| `eb0bb27c`, `97f13ff2` | HistoryReplay 823, 868 | an owner a line keeps; a line audited itself | **gap, not written** (was "not reached"): no fixture has either |
+| `ee732dde`, `ca428c2b`, `eef0ae11`, `c741bdc2`, `c9318311`, `316d474c`, `8b025d81`, `8d013dfb`, `c421ba2f`, `350fa84e` | AuditSubscriber 1818–1820 | `ranDuringAFlush()`: the loop, the window, the answer | **open, searched** (was "not reached"): fourteen shapes of the application's SQL in and around a flush were searched for the hole's warning, and none reached it — a search, not an invariant |
+| `88fb375d`, `8c668dab`, `2c5aa8bd`, `157575c5`, `b28707a4`, `8558a472`, `9c384b71` | AuditSubscriber 1366, 1371, 1458 | how an operation's windows are kept | **open, searched** (was "not reached"): read only by `ranDuringAFlush()`, above |
+| `84eadb27` | AuditSubscriber 1243 | `claimUnowned()` not called | **killed on DBAL 3** (`orm_cell_probe`, es-audit-dbal3: 14 failures), as the reason against 4261bdb foresaw |
+| `2a50193f` | AuditSubscriber 1243 | `$last` before what was claimed through | **equivalent**: `$last` is never null, and claiming again what is claimed changes nothing — `claimUnowned()` claims only what no flush owns |
+| `d71a0fb8`, `52d53374` | EntityRowRuns 148 | `$duringAFlush` tested against null | **equivalent**, as above (it was counted with "not reached" for a word of its reason) |
+| `a82b7d6b`, `6e6790e1`, `e0c20ac8` | AuditSubscriber 1416, 1434 | the late write with the manager of the next flush, not the one whose flush it was | **test gap, closed** (was "for the reviewers"): the reviewers kept the documented bound for 1.3 — a target of a class the bundle does not read is the object the application holds when the representer runs — so the code as it is, is the contract, and `WhatALateRecordShowsOfAnUnwatchedTargetTest` pins it: the late record names the abandoned manager's object, renamed and unsaved; red under each |
+| `61493358`, `37b3f040` | AuditSubscriber 1422, 1434 | the count with the next flush's manager; the second argument of `publish()` | **equivalent**: the count asks only whether anything was collected, and the log's records are the same whichever manager of one mapping reads them; `publish()` takes the manager of its first argument, and the second only where the first is none |
+| `c1090888` | HistoryReplay 201 | the caret of the pattern that tells a write | **open, for the reviewers**: (b) was refused, so the caret stays; what the mutant changes is the next finding below — writes that begin with neither INSERT, UPDATE, DELETE nor WITH |
+
+### For the reviewers: writes that begin with another word (found by the roll-call)
+
+The caret's mutant points at the same road as the common table expression, by another door. Two
+statements that write a watched table, begin with none of INSERT, UPDATE, DELETE and WITH, and are
+not read, measured on SQLite, red (kept aside in the scratchpad, not committed):
+`REPLACE INTO Article (…) VALUES (…)` (MySQL and SQLite) — the article's row replaced, no
+doubt; and `INSERT OR REPLACE INTO Article …` (SQLite), which begins with INSERT but whose table the
+pattern reads as `OR` — no doubt either. By the same shape, untested: `MERGE INTO …`
+(PostgreSQL 15+). Severity LOW, as for the CTE: the application's own SQL, in forms Doctrine never
+writes. Ways out: (a') the CTE's lexical rule for every statement that is not read — a write token
+(INSERT, UPDATE, DELETE, REPLACE, MERGE) outside literals and quoted names makes it doubt of the
+table named after it, with the CTE's exceptions (a lock, an INSERT's other arm) and `OR …` passed
+over; (c) document the forms that are not followed. Recommended: (a'), one rule for the CTE and
+these, by the tokens the CTE's fix already reads.
+
+### New with H
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `68efdeae`, `fd9633a2`, `67a1dfad`, `5c57997e` | AuditSubscriber 935, 950, 999, 1014 | `true` → `false` in the nested maps read by `isset()` | **equivalent** |
+| `9956d6dd`, `7b3e834e` | AuditSubscriber 965, 1027 | `??=` → `=` | **open, searched**, as `1168bd9c` and `df1f0cea` were: needs an owner with two records of one publishing |
+| `61ce5d74` | ElementFieldRuns 134 | `(string)` dropped from `json_encode()` | **equivalent**: an owner's key read from a row always encodes |
+| `d5fb4f65`, `e260a257` | HistoryReplay 401 | `\|\|` → `&&` on a fact's kept parts | **equivalent**: a fact is let go of whole — its columns, values and fields are null together or none is (`letGoOf()`) |
+
+### The 25 timed out, classed again
+
+| Ids | Line | Change | Class |
+|---|---|---|---|
+| `9d35866a`, `3aacdb62`, `cc50f6ca`, `3ccf2a59`, `cd1fba25`, `828a2876`, `30e7ac36`, `d77bd104`, `6ad6b717` | ReadableSql 81–202 | a return dropped where a quote or a comment does not end; the position set to, or moved back by, a length; `++$i` → `--$i` | **a loop that never ends**: the reader's position stops advancing or goes back, and the same character is read for ever |
+| `622aa7f0`, `301130cb`, `30959a5f`, `12587642`, `6b0745f1`, `de6337d5`, `4aafec10` | StatementShape 199–272, 402 | the token loop's test assigning a boolean; `break` → `continue`; `++` → `--`; AND and OR not consumed | **a loop that never ends**, the same way |
+| `3af0364b`, `fbaf14a7`, `c8940668`, `5a6b1056`, `fa1fa7a4` | StatementLog 586, 711, 794, 817 | the walk up the frames' parents with `&&` → `\|\|`, negated, or its parent read as a boolean | **a loop that never ends**: the walk's test is always true |
+| `cd4dd75a`, `9c6f225a` | StatementLog 624, HistoryReplay 174 | `<=` → `>` in a loop counting up to a position | **a loop that never ends** once it is entered past its end |
+| `437dbaac`, `5a4b8732` | RowIdentity 51, 52 | the entity the manager holds not returned | **killed**: `WhichEntityAForeignKeyNamesTest` is red under each, by hand (`hand_probe.py`); in the run a slower test met it first and ran past the timeout |
+
+Every timeout is detected; none is an equivalent hidden by a time limit.
 
 ## H: keys as nested arrays, and the README
 
