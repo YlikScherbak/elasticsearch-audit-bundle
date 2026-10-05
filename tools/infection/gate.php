@@ -29,6 +29,7 @@ declare(strict_types=1);
  *   php tools/infection/gate.php files <set> <part>
  *   php tools/infection/gate.php fingerprint <set>
  *   php tools/infection/gate.php record <set> <part|plan> <log.json> <exit-code> <fingerprint-before> <threads> <cpus> <out-dir>
+ *   php tools/infection/gate.php excluded <set> <whole-log.json> <out-dir>   # the exclusions, against the plan made without them
  *   php tools/infection/gate.php summarise <set> <dir>
  *
  * --root=<dir> points it at another tree than this one, which is how its tests run it.
@@ -155,6 +156,11 @@ function fingerprint(string $root, array $set): string
         }
 
         $paths[] = $file;
+    }
+
+    // What a run leaves out is part of what it ran on.
+    if (is_file($root . '/tools/infection/exclusions.json')) {
+        $paths[] = 'tools/infection/exclusions.json';
     }
 
     sort($paths);
@@ -373,6 +379,43 @@ function summarise(string $root, string $setName, string $dir): int
         }
     }
 
+    // What the plan left out by the exclusions is exactly what they argue for: the plan without
+    // them, less one of each, is the plan the parts ran.
+    $argued = is_file($root . '/tools/infection/exclusions.json')
+        ? json_decode((string) file_get_contents($root . '/tools/infection/exclusions.json'), true, 512, \JSON_THROW_ON_ERROR)[$setName] ?? []
+        : [];
+    $exclusions = null;
+
+    if (is_file($dir . '/' . $setName . '-exclusions.json')) {
+        $exclusions = json_decode((string) file_get_contents($dir . '/' . $setName . '-exclusions.json'), true, 512, \JSON_THROW_ON_ERROR);
+    } elseif ($argued !== []) {
+        refuse(sprintf('%s excludes %d mutations and there is no record of them held against the plan made without them.', $setName, \count($argued)));
+    }
+
+    if ($exclusions !== null) {
+        foreach (['fingerprint' => $fingerprint, 'infection' => $infection] as $field => $expected) {
+            if ($exclusions[$field] !== $expected) {
+                refuse(sprintf('%s: the exclusions were held against another %s than this tree has.', $setName, $field));
+            }
+        }
+
+        if (\count($exclusions['excluded']) !== \count($argued)) {
+            refuse(sprintf('%s: %d exclusions were held against the plan, and the tree has %d.', $setName, \count($exclusions['excluded']), \count($argued)));
+        }
+
+        $without = $exclusions['whole'];
+
+        foreach ($exclusions['excluded'] as $key) {
+            $without[$key] = ($without[$key] ?? 0) - 1;
+        }
+
+        $without = array_filter($without, static fn (int $count): bool => $count !== 0);
+
+        if (differenceOf($without, $plan) !== [] || differenceOf($plan, $without) !== []) {
+            refuse(sprintf('%s: the plan is not the plan without exclusions less exactly the excluded mutations.', $setName));
+        }
+    }
+
     $missing = differenceOf($plan, $mutants);
     $unplanned = differenceOf($mutants, $plan);
 
@@ -402,6 +445,16 @@ function summarise(string $root, string $setName, string $dir): int
     printf("  killed %d, escaped %d, timed out %d, errored %d, syntax errors %d, not covered %d, ignored %d\n", $killed, $counts['escaped'], $counts['timeouted'], $counts['errored'], $counts['syntaxErrors'], $counts['uncovered'], $counts['ignored']);
     printf("  covered MSI %.2f%% (timeouts and errors counted as detected, as Infection counts them)\n", $msi);
     printf("  covered MSI %.2f%% counting only what a test failed on\n", $strict);
+    if ($exclusions !== null && $exclusions['excluded'] !== []) {
+        ksort($exclusions['bases']);
+        printf(
+            "  excluded before the count: %d of %d planned, each argued for in tools/infection/exclusions.json (%s)\n",
+            \count($exclusions['excluded']),
+            array_sum($exclusions['whole']),
+            implode(', ', array_map(static fn (string $basis, int $n): string => sprintf('%s %d', $basis, $n), array_keys($exclusions['bases']), $exclusions['bases'])),
+        );
+    }
+
     printf("  floor %s%%\n", $floor[1]);
 
     if ($msi + 0.005 < (float) $floor[1]) {
@@ -438,6 +491,192 @@ function agrees(string $root, string $setName, string $planRecord): void
             refuse(sprintf('The plan was made on another %s than this tree has (%s, here %s).', $field, $plan[$field], $expected));
         }
     }
+}
+
+/**
+ * The exclusions of a set (tools/infection/exclusions.json), held against the plan made without
+ * them: each names one mutation of one line -- its file, its method, its mutator, its line, the
+ * line's text and the mutation's diff -- and it has to be there, exactly, and alone of its kind.
+ * Infection ignores a mutator at a line of a method, every mutation it makes there; so the
+ * mutations a rule takes are counted, and each must have a record of its own. A line that moved,
+ * a line whose text changed, a method gone, a diff that is not the one argued about, a second
+ * mutation the rule would take with it: each is a refusal, by name.
+ *
+ * Written to <out>/<set>-exclusions.json: what was excluded and why, and the plan without the
+ * exclusions -- the summary holds the plan with them to it, minus exactly these.
+ */
+function excluded(string $root, string $setName, string $wholeLog, string $out): void
+{
+    $set = setOf($root, $setName);
+    $files = sourceFiles($root, $set['sources']);
+    $exclusions = is_file($root . '/tools/infection/exclusions.json')
+        ? json_decode((string) file_get_contents($root . '/tools/infection/exclusions.json'), true, 512, \JSON_THROW_ON_ERROR)[$setName] ?? []
+        : [];
+    $whole = readLog($setName . '.whole', $wholeLog, $files);
+
+    // The diffs of the whole plan by file, mutator and line, as the records state them.
+    $log = json_decode((string) file_get_contents($wholeLog), true, 512, \JSON_THROW_ON_ERROR);
+    $made = [];
+
+    foreach (STATUSES as $status) {
+        foreach ($log[$status] as $mutant) {
+            $file = (string) fileOf($mutant['mutator']['originalFilePath'], $files);
+            $made[$file . ' | ' . $mutant['mutator']['mutatorName'] . ' | ' . $mutant['mutator']['originalStartLine']][] = [diffLines($mutant['diff']), sha1($mutant['diff'])];
+        }
+    }
+
+    $claimed = [];
+    $keys = [];
+    $reasons = [];
+
+    foreach ($exclusions as $i => $exclusion) {
+        foreach (['file', 'method', 'mutator', 'line', 'text', 'diff', 'basis', 'reason'] as $field) {
+            if (!isset($exclusion[$field]) || $exclusion[$field] === '' || $exclusion[$field] === []) {
+                refuse(sprintf('Exclusion %d of %s has no %s.', $i, $setName, $field));
+            }
+        }
+
+        $where = sprintf('The exclusion of %s at %s:%d (%s)', $exclusion['mutator'], $exclusion['file'], $exclusion['line'], $exclusion['method']);
+
+        if (!\in_array($exclusion['basis'], ['PHP', 'Doctrine'], true)) {
+            refuse(sprintf('%s rests on "%s"; only PHP\'s semantics and Doctrine\'s or DBAL\'s contract are grounds to exclude.', $where, $exclusion['basis']));
+        }
+
+        if (!\in_array($exclusion['file'], $files, true)) {
+            refuse(sprintf('%s names a file that is not of the set.', $where));
+        }
+
+        $source = (string) file_get_contents($root . '/' . $exclusion['file']);
+        $text = trim(explode("\n", $source)[$exclusion['line'] - 1] ?? '');
+
+        if ($text !== $exclusion['text']) {
+            refuse(sprintf('%s: the line is not the one argued about any more — it reads "%s", the record "%s".', $where, $text, $exclusion['text']));
+        }
+
+        if (methodAt($source, (int) $exclusion['line']) !== $exclusion['method']) {
+            refuse(sprintf('%s: the line is in %s now.', $where, methodAt($source, (int) $exclusion['line']) ?? 'no method'));
+        }
+
+        $at = $exclusion['file'] . ' | ' . $exclusion['mutator'] . ' | ' . $exclusion['line'];
+        $matching = array_keys(array_filter($made[$at] ?? [], static fn (array $one): bool => $one[0] === $exclusion['diff']));
+        $free = array_values(array_diff($matching, $claimed[$at] ?? []));
+
+        if ($free === []) {
+            refuse(sprintf('%s: the plan without exclusions has no such mutation there%s.', $where, $matching === [] ? '' : ' left — another record claims it'));
+        }
+
+        $claimed[$at][] = $free[0];
+        $keys[] = $at . ' | ' . $made[$at][$free[0]][1];
+        $reasons[$exclusion['basis']] = ($reasons[$exclusion['basis']] ?? 0) + 1;
+    }
+
+    // A rule takes every mutation of its mutator at its line: each must be argued for.
+    foreach ($claimed as $at => $taken) {
+        if (\count($made[$at]) !== \count($taken)) {
+            refuse(sprintf('The exclusion at %s would take %d mutations, and %d of them are argued for.', $at, \count($made[$at]), \count($taken)));
+        }
+    }
+
+    if (!is_dir($out) && !mkdir($out, 0777, true) && !is_dir($out)) {
+        refuse(sprintf('Cannot create %s.', $out));
+    }
+
+    file_put_contents($out . '/' . $setName . '-exclusions.json', json_encode([
+        'set' => $setName,
+        'fingerprint' => fingerprint($root, $set),
+        'infection' => infectionVersion($root),
+        'whole' => $whole['mutants'],
+        'excluded' => $keys,
+        'bases' => $reasons,
+    ], \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR));
+}
+
+/**
+ * A diff of Infection's as its changed lines: each "-" or "+" and the line's text, trimmed.
+ *
+ * @return list<string>
+ */
+function diffLines(string $diff): array
+{
+    $lines = [];
+
+    foreach (explode("\n", str_replace("\r\n", "\n", $diff)) as $line) {
+        if (($line[0] ?? '') === '-' && !str_starts_with($line, '---') || ($line[0] ?? '') === '+' && !str_starts_with($line, '+++')) {
+            $lines[] = $line[0] . ' ' . trim(substr($line, 1));
+        }
+    }
+
+    return $lines;
+}
+
+/** The method a line is in, as Infection's rules name one: the class with its namespace, "::", the method. */
+function methodAt(string $source, int $line): ?string
+{
+    $namespace = '';
+    $class = null;
+    $found = null;
+    $depth = 0;
+    $open = [];
+    $tokens = PhpToken::tokenize($source);
+
+    foreach ($tokens as $i => $token) {
+        if ($token->is(\T_NAMESPACE)) {
+            $namespace = '';
+
+            for ($j = $i + 1; isset($tokens[$j]) && !$tokens[$j]->is([';', '{']); ++$j) {
+                $namespace .= $tokens[$j]->is([\T_NAME_QUALIFIED, \T_STRING]) ? $tokens[$j]->text : '';
+            }
+        }
+
+        if ($token->is([\T_CLASS, \T_TRAIT, \T_ENUM]) && ($tokens[$i - 1] ?? null)?->is(\T_DOUBLE_COLON) !== true) {
+            for ($j = $i + 1; isset($tokens[$j]) && $tokens[$j]->is(\T_WHITESPACE); ++$j) {
+            }
+
+            if (isset($tokens[$j]) && $tokens[$j]->is(\T_STRING)) {
+                $class = ($namespace === '' ? '' : $namespace . '\\') . $tokens[$j]->text;
+            }
+        }
+
+        if ($token->is(\T_FUNCTION) && $class !== null) {
+            for ($j = $i + 1; isset($tokens[$j]) && !$tokens[$j]->is(\T_STRING) && !$tokens[$j]->is('('); ++$j) {
+            }
+
+            if (isset($tokens[$j]) && $tokens[$j]->is(\T_STRING)) {
+                $open[] = ['name' => $tokens[$j]->text, 'from' => $token->line, 'depth' => null];
+            }
+        }
+
+        if ($token->is('{') || $token->is(\T_CURLY_OPEN) || $token->is(\T_DOLLAR_OPEN_CURLY_BRACES)) {
+            ++$depth;
+
+            foreach ($open as $k => $method) {
+                if ($method['depth'] === null && $token->is('{')) {
+                    $open[$k]['depth'] = $depth;
+                }
+            }
+        }
+
+        if ($token->is('}')) {
+            foreach ($open as $k => $method) {
+                if ($method['depth'] === $depth) {
+                    if ($line >= $method['from'] && $line <= $token->line) {
+                        $found ??= $class . '::' . $method['name'];
+                    }
+
+                    unset($open[$k]);
+                }
+            }
+
+            --$depth;
+        }
+
+        // A method with no body (an interface's, an abstract one) ends at its semicolon.
+        if ($token->is(';')) {
+            $open = array_filter($open, static fn (array $method): bool => $method['depth'] !== null);
+        }
+    }
+
+    return $found;
 }
 
 /** @return array<string, int> what $a has more of than $b */
@@ -485,6 +724,9 @@ try {
             exit(0);
         case 'record':
             record($root, ...array_slice($arguments, 1, 8));
+            exit(0);
+        case 'excluded':
+            excluded($root, $arguments[1], $arguments[2], $arguments[3]);
             exit(0);
         case 'summarise':
             exit(summarise($root, $arguments[1], $arguments[2]));
