@@ -965,7 +965,7 @@ nested flushes share a frame). With the model's 2,000 seeds before it, that is t
 | `731b0792`, `502c32b6` | 1125, 1173 | the context through a fresh instance; the last failure raised | **open**: a declaration by interface varying by instance; which of two equal sentences is raised, seen only with `failure_details: full` |
 | `02636704`, `455af5af`, `c0364a90`, `9dd3b17f` | 1494–1541 | which associations of an element lead to its owner | **open**: different only for an owner that does not hold the element through that association and whose declaration is wrong; no fixture |
 
-So AuditSubscriber stands at 69 + 9 classed and 40 open: the flush stack is where this
+So AuditSubscriber stands at 69 + 11 classed and 38 open: the flush stack is where this
 gate's search ends. A word the model lacks — a transaction of the application's own around and
 between its flushes — is what the remaining stack mutants need, and adding one redraws every
 seed (the corpora's baseline with it); for the reviewers whether that belongs to 1.3 or 1.4.
