@@ -891,7 +891,7 @@ final class AuditSubscriber
 
         foreach ($drafts as $index => $draft) {
             if ($draft['event'] !== AuditEvent::REMOVE) {
-                $byOwner[$draft['objectType'].'|'.$draft['id']] = $index;
+                $byOwner[$draft['objectType']][$draft['id']] = $index;
             }
         }
 
@@ -928,11 +928,11 @@ final class AuditSubscriber
                     continue;
                 }
 
-                $name = $metadata->objectType.'|'.$id;
-                $index = $byOwner[$name] ?? null;
+                $type = $metadata->objectType;
+                $index = $byOwner[$type][$id] ?? null;
 
-                if (!isset($seen[$name]) && $index !== null && $drafts[$index]['flush'] === $run['flush']) {
-                    $seen[$name] = true;
+                if (!isset($seen[$type][$id]) && $index !== null && $drafts[$index]['flush'] === $run['flush']) {
+                    $seen[$type][$id] = true;
                     $since[$index] = min($since[$index] ?? $run['since'], $run['since']);
                     $draft = $drafts[$index];
                     $draft['changes'] = array_replace($draft['changes'], $run['changes']);
@@ -947,7 +947,7 @@ final class AuditSubscriber
                     continue;
                 }
 
-                $seen[$name] = true;
+                $seen[$type][$id] = true;
                 $drafts[] = [
                     'objectType' => $metadata->objectType,
                     'id' => $id,
@@ -962,7 +962,7 @@ final class AuditSubscriber
                 $since[array_key_last($drafts)] = $run['since'];
                 // The owner's record for this flush from here on, for its links to join: an owner
                 // with no event of its own is one record of both kinds of news, not two.
-                $byOwner[$name] ??= array_key_last($drafts);
+                $byOwner[$type][$id] ??= array_key_last($drafts);
             } catch (\Throwable $e) {
                 $failed($e);
             }
@@ -992,12 +992,11 @@ final class AuditSubscriber
                     continue;
                 }
 
-                $name = $metadata->objectType.'|'.$run['id'];
-                $index = $byOwner[$name] ?? null;
-                $first = $name.'|'.$run['collection'].'|'.$run['flush'];
+                [$type, $id] = [$metadata->objectType, $run['id']];
+                $index = $byOwner[$type][$id] ?? null;
 
-                if (!isset($joined[$first]) && $index !== null && $drafts[$index]['flush'] === $run['flush']) {
-                    $joined[$first] = true;
+                if (!isset($joined[$type][$id][$run['collection']][$run['flush']]) && $index !== null && $drafts[$index]['flush'] === $run['flush']) {
+                    $joined[$type][$id][$run['collection']][$run['flush']] = true;
                     $since[$index] = min($since[$index] ?? $run['since'], $run['since']);
                     $draft = $drafts[$index];
                     $draft['changes'] = array_replace($draft['changes'], $run['changes']);
@@ -1012,7 +1011,7 @@ final class AuditSubscriber
                     continue;
                 }
 
-                $joined[$first] = true;
+                $joined[$type][$id][$run['collection']][$run['flush']] = true;
                 $drafts[] = [
                     'objectType' => $metadata->objectType,
                     'id' => $run['id'],
@@ -1025,7 +1024,7 @@ final class AuditSubscriber
                     'at' => $run['at'],
                 ];
                 $since[array_key_last($drafts)] = $run['since'];
-                $byOwner[$name] ??= array_key_last($drafts);
+                $byOwner[$type][$id] ??= array_key_last($drafts);
             } catch (\Throwable $e) {
                 $failed($e);
             }
