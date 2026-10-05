@@ -354,25 +354,25 @@ final class StatementShape
     }
 
     /**
-     * The tables a statement that begins with WITH writes behind its common table expressions --
-     * by an INSERT, an UPDATE or a DELETE that is a word of its own, outside every literal and
-     * quoted name -- each as it is named (a quoted name unquoted, a schema kept), or null for one
-     * whose name cannot be read; null for a statement that does not begin with WITH, and an empty
-     * list for one that writes nothing.
+     * The tables a statement this reader could not read may write -- by a word of a write of its
+     * own (INSERT, UPDATE, DELETE, REPLACE, MERGE, TRUNCATE) outside every literal and quoted
+     * name -- each as it is named (a quoted name unquoted, a schema kept), or null for one whose
+     * name cannot be read; an empty list for a statement that writes nothing. For any form: one
+     * behind a common table expression, MySQL's REPLACE and its modifiers, SQLite's INSERT OR
+     * REPLACE, a MERGE.
      *
      * Read only to say that such a statement is doubt: nothing is made of what it did. A word is
      * told from a literal by the quotes every dialect shares -- '…' with '' inside it, E'…' with a
      * backslash, $tag$…$tag$, "…", `…`, […] -- and the statement is the one the comments have
-     * been taken out of ({@see ReadableSql}).
+     * been taken out of ({@see ReadableSql}). Not a write of its own: a lock a read takes (FOR
+     * UPDATE, FOR NO KEY UPDATE), an INSERT's other arm (ON CONFLICT DO UPDATE, ON DUPLICATE KEY
+     * UPDATE), a foreign key's action (ON DELETE, ON UPDATE), a MERGE's arms (THEN UPDATE, THEN
+     * DELETE, THEN INSERT -- the MERGE names the table), and REPLACE(…), the function.
      *
-     * @return list<string|null>|null
+     * @return list<string|null>
      */
-    public static function writtenBehindAWith(string $read): ?array
+    public static function writesItCannotRead(string $read): array
     {
-        if (preg_match('/^\s*WITH\b/i', $read) !== 1) {
-            return null;
-        }
-
         $words = [];
         $length = \strlen($read);
 
@@ -428,22 +428,35 @@ final class StatementShape
         foreach ($words as $at => [$kind, $word]) {
             $keyword = $kind === 'word' ? strtoupper($word) : '';
 
-            if ($keyword !== 'INSERT' && $keyword !== 'UPDATE' && $keyword !== 'DELETE') {
+            if (!isset(self::WRITES[$keyword])) {
                 continue;
             }
 
-            // Not a write of its own: a lock taken by a read (FOR UPDATE, FOR NO KEY UPDATE), or
-            // the other arm of an INSERT (ON CONFLICT DO UPDATE, ON DUPLICATE KEY UPDATE).
-            if ($keyword === 'UPDATE' && ($words[$at - 1][0] ?? '') === 'word' && \in_array(strtoupper($words[$at - 1][1]), ['FOR', 'KEY', 'DO'], true)) {
+            $before = ($words[$at - 1][0] ?? '') === 'word' ? strtoupper($words[$at - 1][1]) : '';
+            $after = $words[$at + 1] ?? null;
+
+            if (\in_array($before, self::WRITES[$keyword]['not after'], true) || ($keyword === 'REPLACE' && $after === ['symbol', '('])) {
                 continue;
             }
 
             $next = $at + 1;
 
-            foreach ($keyword === 'INSERT' ? ['INTO'] : ($keyword === 'DELETE' ? ['FROM', 'ONLY'] : ['ONLY']) as $skipped) {
-                if (($words[$next][0] ?? '') === 'word' && strtoupper($words[$next][1]) === $skipped) {
-                    ++$next;
+            // What may stand between the word and the table: a modifier, SQLite's OR and its one
+            // word, INTO or FROM, ONLY, TABLE.
+            while (($words[$next][0] ?? '') === 'word') {
+                $passed = strtoupper($words[$next][1]);
+
+                if ($passed === 'OR' && \in_array(strtoupper($words[$next + 1][1] ?? ''), ['REPLACE', 'IGNORE', 'ABORT', 'FAIL', 'ROLLBACK'], true) && ($keyword === 'INSERT' || $keyword === 'UPDATE')) {
+                    $next += 2;
+
+                    continue;
                 }
+
+                if (!\in_array($passed, self::WRITES[$keyword]['passed'], true)) {
+                    break;
+                }
+
+                ++$next;
             }
 
             $tables[] = self::nameAt($words, $next);
@@ -451,6 +464,19 @@ final class StatementShape
 
         return $tables;
     }
+
+    /**
+     * The words of a write of its own: what may stand between each and its table, and the words
+     * after which it is no write of its own.
+     */
+    private const WRITES = [
+        'INSERT' => ['passed' => ['LOW_PRIORITY', 'DELAYED', 'HIGH_PRIORITY', 'IGNORE', 'INTO'], 'not after' => ['THEN']],
+        'REPLACE' => ['passed' => ['LOW_PRIORITY', 'DELAYED', 'INTO'], 'not after' => ['OR']],
+        'UPDATE' => ['passed' => ['LOW_PRIORITY', 'IGNORE', 'ONLY'], 'not after' => ['FOR', 'KEY', 'DO', 'ON', 'THEN']],
+        'DELETE' => ['passed' => ['LOW_PRIORITY', 'QUICK', 'IGNORE', 'FROM', 'ONLY'], 'not after' => ['ON', 'THEN']],
+        'MERGE' => ['passed' => ['INTO', 'ONLY'], 'not after' => []],
+        'TRUNCATE' => ['passed' => ['TABLE', 'ONLY'], 'not after' => []],
+    ];
 
     /** Where a literal that opens at $at ends, the position after its closing quote. */
     private static function pastALiteral(string $sql, int $at, bool $backslash): int
@@ -502,7 +528,7 @@ final class StatementShape
 
     private static function isAWriteOrClause(string $word): bool
     {
-        return \in_array(strtoupper($word), ['SELECT', 'SET', 'WHERE', 'VALUES', 'INSERT', 'UPDATE', 'DELETE', 'INTO', 'FROM', 'USING', 'RETURNING', 'ONLY'], true);
+        return \in_array(strtoupper($word), ['SELECT', 'SET', 'WHERE', 'VALUES', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'MERGE', 'TRUNCATE', 'INTO', 'FROM', 'USING', 'RETURNING', 'ONLY', 'TABLE', 'OR'], true);
     }
 
     /**

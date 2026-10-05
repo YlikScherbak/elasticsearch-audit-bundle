@@ -163,21 +163,22 @@ final class StatementShapeTest extends TestCase
     }
 
     /**
-     * @param list<string|null>|null $expected
+     * @param list<string|null> $expected
      */
-    #[DataProvider('commonTableExpressions')]
-    public function testWhatAStatementBeginningWithWithWrites(string $sql, ?array $expected): void
+    #[DataProvider('writesNotRead')]
+    public function testWhatAStatementNotReadMayWrite(string $sql, array $expected): void
     {
-        self::assertSame($expected, StatementShape::writtenBehindAWith($sql));
+        self::assertSame($expected, StatementShape::writesItCannotRead($sql));
     }
 
     /**
-     * @return iterable<string, array{string, list<string|null>|null}>
+     * @return iterable<string, array{string, list<string|null>}>
      */
-    public static function commonTableExpressions(): iterable
+    public static function writesNotRead(): iterable
     {
-        yield 'not a WITH' => ['DELETE FROM a WHERE id = ?', null];
-        yield 'a word beginning with with' => ['WITHIN GROUP', null];
+        yield 'a DELETE' => ['DELETE FROM a WHERE id = ?', ['a']];
+        yield 'DDL' => ['CREATE TABLE a (id INT)', []];
+        yield 'a word beginning with with' => ['WITHIN GROUP', []];
         yield 'a read' => ['WITH x AS (SELECT 1) SELECT * FROM x', []];
         yield 'lower case, and a DELETE' => ['with x as (select 1 as id) delete from a where id in (select id from x)', ['a']];
         yield 'an INSERT INTO' => ['WITH x AS (SELECT 1 AS id) INSERT INTO a (id) SELECT id FROM x', ['a']];
@@ -205,5 +206,22 @@ final class StatementShapeTest extends TestCase
         yield 'ON DUPLICATE KEY UPDATE' => ['WITH x AS (SELECT 1 AS id) INSERT INTO a (id) SELECT id FROM x ON DUPLICATE KEY UPDATE id = 1', ['a']];
         yield 'an unterminated literal' => ["WITH x AS (SELECT 'DELETE FROM a", []];
         yield 'an unterminated quoted name' => ['WITH x AS (SELECT 1) DELETE FROM "a', ['a']];
+        yield 'REPLACE INTO' => ['REPLACE INTO a (id) VALUES (?)', ['a']];
+        yield 'REPLACE with a modifier, without INTO' => ['REPLACE LOW_PRIORITY a (id) VALUES (?)', ['a']];
+        yield 'REPLACE, the function' => ["SELECT REPLACE(name, 'a', 'b') FROM a", []];
+        yield 'INSERT OR REPLACE' => ['INSERT OR REPLACE INTO a (id) VALUES (?)', ['a']];
+        yield 'INSERT OR IGNORE' => ['INSERT OR IGNORE INTO a (id) VALUES (?)', ['a']];
+        yield 'INSERT OR a word SQLite has not' => ['INSERT OR NOTHING INTO a (id) VALUES (?)', [null]];
+        yield 'UPDATE OR REPLACE' => ['UPDATE OR REPLACE a SET b = 1', ['a']];
+        yield 'INSERT IGNORE' => ['INSERT IGNORE INTO a (id) VALUES (?)', ['a']];
+        yield 'INSERT with two modifiers' => ['INSERT LOW_PRIORITY IGNORE INTO a (id) VALUES (?)', ['a']];
+        yield 'DELETE QUICK' => ['DELETE LOW_PRIORITY QUICK IGNORE FROM a WHERE id = ?', ['a']];
+        yield 'UPDATE IGNORE' => ['UPDATE LOW_PRIORITY IGNORE a SET b = 1', ['a']];
+        yield 'a MERGE and its arms' => ['MERGE INTO a USING b ON a.id = b.id WHEN MATCHED THEN UPDATE SET n = 1 WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT (id) VALUES (b.id)', ['a']];
+        yield 'TRUNCATE TABLE' => ['TRUNCATE TABLE a', ['a']];
+        yield 'TRUNCATE' => ['TRUNCATE a', ['a']];
+        yield 'a foreign key that cascades' => ['CREATE TABLE b (a_id INT REFERENCES a (id) ON DELETE CASCADE ON UPDATE CASCADE)', []];
+        yield 'a foreign key that sets null' => ['ALTER TABLE b ADD FOREIGN KEY (a_id) REFERENCES a (id) ON DELETE SET NULL', []];
+        yield 'a column updated on its own' => ['CREATE TABLE a (at TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)', []];
     }
 }

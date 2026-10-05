@@ -1071,6 +1071,29 @@ table named after it, with the CTE's exceptions (a lock, an INSERT's other arm) 
 over; (c) document the forms that are not followed. Recommended: (a'), one rule for the CTE and
 these, by the tokens the CTE's fix already reads.
 
+**Decided and FIXED (2026-10-05): (a').** One rule for every statement the reader cannot read,
+the CTE's among them: `StatementShape::writesItCannotRead()` (it replaces
+`writtenBehindAWith()`, and the pattern with the caret is gone). A write is a word of its own,
+outside literals and quoted names, among INSERT, UPDATE, DELETE, REPLACE, MERGE and TRUNCATE; the
+words that may stand before its table are named, not skipped at will — MySQL's modifiers
+(LOW_PRIORITY, DELAYED, HIGH_PRIORITY, QUICK, IGNORE), INTO, FROM, ONLY, TABLE, and SQLite's OR
+followed by one of its five words (REPLACE, IGNORE, ABORT, FAIL, ROLLBACK); after OR with any
+other word, or wherever the name cannot be read, the table is "any", and the statement is doubt.
+Not a write of its own: FOR UPDATE, FOR NO KEY UPDATE, ON CONFLICT DO UPDATE, ON DUPLICATE KEY
+UPDATE, a foreign key's ON DELETE and ON UPDATE (the schema's DDL is logged too), a MERGE's THEN
+arms (the MERGE names the table), REPLACE(…) the function. Nothing is made of what a statement
+did. TRUNCATE was not among the forms set out above; it is the same road — a watched table
+emptied, no doubt — and the same rule closes it.
+
+The parser (`StatementShape::read()`) returns null for every one of these forms — `OR` was the
+table only of the old pattern of the doubt, not a shape — so the rule, which runs where nothing
+was read, covers `INSERT OR REPLACE` too; `AWriteInAFormNotReadTest` proves it end to end.
+Regressions (`AWriteInAFormNotReadTest`), each red on the code before (a'), each where its
+database has the form: REPLACE (SQLite, MySQL), INSERT OR REPLACE (SQLite), MERGE (PostgreSQL 15
+and later — **run on PostgreSQL 16, DBAL 3 and 4**), TRUNCATE (MySQL, PostgreSQL; SQLite has
+none). `StatementShapeTest` reads 47 statements, the forms above and the words that are no write.
+Green on SQLite with ORM 2.19, ORM 2 and DBAL 3, and on MySQL and PostgreSQL under DBAL 3 and 4.
+
 ### New with H
 
 | Ids | Line | Change | Class |
