@@ -1026,12 +1026,13 @@ run's; a row here supersedes what an earlier section says of the same mutant.
 
 | Class | Escaped | What it rests on |
 |---|---|---|
-| equivalent | 242 | each with its reason in its row: an invariant of the supported code, PHP's semantics, or a reader that reads nothing the mutant changes |
-| open | 72 | searched and not told apart: AuditSubscriber 54 (the flush stack, the operation's windows, the drafts of an owner with two records), HistoryReplay 16, EntityRowRuns 1, RowMemory 1 |
-| gap, not written | 11 | a form no fixture has — a gap of the testing, listed with what would reach it |
+| equivalent | 221 | each with its reason in its row: an invariant of the supported code, PHP's semantics, or a reader that reads nothing the mutant changes (242 at the roll-call; 21 taken back when each exclusion was checked on its line, below) |
+| open | 85 | searched and not told apart: AuditSubscriber 54 (the flush stack, the operation's windows, the drafts of an owner with two records), HistoryReplay 26, EntityRowRuns 1, RowMemory 3, LinkRuns 1 |
+| gap, not written | 18 | a form no fixture has — a gap of the testing, listed with what would reach it |
 | not reached | 11 | an invariant of the supported code, named in its row |
 | killed elsewhere | 7 | red in a cell the gate does not run, confirmed there: DBAL 3 without savepoints 4, ORM 2.19 3 — not added to the SQLite score |
 | killed since the run | 3 | by `WhatALateRecordShowsOfAnUnwatchedTargetTest`, written after it |
+| no longer made | 1 | `placeholder()` made private, so no visibility mutant is made of it |
 | **all** | **346** | |
 
 The 25 timed out: 23 a loop that never ends under the mutant, 2 killed by a test that a slower
@@ -1052,6 +1053,17 @@ is among the equivalents: on SQLite it changes nothing.
 | `84eadb27` | AuditSubscriber 1243 | `claimUnowned()` not called | **killed on DBAL 3** (`orm_cell_probe`, es-audit-dbal3: 14 failures), as the reason against 4261bdb foresaw |
 | `2a50193f` | AuditSubscriber 1243 | `$last` before what was claimed through | **equivalent**: `$last` is never null, and claiming again what is claimed changes nothing — `claimUnowned()` claims only what no flush owns |
 | `d71a0fb8`, `52d53374` | EntityRowRuns 148 | `$duringAFlush` tested against null | **equivalent**, as above (it was counted with "not reached" for a word of its reason) |
+| `a5b0d93b` | HistoryReplay 1077 | `continue` → `break` in the walk over a row's associations when it is copied | **gap, not written** (was "equivalent", found wrong when each exclusion was checked on its line): `break` stops at the first association that is no owning to-one, so a reference declared after a collection is not set on the copy, and a representer reading it reads null. No fixture shows a row of such a class as it stood |
+| `75264ca3`, `bb6ab0c9`, `52c74463` | HistoryReplay 982, 1314 | `&&` → `\|\|` and `\|\|` → `&&` in the guards on one join column | **gap, not written** (was "equivalent", found wrong on its line): "always a list" holds, "of one column" does not — a foreign key of two columns then gives its first column for the whole, and an inverse one-to-one's null reaches `count()` and `reset()`, a TypeError. No fixture has a composite reference among the fields a row is copied with |
+| `9febb66d` | HistoryReplay 1081 | `&&` → `\|\|` before a reference's one column | **gap, not written** (was "equivalent", found wrong on its line): a reference of two columns is then read by its first |
+| `fdb755d0` | RowIdentity 48 | the two arms of the conversion swapped | **gap, not written** (was "equivalent", found wrong on its line): the reason covered the association arm only; under the mutant an identifier that is a field is looked up unconverted, which differs for a type whose PHP value is not its database value (a UUID). No fixture is keyed by such a type through `byForeignKey()` |
+| `082809eb` | StatementShape 435 (now 613) | `&&` → `\|\|` before a number | **gap, not written** (was "equivalent", found wrong on its line): with `\|\|` a digit short-circuits the match, and the token is the previous match's text, the position moving by its length — after `id =`, the `12` is read as two literals `=`. No statement the persisters write has a number in it |
+| `d3a6047c`, `20a8fcd2`, `774a43dd`, `02552f07`, `4de10d15` | HistoryReplay 634, 646, 761, 1014, 1260 | `(int)` taken off a count compared with `===`/`!==` later | **open** (was "equivalent", the reason was a driver's, not DBAL's): `rowCount()` is `int\|numeric-string` by DBAL's contract; that every driver of this support gives a string only past `PHP_INT_MAX` is so of their code, not promised. For the reviewers: normalising the count once where it is logged would make these casts unneeded, and the mutants with them |
+| `38702258` | HistoryReplay 1238 | `(string)` taken off the column of an emptying | **open** (was "equivalent"): the null it would differ by needs a WHERE with no column, which the binding rules out — the caller's, not PHP's |
+| `1644278c`, `e7bdfe22`, `e1273a6b`, `9f35630e` | HistoryReplay 1472, 1473; RowMemory 619, 685 | a null converted through its field's type | **open** (was "equivalent"): DBAL's own types give null for null, but no contract makes an application's type do so |
+| `0609be94` | LinkRuns 212 | the managed entity asked before the object removed | **open** (was "equivalent"): another object can be managed under the key of one removed — behaviour, not a contract |
+| `4c0b1b0f`, `5cb60f2d` | HistoryReplay 976, 1083 | `\|\|` → `&&` before an association is copied | **open** (was "equivalent"): the first lets an owning to-one the declaration does not name into the copy's values, the second a join column the row has not got — what the copy then shows is behaviour |
+| `38adf250` | StatementShape 133 | `placeholder()` protected | **no longer made**: only its own class calls it, so it is private now, as the reviewers asked of a caller's invariant |
 | `a82b7d6b`, `6e6790e1`, `e0c20ac8` | AuditSubscriber 1416, 1434 | the late write with the manager of the next flush, not the one whose flush it was | **test gap, closed** (was "for the reviewers"): the reviewers kept the documented bound for 1.3 — a target of a class the bundle does not read is the object the application holds when the representer runs — so the code as it is, is the contract, and `WhatALateRecordShowsOfAnUnwatchedTargetTest` pins it: the late record names the abandoned manager's object, renamed and unsaved; red under each |
 | `61493358`, `37b3f040` | AuditSubscriber 1422, 1434 | the count with the next flush's manager; the second argument of `publish()` | **equivalent**: the count asks only whether anything was collected, and the log's records are the same whichever manager of one mapping reads them; `publish()` takes the manager of its first argument, and the second only where the first is none |
 | `c1090888` | HistoryReplay 201 | the caret of the pattern that tells a write | **open, for the reviewers**: (b) was refused, so the caret stays; what the mutant changes is the next finding below — writes that begin with neither INSERT, UPDATE, DELETE nor WITH |
@@ -1132,6 +1144,42 @@ The README says now (Limitations, "A flush is the only source") which listener's
 flush — `onFlush` after the bundle's, a lifecycle event of the flush, `postFlush` before it — and
 which is outside; and (the late road) that a late record's labels of a class the bundle does not
 watch are of the object as it is when the record is written.
+
+## Exclusions from the count
+
+The reviewers' rule: a mutation leaves the count only if it is equivalent by PHP's semantics or by
+a Doctrine or DBAL contract, each by a record of its own in `tools/infection/exclusions.json` —
+file, `Class::method`, mutator, line, the line's text, the mutation's diff, the ground, and the
+argument in three steps (what it changes → what bounds it → why the same) — checked on the code
+as it is now. `gate.php excluded` holds every record to the plan made **without** exclusions: its
+text and method must be those of its line, its diff must be that of exactly one mutation there,
+and an Infection rule (`mutator` + `Class::method::line`) that would take more mutations than its
+records argue for is refused. The summary then states the plan before exclusions, the mutations
+left out with their grounds, and requires the plan run to be that plan less exactly them.
+
+Of the 241 equivalents `rollcall.py` classed, 86 rested on PHP or on Doctrine; the other 155 — on an
+invariant of this bundle's own code (94) or on what a reader reads (61) — stay in the count as
+survivors, as agreed. Of the 86:
+
+| | Mutations |
+|---|---|
+| excluded, by PHP | 40 |
+| excluded, by Doctrine or DBAL | 18 |
+| taken back on their line (rows above: 7 gaps, 13 open, 1 made private) | 21 |
+| refused by the gate — the rule would take more mutations than are argued for: AuditMetadata 49 `LogicalAnd`, HistoryReplay 517 `UnwrapArrayMap`, JoinRowsQuery 122 `DecrementInteger` and `IncrementInteger`, LinkFacts 89 and 357 `IncrementInteger`, RowBinding 152 `IncrementInteger` | 7 |
+| **all** | **86** |
+
+The 7 refused stay in the count as survivors: each is still equivalent as its row says, but the
+line holds a second mutation of the same mutator that is not, and Infection cannot tell them apart.
+
+Two things were learnt on the way. A record carried from the roll-call by the nearest line of the
+same diff landed on code written since (`StatementShape` 417, a word of (a′), where the mutant is no
+equivalent): records are now carried by the file's own diff from `9fdd578`. And 21 reasons written
+for a group did not hold for every member of it — "always a list" is not "of one column"; a
+driver's habit is not DBAL's contract.
+
+The one ignore of `infection.doctrine.json5` (`ReadableSql::of::39`) argued from this bundle's own
+reading and is gone; that mutant is a survivor now.
 
 ## Killed outside coverage
 

@@ -33,15 +33,11 @@
         // on_failure: throw they are not -- ALateFlushBehindAFailedOneTest now says what
         // leaving it out cost.
         //
-        // A mutant is ignored here again only when tools/infection/TRIAGE-1.3.md classes it
-        // equivalent or deliberately not tested, by its line, with the reason beside it.
-
-        ReturnRemoval: {
-            // ReadableSql::of() returns a statement with nothing that could begin a comment
-            // as it is, before reading it: the reading would return the same text. Equivalent;
-            // what it saves is the reading of every statement the persisters write.
-            ignore: ["Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\ReadableSql::of::39"],
-        },
+        // Nothing is ignored here. A mutation is left out of the count only by a record in
+        // tools/infection/exclusions.json, argued from PHP or from Doctrine and DBAL, which
+        // gate.php holds to the plan made without it. The one ignore that stood here --
+        // ReadableSql::of()'s early return, the reading after it giving the same text -- was
+        // an argument from this bundle's own code, and such a mutant stays in the count.
     },
     // Its own floor, and well below the other run's, because this listener is the code
     // the bundle calls its price of complexity: one class answering for every shape a

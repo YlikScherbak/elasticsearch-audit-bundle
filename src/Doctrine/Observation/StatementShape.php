@@ -130,7 +130,7 @@ final class StatementShape
             }
 
             /** @phpstan-impure */
-            public function placeholder(): ?int
+            private function placeholder(): ?int
             {
                 $token = $this->tokens[$this->at] ?? null;
 

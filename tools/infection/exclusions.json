@@ -1,4 +1,759 @@
 {
     "main": [],
-    "doctrine": []
+    "doctrine": [
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::keepingOnlyTheHistorysTables",
+            "mutator": "TrueValue",
+            "line": 347,
+            "text": "$this->keptFor[$em] = true;",
+            "diff": [
+                "- $this->keptFor[$em] = true;",
+                "+ $this->keptFor[$em] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the WeakMap value is false instead of true -> what bounds it: the map is read by isset() and iterated for its keys only -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
+            "mutator": "TrueValue",
+            "line": 935,
+            "text": "$seen[$type][$id] = true;",
+            "diff": [
+                "- $seen[$type][$id] = true;",
+                "+ $seen[$type][$id] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
+            "mutator": "TrueValue",
+            "line": 950,
+            "text": "$seen[$type][$id] = true;",
+            "diff": [
+                "- $seen[$type][$id] = true;",
+                "+ $seen[$type][$id] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
+            "mutator": "TrueValue",
+            "line": 999,
+            "text": "$joined[$type][$id][$run['collection']][$run['flush']] = true;",
+            "diff": [
+                "- $joined[$type][$id][$run['collection']][$run['flush']] = true;",
+                "+ $joined[$type][$id][$run['collection']][$run['flush']] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
+            "mutator": "TrueValue",
+            "line": 1014,
+            "text": "$joined[$type][$id][$run['collection']][$run['flush']] = true;",
+            "diff": [
+                "- $joined[$type][$id][$run['collection']][$run['flush']] = true;",
+                "+ $joined[$type][$id][$run['collection']][$run['flush']] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertAuditedFieldsAreThere",
+            "mutator": "TrueValue",
+            "line": 1642,
+            "text": "$this->checkedTracking[$checked] = true;",
+            "diff": [
+                "- $this->checkedTracking[$checked] = true;",
+                "+ $this->checkedTracking[$checked] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTheColumnSaysWhatTheRowHolds",
+            "mutator": "CastBool",
+            "line": 1683,
+            "text": "(bool) ($mapping['notInsertable'] ?? false) => 'is mapped as not insertable, so an INSERT leaves it to the database',",
+            "diff": [
+                "- (bool) ($mapping['notInsertable'] ?? false) => 'is mapped as not insertable, so an INSERT leaves it to the database',",
+                "+ $mapping['notInsertable'] ?? false => 'is mapped as not insertable, so an INSERT leaves it to the database',"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: (bool) is taken off a mapping flag in match (true), which compares with === -> what bounds it: Doctrine maps notInsertable as a bool (or leaves it out, and ?? false gives false) -> why the same: a bool cast of a bool is the bool"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTheColumnSaysWhatTheRowHolds",
+            "mutator": "CastBool",
+            "line": 1684,
+            "text": "(bool) ($mapping['notUpdatable'] ?? false) => 'is mapped as not updatable, so an UPDATE never writes it — the property can move in PHP while the row keeps what it had',",
+            "diff": [
+                "- (bool) ($mapping['notUpdatable'] ?? false) => 'is mapped as not updatable, so an UPDATE never writes it — the property can move in PHP while the row keeps what it had',",
+                "+ $mapping['notUpdatable'] ?? false => 'is mapped as not updatable, so an UPDATE never writes it — the property can move in PHP while the row keeps what it had',"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: (bool) is taken off a mapping flag in match (true), which compares with === -> what bounds it: Doctrine maps notUpdatable as a bool (or leaves it out, and ?? false gives false) -> why the same: a bool cast of a bool is the bool"
+        },
+        {
+            "file": "src/Doctrine/AuditSubscriber.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable",
+            "mutator": "TrueValue",
+            "line": 1771,
+            "text": "$this->checkedTracking[$checked] = true;",
+            "diff": [
+                "- $this->checkedTracking[$checked] = true;",
+                "+ $this->checkedTracking[$checked] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/EntityRowRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\EntityRowRuns::of",
+            "mutator": "FalseValue",
+            "line": 80,
+            "text": "return iterator_to_array($this->each($em, $replay, $log, $readThrough, $departed, $consume, $duringAFlush, $failed), false);",
+            "diff": [
+                "- return iterator_to_array($this->each($em, $replay, $log, $readThrough, $departed, $consume, $duringAFlush, $failed), false);",
+                "+ return iterator_to_array($this->each($em, $replay, $log, $readThrough, $departed, $consume, $duringAFlush, $failed), true);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: iterator_to_array() keeps the generator's keys -> what bounds it: the generator yields only by a bare `yield $record`, never a key and never `yield from` -> why the same: its keys are 0, 1, 2, ..., the keys a list gets anyway"
+        },
+        {
+            "file": "src/Doctrine/Observation/EntityRowRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\EntityRowRuns::completes",
+            "mutator": "LogicalAnd",
+            "line": 324,
+            "text": "if ($metadata->isSingleValuedAssociation($association) && !$metadata->isAssociationInverseSide($association)) {",
+            "diff": [
+                "- if ($metadata->isSingleValuedAssociation($association) && !$metadata->isAssociationInverseSide($association)) {",
+                "+ if ($metadata->isSingleValuedAssociation($association) || !$metadata->isAssociationInverseSide($association)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the guard lets a to-many or an inverse association through -> what bounds it: Doctrine puts joinColumns at a mapping's top only for an owning to-one (a many-to-many holds them in its joinTable) -> why the same: for the others the entry is null, the loop over it runs no time and nothing is added"
+        },
+        {
+            "file": "src/Doctrine/Observation/EntityRowRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\EntityRowRuns::completes",
+            "mutator": "CastArray",
+            "line": 325,
+            "text": "foreach ((array) CollectionRowsQuery::entry($metadata->getAssociationMapping($association), 'joinColumns') as $column) {",
+            "diff": [
+                "- foreach ((array) CollectionRowsQuery::entry($metadata->getAssociationMapping($association), 'joinColumns') as $column) {",
+                "+ foreach (CollectionRowsQuery::entry($metadata->getAssociationMapping($association), 'joinColumns') as $column) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: (array) is taken off the join columns -> what bounds it: the guard before it lets only an owning to-one through, and Doctrine always gives one a list of join columns -> why the same: a cast of a list is the list"
+        },
+        {
+            "file": "src/Doctrine/Observation/EntityRowRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\EntityRowRuns::completes",
+            "mutator": "TrueValue",
+            "line": 329,
+            "text": "$references[$name] = true;",
+            "diff": [
+                "- $references[$name] = true;",
+                "+ $references[$name] = false;"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/HistoryReplay.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::replay",
+            "mutator": "CastInt",
+            "line": 262,
+            "text": "if ($shape->kind === StatementShape::DELETE && $binding->key !== null && (int) $statement['affected'] > 0) {",
+            "diff": [
+                "- if ($shape->kind === StatementShape::DELETE && $binding->key !== null && (int) $statement['affected'] > 0) {",
+                "+ if ($shape->kind === StatementShape::DELETE && $binding->key !== null && $statement['affected'] > 0) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the count is compared with 0 without (int) -> what bounds it: it is int, numeric-string (DBAL's rowCount()) or null -> why the same: PHP 8 compares a numeric string with an int as numbers, and null > 0 is false as (int) null > 0 is"
+        },
+        {
+            "file": "src/Doctrine/Observation/HistoryReplay.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::keyOf",
+            "mutator": "CastString",
+            "line": 532,
+            "text": "$parts[] = \\is_scalar($value) ? (string) $value : '';",
+            "diff": [
+                "- $parts[] = \\is_scalar($value) ? (string) $value : '';",
+                "+ $parts[] = \\is_scalar($value) ? $value : '';"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: a scalar is put into the parts without (string) -> what bounds it: the parts are only joined by implode() -> why the same: implode() turns each scalar into a string the way (string) does"
+        },
+        {
+            "file": "src/Doctrine/Observation/HistoryReplay.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::deleted",
+            "mutator": "TrueValue",
+            "line": 1052,
+            "text": "$this->gone[$root][$id] = true;",
+            "diff": [
+                "- $this->gone[$root][$id] = true;",
+                "+ $this->gone[$root][$id] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/HistoryReplay.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::copyAt",
+            "mutator": "LogicalOr",
+            "line": 1089,
+            "text": "if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
+            "diff": [
+                "- if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
+                "+ if (!$metadata->isSingleValuedAssociation($association) && $metadata->isAssociationInverseSide($association)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the guard lets a to-many or an inverse association through -> what bounds it: Doctrine puts joinColumns at a mapping's top only for an owning to-one (a many-to-many holds them in its joinTable) -> why the same: for the others the entry is null, the loop over it runs no time and nothing is added"
+        },
+        {
+            "file": "src/Doctrine/Observation/HistoryReplay.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::emptied",
+            "mutator": "TrueValue",
+            "line": 1290,
+            "text": "$this->gone[$root][$id] = true;",
+            "diff": [
+                "- $this->gone[$root][$id] = true;",
+                "+ $this->gone[$root][$id] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/JoinRowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\JoinRowMemory::readTheHoldersOf",
+            "mutator": "CastString",
+            "line": 194,
+            "text": "$this->holdersRead[$of][(string) $targetId] = $this->log->position();",
+            "diff": [
+                "- $this->holdersRead[$of][(string) $targetId] = $this->log->position();",
+                "+ $this->holdersRead[$of][$targetId] = $this->log->position();"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: (string) is taken off an array key -> what bounds it: the key is an int or a string, read from array_keys() or a foreach over an array's keys -> why the same: PHP makes a string of decimal digits an int key anyway, so both name the same entry"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkFacts.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkFacts::of",
+            "mutator": "TrueValue",
+            "line": 89,
+            "text": "$owning[explode('::', $of, 2)[0]] = true;",
+            "diff": [
+                "- $owning[explode('::', $of, 2)[0]] = true;",
+                "+ $owning[explode('::', $of, 2)[0]] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkFacts.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkFacts::of",
+            "mutator": "IncrementInteger",
+            "line": 106,
+            "text": "[$root, $collection] = explode('::', $of, 2);",
+            "diff": [
+                "- [$root, $collection] = explode('::', $of, 2);",
+                "+ [$root, $collection] = explode('::', $of, 3);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: explode() is given a limit of 3 instead of 2 -> what bounds it: the string is \"Class::field\", and neither a PHP class name nor a property name can hold \"::\" -> why the same: there is one \"::\", so both limits give two parts"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkFacts.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkFacts::holdersSeenAfter",
+            "mutator": "TrueValue",
+            "line": 367,
+            "text": "$holding[HistoryReplay::keyOf($owner, array_combine($read['owners'], $row))] = true;",
+            "diff": [
+                "- $holding[HistoryReplay::keyOf($owner, array_combine($read['owners'], $row))] = true;",
+                "+ $holding[HistoryReplay::keyOf($owner, array_combine($read['owners'], $row))] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkFacts.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkFacts::undone",
+            "mutator": "CastInt",
+            "line": 407,
+            "text": "} elseif ((int) $statement['affected'] > 0) {",
+            "diff": [
+                "- } elseif ((int) $statement['affected'] > 0) {",
+                "+ } elseif ($statement['affected'] > 0) {"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the count is compared with 0 without (int) -> what bounds it: it is int, numeric-string (DBAL's rowCount()) or null -> why the same: PHP 8 compares a numeric string with an int as numbers, and null > 0 is false as (int) null > 0 is"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkRuns::of",
+            "mutator": "CastString",
+            "line": 70,
+            "text": "$marks = $starts[$of][(string) $id] ?? [];",
+            "diff": [
+                "- $marks = $starts[$of][(string) $id] ?? [];",
+                "+ $marks = $starts[$of][$id] ?? [];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: (string) is taken off an array key -> what bounds it: the key is an int or a string, read from array_keys() or a foreach over an array's keys -> why the same: PHP makes a string of decimal digits an int key anyway, so both name the same entry"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkRuns::of",
+            "mutator": "TrueValue",
+            "line": 122,
+            "text": "$open['touched'][$fact['targetId']] = true;",
+            "diff": [
+                "- $open['touched'][$fact['targetId']] = true;",
+                "+ $open['touched'][$fact['targetId']] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkRuns::listOf",
+            "mutator": "UnwrapArrayValues",
+            "line": 195,
+            "text": "$keys = array_values($targets);",
+            "diff": [
+                "- $keys = array_values($targets);",
+                "+ $keys = $targets;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: array_values() is taken off before usort() -> what bounds it: the array is read only after usort(), which sorts it in place -> why the same: usort() gives a list whatever keys it was given"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkRuns::listOf",
+            "mutator": "CastFloat",
+            "line": 200,
+            "text": "$order = is_numeric($a) && is_numeric($b) ? (float) $a <=> (float) $b : strcmp((string) $a, (string) $b);",
+            "diff": [
+                "- $order = is_numeric($a) && is_numeric($b) ? (float) $a <=> (float) $b : strcmp((string) $a, (string) $b);",
+                "+ $order = is_numeric($a) && is_numeric($b) ? $a <=> (float) $b : strcmp((string) $a, (string) $b);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: one side of <=> is compared without (float) -> what bounds it: is_numeric() is true of both -> why the same: PHP 8 compares a number or numeric string with a float as numbers, an int being taken as a float, as the cast would"
+        },
+        {
+            "file": "src/Doctrine/Observation/LinkRuns.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkRuns::listOf",
+            "mutator": "CastFloat",
+            "line": 200,
+            "text": "$order = is_numeric($a) && is_numeric($b) ? (float) $a <=> (float) $b : strcmp((string) $a, (string) $b);",
+            "diff": [
+                "- $order = is_numeric($a) && is_numeric($b) ? (float) $a <=> (float) $b : strcmp((string) $a, (string) $b);",
+                "+ $order = is_numeric($a) && is_numeric($b) ? (float) $a <=> $b : strcmp((string) $a, (string) $b);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: one side of <=> is compared without (float) -> what bounds it: is_numeric() is true of both -> why the same: PHP 8 compares a number or numeric string with a float as numbers, an int being taken as a float, as the cast would"
+        },
+        {
+            "file": "src/Doctrine/Observation/LookRightAfter.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LookRightAfter::ask",
+            "mutator": "UnwrapArrayMap",
+            "line": 71,
+            "text": "$rows = array_values(array_map('array_values', $statement->execute()->fetchAllNumeric()));",
+            "diff": [
+                "- $rows = array_values(array_map('array_values', $statement->execute()->fetchAllNumeric()));",
+                "+ $rows = array_values($statement->execute()->fetchAllNumeric());"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: array_map('array_values') is taken off the rows -> what bounds it: DBAL's fetchAllNumeric() returns list<list<mixed>> -> why the same: array_values() of a list is the list"
+        },
+        {
+            "file": "src/Doctrine/Observation/LookRightAfter.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LookRightAfter::ask",
+            "mutator": "UnwrapArrayValues",
+            "line": 71,
+            "text": "$rows = array_values(array_map('array_values', $statement->execute()->fetchAllNumeric()));",
+            "diff": [
+                "- $rows = array_values(array_map('array_values', $statement->execute()->fetchAllNumeric()));",
+                "+ $rows = array_map('array_values', $statement->execute()->fetchAllNumeric());"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the outer array_values() is taken off the rows -> what bounds it: DBAL's fetchAllNumeric() returns a list, and array_map() with one array keeps its keys -> why the same: the keys are already 0, 1, 2, ..."
+        },
+        {
+            "file": "src/Doctrine/Observation/RowBinding.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowBinding::entityRow",
+            "mutator": "LogicalAnd",
+            "line": 115,
+            "text": "if ($metadata->isVersioned && \\is_string($metadata->versionField)) {",
+            "diff": [
+                "- if ($metadata->isVersioned && \\is_string($metadata->versionField)) {",
+                "+ if ($metadata->isVersioned || \\is_string($metadata->versionField)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the version column is read when only one of isVersioned and a string versionField holds -> what bounds it: Doctrine sets versionField only when it sets isVersioned, and both together -> why the same: the two are true or false together"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowBinding.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowBinding::joinRow",
+            "mutator": "LogicalOr",
+            "line": 172,
+            "text": "if ($ownerColumns === [] || $elementColumns === []) {",
+            "diff": [
+                "- if ($ownerColumns === [] || $elementColumns === []) {",
+                "+ if ($ownerColumns === [] && $elementColumns === []) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: a join table is refused only when both of its sides have no columns -> what bounds it: Doctrine completes a join table with joinColumns and inverseJoinColumns, each at least one -> why the same: neither side is ever empty, so the guard is false either way"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowBinding.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowBinding::columnsOf",
+            "mutator": "LogicalAnd",
+            "line": 230,
+            "text": "if (\\is_string($name) && \\is_string($referenced)) {",
+            "diff": [
+                "- if (\\is_string($name) && \\is_string($referenced)) {",
+                "+ if (\\is_string($name) || \\is_string($referenced)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the join column is used when only one of its name and its referenced column is a string -> what bounds it: Doctrine's mapping completion gives every join column both -> why the same: both are always strings, so && and || decide alike"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::rememberTheRowsOf",
+            "mutator": "LogicalOr",
+            "line": 165,
+            "text": "if (!\\is_string($column) || !\\is_string($referenced)) {",
+            "diff": [
+                "- if (!\\is_string($column) || !\\is_string($referenced)) {",
+                "+ if (!\\is_string($column) && !\\is_string($referenced)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the join column is used when only one of its name and its referenced column is a string -> what bounds it: Doctrine's mapping completion gives every join column both -> why the same: both are always strings, so && and || decide alike"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::rememberTheRowsOf",
+            "mutator": "LogicalOr",
+            "line": 185,
+            "text": "if (!$elements->isSingleValuedAssociation($other) || $elements->isAssociationInverseSide($other)) {",
+            "diff": [
+                "- if (!$elements->isSingleValuedAssociation($other) || $elements->isAssociationInverseSide($other)) {",
+                "+ if (!$elements->isSingleValuedAssociation($other) && $elements->isAssociationInverseSide($other)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the guard lets a to-many or an inverse association through -> what bounds it: Doctrine puts joinColumns at a mapping's top only for an owning to-one (a many-to-many holds them in its joinTable) -> why the same: for the others the entry is null, the loop over it runs no time and nothing is added"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::rememberTheRowsOf",
+            "mutator": "CastArray",
+            "line": 189,
+            "text": "foreach ((array) CollectionRowsQuery::entry($elements->getAssociationMapping($other), 'joinColumns') as $joinColumn) {",
+            "diff": [
+                "- foreach ((array) CollectionRowsQuery::entry($elements->getAssociationMapping($other), 'joinColumns') as $joinColumn) {",
+                "+ foreach (CollectionRowsQuery::entry($elements->getAssociationMapping($other), 'joinColumns') as $joinColumn) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: (array) is taken off the join columns -> what bounds it: the guard before it lets only an owning to-one through, and Doctrine always gives one a list of join columns -> why the same: a cast of a list is the list"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::rememberTheLinksAboutToChange",
+            "mutator": "UnwrapArrayValues",
+            "line": 238,
+            "text": "foreach ([...array_values($uow->getScheduledCollectionUpdates()), ...array_values($uow->getScheduledCollectionDeletions())] as $collection) {",
+            "diff": [
+                "- foreach ([...array_values($uow->getScheduledCollectionUpdates()), ...array_values($uow->getScheduledCollectionDeletions())] as $collection) {",
+                "+ foreach ([...array_values($uow->getScheduledCollectionUpdates()), ...$uow->getScheduledCollectionDeletions()] as $collection) {"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: array_values() is taken off before the spread -> what bounds it: the UnitOfWork keys its schedules by spl_object_id(), an int -> why the same: a spread renumbers int keys, so the list built is the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::rememberTheLinksAboutToChange",
+            "mutator": "UnwrapArrayValues",
+            "line": 238,
+            "text": "foreach ([...array_values($uow->getScheduledCollectionUpdates()), ...array_values($uow->getScheduledCollectionDeletions())] as $collection) {",
+            "diff": [
+                "- foreach ([...array_values($uow->getScheduledCollectionUpdates()), ...array_values($uow->getScheduledCollectionDeletions())] as $collection) {",
+                "+ foreach ([...$uow->getScheduledCollectionUpdates(), ...array_values($uow->getScheduledCollectionDeletions())] as $collection) {"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: array_values() is taken off before the spread -> what bounds it: the UnitOfWork keys its schedules by spl_object_id(), an int -> why the same: a spread renumbers int keys, so the list built is the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::rememberTheLinksAboutToChange",
+            "mutator": "UnwrapArrayValues",
+            "line": 251,
+            "text": "return [...$failures, ...$this->rememberTheGoing($em, array_values($uow->getScheduledEntityDeletions()), $flush)];",
+            "diff": [
+                "- return [...$failures, ...$this->rememberTheGoing($em, array_values($uow->getScheduledEntityDeletions()), $flush)];",
+                "+ return [...$failures, ...$this->rememberTheGoing($em, $uow->getScheduledEntityDeletions(), $flush)];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the UnitOfWork's schedule is passed with its keys -> what bounds it: rememberTheGoing() only iterates it by value -> why the same: a foreach by value does not see keys"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::watchTheGoing",
+            "mutator": "TrueValue",
+            "line": 336,
+            "text": "$going[$id] = true;",
+            "diff": [
+                "- $going[$id] = true;",
+                "+ $going[$id] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::watchTheGoing",
+            "mutator": "TrueValue",
+            "line": 339,
+            "text": "$keys[$id] = true;",
+            "diff": [
+                "- $keys[$id] = true;",
+                "+ $keys[$id] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::columnsOf",
+            "mutator": "LogicalOr",
+            "line": 623,
+            "text": "if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
+            "diff": [
+                "- if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
+                "+ if (!$metadata->isSingleValuedAssociation($association) && $metadata->isAssociationInverseSide($association)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the guard lets a to-many or an inverse association through -> what bounds it: Doctrine puts joinColumns at a mapping's top only for an owning to-one (a many-to-many holds them in its joinTable) -> why the same: for the others the entry is null, the loop over it runs no time and nothing is added"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::columnsOf",
+            "mutator": "LogicalOr",
+            "line": 634,
+            "text": "if (!\\is_string($name) || !\\is_string($referenced)) {",
+            "diff": [
+                "- if (!\\is_string($name) || !\\is_string($referenced)) {",
+                "+ if (!\\is_string($name) && !\\is_string($referenced)) {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: the join column is used when only one of its name and its referenced column is a string -> what bounds it: Doctrine's mapping completion gives every join column both -> why the same: both are always strings, so && and || decide alike"
+        },
+        {
+            "file": "src/Doctrine/Observation/RowMemory.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\RowMemory::keyOfTarget",
+            "mutator": "CastString",
+            "line": 671,
+            "text": "$field = (string) array_key_first($values);",
+            "diff": [
+                "- $field = (string) array_key_first($values);",
+                "+ $field = array_key_first($values);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: (string) is taken off the identifier's field name -> what bounds it: count() === 1 before it, so the key is there, and a Doctrine field name is a PHP property name, which is never digits only -> why the same: the key is already a string"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementLog.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::aFlushStarts",
+            "mutator": "TrueValue",
+            "line": 182,
+            "text": "$this->flushesStartedAfter[$this->sequence] = true;",
+            "diff": [
+                "- $this->flushesStartedAfter[$this->sequence] = true;",
+                "+ $this->flushesStartedAfter[$this->sequence] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementLog.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::executed",
+            "mutator": "CastInt",
+            "line": 302,
+            "text": "if ($read !== null && !$failed && (int) $affected > 0) {",
+            "diff": [
+                "- if ($read !== null && !$failed && (int) $affected > 0) {",
+                "+ if ($read !== null && !$failed && $affected > 0) {"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the count is compared with 0 without (int) -> what bounds it: it is int, numeric-string (DBAL's rowCount()) or null -> why the same: PHP 8 compares a numeric string with an int as numbers, and null > 0 is false as (int) null > 0 is"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementLog.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::aJoinRowWritten",
+            "mutator": "TrueValue",
+            "line": 485,
+            "text": "$watch['keys'][$key] = true;",
+            "diff": [
+                "- $watch['keys'][$key] = true;",
+                "+ $watch['keys'][$key] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementLog.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
+            "mutator": "TrueValue",
+            "line": 712,
+            "text": "$used[$frame] = true;",
+            "diff": [
+                "- $used[$frame] = true;",
+                "+ $used[$frame] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementLog.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
+            "mutator": "TrueValue",
+            "line": 718,
+            "text": "$used[$f] = true;",
+            "diff": [
+                "- $used[$f] = true;",
+                "+ $used[$f] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementShape.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
+            "mutator": "LogicalOrAllSubExprNegation",
+            "line": 606,
+            "text": "if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
+            "diff": [
+                "- if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
+                "+ if ((!ctype_alpha($c) || !($c === '_')) && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the first-character guard becomes (!alpha || not \"_\"), true for every character -> what bounds it: the anchored pattern after it matches only at [A-Za-z_] -> why the same: where the pattern matches the guard was true, so the branch is taken at the same characters"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementShape.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
+            "mutator": "IncrementInteger",
+            "line": 621,
+            "text": "$tokens[] = ['symbol', $m[0]];",
+            "diff": [
+                "- $tokens[] = ['symbol', $m[0]];",
+                "+ $tokens[] = ['symbol', $m[1]];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the symbol's text is read from group 1 instead of group 0 -> what bounds it: the pattern is \\G( ... ) with one group around the whole of it -> why the same: group 1 is the whole match"
+        },
+        {
+            "file": "src/Doctrine/Observation/StatementShape.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
+            "mutator": "IncrementInteger",
+            "line": 622,
+            "text": "$i += \\strlen($m[0]);",
+            "diff": [
+                "- $i += \\strlen($m[0]);",
+                "+ $i += \\strlen($m[1]);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the position moves by group 1's length instead of group 0's -> what bounds it: the pattern is \\G( ... ) with one group around the whole of it -> why the same: group 1 is the whole match"
+        },
+        {
+            "file": "src/Doctrine/Observation/WatchedRows.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\WatchedRows::areShownAsTheyStood",
+            "mutator": "TrueValue",
+            "line": 142,
+            "text": "$pointedAt[$em->getClassMetadata($owner->getAssociationTargetClass($field))->rootEntityName] = true;",
+            "diff": [
+                "- $pointedAt[$em->getClassMetadata($owner->getAssociationTargetClass($field))->rootEntityName] = true;",
+                "+ $pointedAt[$em->getClassMetadata($owner->getAssociationTargetClass($field))->rootEntityName] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/WatchedRows.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\WatchedRows::isAHistoryTable",
+            "mutator": "TrueValue",
+            "line": 175,
+            "text": "$roots[$metadata->rootEntityName] = true;",
+            "diff": [
+                "- $roots[$metadata->rootEntityName] = true;",
+                "+ $roots[$metadata->rootEntityName] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/WatchedRows.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\WatchedRows::isAHistoryTable",
+            "mutator": "LogicalAnd",
+            "line": 184,
+            "text": "if (\\is_string($name) && $name !== '') {",
+            "diff": [
+                "- if (\\is_string($name) && $name !== '') {",
+                "+ if (\\is_string($name) || $name !== '') {"
+            ],
+            "basis": "Doctrine",
+            "reason": "what it changes: a join table's name is used when it is a string or not empty -> what bounds it: Doctrine completes every join table with a name, a non-empty string -> why the same: both conditions hold, so && and || decide alike"
+        },
+        {
+            "file": "src/Doctrine/Observation/WatchedRows.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\WatchedRows::isAHistoryTable",
+            "mutator": "TrueValue",
+            "line": 185,
+            "text": "$tables[strtolower((\\is_string($schema) && $schema !== '' ? $schema.'.' : '').$name)] = true;",
+            "diff": [
+                "- $tables[strtolower((\\is_string($schema) && $schema !== '' ? $schema.'.' : '').$name)] = true;",
+                "+ $tables[strtolower((\\is_string($schema) && $schema !== '' ? $schema.'.' : '').$name)] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/WatchedRows.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\WatchedRows::isAHistoryTable",
+            "mutator": "TrueValue",
+            "line": 193,
+            "text": "$tables[strtolower(RowBinding::tableOf($metadata))] = true;",
+            "diff": [
+                "- $tables[strtolower(RowBinding::tableOf($metadata))] = true;",
+                "+ $tables[strtolower(RowBinding::tableOf($metadata))] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
+        },
+        {
+            "file": "src/Doctrine/Observation/WatchedRows.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\WatchedRows::decide",
+            "mutator": "ReturnRemoval",
+            "line": 265,
+            "text": "return false;",
+            "diff": [
+                "- return false;",
+                "+ "
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the return false in the catch is taken away -> what bounds it: the statement after the try/catch is return false -> why the same: the method returns false either way"
+        }
+    ]
 }
