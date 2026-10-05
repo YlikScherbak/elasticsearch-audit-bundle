@@ -715,6 +715,28 @@ on another line than meant (`AuditWriter:581` was a comment) took reading each l
 
 ## G: the escaped of CI 37197603893 (`24d23d8`), by behaviour
 
+**For the reviewers, the summary (2026-10-05).** Counted from the tables below, and for
+AuditSubscriber with the 69 that keep a class given against 4261bdb: of about 460 escaped,
+
+| Class | Mutants | What it means |
+|---|---|---|
+| test gap, closed | 86 | a test written for it, red under it (each probed: the mutant applied, the test failing) |
+| equivalent | ~235 | with the reason in its row: an invariant of the supported code, PHP's own semantics, or a reader that reads nothing the mutant changes |
+| not reached | ~41 | with the invariant or the missing fixture named |
+| dead code, taken away | 14 | defaults, fields and parameters no caller used; their mutants are gone with them |
+| H (nested keys) | 7 | the separators of keys that are nested arrays now |
+| killed elsewhere | 6 | red in a cell the gate does not run: DBAL 3 without savepoints (3), ORM 2.19 (2), MySQL (1) |
+| for the reviewers | 6 | the late record's label (5, a code defect found against 4261bdb, not fixed) and a write behind a common table expression (1, below) |
+| open | 57 | searched and not told apart; 38 of them the flush stack of AuditSubscriber |
+
+Code defects found in G: **MEDIUM**, a link a mapped superclass declares left no record (a 1.3
+regression; fixed, `85f6e97`); **LOW**, a write behind a common table expression is no doubt (not
+fixed, for the reviewers). Measured on `8e15dc2` (CI 37216755055): Doctrine 4,041 mutants, 359
+escaped, 25 timed out, **91.12 %** (90.50 % counting only what a test failed on), floor 94; main
+98.16 %. Not measured since: H. On the threshold the two
+of you differ (R1: the measured value with its reason, 94 for 1.4; R2: 94 stays the condition) —
+the open 57 are what stands between.
+
 The reviewers' G: every mutant still escaped after A–F gets a class, grouped by what it changes,
 "not reached" only with an invariant of the supported code. Measured there: Doctrine 4,048 mutants,
 460 escaped, 23 timed out, 88.64 % (88.07 % counting only what a test failed on). The ids below are
