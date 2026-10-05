@@ -970,6 +970,24 @@ gate's search ends. A word the model lacks — a transaction of the application'
 between its flushes — is what the remaining stack mutants need, and adding one redraws every
 seed (the corpora's baseline with it); for the reviewers whether that belongs to 1.3 or 1.4.
 
+## H: keys as nested arrays, and the README
+
+The maps keyed by parts joined with `|` are nested arrays now: `AuditSubscriber::drafts()`
+(an owner's record by type, then id; a list's joining by type, id, collection, flush —
+`4f36c65`), `DepartedObjects` (root class, then row key — `6e54fa5`, `cccf59b`), `ElementFieldRuns`
+(an owner's runs by class, then its key — `d58f7f9`) and `EntityRowRuns` (a row's creation by
+class, then id — `d58f7f9`). No part can run into the next one any more, and the separator's
+mutants (ElementFieldRuns 134, EntityRowRuns 215, AuditSubscriber 997) go with them. Two kinds of
+join stay, on purpose: a row's key (`HistoryReplay::keyOf()`, the composite key's columns joined
+— a normalisation of one identifier, which every reader compares as one value, kept apart from
+the maps), and a watch's name in `StatementLog::watch()`, the label and the flush joined by a NUL,
+which no class or field name can hold.
+
+The README says now (Limitations, "A flush is the only source") which listener's SQL is inside a
+flush — `onFlush` after the bundle's, a lifecycle event of the flush, `postFlush` before it — and
+which is outside; and (the late road) that a late record's labels of a class the bundle does not
+watch are of the object as it is when the record is written.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

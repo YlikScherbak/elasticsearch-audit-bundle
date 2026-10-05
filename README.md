@@ -431,7 +431,10 @@ by the next flush on the connection's outermost level, with the actor and the mo
 that made them. Until such a flush runs they are neither written nor dropped: a process that ends
 first ends without them, and a worker that never flushes again never writes them. Written inside a
 frame, a late record is held by it like any other record: a step of the same actor on the same
-object merges with it, one record for the two operations. Give the audit listener a higher
+object merges with it, one record for the two operations. A late record's ids are as true as
+any; its labels are not always of the moment it describes: for a related class the bundle does not
+watch, the representer is handed the object as the application holds it when the record is
+written — after anything the application changed in it since. Give the audit listener a higher
 priority than listeners that may fail, and the late road is never taken.
 
 When the application owns the wider transaction, close the gap with a frame — the same
@@ -1905,7 +1908,11 @@ Honest list, so nothing surprises you in production:
 - **A flush is the only source of automatic records.** What the history is read from is what the
   audited connection runs while a flush does: the persister's statements, and SQL a listener of
   yours runs inside the flush in the persister's own form, bound to one row of an audited class
-  (**since 1.3**). A DQL `UPDATE`/`DELETE`, a raw SQL statement or a bulk update run outside
+  (**since 1.3**). "Inside" is where the bundle's listener sees it: SQL from an `onFlush` listener
+  that runs after the bundle's, from a lifecycle event of the flush (`postPersist`, `postUpdate`,
+  `postRemove`), or from a `postFlush` listener that runs before the bundle's is the flush's; SQL
+  from an `onFlush` listener that runs before the bundle's, or from a `postFlush` listener after
+  it, is outside — said in the log, and not in the history. A DQL `UPDATE`/`DELETE`, a raw SQL statement or a bulk update run outside
   every flush is not audited — a warning says so — and one run inside a flush that cannot be bound
   to a row (a DQL `UPDATE … WHERE sku = ?`) is reported as a statement the history could not
   follow, never taken for "no change". Audit those paths explicitly with `AuditWriter::record()`.
