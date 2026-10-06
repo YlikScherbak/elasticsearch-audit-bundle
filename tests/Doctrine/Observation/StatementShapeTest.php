@@ -75,6 +75,8 @@ final class StatementShapeTest extends TestCase
      */
     public static function measured(): iterable
     {
+        // A column is read as it is named, a table before it kept: the persisters never write one so.
+        yield 'qualified columns' => ['UPDATE a SET a.n = ? WHERE a.id = ?', ['update', 'a', ['a.n' => 1], ['a.id' => 2], true]];
         yield 'an insert, identity column' => ['INSERT INTO CrateItem (sku, quantity, crate_id) VALUES (?, ?, ?)', ['insert', 'CrateItem', ['sku' => 1, 'quantity' => 2, 'crate_id' => 3], [], true]];
         yield 'an insert, id from a sequence (Postgres, DBAL 3)' => ['INSERT INTO CrateItem (id, sku, quantity, crate_id) VALUES (?, ?, ?, ?)', ['insert', 'CrateItem', ['id' => 1, 'sku' => 2, 'quantity' => 3, 'crate_id' => 4], [], true]];
         yield 'an insert, assigned key' => ['INSERT INTO Crate (code, status, internalNote) VALUES (?, ?, ?)', ['insert', 'Crate', ['code' => 1, 'status' => 2, 'internalNote' => 3], [], true]];

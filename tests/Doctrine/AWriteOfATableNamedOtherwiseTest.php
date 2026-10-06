@@ -84,6 +84,43 @@ final class AWriteOfATableNamedOtherwiseTest extends DoctrineTestCase
         self::assertStringNotContainsString('tags', (string) json_encode(\array_slice($this->documents(), $before)), 'and no record of the link is made');
     }
 
+    public function testTwoTablesNamedLikeWatchedOnesInOneStatementAreOneDoubtOfBoth(): void
+    {
+        $this->onlyOn('SQLite'); // two statements in one, run as one by the driver
+        $connection = $this->em->getConnection();
+        $this->em->persist(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('C-1'));
+        $this->em->persist($article = new Article('One'));
+        $this->em->persist($other = new Article('Other'));
+        $this->em->flush();
+        $this->unownedStatementsAreExpected = true;
+
+        $connection->executeStatement(sprintf("UPDATE article SET title = 'Replaced' WHERE id = %d; UPDATE crate SET status = 'shipped' WHERE code = 'C-1'", $other->id));
+        $article->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of a table named like '.Article::class.'\'s, a table named like '.\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate::class.'\'s since the history was last written, so the history may be missing what they did.'], $this->logs);
+    }
+
+    public function testTheDoubtOfATableNamedLikeAWatchedOneSaysTheStatementAndWhyItWasNotBound(): void
+    {
+        // What the replay says of it, beside the warning: the statement, and why it was not bound.
+        $log = new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog();
+        $log->executed('UPDATE article SET title = ? WHERE id = ?', [1 => 'Replaced', 2 => 7], 1);
+        $replay = new \Borsche\ElasticsearchAuditBundle\Doctrine\Observation\HistoryReplay($this->em, []);
+        $replay->replay($log, 0);
+
+        self::assertCount(1, $replay->doubts());
+        self::assertStringStartsWith('not bound: UPDATE article SET title = ? WHERE id = ? -- ', $replay->doubts()[0]);
+        self::assertGreaterThan(\strlen('not bound: UPDATE article SET title = ? WHERE id = ? -- '), \strlen($replay->doubts()[0]), 'and why');
+    }
+
+    private function onlyOn(string $platform): void
+    {
+        if (!(TestConnection::isSqlite() ? $platform === 'SQLite' : str_contains($this->em->getConnection()->getDatabasePlatform()::class, $platform))) {
+            self::markTestSkipped('The form is '.$platform.'\'s.');
+        }
+    }
+
     public function testATableNamedLikeOneNobodyAuditsIsNoDoubt(): void
     {
         // Tag is no class the history is written about: its table, in any case, is the

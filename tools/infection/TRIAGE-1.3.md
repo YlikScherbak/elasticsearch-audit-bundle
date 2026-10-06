@@ -1377,6 +1377,25 @@ Left as the reviewers drew it: a quoted name in another case than the mapping's 
 goes unsaid; a false doubt for another table of the same name, in another schema or, on MySQL with
 `lower_case_table_names=0`, in another case, is accepted.
 
+### CI 37452642914 (`327e80b`): Doctrine 5 short, and why
+
+main 2620 of 2728, 96.04% strict — through its floor. Doctrine 4022 of 4343, **92.61%**, five
+mutations short of 92.71; 292 escaped against 280 of the run before, the timeouts 29 against 30.
+The 14 escaped not in the journal: C's code had no case of two names like watched tables in one
+statement (HistoryReplay 220), none read the text of its doubt (242 ×7), and a qualified column
+was read by no case since tables have their own reader (StatementShape 159 ×3) — all eleven red by
+hand since, under new cases; `$depth = 0` → `-1` and `return $classes` with one item (the message
+makes them unique) are the bundle's own equivalents and stay in the count; ReadableSql 39 escaped
+again.
+
+**For the reviewers: the refusal's reason was wrong here.** It said the timed out would reach the
+floor, and so they would — 29 of them, as every run has had, 23 loops that never end. The five
+short were escaped of new code. Telling "a killed one timed out" from "more escaped" by the
+statuses of one run alone cannot work while a run has loops among its timeouts; it needs a
+baseline — the escaped and the timed out of the run the floor was measured on, kept beside the
+floor — and then the refusal says which of the two grew. Recommended: keep the two counts of the
+measured run in `parts.json` beside the floor, and say the reason from their difference.
+
 ### FrameBuffer 356: the gap closed (ad03de9)
 
 `[] ?? $this->moved[$key]` on a REMOVE: the held record went out as if no field had moved, and a
