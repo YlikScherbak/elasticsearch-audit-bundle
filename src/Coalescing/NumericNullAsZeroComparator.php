@@ -51,9 +51,17 @@ final class NumericNullAsZeroComparator implements ValueComparatorInterface
             return true;
         }
 
+        // The last segment is asked once, not by asking again: it holds no dot, and a mutant of
+        // the call that recursed for ever took the process down where a test should have failed.
         $last = strrchr($field, '.');
 
-        return $last !== false && $last !== '.' && $this->covers($objectType, substr($last, 1));
+        if ($last === false || $last === '.') {
+            return false;
+        }
+
+        $segment = substr($last, 1);
+
+        return \in_array($segment, $this->fields, true) || \in_array($objectType.'.'.$segment, $this->fields, true);
     }
 
     /**

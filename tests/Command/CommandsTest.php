@@ -409,6 +409,43 @@ final class CommandsTest extends TestCase
         self::assertStringContainsString('audit_auth ok', $tester->getDisplay());
     }
 
+    public function testSyncReachesAFieldTwoObjectsDown(): void
+    {
+        // context.geo exists, context.geo.city does not: the partial parents wrap it from the
+        // field up, in the path's order.
+        $this->gateway->indices['audit_log'] = (new IndexDefinition())->withProperties(['context' => ['properties' => ['geo' => ['properties' => ['country' => ['type' => 'keyword']]]]]])->toArray();
+        $mapping = ['context' => ['properties' => ['geo' => ['properties' => ['country' => ['type' => 'keyword'], 'city' => ['type' => 'keyword']]]]]];
+        $this->gateway->indices['audit_auth'] = (new IndexDefinition())->withProperties($mapping)->toArray();
+        $enricher = new class($mapping) implements AuditEnricherInterface {
+            /** @param array<string, array<string, mixed>> $mapping */
+            public function __construct(private readonly array $mapping)
+            {
+            }
+
+            public function supports(AuditRecord $record): bool
+            {
+                return true;
+            }
+
+            public function enrich(AuditRecord $record): AuditRecord
+            {
+                return $record;
+            }
+
+            public function mapping(): array
+            {
+                return $this->mapping;
+            }
+        };
+
+        $tester = new CommandTester(new SyncIndexCommand($this->gateway, $this->resolver, new IndexDefinition(), [$enricher]));
+
+        self::assertSame(Command::SUCCESS, $tester->execute([]));
+        self::assertStringContainsString('audit_log: added mapping for context.geo.city', $tester->getDisplay());
+        self::assertSame(['type' => 'keyword'], $this->gateway->indices['audit_log']['mappings']['properties']['context']['properties']['geo']['properties']['city'] ?? null);
+        self::assertSame(['type' => 'keyword'], $this->gateway->indices['audit_log']['mappings']['properties']['context']['properties']['geo']['properties']['country'] ?? null, 'the sibling was not touched');
+    }
+
     public function testSyncRefusesToTouchAFieldMappedDifferently(): void
     {
         // A changed type is a reindex, and no command should pretend otherwise. The

@@ -115,18 +115,26 @@ final class SyncIndexCommand extends Command
      */
     private static function partial(array $expected, array $segments): array
     {
-        $head = array_shift($segments);
-        /** @var array<string, mixed> $property */
-        $property = $expected[$head] ?? [];
+        // Down the path once, then wrapped from its end up -- by loops that end, not by a call
+        // that a mutant could make recurse for ever and take the process down with it.
+        $level = $expected;
+        $properties = [];
 
-        if ($segments === []) {
-            return [$head => $property];
+        foreach ($segments as $segment) {
+            /** @var array<string, mixed> $property */
+            $property = $level[$segment] ?? [];
+            $properties[] = $property;
+            /** @var array<string, array<string, mixed>> $level */
+            $level = \is_array($property['properties'] ?? null) ? $property['properties'] : [];
         }
 
-        /** @var array<string, array<string, mixed>> $children */
-        $children = \is_array($property['properties'] ?? null) ? $property['properties'] : [];
+        $last = \count($segments) - 1;
 
-        return [$head => ['properties' => self::partial($children, $segments)]];
+        return array_reduce(
+            array_reverse(\array_slice($segments, 0, $last)),
+            static fn (array $inner, string $segment): array => [$segment => ['properties' => $inner]],
+            [$segments[$last] => $properties[$last]],
+        );
     }
 
     /**

@@ -30,7 +30,7 @@
             "file": "src/Coalescing/NumericNullAsZeroComparator.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
             "mutator": "ArrayItemRemoval",
-            "line": 114,
+            "line": 122,
             "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
             "diff": [
                 "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
@@ -43,7 +43,7 @@
             "file": "src/Coalescing/NumericNullAsZeroComparator.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
             "mutator": "DecrementInteger",
-            "line": 114,
+            "line": 122,
             "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
             "diff": [
                 "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
@@ -56,7 +56,7 @@
             "file": "src/Coalescing/NumericNullAsZeroComparator.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
             "mutator": "DecrementInteger",
-            "line": 114,
+            "line": 122,
             "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
             "diff": [
                 "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
@@ -69,7 +69,7 @@
             "file": "src/Coalescing/NumericNullAsZeroComparator.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
             "mutator": "IncrementInteger",
-            "line": 114,
+            "line": 122,
             "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
             "diff": [
                 "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
@@ -82,7 +82,7 @@
             "file": "src/Coalescing/NumericNullAsZeroComparator.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
             "mutator": "IncrementInteger",
-            "line": 114,
+            "line": 122,
             "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
             "diff": [
                 "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
@@ -95,7 +95,7 @@
             "file": "src/Coalescing/NumericNullAsZeroComparator.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
             "mutator": "CastInt",
-            "line": 124,
+            "line": 132,
             "text": "$point = \\strlen($whole) + (int) $exponent; // where the decimal point lands",
             "diff": [
                 "- $point = \\strlen($whole) + (int) $exponent; // where the decimal point lands",
@@ -108,7 +108,7 @@
             "file": "src/Coalescing/NumericNullAsZeroComparator.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
             "mutator": "GreaterThan",
-            "line": 131,
+            "line": 139,
             "text": "if ($point > \\strlen($digits)) {",
             "diff": [
                 "- if ($point > \\strlen($digits)) {",

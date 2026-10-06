@@ -1396,6 +1396,31 @@ baseline — the escaped and the timed out of the run the floor was measured on,
 floor — and then the refusal says which of the two grew. Recommended: keep the two counts of the
 measured run in `parts.json` beside the floor, and say the reason from their difference.
 
+### Decided and DONE: statuses by name, a refusal that claims no cause, kills made deterministic
+
+On CI 37458201712 (`adfd434`) main's code was the code of `327e80b`, and a killed mutant had become
+an errored one: 2620 → 2619 killed, 4 → 5 errored, 96.04% → 96.00%, on the floor. Both reviewers
+asked, before the tag:
+
+- **Statuses by name** (eaaa0b7). Each part's record keeps every mutant's status, and the end of
+  what an errored or timed-out one left of its run; the summary writes `<set>-statuses.json` as an
+  artifact, red or green; `gate.php transitions` compares two runs mutant by mutant.
+- **A refusal that says no more than it knows** (eaaa0b7). The guessed reason is gone. `parts.json`
+  keeps beside each floor the counts of the run it was measured on, with the run and a hash of its
+  plan; the refusal gives the difference when the plans are one, says that they are not when not,
+  and ends: the cause is not established, compare the mutants' statuses by name.
+- **Kills that do not depend on the machine** (this commit). Infection run locally with every
+  status kept named the errored of main: NumericNullAsZeroComparator 56 ×2 (`substr($last, 0)` and
+  the unwrapped `substr`) and SyncIndexCommand 122–123 ×2 — each a call that recursed for ever under
+  the mutant, so the process died, with a test or not before it, as the stack of the machine went.
+  Both are loops now, with the same results: `covers()` asks the last segment once (it has no dot),
+  `partial()` walks the path down and wraps it up by `array_reduce`. Run again: 0 errored, and the
+  mutants of both are killed by an assertion; two cases were added for what the recursion had
+  covered unseen — a scoped rule for a field in a collection, and a path two objects deep.
+
+The base in `parts.json` is of `adfd434`'s plans; this commit changes main's (2747 → 2763 planned),
+so its run will say that its counts are not compared, until the base is the run the tag is on.
+
 ### FrameBuffer 356: the gap closed (ad03de9)
 
 `[] ?? $this->moved[$key]` on a REMOVE: the held record went out as if no field had moved, and a

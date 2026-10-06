@@ -110,4 +110,15 @@ final class NumericNormalisationTest extends TestCase
         self::assertTrue($comparator->equals('order', 'lines.42.quantity', '1', '1.0'));
         self::assertNull($comparator->equals('order', 'lines.price', '1', '1.0'), 'and not about everything in them');
     }
+
+    public function testARuleScopedToAnObjectTypeIsAboutItsQuantitiesWhereverTheySit(): void
+    {
+        // The same for a rule scoped to the object type: "order.quantity" is about the order's
+        // quantities in its lines too -- and not about another type's.
+        $comparator = new NumericNullAsZeroComparator(['order.quantity']);
+
+        self::assertTrue($comparator->equals('order', 'lines.quantity', '1', '1.0'));
+        self::assertTrue($comparator->equals('order', 'lines.42.quantity', '1', '1.0'));
+        self::assertNull($comparator->equals('invoice', 'lines.quantity', '1', '1.0'), 'another object type');
+    }
 }
