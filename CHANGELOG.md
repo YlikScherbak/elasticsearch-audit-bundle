@@ -145,6 +145,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
     — a DQL `UPDATE … WHERE sku = ?` on an audited table — is reported as a statement the history
     could not follow, not taken for "no change". A listener calling `$connection->update()` in a
     loop now gives a record per row;
+  - the application's SQL that writes in a form this does not read — behind a common table
+    expression, MySQL's `REPLACE` and its writes of several tables (`UPDATE a JOIN b … SET`,
+    `DELETE a, b FROM …`, a `DELETE` of an alias), SQLite's `INSERT OR REPLACE`, a `MERGE`, a
+    `TRUNCATE` of one table or of several — is a warning that the history may be missing what it
+    did, naming every watched class whose table it writes, and "an unknown table" where a name
+    cannot be read. A watched table named otherwise than its mapping — `UPDATE article` on
+    PostgreSQL, which folds the name it is given, or the table behind its schema — is named in
+    that warning as "a table named like" the class's, since it may be another table; nothing is
+    recorded of it under that class. A row count a driver gives past what an int holds is a
+    count not known, never none: the statement is taken as it was written, and is said to be
+    doubt;
   - `nested_flush_provenance: outer` limits more than whose name and moment a nested flush's
     changes carry: without savepoints nothing on the wire tells a nested flush's statements from
     the outer flush's, so where an execution ends can read differently too. The values are all
@@ -572,6 +583,21 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 - **Removing a target left every owner that held it without a record.** The join rows went with
   the target's row, by the cascade, and no owner's list said so. The code responsible dates from
   0.2.0.
+
+### Internal
+- **The mutation gate holds what a test failed on, against a floor kept with the run it was
+  measured on.** The score is the killed of the covered, compared in integers with the floor in
+  `tools/infection/parts.json` — `96.00` for the bundle, `92.71` for the Doctrine listener — with
+  nothing rounded and no room under it: a timeout or an error is shown and not counted, since
+  whether a mutant times out depends on the machine. A mutation leaves the count only by a record
+  in `tools/infection/exclusions.json`, argued from PHP or from Doctrine and DBAL and held to the
+  plan made without it; the line ignores that stood in the configurations were held to the same,
+  and the 64 of 83 they took that rested on Elasticsearch, Messenger or the bundle's own callers
+  are back in the count. Every mutant's status is kept by name, with what an errored or timed-out
+  one left of its run, and `gate.php transitions` compares two runs mutant by mutant; a refusal
+  gives the difference from the measured run and claims no cause. Mutants that a stack running out
+  or a test order killed on one machine and not another are killed by an assertion now. Nothing
+  the bundle does changed for this.
 
 ## [1.2.5] - 2026-10-02
 

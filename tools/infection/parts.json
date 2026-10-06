@@ -4,9 +4,9 @@
         "threads": 3,
         "floor": "96.00",
         "base": {
-            "run": "37458201712",
-            "plan": "854ed77370a530e2e00e5307981f55ae74be736d2542a14da57f672951828273",
-            "counts": {"killed": 2619, "escaped": 104, "timeouted": 0, "errored": 5}
+            "run": "37490863815",
+            "plan": "0a51ce0cb708af31ed86a1b8312a8a7684d1b959578727339d39f1eda3fbe99d",
+            "counts": {"killed": 2640, "escaped": 104, "timeouted": 0, "errored": 0}
         },
         "sources": [
             "src/Privacy",
@@ -28,9 +28,9 @@
         "threads": 3,
         "floor": "92.71",
         "base": {
-            "run": "37458201712",
-            "plan": "114789a1c548bf3ad2ade670425ffcc9edd3ceec286268195a81416da5c6ed39",
-            "counts": {"killed": 4038, "escaped": 281, "timeouted": 29, "errored": 0}
+            "run": "37490863815",
+            "plan": "8a0e64d6bfd1091c77525f18c9d06f8291145fcdbc1099f5ff6f6b76c47e47f1",
+            "counts": {"killed": 4036, "escaped": 280, "timeouted": 29, "errored": 0}
         },
         "sources": ["src/Doctrine"],
         "parts": {
