@@ -110,7 +110,11 @@
     //
     // What the score still does not do is stand in for the search: three thousand
     // sequences run green against the rows, and the list of known failures is empty.
-    minCoveredMsi: 94,
+    //
+    // The floor is no longer here. It is the set's `floor` in tools/infection/parts.json,
+    // held by gate.php to what a test failed on alone -- a timeout is the machine's as often
+    // as the mutant's -- and compared in integers, with no rounding up. Infection is given
+    // no floor of its own: one number, held in one place.
     // High enough that nothing is skipped — see the other configuration's for why that is
     // what decides it, and tools/infection/gate.php for the refusal that holds it there.
     // The listener's lines are covered by the whole Doctrine suite, and at 60 seconds 1,176

@@ -26,12 +26,12 @@ final class TheMutationGateTest extends TestCase
     {
         $this->root = sys_get_temp_dir() . '/es-audit-gate-' . bin2hex(random_bytes(6));
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'threads' => 2, 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'rest' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'floor' => '50', 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'rest' => ['*']]],
         ], \JSON_THROW_ON_ERROR));
         $this->write('tools/infection/composer.lock', json_encode([
             'packages' => [['name' => 'infection/infection', 'version' => '0.35.4', 'source' => ['reference' => 'abc']]],
         ], \JSON_THROW_ON_ERROR));
-        $this->write('infection.json5', "{\n    // the floor\n    minCoveredMsi: 50,\n    timeout: 120,\n}\n");
+        $this->write('infection.json5', "{\n    timeout: 120,\n}\n");
         $this->write('phpunit.xml.dist', '<phpunit/>');
         $this->write('src/A/One.php', '<?php // one');
         $this->write('src/A/Two.php', '<?php // two');
@@ -53,8 +53,27 @@ final class TheMutationGateTest extends TestCase
         self::assertSame(0, $code, $output);
         self::assertStringContainsString('set: 4 mutants in 2 part(s), every one planned and run once, none skipped.', $output);
         self::assertStringContainsString('killed 2, escaped 1, timed out 1, errored 0', $output);
-        self::assertStringContainsString('covered MSI 75.00% (timeouts and errors counted as detected', $output);
-        self::assertStringContainsString('covered MSI 50.00% counting only what a test failed on', $output);
+        self::assertStringContainsString('covered MSI 50.00% counting only what a test failed on -- the one the floor holds', $output);
+        self::assertStringContainsString('covered MSI 75.00% with timeouts and errors counted as detected', $output);
+        self::assertStringContainsString('floor 50% of the covered, counting only what a test failed on', $output);
+    }
+
+    public function testAScoreExactlyAtTheFloorReachesIt(): void
+    {
+        $this->floor('75');
+        $this->runEverything(mutants: ['rest' => ['killed' => [['src/A/Two.php', 'Plus', 3], ['src/A/Two.php', 'Minus', 4]]]]);
+
+        [$code, $output] = $this->gate('summarise', 'set', $this->root . '/out');
+
+        self::assertSame(0, $code, $output);
+        self::assertStringContainsString('covered MSI 75.00% counting only what a test failed on', $output);
+    }
+
+    public function floor(mixed $floor): void
+    {
+        $this->write('tools/infection/parts.json', json_encode([
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'floor' => $floor, 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'rest' => ['*']]],
+        ], \JSON_THROW_ON_ERROR));
     }
 
     /**
@@ -143,7 +162,7 @@ final class TheMutationGateTest extends TestCase
         yield 'a part run under another configuration' => [
             static function (self $test): void {
                 $test->runEverything();
-                $test->write('infection.json5', "{\n    minCoveredMsi: 50,\n    timeout: 10,\n}\n");
+                $test->write('infection.json5', "{\n    timeout: 10,\n}\n");
             },
             'ran on another fingerprint than this tree has',
         ];
@@ -158,12 +177,46 @@ final class TheMutationGateTest extends TestCase
             'set.one ran 2 threads on 2 CPUs',
         ];
 
-        yield 'a score below the floor' => [
+        yield 'a score one mutation below the floor' => [
             static function (self $test): void {
-                $test->write('infection.json5', "{\n    minCoveredMsi: 80,\n    timeout: 120,\n}\n");
+                $test->floor('75');
+                $test->runEverything(mutants: ['rest' => ['killed' => [['src/A/Two.php', 'Plus', 3]], 'escaped' => [['src/A/Two.php', 'Minus', 4]]]]);
+            },
+            'set is below its floor: 1 more of the 4 would have to be killed by a test',
+        ];
+
+        // Infection's own count, 75%, would reach the floor; the gate's does not.
+        yield 'a timeout, which is not counted as killed' => [
+            static function (self $test): void {
+                $test->floor('75');
                 $test->runEverything();
             },
-            'set is below its floor by 5.00 points',
+            'set is below its floor: 1 more of the 4',
+        ];
+
+        // Two of three: shown as 66.67%, and short of a floor of 66.67 all the same.
+        yield 'a score shown as the floor and short of it' => [
+            static function (self $test): void {
+                $test->floor('66.67');
+                $test->runEverything(mutants: ['rest' => ['killed' => [['src/A/Two.php', 'Plus', 3]], 'uncovered' => [['src/A/Two.php', 'Minus', 4]]]]);
+            },
+            'set is below its floor: 1 more of the 3',
+        ];
+
+        yield 'a floor that is not a decimal in a string' => [
+            static function (self $test): void {
+                $test->runEverything();
+                $test->floor(75);
+            },
+            'parts.json gives set "set" no floor',
+        ];
+
+        yield 'a floor above a hundred' => [
+            static function (self $test): void {
+                $test->runEverything();
+                $test->floor('100.01');
+            },
+            'parts.json gives set "set" no floor',
         ];
     }
 
@@ -181,7 +234,7 @@ final class TheMutationGateTest extends TestCase
     public function testAFileTwoPartsNameIsRefusedBeforeAnythingRuns(): void
     {
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'threads' => 2, 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'again' => ['src/A/One.php'], 'rest' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'floor' => '50', 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'again' => ['src/A/One.php'], 'rest' => ['*']]],
         ], \JSON_THROW_ON_ERROR));
 
         [$code, $output] = $this->gate('files', 'set', 'one');
@@ -193,7 +246,7 @@ final class TheMutationGateTest extends TestCase
     public function testAPartNamesOnlyFilesOfTheSet(): void
     {
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'threads' => 2, 'sources' => ['src/A'], 'parts' => ['one' => ['src/B/Gone.php'], 'rest' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'floor' => '50', 'sources' => ['src/A'], 'parts' => ['one' => ['src/B/Gone.php'], 'rest' => ['*']]],
         ], \JSON_THROW_ON_ERROR));
 
         [$code, $output] = $this->gate('files', 'set', 'rest');

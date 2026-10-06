@@ -19,9 +19,11 @@ declare(strict_types=1);
  * it ran on. summarise then refuses unless the parts' mutants are exactly the plan's, one
  * for one; nothing was skipped; every part finished; and every record is of the same tree,
  * the same Infection and the same configuration. Only then is the score computed — from
- * the summed counts, never from the parts' percentages — and held to the configuration's
- * minCoveredMsi. The parts themselves run with no floor, so that a part with many escaped
- * mutants still finishes and is counted rather than lost.
+ * the summed counts, never from the parts' percentages — and held to the set's floor in
+ * parts.json: what a test failed on, of the covered, compared in integers. A timeout or an
+ * error is shown and not counted, because whether a mutant times out depends on the machine.
+ * The parts themselves run with no floor, so that a part with many escaped mutants still
+ * finishes and is counted rather than lost.
  *
  *   php tools/infection/gate.php parts <set>
  *   php tools/infection/gate.php matrix <set>                 # the parts, as JSON, for a CI matrix
@@ -47,7 +49,7 @@ function refuse(string $message): void
     throw new GateRefused($message);
 }
 
-/** @return array{config: string, threads: int, sources: list<string>, parts: array<string, list<string>>} */
+/** @return array{config: string, threads: int, floor: string, sources: list<string>, parts: array<string, list<string>>} */
 function setOf(string $root, string $set): array
 {
     $manifest = json_decode((string) file_get_contents($root . '/tools/infection/parts.json'), true, 512, \JSON_THROW_ON_ERROR);
@@ -60,7 +62,37 @@ function setOf(string $root, string $set): array
         refuse(sprintf('parts.json gives set "%s" no number of threads.', $set));
     }
 
+    // A decimal in a string: read as digits, never as a float, so that the floor written is
+    // the floor held.
+    if (!\is_string($manifest[$set]['floor'] ?? null) || preg_match('/^[0-9]{1,3}(\.[0-9]{1,4})?$/', $manifest[$set]['floor']) !== 1 || !reaches(1, 1, $manifest[$set]['floor'])) {
+        refuse(sprintf('parts.json gives set "%s" no floor (a percentage written as a string, "92.49").', $set));
+    }
+
     return $manifest[$set];
+}
+
+/**
+ * Whether $killed of $counted reach the floor, by integers alone: no float and no rounding,
+ * so a score shown as the floor and short of it by a fraction of a mutation is short.
+ */
+function reaches(int $killed, int $counted, string $floor): bool
+{
+    [$whole, $fraction] = explode('.', $floor . '.', 3);
+    $scale = 10 ** \strlen($fraction);
+
+    return $killed * 100 * $scale >= ((int) $whole * $scale + (int) ('0' . $fraction)) * $counted;
+}
+
+/** How many more mutations a test must fail on for $killed of $counted to reach the floor. */
+function shortBy(int $killed, int $counted, string $floor): int
+{
+    $more = 0;
+
+    while (!reaches($killed + $more, $counted, $floor)) {
+        ++$more;
+    }
+
+    return $more;
 }
 
 /** @return list<string> every PHP file under the set's sources, relative to the root */
@@ -428,12 +460,6 @@ function summarise(string $root, string $setName, string $dir): int
         ));
     }
 
-    preg_match('/^\s*minCoveredMsi:\s*([0-9.]+)/m', (string) file_get_contents($root . '/' . $set['config']), $floor);
-
-    if (!isset($floor[1])) {
-        refuse(sprintf('%s states no minCoveredMsi.', $set['config']));
-    }
-
     $total = array_sum($counts);
     $covered = $total - $counts['uncovered'] - $counts['ignored'];
     $killed = $counts['killed'] + $counts['killedByStaticAnalysis'];
@@ -443,8 +469,8 @@ function summarise(string $root, string $setName, string $dir): int
 
     printf("%s: %d mutants in %d part(s), every one planned and run once, none skipped.\n", $setName, $total, \count($parts));
     printf("  killed %d, escaped %d, timed out %d, errored %d, syntax errors %d, not covered %d, ignored %d\n", $killed, $counts['escaped'], $counts['timeouted'], $counts['errored'], $counts['syntaxErrors'], $counts['uncovered'], $counts['ignored']);
-    printf("  covered MSI %.2f%% (timeouts and errors counted as detected, as Infection counts them)\n", $msi);
-    printf("  covered MSI %.2f%% counting only what a test failed on\n", $strict);
+    printf("  covered MSI %.2f%% counting only what a test failed on -- the one the floor holds\n", $strict);
+    printf("  covered MSI %.2f%% with timeouts and errors counted as detected, as Infection counts them\n", $msi);
     if ($exclusions !== null && $exclusions['excluded'] !== []) {
         ksort($exclusions['bases']);
         printf(
@@ -455,10 +481,13 @@ function summarise(string $root, string $setName, string $dir): int
         );
     }
 
-    printf("  floor %s%%\n", $floor[1]);
+    printf("  floor %s%% of the covered, counting only what a test failed on (parts.json)\n", $set['floor']);
 
-    if ($msi + 0.005 < (float) $floor[1]) {
-        fwrite(\STDERR, sprintf("%s is below its floor by %.2f points.\n", $setName, (float) $floor[1] - $msi));
+    // A timeout is a mutant the machine was too slow to finish, as often as one that never
+    // ends: the same mutant was each in two runs of one tree. Counted, the score would be
+    // the machine's.
+    if (!reaches($killed, $covered, $set['floor'])) {
+        fwrite(\STDERR, sprintf("%s is below its floor: %d more of the %d would have to be killed by a test.\n", $setName, shortBy($killed, $covered, $set['floor']), $covered));
 
         return 1;
     }

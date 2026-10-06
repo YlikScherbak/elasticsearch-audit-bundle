@@ -43,12 +43,12 @@ final class TheMutationGatesExclusionsTest extends TestCase
     {
         $this->root = sys_get_temp_dir() . '/es-audit-exclusions-' . bin2hex(random_bytes(6));
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'threads' => 2, 'sources' => ['src/A'], 'parts' => ['all' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'floor' => '50', 'sources' => ['src/A'], 'parts' => ['all' => ['*']]],
         ], \JSON_THROW_ON_ERROR));
         $this->write('tools/infection/composer.lock', json_encode([
             'packages' => [['name' => 'infection/infection', 'version' => '0.35.4', 'source' => ['reference' => 'abc']]],
         ], \JSON_THROW_ON_ERROR));
-        $this->write('infection.json5', "{\n    minCoveredMsi: 50,\n    timeout: 120,\n}\n");
+        $this->write('infection.json5', "{\n    timeout: 120,\n}\n");
         $this->write('phpunit.xml.dist', '<phpunit/>');
         $this->write('src/A/One.php', self::SOURCE);
     }

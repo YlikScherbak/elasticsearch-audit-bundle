@@ -261,9 +261,13 @@
     // measured on a stand that was not lying (see the Dockerfile): it is here so the
     // number cannot quietly go down while the code grows, and it is raised as each
     // group of escaped mutants is worked through rather than set aspirationally and
-    // ignored. minCoveredMsi rather than minMsi because uncovered code is the coverage
+    // ignored. Of the covered rather than of all because uncovered code is the coverage
     // floor's business, and tools/coverage-floor.php already owns that argument.
-    minCoveredMsi: 97,
+    //
+    // The floor is no longer here. It is the set's `floor` in tools/infection/parts.json,
+    // held by gate.php to what a test failed on alone -- a timeout is the machine's as often
+    // as the mutant's -- and compared in integers, with no rounding up. Infection is given
+    // no floor of its own: one number, held in one place.
     // High enough that nothing is skipped, which is what decides it — and the gate
     // (tools/infection/gate.php) refuses a run that skipped any, so that a timeout lowered
     // for speed shows up as a red job rather than as a score over fewer mutants. Infection

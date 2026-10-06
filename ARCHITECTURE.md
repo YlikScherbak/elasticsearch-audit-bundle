@@ -497,8 +497,10 @@ Each is enforced somewhere named, and broken at least once before it was written
 plan (Infection's `--dry-run` over the whole configuration) and parts (`tools/infection/parts.json`),
 and refuses one where any mutant was skipped, a part is missing, unfinished or ran on another tree,
 another configuration or other threads than the manifest gives, or the parts' mutants are not the
-plan's one for one. Then it sums the counts — never the parts' percentages — and holds them to the
-configuration's `minCoveredMsi`.
+plan's one for one. Then it sums the counts — never the parts' percentages — and holds what a test
+failed on, of the covered, to the set's `floor` in `parts.json`, in integers and with no rounding.
+A timeout is shown and not counted: whether a mutant times out depends on the machine, and the same
+mutant of one tree was a timeout in one run and escaped in the next.
 
 - **The timeout is set so that nothing is skipped.** Infection skips a mutant, uncounted, when the
   tests covering its line add up to more than the timeout; with too low a one the score is a score
