@@ -889,8 +889,8 @@ final class AuditWriter
             return $record;
         }
 
-        foreach ($taken as $name => $value) {
-            $this->say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept. Neither value is repeated here.', $enricher::class, $name), ['attribute' => $name]);
+        foreach (array_keys($taken) as $attribute) {
+            $this->say(sprintf('The enricher %s set "%s", which a moment enricher had already described; the value from the moment is kept. Neither value is repeated here.', $enricher::class, $attribute), ['attribute' => $attribute]);
         }
 
         return $record->withAttributes($taken);
