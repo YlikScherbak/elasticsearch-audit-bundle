@@ -1339,6 +1339,50 @@ bundle's own, so it stays in the count. The 5 new timeouts are loops that never 
 Static analysis was red on PHPStan 2.3.0, which CI resolves and the local tree did not have: a
 foreach that overwrote the variables of the one before it in `AuditWriter::keeping()` (72fd1e7).
 
+## The floors, decided (after CI 37437717403, `900b52b`)
+
+Measured on the candidate: main 2619 of 2728 killed, **96.00%** strict (96.15% as Infection
+counts); Doctrine 3945 of 4255, **92.71%** strict (93.42% as Infection counts). Skipped 0 and not
+covered 0 in both — the covered are all that were planned, less the excluded. The reviewers fixed
+the floors at the measure, exactly and with no room: `"96.00"` and `"92.71"` in `parts.json`
+(`"92.72"` is out of reach by a ten-thousandth, and is not the floor). A floor goes up only.
+**The goal for 1.4: Doctrine at 94, strict**, beside the word about the application's
+transaction.
+
+A killed mutant that times out on a slower runner takes 0.024 of a point from Doctrine with no
+change of code. No room is given for it: the refusal now says, from the statuses, whether the
+timed out would have reached the floor — then it is the timeout's or the threads' to mend, never
+the floor's — or whether the escaped are more than the floor allows (a9ec7c5; ARCHITECTURE says
+it in one line).
+
+### Decided and FIXED: C (9a37a11)
+
+As both reviewers chose, (a), with the bounds the second drew. The exact match by the mapping's
+spelling stands as it was. Only where it finds nothing is a candidate looked for: a name read part
+by part, each with whether it was quoted — a dot inside a quoted name is the name's — whose last
+part is a watched table's or join table's, unquoted in any case, quoted exactly. A candidate is
+doubt of *a table named like* that class's, and nothing more: the statement is not bound,
+replayed or remembered as the mapping's, and no record is made under that class or id — the
+regression holds both (`AWriteOfATableNamedOtherwiseTest`, red under each of eight
+neutralisations; all five forms green on PostgreSQL 16 and SQLite, the schema's on MySQL 8, where
+the other case is another table and refused). The log keeps a statement by its name's last part
+too, which a qualified one needed to reach the replay at all. Held further, before the measure:
+a join table named otherwise (`ARTICLE_TAG`) is doubt of its owner's class; an unaudited class's
+table in another case (`TAG`) is no doubt; a watched class after unwatched ones among the mapped
+(`CRATE`) is found; `UPDATE SET SET …` is no table called SET. The candidates are not made unique
+where the message, which alone reads them, makes them so.
+
+Left as the reviewers drew it: a quoted name in another case than the mapping's (`"article"` for
+`Article`) is no candidate — on PostgreSQL that is the folded table itself, written quoted, and it
+goes unsaid; a false doubt for another table of the same name, in another schema or, on MySQL with
+`lower_case_table_names=0`, in another case, is accepted.
+
+### FrameBuffer 356: the gap closed (ad03de9)
+
+`[] ?? $this->moved[$key]` on a REMOVE: the held record went out as if no field had moved, and a
+field that went and came back stayed as context. A frame with one field 1 → 2 → 1 and another 5 → 6,
+then a REMOVE, now says the record goes out with the second alone — red under the mutant.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

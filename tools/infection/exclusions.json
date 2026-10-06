@@ -422,7 +422,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::keyOf",
             "mutator": "CastString",
-            "line": 544,
+            "line": 552,
             "text": "$parts[] = \\is_scalar($value) ? (string) $value : '';",
             "diff": [
                 "- $parts[] = \\is_scalar($value) ? (string) $value : '';",
@@ -435,7 +435,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::deleted",
             "mutator": "TrueValue",
-            "line": 1076,
+            "line": 1118,
             "text": "$this->gone[$root][$id] = true;",
             "diff": [
                 "- $this->gone[$root][$id] = true;",
@@ -448,7 +448,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::copyAt",
             "mutator": "LogicalOr",
-            "line": 1113,
+            "line": 1155,
             "text": "if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
             "diff": [
                 "- if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
@@ -461,7 +461,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::emptied",
             "mutator": "TrueValue",
-            "line": 1314,
+            "line": 1356,
             "text": "$this->gone[$root][$id] = true;",
             "diff": [
                 "- $this->gone[$root][$id] = true;",
@@ -812,7 +812,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::aJoinRowWritten",
             "mutator": "TrueValue",
-            "line": 515,
+            "line": 519,
             "text": "$watch['keys'][$key] = true;",
             "diff": [
                 "- $watch['keys'][$key] = true;",
@@ -825,7 +825,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
             "mutator": "TrueValue",
-            "line": 742,
+            "line": 746,
             "text": "$used[$frame] = true;",
             "diff": [
                 "- $used[$frame] = true;",
@@ -838,7 +838,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
             "mutator": "TrueValue",
-            "line": 748,
+            "line": 752,
             "text": "$used[$f] = true;",
             "diff": [
                 "- $used[$f] = true;",
@@ -851,7 +851,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "LogicalOrAllSubExprNegation",
-            "line": 676,
+            "line": 703,
             "text": "if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
             "diff": [
                 "- if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
@@ -864,7 +864,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "IncrementInteger",
-            "line": 691,
+            "line": 718,
             "text": "$tokens[] = ['symbol', $m[0]];",
             "diff": [
                 "- $tokens[] = ['symbol', $m[0]];",
@@ -877,7 +877,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "IncrementInteger",
-            "line": 692,
+            "line": 719,
             "text": "$i += \\strlen($m[0]);",
             "diff": [
                 "- $i += \\strlen($m[0]);",

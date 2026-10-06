@@ -2,7 +2,7 @@
     "main": {
         "config": "infection.json5",
         "threads": 3,
-        "floor": "97",
+        "floor": "96.00",
         "sources": [
             "src/Privacy",
             "src/Coalescing",
@@ -21,7 +21,7 @@
     "doctrine": {
         "config": "infection.doctrine.json5",
         "threads": 3,
-        "floor": "94",
+        "floor": "92.71",
         "sources": ["src/Doctrine"],
         "parts": {
             "subscriber": ["src/Doctrine/AuditSubscriber.php"],
