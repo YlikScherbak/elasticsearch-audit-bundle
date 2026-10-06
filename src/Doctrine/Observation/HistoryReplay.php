@@ -142,7 +142,7 @@ final class HistoryReplay
     /** Whether the last representer this called threw: the fact it was for is marked, never guessed. */
     private bool $representFailed = false;
 
-    /** @var list<array{at: int, classes: non-empty-list<string|null>}> where each doubt was, and about which classes: no value it held */
+    /** @var list<array{at: int, classes: list<string>, like: list<string>, unnamed: bool}> where each doubt was, and about which classes: no value it held */
     private array $doubtsAt = [];
 
     /**
@@ -203,22 +203,26 @@ final class HistoryReplay
                     // behind a common table expression, MySQL's REPLACE, SQLite's INSERT OR
                     // REPLACE, a MERGE: one doubt, of every watched class a name is of, and of any
                     // table besides if a name cannot be read -- which a name read after it does
-                    // not take back.
+                    // not take back. A name not the mapping's, that may be a watched table's, is
+                    // doubt of it too.
                     $watched = [];
+                    $like = [];
                     $unnamed = false;
 
                     foreach (StatementShape::writesItCannotRead($statement['read']) as $table) {
-                        $class = $table === null ? null : $this->watchedClassOf($table);
+                        $class = $table === null ? null : $this->watchedClassOf($table->written());
 
                         if ($table === null) {
                             $unnamed = true;
-                        } elseif ($class !== null && !\in_array($class, $watched, true)) {
+                        } elseif ($class !== null) {
                             $watched[] = $class;
+                        } else {
+                            $like = [...$like, ...$this->watchedClassesItMayBe($table)];
                         }
                     }
 
-                    if ($watched !== [] || $unnamed) {
-                        $this->doubtOf('not read: '.$statement['sql'], $unnamed ? [...$watched, null] : $watched);
+                    if ($watched !== [] || $like !== [] || $unnamed) {
+                        $this->doubtOf('not read: '.$statement['sql'], array_values(array_unique($watched)), array_values(array_unique($like)), $unnamed);
                     }
                 }
 
@@ -229,9 +233,13 @@ final class HistoryReplay
                 $watched = $this->watchedClassOf($shape->table);
 
                 // Doubt only about rows history is written about: a statement the application
-                // ran on a table of its own is neither a fact nor a doubt.
+                // ran on a table of its own is neither a fact nor a doubt. One named otherwise
+                // than the mapping -- in another case, behind a schema -- that may be a watched
+                // table is doubt of it, and is never bound or replayed as the mapping's.
                 if ($watched !== null) {
                     $this->doubt('not bound: '.$statement['sql'].' -- '.$binding->reason, $watched);
+                } elseif (($like = $this->watchedClassesItMayBe($shape->name)) !== []) {
+                    $this->doubtOf('not bound: '.$statement['sql'].' -- '.$binding->reason, [], $like);
                 }
 
                 continue;
@@ -621,26 +629,60 @@ final class HistoryReplay
 
     private function doubt(string $text, ?string $class): void
     {
-        $this->doubtOf($text, [$class]);
+        $this->doubtOf($text, $class === null ? [] : [$class], [], $class === null);
     }
 
     /**
-     * One doubt of a statement, about each class it may have written, null among them for a
-     * table it may have written and this cannot name.
+     * One doubt of a statement: of each watched class whose table it named, of each whose table a
+     * name of it may be ({@see TableName::mayBe()}), and of a table it may have written and this
+     * cannot name.
      *
-     * @param non-empty-list<string|null> $classes
+     * @param list<string> $classes
+     * @param list<string> $like
      */
-    private function doubtOf(string $text, array $classes): void
+    private function doubtOf(string $text, array $classes, array $like = [], bool $unnamed = false): void
     {
         $this->doubts[] = $text;
-        $this->doubtsAt[] = ['at' => $this->at, 'classes' => $classes];
+        $this->doubtsAt[] = ['at' => $this->at, 'classes' => $classes, 'like' => $like, 'unnamed' => $unnamed];
+    }
+
+    /**
+     * The watched classes whose table -- or join table -- a name not the mapping's may be: grounds
+     * for a doubt only, never for binding the statement to them.
+     *
+     * @return list<string>
+     */
+    private function watchedClassesItMayBe(TableName $name): array
+    {
+        $classes = [];
+
+        foreach ($this->em()->getMetadataFactory()->getAllMetadata() as $candidate) {
+            if (!$candidate instanceof ClassMetadata || !$this->watched->areWatched($this->em(), $candidate)) {
+                continue;
+            }
+
+            $tables = [$candidate->getTableName()];
+
+            foreach ($candidate->getAssociationNames() as $association) {
+                $joinTable = CollectionRowsQuery::entry($candidate->getAssociationMapping($association), 'joinTable');
+                $tables[] = $joinTable === null ? null : CollectionRowsQuery::entry($joinTable, 'name');
+            }
+
+            foreach ($tables as $table) {
+                if (\is_string($table) && $name->mayBe($table) && !\in_array($candidate->rootEntityName, $classes, true)) {
+                    $classes[] = $candidate->rootEntityName;
+                }
+            }
+        }
+
+        return $classes;
     }
 
     /**
      * The doubts of the statements after a position: where, and about which classes, and nothing a
      * statement carried -- for a writer to say what the history may be missing.
      *
-     * @return list<array{at: int, classes: non-empty-list<string|null>}>
+     * @return list<array{at: int, classes: list<string>, like: list<string>, unnamed: bool}>
      */
     public function doubtsAfter(int $at): array
     {

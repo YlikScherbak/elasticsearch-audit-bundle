@@ -1,0 +1,77 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
+
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Article;
+use Borsche\ElasticsearchAuditBundle\Tests\TestConnection;
+use PHPUnit\Framework\Attributes\DataProvider;
+
+/**
+ * The application's write of a watched table named otherwise than its mapping -- in lower or upper
+ * case, which PostgreSQL folds and SQLite ignores, or behind a schema -- is doubt of a table named
+ * like the watched one's: a warning that the history may be missing it, never a record made of it.
+ * Said as a table *named like* it, because it may be another one: of another schema, or of another
+ * case where the database keeps the case.
+ */
+final class AWriteOfATableNamedOtherwiseTest extends DoctrineTestCase
+{
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function names(): iterable
+    {
+        yield 'in lower case, read' => ["UPDATE article SET title = 'Replaced' WHERE id = %d"];
+        yield 'in upper case, read' => ["UPDATE ARTICLE SET title = 'Replaced' WHERE id = %d"];
+        yield 'in lower case, not read' => ["WITH x AS (SELECT %d AS id) UPDATE article SET title = 'Replaced' WHERE id IN (SELECT id FROM x)"];
+        yield 'behind its schema' => ["UPDATE %%SCHEMA%%.Article SET title = 'Replaced' WHERE id = %d"];
+    }
+
+    #[DataProvider('names')]
+    public function testAWriteOfATableNamedLikeAWatchedOneIsDoubtAndNoRecord(string $sql): void
+    {
+        $connection = $this->em->getConnection();
+        $schema = TestConnection::isSqlite() ? 'main' : (str_contains($connection->getDatabasePlatform()::class, 'PostgreSQL') ? 'public' : (string) $connection->fetchOne('SELECT DATABASE()'));
+        $this->em->persist($article = new Article('One'));
+        $this->em->persist($other = new Article('Other'));
+        $this->em->flush();
+        $this->unownedStatementsAreExpected = true;
+        $before = \count($this->documents());
+
+        try {
+            $connection->executeStatement(sprintf(str_replace('%%SCHEMA%%', $schema, $sql), $other->id));
+        } catch (\Doctrine\DBAL\Exception $e) {
+            // MySQL on Linux keeps a table name's case: `article` is no table there.
+            self::markTestSkipped('The database refuses the form: '.$e->getMessage());
+        }
+
+        $article->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame('Replaced', $connection->fetchOne('SELECT title FROM Article WHERE id = ?', [$other->id]), 'the premise: the row was written');
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of a table named like '.Article::class.'\'s since the history was last written, so the history may be missing what they did.'], $this->logs);
+
+        // Nothing is made of it: the one record since is the flush's own, of the other article.
+        $since = \array_slice($this->documents(), $before);
+        self::assertCount(1, $since);
+        self::assertSame([(string) $article->id, ['old' => 'One', 'new' => 'One, again']], [(string) $since[0]['objectId'], $since[0]['changes']['title'] ?? null]);
+        self::assertStringNotContainsString('Replaced', (string) json_encode($since));
+    }
+
+    public function testAWriteOfTheTableAsMappedIsDoubtOfItsClassAndNotOfALikeOne(): void
+    {
+        // The mapping's own spelling is matched exactly, as before: a value written in, which is
+        // not bound, is doubt of the class itself -- not of a table named like its.
+        $this->em->persist($article = new Article('One'));
+        $this->em->persist($other = new Article('Other'));
+        $this->em->flush();
+        $this->unownedStatementsAreExpected = true;
+
+        $this->em->getConnection()->executeStatement(sprintf("UPDATE Article SET title = 'Replaced' WHERE id = %d", $other->id));
+        $article->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of '.Article::class.' since the history was last written, so the history may be missing what they did.'], $this->logs);
+    }
+}

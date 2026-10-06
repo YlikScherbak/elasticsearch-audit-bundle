@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine\Observation;
 
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementShape;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\TableName;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -171,7 +172,38 @@ final class StatementShapeTest extends TestCase
     #[DataProvider('writesNotRead')]
     public function testWhatAStatementNotReadMayWrite(string $sql, array $expected): void
     {
-        self::assertSame($expected, StatementShape::writesItCannotRead($sql));
+        self::assertSame($expected, array_map(static fn (?TableName $name): ?string => $name?->written(), StatementShape::writesItCannotRead($sql)));
+    }
+
+    /**
+     * A name part by part: a dot inside a quoted name is the name's, not a schema's.
+     *
+     * @return iterable<string, array{string, list<array{string, bool}>}>
+     */
+    public static function namesPartByPart(): iterable
+    {
+        yield 'a table' => ['DELETE FROM a WHERE id = ?', [['a', false]]];
+        yield 'a schema and a table' => ['DELETE FROM main.Article WHERE id = ?', [['main', false], ['Article', false]]];
+        yield 'one quoted name with a dot in it' => ['DELETE FROM "main.Article" WHERE id = ?', [['main.Article', true]]];
+        yield 'a quoted schema and table' => ['UPDATE `s`.`a` SET n = ? WHERE id = ?', [['s', true], ['a', true]]];
+        yield 'an insert' => ['INSERT INTO "Crate" (code) VALUES (?)', [['Crate', true]]];
+    }
+
+    /**
+     * @param list<array{string, bool}> $parts
+     */
+    #[DataProvider('namesPartByPart')]
+    public function testATableIsNamedPartByPart(string $sql, array $parts): void
+    {
+        self::assertSame($parts, StatementShape::read($sql)?->name->parts);
+    }
+
+    public function testANameNotReadIsNamedPartByPartToo(): void
+    {
+        self::assertSame([[['main.Article', true]], [['main', false], ['Article', false]]], array_map(
+            static fn (?TableName $name): ?array => $name?->parts,
+            StatementShape::writesItCannotRead('WITH x AS (SELECT 1) DELETE FROM "main.Article"; DELETE FROM main.Article'),
+        ));
     }
 
     /**

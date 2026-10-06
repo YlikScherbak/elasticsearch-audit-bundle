@@ -42,6 +42,8 @@ final class StatementShape
      * @param array<string, int>      $where    the columns the WHERE compares to a parameter
      * @param bool                    $exact    whether the WHERE is nothing but those
      *                                          comparisons, joined by AND
+     * @param TableName               $name     the table as it was named, part by part: $table
+     *                                          is its parts joined
      */
     private function __construct(
         public readonly string $kind,
@@ -49,6 +51,7 @@ final class StatementShape
         public readonly array $assigned,
         public readonly array $where,
         public readonly bool $exact,
+        public readonly TableName $name,
     ) {
     }
 
@@ -164,6 +167,29 @@ final class StatementShape
                 }
 
                 return $name;
+            }
+
+            /**
+             * A table's name, part by part, each with whether it was quoted.
+             *
+             * @phpstan-impure
+             */
+            public function tableName(): ?TableName
+            {
+                $parts = [];
+
+                do {
+                    $token = $this->tokens[$this->at] ?? null;
+
+                    if ($token === null || !($token[0] === 'quoted' || ($token[0] === 'word' && !self::reserved($token[1])))) {
+                        return null;
+                    }
+
+                    ++$this->at;
+                    $parts[] = [$token[1], $token[0] === 'quoted'];
+                } while ($this->symbol('.'));
+
+                return new TableName($parts);
             }
 
             /** @phpstan-impure */
@@ -284,7 +310,7 @@ final class StatementShape
         };
 
         if ($reader->keyword('INSERT')) {
-            if (!$reader->keyword('INTO') || ($table = $reader->name()) === null || !$reader->symbol('(')) {
+            if (!$reader->keyword('INTO') || ($table = $reader->tableName()) === null || !$reader->symbol('(')) {
                 return null;
             }
 
@@ -315,11 +341,11 @@ final class StatementShape
             }
 
             // One row: a second VALUES tuple is not a shape the persisters write.
-            return $reader->symbol(')') && $reader->done() ? new self(self::INSERT, $table, $assigned, [], true) : null;
+            return $reader->symbol(')') && $reader->done() ? new self(self::INSERT, $table->written(), $assigned, [], true, $table) : null;
         }
 
         if ($reader->keyword('UPDATE')) {
-            if (($table = $reader->name()) === null || !$reader->keyword('SET')) {
+            if (($table = $reader->tableName()) === null || !$reader->keyword('SET')) {
                 return null;
             }
 
@@ -339,15 +365,15 @@ final class StatementShape
                 return null;
             }
 
-            return new self(self::UPDATE, $table, $assigned, $where[0], $where[1]);
+            return new self(self::UPDATE, $table->written(), $assigned, $where[0], $where[1], $table);
         }
 
         if ($reader->keyword('DELETE')) {
-            if (!$reader->keyword('FROM') || ($table = $reader->name()) === null || !$reader->keyword('WHERE') || ($where = $reader->where()) === null) {
+            if (!$reader->keyword('FROM') || ($table = $reader->tableName()) === null || !$reader->keyword('WHERE') || ($where = $reader->where()) === null) {
                 return null;
             }
 
-            return new self(self::DELETE, $table, [], $where[0], $where[1]);
+            return new self(self::DELETE, $table->written(), [], $where[0], $where[1], $table);
         }
 
         return null;
@@ -356,8 +382,9 @@ final class StatementShape
     /**
      * The tables a statement this reader could not read may write -- by a word of a write of its
      * own (INSERT, UPDATE, DELETE, REPLACE, MERGE, TRUNCATE) outside every literal and quoted
-     * name -- each as it is named (a quoted name unquoted, a schema kept), or null for one whose
-     * name cannot be read; an empty list for a statement that writes nothing. For any form: one
+     * name -- each as it is named, part by part (a quoted part unquoted, and said to be quoted; a
+     * schema kept), or null for one whose name cannot be read; an empty list for a statement that
+     * writes nothing. For any form: one
      * behind a common table expression, MySQL's REPLACE and its modifiers, SQLite's INSERT OR
      * REPLACE, a MERGE.
      *
@@ -369,7 +396,7 @@ final class StatementShape
      * UPDATE), a foreign key's action (ON DELETE, ON UPDATE), a MERGE's arms (THEN UPDATE, THEN
      * DELETE, THEN INSERT -- the MERGE names the table), and REPLACE(…), the function.
      *
-     * @return list<string|null>
+     * @return list<TableName|null>
      */
     public static function writesItCannotRead(string $read): array
     {
@@ -579,15 +606,15 @@ final class StatementShape
      *
      * @param list<array{0: string, 1: string}> $words
      */
-    private static function nameAt(array $words, int $at): ?string
+    private static function nameAt(array $words, int $at): ?TableName
     {
         $parts = [];
 
         while (isset($words[$at]) && ($words[$at][0] === 'quoted' || ($words[$at][0] === 'word' && !self::isAWriteOrClause($words[$at][1])))) {
-            $parts[] = $words[$at][1];
+            $parts[] = [$words[$at][1], $words[$at][0] === 'quoted'];
 
             if (($words[$at + 1] ?? null) !== ['symbol', '.']) {
-                return implode('.', $parts);
+                return new TableName($parts);
             }
 
             $at += 2;

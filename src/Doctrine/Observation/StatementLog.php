@@ -285,10 +285,14 @@ final class StatementLog
         // change are next to each other in the log, and a join row's DELETE is right before its
         // owner's only with nothing standing between. One entry, shared by every such statement
         // of a frame that runs back to back, until a rollback marks it.
-        if ($this->keeps !== null) {
+        $keeps = $this->keeps;
+
+        if ($keeps !== null) {
             $shape = $read === null ? null : StatementShape::read($read);
 
-            if ($shape !== null && !($this->keeps)($shape->table)) {
+            // By its last part too: a table behind a schema may be a watched one, and its doubt is
+            // the replay's to say.
+            if ($shape !== null && !$keeps($shape->table) && !$keeps($shape->name->parts[\count($shape->name->parts) - 1][0])) {
                 $frame = $this->open === [] ? -1 : $this->open[\count($this->open) - 1];
 
                 if ($this->unkept === null || $this->unkept['frame'] !== $frame || $this->unkept['failed'] !== $failed) {

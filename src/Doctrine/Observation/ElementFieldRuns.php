@@ -160,7 +160,13 @@ final class ElementFieldRuns
         if ($doubts !== []) {
             $this->logger->warning('What the connection ran could not be followed for {count} statement(s) of {classes} since the history was last written, so the history may be missing what they did.', [
                 'count' => \count($doubts),
-                'classes' => implode(', ', array_unique(array_map(static fn (?string $class): string => $class ?? 'an unknown table', array_merge(...array_column($doubts, 'classes'))))),
+                // A table named like a watched one's is said as that, never as the class itself:
+                // it may be another table of that name.
+                'classes' => implode(', ', array_unique(array_merge(...array_map(static fn (array $doubt): array => [
+                    ...$doubt['classes'],
+                    ...array_map(static fn (string $class): string => 'a table named like '.$class.'\'s', $doubt['like']),
+                    ...($doubt['unnamed'] ? ['an unknown table'] : []),
+                ], $doubts)))),
             ]);
         }
 
