@@ -220,6 +220,21 @@ final class FrameBufferTest extends TestCase
         self::assertSame([], $buffer->close(), 'nothing is left for that object');
     }
 
+    public function testARemoveFlushesTheHeldRecordWithoutTheFieldsThatWentAndCameBack(): void
+    {
+        // What the frame learnt of the held record goes out with it: a field that moved and came
+        // back is noise, not context, when a REMOVE lets the record out as when a close does.
+        $buffer = new FrameBuffer();
+        $buffer->open();
+        $buffer->hold(self::update(1, ['fact' => new Change(1, 2), 'other' => new Change(5, 6)]));
+        $buffer->hold(self::update(1, ['fact' => new Change(2, 1)]));
+
+        $out = $buffer->hold(new AuditRecord('stock', 1, AuditEvent::REMOVE, self::at(), 'system'));
+
+        self::assertSame([AuditEvent::UPDATE, AuditEvent::REMOVE], array_map(static fn (AuditRecord $r) => $r->event, $out));
+        self::assertSame(['other'], array_keys($out[0]->changes));
+    }
+
     public function testNestedFramesReleaseOnlyWhenTheOutermostCloses(): void
     {
         $buffer = new FrameBuffer();
