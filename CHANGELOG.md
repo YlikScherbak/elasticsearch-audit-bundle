@@ -9,6 +9,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-06
+
 ### Added
 - **`transport: collector`: the test transport, and a public collector to read it with.**
   Asserting on an audit trail meant writing a fake transport, and a hand-written one sits a layer
