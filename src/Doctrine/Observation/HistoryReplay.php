@@ -222,7 +222,7 @@ final class HistoryReplay
                     }
 
                     if ($watched !== [] || $like !== [] || $unnamed) {
-                        $this->doubtOf('not read: '.$statement['sql'], array_values(array_unique($watched)), array_values(array_unique($like)), $unnamed);
+                        $this->doubtOf('not read: '.$statement['sql'], $watched, $like, $unnamed);
                     }
                 }
 
@@ -669,7 +669,7 @@ final class HistoryReplay
             }
 
             foreach ($tables as $table) {
-                if (\is_string($table) && $name->mayBe($table) && !\in_array($candidate->rootEntityName, $classes, true)) {
+                if (\is_string($table) && $name->mayBe($table)) {
                     $classes[] = $candidate->rootEntityName;
                 }
             }

@@ -59,6 +59,72 @@ final class AWriteOfATableNamedOtherwiseTest extends DoctrineTestCase
         self::assertStringNotContainsString('Replaced', (string) json_encode($since));
     }
 
+    public function testAWriteOfAJoinTableNamedLikeAWatchedOnesIsDoubtOfItsOwner(): void
+    {
+        $connection = $this->em->getConnection();
+        $article = new Article('One');
+        $article->tags->add($tag = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag('php'));
+        $this->em->persist($tag);
+        $this->em->persist($article);
+        $this->em->flush();
+        $this->unownedStatementsAreExpected = true;
+        $before = \count($this->documents());
+
+        try {
+            $connection->executeStatement(sprintf('DELETE FROM ARTICLE_TAG WHERE article_id = %d', $article->id));
+        } catch (\Doctrine\DBAL\Exception $e) {
+            self::markTestSkipped('The database refuses the form: '.$e->getMessage());
+        }
+
+        $article->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame(0, (int) $connection->fetchOne('SELECT COUNT(*) FROM article_tag'), 'the premise: the link went');
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of a table named like '.Article::class.'\'s since the history was last written, so the history may be missing what they did.'], $this->logs);
+        self::assertStringNotContainsString('tags', (string) json_encode(\array_slice($this->documents(), $before)), 'and no record of the link is made');
+    }
+
+    public function testATableNamedLikeOneNobodyAuditsIsNoDoubt(): void
+    {
+        // Tag is no class the history is written about: its table, in any case, is the
+        // application's own.
+        $this->em->persist($tag = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Tag('php'));
+        $this->em->persist($article = new Article('One'));
+        $this->em->flush();
+        $this->unownedStatementsAreExpected = true;
+
+        try {
+            $this->em->getConnection()->executeStatement(sprintf("UPDATE TAG SET label = 'go' WHERE id = %d", $tag->id));
+        } catch (\Doctrine\DBAL\Exception $e) {
+            self::markTestSkipped('The database refuses the form: '.$e->getMessage());
+        }
+
+        $article->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame([], $this->logs);
+    }
+
+    public function testAWatchedTableAfterOnesNobodyAuditsIsFoundToo(): void
+    {
+        // Every watched class is asked, whatever stands before it among the mapped ones.
+        $this->em->persist($crate = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate('C-1'));
+        $this->em->persist($article = new Article('One'));
+        $this->em->flush();
+        $this->unownedStatementsAreExpected = true;
+
+        try {
+            $this->em->getConnection()->executeStatement("UPDATE CRATE SET status = 'shipped' WHERE code = 'C-1'");
+        } catch (\Doctrine\DBAL\Exception $e) {
+            self::markTestSkipped('The database refuses the form: '.$e->getMessage());
+        }
+
+        $article->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of a table named like '.\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\Crate::class.'\'s since the history was last written, so the history may be missing what they did.'], $this->logs);
+    }
+
     public function testAWriteOfTheTableAsMappedIsDoubtOfItsClassAndNotOfALikeOne(): void
     {
         // The mapping's own spelling is matched exactly, as before: a value written in, which is

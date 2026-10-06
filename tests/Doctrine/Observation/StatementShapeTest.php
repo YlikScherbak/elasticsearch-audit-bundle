@@ -159,6 +159,7 @@ final class StatementShapeTest extends TestCase
         yield 'an INSERT without INTO is not read' => ['INSERT t (a) VALUES (?)', null];
         yield 'an INSERT without its columns is not read' => ['INSERT INTO t VALUES (?)', null];
         yield 'an insert whose columns have no opening parenthesis' => ['INSERT INTO t a) VALUES (?)', null];
+        yield 'a reserved word where the table is' => ['UPDATE SET SET a = ? WHERE id = ?', null];
         yield 'fewer values than columns is not read' => ['INSERT INTO t (a, b) VALUES (?)', null];
         yield 'an UPDATE of every row is not read' => ['UPDATE t SET a = ?', null];
         yield 'a DELETE of every row is not read' => ['DELETE FROM t', null];
