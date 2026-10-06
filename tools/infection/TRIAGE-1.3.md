@@ -1270,6 +1270,44 @@ part — doubt, never a replay, when it is not the mapping's own spelling; (b) r
 platform does (folding, `search_path`, `lower_case_table_names`). **Recommended: (a)** — the rule
 only has to say doubt, and a wrong doubt costs a warning where a wrong miss costs history.
 
+## The main set's line ignores, held to the same record (P4)
+
+`infection.json5` ignored 70 rules (52 lines, some under several mutators). As the reviewers asked,
+none was carried over by right: the plan of the main set made without them (2746 mutations, none
+skipped, timeout 100000) shows they took **83** mutations, and each was read on its line now.
+
+**19 left out by a record** in `tools/infection/exclusions.json`, every one argued from PHP, and
+`gate.php excluded main` holds them against that plan: NumericNullAsZeroComparator 124 (`(int)` on a
+numeric string added to an int), 114 ×5 (the defaults united with a match that sets every group, the
+last one being mandatory), 131 (`>=` where the padding is then empty); AuditPage 104 ×2 (the key
+read for an empty array); ElasticsearchGateway 420, 448 (a map read by `isset()`), 526 (a read under
+`??` on a scalar answers null); FrameBuffer 363, 405 (`array_values()` of a filtered list of one);
+CheckCommand 321 and CreateIndexCommand 113 (what `implode()` joins); IndexResolver 67 (the inner
+`array_values()` before `array_unique()` and an outer one); Cursor 221 and AuditReader 459 (`(string)`
+where `%s` or a concatenation converts alike).
+
+**64 back in the count**, by what their argument rested on:
+
+| Rested on | Mutations | Lines |
+|---|---|---|
+| Elasticsearch's answers | 12 | the depth of `json_decode()` of an error body (gateway 520, 683, ±1); the status range of `call()` (629); `(int)` on a setting (CheckCommand 294); `array_values()` of the hits (AuditReader 155); `??` of a cluster's name and a mapping's type (CheckCommand 91 ×2, MappingComparison 72); the first guard of `refusedTheParameter()` (247) |
+| a token's input, which the client hands in | 4 | the depth of `json_decode()` of a cursor (Cursor 86, 180, ±1) |
+| Messenger | 8 | the code 0 of `UnrecoverableMessageHandlingException` (three handlers' lines, ±1), the chain's bound `$step < 8` (MessengerTransport 77 ×2) |
+| this bundle's own code and its callers | 33 | `array_unique()` in `bulk()`; `Filter::crossed()` ×2; the comparator's guards ×4 and its `trim()` ×4, `<=` and `-` (126, 132); `comparable()` ×8; `narrowIn()`; AuditReader 158 and 470; Cursor 217; CreateIndexCommand 107, 113 (`array_filter()`); AuditWriter 631; the variadics ×6 (below) |
+| **wrong, by PHP itself** | 7 | ClusterVersion 34 `CastInt` ×3 — one of the three casts is under `===`, where `"8" === 8` is false; `DecrementInteger` ×3 — one reads the major for the minor; FrameBuffer 356 `Coalesce` — the mutator swaps the operands, and `[] ?? $this->moved[$key]` is always `[]` |
+| **all** | **64** | |
+
+The variadics (AuditQuery 103, 113, 126, 219, 235, 545) are counted with the bundle's own: "PHP hands a
+variadic over as a list" is not so for a call with named arguments, which gives it string keys —
+what keeps them a list is that no caller does that, a caller's invariant. None of the 64 is argued
+away; each will be what the next run says of it — killed, or a survivor in the count — and the main
+set's score is measured with all of them before its floor is decided.
+
+The 55 Doctrine records were carried from `7c0c15c` by each file's diff; the three whose lines the
+count's normalisation took away (HistoryReplay 262, LinkFacts 407, StatementLog 302 — `(int)` on a
+count) went with them, and the rest hold against the Doctrine plan made without exclusions (4311
+mutations, none skipped).
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

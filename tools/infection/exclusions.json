@@ -1,5 +1,253 @@
 {
-    "main": [],
+    "main": [
+        {
+            "file": "src/Coalescing/FrameBuffer.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold",
+            "mutator": "UnwrapArrayValues",
+            "line": 363,
+            "text": "$out = $held === null ? [] : array_values(array_filter([$this->finalizeSafely($held, $moved)]));",
+            "diff": [
+                "- $out = $held === null ? [] : array_values(array_filter([$this->finalizeSafely($held, $moved)]));",
+                "+ $out = $held === null ? [] : array_filter([$this->finalizeSafely($held, $moved)]);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: array_values() taken off array_filter() of a one-element list -> what bounds it: array_filter() keeps keys, and of [0 => x] it gives [0 => x] or [] -> why the same: both are lists already"
+        },
+        {
+            "file": "src/Coalescing/FrameBuffer.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\FrameBuffer::hold",
+            "mutator": "UnwrapArrayValues",
+            "line": 405,
+            "text": "return $this->handOver(array_values(array_filter([$this->finalizeSafely($held, $moved)])));",
+            "diff": [
+                "- return $this->handOver(array_values(array_filter([$this->finalizeSafely($held, $moved)])));",
+                "+ return $this->handOver(array_filter([$this->finalizeSafely($held, $moved)]));"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: array_values() taken off array_filter() of a one-element list -> what bounds it: array_filter() keeps keys, and of [0 => x] it gives [0 => x] or [] -> why the same: both are lists already"
+        },
+        {
+            "file": "src/Coalescing/NumericNullAsZeroComparator.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
+            "mutator": "ArrayItemRemoval",
+            "line": 114,
+            "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+            "diff": [
+                "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+                "+ [, $sign, $whole, $fraction, $exponent] = $m + [4 => '0'];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the defaults united with the match -> what bounds it: the pattern's last group, 4, is not optional, so a match sets every group from 0 to 4 -- '' for one that took nothing -> why the same: `+` keeps the left side's keys, so the defaults add nothing either way, and a key past 4 is not read"
+        },
+        {
+            "file": "src/Coalescing/NumericNullAsZeroComparator.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
+            "mutator": "DecrementInteger",
+            "line": 114,
+            "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+            "diff": [
+                "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+                "+ [, $sign, $whole, $fraction, $exponent] = $m + [2 => '', 4 => '0'];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the defaults united with the match -> what bounds it: the pattern's last group, 4, is not optional, so a match sets every group from 0 to 4 -- '' for one that took nothing -> why the same: `+` keeps the left side's keys, so the defaults add nothing either way, and a key past 4 is not read"
+        },
+        {
+            "file": "src/Coalescing/NumericNullAsZeroComparator.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
+            "mutator": "DecrementInteger",
+            "line": 114,
+            "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+            "diff": [
+                "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+                "+ [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 3 => '0'];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the defaults united with the match -> what bounds it: the pattern's last group, 4, is not optional, so a match sets every group from 0 to 4 -- '' for one that took nothing -> why the same: `+` keeps the left side's keys, so the defaults add nothing either way, and a key past 4 is not read"
+        },
+        {
+            "file": "src/Coalescing/NumericNullAsZeroComparator.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
+            "mutator": "IncrementInteger",
+            "line": 114,
+            "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+            "diff": [
+                "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+                "+ [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 5 => '0'];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the defaults united with the match -> what bounds it: the pattern's last group, 4, is not optional, so a match sets every group from 0 to 4 -- '' for one that took nothing -> why the same: `+` keeps the left side's keys, so the defaults add nothing either way, and a key past 4 is not read"
+        },
+        {
+            "file": "src/Coalescing/NumericNullAsZeroComparator.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
+            "mutator": "IncrementInteger",
+            "line": 114,
+            "text": "[, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+            "diff": [
+                "- [, $sign, $whole, $fraction, $exponent] = $m + [3 => '', 4 => '0'];",
+                "+ [, $sign, $whole, $fraction, $exponent] = $m + [4 => '', 4 => '0'];"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the defaults united with the match -> what bounds it: the pattern's last group, 4, is not optional, so a match sets every group from 0 to 4 -- '' for one that took nothing -> why the same: `+` keeps the left side's keys, so the defaults add nothing either way, and a key past 4 is not read"
+        },
+        {
+            "file": "src/Coalescing/NumericNullAsZeroComparator.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
+            "mutator": "CastInt",
+            "line": 124,
+            "text": "$point = \\strlen($whole) + (int) $exponent; // where the decimal point lands",
+            "diff": [
+                "- $point = \\strlen($whole) + (int) $exponent; // where the decimal point lands",
+                "+ $point = \\strlen($whole) + $exponent; // where the decimal point lands"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: (int) taken off the exponent in an addition -> what bounds it: the exponent is the pattern's group 4, [+-]?\\d+, or the default '0' -- a numeric string -> why the same: PHP 8 adds a numeric string to an int as a number"
+        },
+        {
+            "file": "src/Coalescing/NumericNullAsZeroComparator.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Coalescing\\NumericNullAsZeroComparator::decimal",
+            "mutator": "GreaterThan",
+            "line": 131,
+            "text": "if ($point > \\strlen($digits)) {",
+            "diff": [
+                "- if ($point > \\strlen($digits)) {",
+                "+ if ($point >= \\strlen($digits)) {"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: `>` made `>=` -> what bounds it: they differ only where the two lengths are equal -> why the same: the padding is then str_repeat('0', 0), the empty string"
+        },
+        {
+            "file": "src/Command/CheckCommand.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic",
+            "mutator": "UnwrapArrayValues",
+            "line": 321,
+            "text": "return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));",
+            "diff": [
+                "- return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));",
+                "+ return implode(' — ', array_unique(array_filter($said, static fn (string $line): bool => $line !== '')));"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: array_values() taken off what implode() joins -> what bounds it: implode() reads the values in order, never the keys -> why the same: the same string"
+        },
+        {
+            "file": "src/Command/CreateIndexCommand.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Command\\CreateIndexCommand::diagnostic",
+            "mutator": "UnwrapArrayValues",
+            "line": 113,
+            "text": "return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));",
+            "diff": [
+                "- return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));",
+                "+ return implode(' — ', array_unique(array_filter($said, static fn (string $line): bool => $line !== '')));"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: array_values() taken off what implode() joins -> what bounds it: implode() reads the values in order, never the keys -> why the same: the same string"
+        },
+        {
+            "file": "src/Elasticsearch/ElasticsearchGateway.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::indexExists",
+            "mutator": "TrueValue",
+            "line": 420,
+            "text": "$this->known[$index] = true;",
+            "diff": [
+                "- $this->known[$index] = true;",
+                "+ $this->known[$index] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset() or unset(), never the value -> why the same: isset() is true for false"
+        },
+        {
+            "file": "src/Elasticsearch/ElasticsearchGateway.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::createIndex",
+            "mutator": "TrueValue",
+            "line": 448,
+            "text": "$this->known[$index] = true;",
+            "diff": [
+                "- $this->known[$index] = true;",
+                "+ $this->known[$index] = false;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset() or unset(), never the value -> why the same: isset() is true for false"
+        },
+        {
+            "file": "src/Elasticsearch/ElasticsearchGateway.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Elasticsearch\\ElasticsearchGateway::isMissingSearchContext",
+            "mutator": "ReturnRemoval",
+            "line": 526,
+            "text": "return false;",
+            "diff": [
+                "- return false;",
+                "+ "
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the return for a decoded body that is not an array taken away -> what bounds it: what follows reads the body only under `?? null`, and returns false when no type is found -> why the same: on an int, a string, a bool or null a read of a key under ?? answers null, so no type is found and false is returned"
+        },
+        {
+            "file": "src/Model/AuditPage.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor",
+            "mutator": "DecrementInteger",
+            "line": 104,
+            "text": "$last = $this->entries[array_key_last($this->entries) ?? -1] ?? null;",
+            "diff": [
+                "- $last = $this->entries[array_key_last($this->entries) ?? -1] ?? null;",
+                "+ $last = $this->entries[array_key_last($this->entries) ?? -2] ?? null;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the key read when array_key_last() gives null, -2 for -1 -> what bounds it: array_key_last() gives null for an empty array only -> why the same: an empty array has no key, and `?? null` answers null for any"
+        },
+        {
+            "file": "src/Model/AuditPage.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Model\\AuditPage::nextCursor",
+            "mutator": "IncrementInteger",
+            "line": 104,
+            "text": "$last = $this->entries[array_key_last($this->entries) ?? -1] ?? null;",
+            "diff": [
+                "- $last = $this->entries[array_key_last($this->entries) ?? -1] ?? null;",
+                "+ $last = $this->entries[array_key_last($this->entries) ?? -0] ?? null;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the key read when array_key_last() gives null, 0 for -1 -> what bounds it: array_key_last() gives null for an empty array only -> why the same: an empty array has no key, and `?? null` answers null for any"
+        },
+        {
+            "file": "src/Model/Cursor.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Model\\Cursor::fromAnotherVersion",
+            "mutator": "CastString",
+            "line": 221,
+            "text": "return new InvalidQueryException(sprintf('This cursor token was issued in an older version (%s) of the audit bundle, before a token carried the query it belongs to — there is no way to tell whether continuing it here would answer from the middle of a different result set. Start from the first page.', $version === null ? 'before tokens were versioned' : (\\is_scalar($version) ? (string) $version : get_debug_type($version))));",
+            "diff": [
+                "- return new InvalidQueryException(sprintf('This cursor token was issued in an older version (%s) of the audit bundle, before a token carried the query it belongs to — there is no way to tell whether continuing it here would answer from the middle of a different result set. Start from the first page.', $version === null ? 'before tokens were versioned' : (\\is_scalar($version) ? (string) $version : get_debug_type($version))));",
+                "+ return new InvalidQueryException(sprintf('This cursor token was issued in an older version (%s) of the audit bundle, before a token carried the query it belongs to — there is no way to tell whether continuing it here would answer from the middle of a different result set. Start from the first page.', $version === null ? 'before tokens were versioned' : (\\is_scalar($version) ? $version : get_debug_type($version))));"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: (string) taken off a scalar handed to sprintf's %s -> what bounds it: is_scalar() before it -> why the same: %s turns a scalar into a string as (string) does"
+        },
+        {
+            "file": "src/Reader/AuditReader.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Reader\\AuditReader::refuseGlobalAggregations",
+            "mutator": "CastString",
+            "line": 459,
+            "text": "$here = $path.'.'.(string) $name;",
+            "diff": [
+                "- $here = $path.'.'.(string) $name;",
+                "+ $here = $path.'.'.$name;"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: (string) taken off an array's key in a concatenation -> what bounds it: a key is an int or a string -> why the same: concatenation turns it into a string as (string) does"
+        },
+        {
+            "file": "src/Writer/IndexResolver.php",
+            "method": "Borsche\\ElasticsearchAuditBundle\\Writer\\IndexResolver::all",
+            "mutator": "UnwrapArrayValues",
+            "line": 67,
+            "text": "$indices = array_unique([$this->default, ...array_values($this->routing)]);",
+            "diff": [
+                "- $indices = array_unique([$this->default, ...array_values($this->routing)]);",
+                "+ $indices = array_unique([$this->default, ...$this->routing]);"
+            ],
+            "basis": "PHP",
+            "reason": "what it changes: the inner array_values() taken off before the spread -> what bounds it: array_unique() keeps the first of each value whatever its key, and the outer array_values() lists what it gives -> why the same: the same values in the same order"
+        }
+    ],
     "doctrine": [
         {
             "file": "src/Doctrine/AuditSubscriber.php",
@@ -172,22 +420,9 @@
         },
         {
             "file": "src/Doctrine/Observation/HistoryReplay.php",
-            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::replay",
-            "mutator": "CastInt",
-            "line": 262,
-            "text": "if ($shape->kind === StatementShape::DELETE && $binding->key !== null && (int) $statement['affected'] > 0) {",
-            "diff": [
-                "- if ($shape->kind === StatementShape::DELETE && $binding->key !== null && (int) $statement['affected'] > 0) {",
-                "+ if ($shape->kind === StatementShape::DELETE && $binding->key !== null && $statement['affected'] > 0) {"
-            ],
-            "basis": "Doctrine",
-            "reason": "what it changes: the count is compared with 0 without (int) -> what bounds it: it is int, numeric-string (DBAL's rowCount()) or null -> why the same: PHP 8 compares a numeric string with an int as numbers, and null > 0 is false as (int) null > 0 is"
-        },
-        {
-            "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::keyOf",
             "mutator": "CastString",
-            "line": 532,
+            "line": 544,
             "text": "$parts[] = \\is_scalar($value) ? (string) $value : '';",
             "diff": [
                 "- $parts[] = \\is_scalar($value) ? (string) $value : '';",
@@ -200,7 +435,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::deleted",
             "mutator": "TrueValue",
-            "line": 1052,
+            "line": 1076,
             "text": "$this->gone[$root][$id] = true;",
             "diff": [
                 "- $this->gone[$root][$id] = true;",
@@ -213,7 +448,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::copyAt",
             "mutator": "LogicalOr",
-            "line": 1089,
+            "line": 1113,
             "text": "if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
             "diff": [
                 "- if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
@@ -226,7 +461,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::emptied",
             "mutator": "TrueValue",
-            "line": 1290,
+            "line": 1314,
             "text": "$this->gone[$root][$id] = true;",
             "diff": [
                 "- $this->gone[$root][$id] = true;",
@@ -278,7 +513,7 @@
             "file": "src/Doctrine/Observation/LinkFacts.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkFacts::holdersSeenAfter",
             "mutator": "TrueValue",
-            "line": 367,
+            "line": 369,
             "text": "$holding[HistoryReplay::keyOf($owner, array_combine($read['owners'], $row))] = true;",
             "diff": [
                 "- $holding[HistoryReplay::keyOf($owner, array_combine($read['owners'], $row))] = true;",
@@ -286,19 +521,6 @@
             ],
             "basis": "PHP",
             "reason": "what it changes: the value stored in a map is false instead of true -> what bounds it: every read of this map, checked on its lines, is isset(), a key union or array_keys()/array_intersect_key(), never the value -> why the same: isset() is true for false, and the keys are the same"
-        },
-        {
-            "file": "src/Doctrine/Observation/LinkFacts.php",
-            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\LinkFacts::undone",
-            "mutator": "CastInt",
-            "line": 407,
-            "text": "} elseif ((int) $statement['affected'] > 0) {",
-            "diff": [
-                "- } elseif ((int) $statement['affected'] > 0) {",
-                "+ } elseif ($statement['affected'] > 0) {"
-            ],
-            "basis": "PHP",
-            "reason": "what it changes: the count is compared with 0 without (int) -> what bounds it: it is int, numeric-string (DBAL's rowCount()) or null -> why the same: PHP 8 compares a numeric string with an int as numbers, and null > 0 is false as (int) null > 0 is"
         },
         {
             "file": "src/Doctrine/Observation/LinkRuns.php",
@@ -588,22 +810,9 @@
         },
         {
             "file": "src/Doctrine/Observation/StatementLog.php",
-            "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::executed",
-            "mutator": "CastInt",
-            "line": 302,
-            "text": "if ($read !== null && !$failed && (int) $affected > 0) {",
-            "diff": [
-                "- if ($read !== null && !$failed && (int) $affected > 0) {",
-                "+ if ($read !== null && !$failed && $affected > 0) {"
-            ],
-            "basis": "PHP",
-            "reason": "what it changes: the count is compared with 0 without (int) -> what bounds it: it is int, numeric-string (DBAL's rowCount()) or null -> why the same: PHP 8 compares a numeric string with an int as numbers, and null > 0 is false as (int) null > 0 is"
-        },
-        {
-            "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::aJoinRowWritten",
             "mutator": "TrueValue",
-            "line": 485,
+            "line": 515,
             "text": "$watch['keys'][$key] = true;",
             "diff": [
                 "- $watch['keys'][$key] = true;",
@@ -616,7 +825,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
             "mutator": "TrueValue",
-            "line": 712,
+            "line": 742,
             "text": "$used[$frame] = true;",
             "diff": [
                 "- $used[$frame] = true;",
@@ -629,7 +838,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
             "mutator": "TrueValue",
-            "line": 718,
+            "line": 748,
             "text": "$used[$f] = true;",
             "diff": [
                 "- $used[$f] = true;",
@@ -642,7 +851,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "LogicalOrAllSubExprNegation",
-            "line": 606,
+            "line": 672,
             "text": "if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
             "diff": [
                 "- if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
@@ -655,7 +864,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "IncrementInteger",
-            "line": 621,
+            "line": 687,
             "text": "$tokens[] = ['symbol', $m[0]];",
             "diff": [
                 "- $tokens[] = ['symbol', $m[0]];",
@@ -668,7 +877,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "IncrementInteger",
-            "line": 622,
+            "line": 688,
             "text": "$i += \\strlen($m[0]);",
             "diff": [
                 "- $i += \\strlen($m[0]);",
