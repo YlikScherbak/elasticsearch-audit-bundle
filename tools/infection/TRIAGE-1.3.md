@@ -1308,6 +1308,37 @@ count's normalisation took away (HistoryReplay 262, LinkFacts 407, StatementLog 
 count) went with them, and the rest hold against the Doctrine plan made without exclusions (4311
 mutations, none skipped).
 
+## The measure of CI 37429405590 (`c35b13c`), with P1–P4
+
+The strict count is the gate's now (killed by a test, of the covered; a timeout and an error are
+shown and not counted).
+
+| | main | doctrine |
+|---|---|---|
+| planned, without exclusions | 2746 | 4311 |
+| excluded, each by its record | 19 (PHP 19) | 55 (PHP 38, Doctrine 17) |
+| counted | 2727 | 4256 |
+| killed / escaped / timed out / errored | 2618 / 105 / 0 / 4 | 3932 / 294 / 30 / 0 |
+| **strict** | **96.00%** (2618 of 2727) | **92.39%** (3932 of 4256) |
+| as Infection counts | 96.15% | 93.09% |
+| floor in parts.json (unchanged) | 97: 28 short | 94: 69 short |
+
+Main's 105 escaped: the 49 of every run before, and **56 of the 64** the old ignores had taken —
+the other 8 were killed, among them ClusterVersion's two that were wrong by PHP. FrameBuffer 356
+(`[] ?? $this->moved[$key]`, always `[]`) escaped: what a held record's moved fields are is a gap
+of the testing, not written.
+
+Doctrine's 294: 162 equivalent, 79 open, 18 gap, 11 not reached, 8 killed elsewhere, and **16 new**
+of P2 and P3's code: the run is on SQLite, and the unknown table beside a known one was red on MySQL
+only; a count's anchors and digits had no case of a sign, a fraction or zeros; a comma after an
+index hint, a join in lower case and OR after TRUNCATE had none. All but one are red or never end
+since a7b6d2c (Infection on StatementShape, StatementLog and ElementFieldRuns; HistoryReplay 221's
+two by hand); `$depth = 0` → `-1` is equivalent — depths are only compared with each other — and the
+bundle's own, so it stays in the count. The 5 new timeouts are loops that never end.
+
+Static analysis was red on PHPStan 2.3.0, which CI resolves and the local tree did not have: a
+foreach that overwrote the variables of the one before it in `AuditWriter::keeping()` (72fd1e7).
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
