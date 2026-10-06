@@ -1236,6 +1236,40 @@ Options: (a) null, any table, for an UPDATE whose first name is followed by `,` 
 name of those forms, aliases resolved. **Recommended: (a)** — the rule only says doubt, and (b)
 would be a parser of MySQL's join syntax for a warning.
 
+### Decided and FIXED: A and B (cf0dff2)
+
+As the reviewers chose, (a) for both. B: a comma or a join at the write's own depth — not in a
+subquery, not in another expression of a WITH, not after the statement's end — before an UPDATE's
+SET or after a DELETE's first name, names before a DELETE's FROM (an alias among them), and a
+TRUNCATE of a list (PostgreSQL's, found on the way), are any table; a DELETE … USING other tables,
+an UPDATE … FROM them and MySQL's index hints keep their table. A: one doubt per statement, of
+every watched class named, with an unknown table among them that a name read after it does not
+take back. End to end on MySQL 8 (the five forms, and two statements in one with the unknown first)
+and PostgreSQL 16 (two watched tables in one statement, DELETE … USING); each of eight
+neutralisations of the fix turned a test red.
+
+### For the reviewers: a watched table named otherwise than its mapping (found on the way)
+
+The application's write of a watched table is followed, or doubt, only when it names the table
+exactly as the mapping does. `HistoryReplay::watchedClassOf()` compares the name as written, case
+and schema included, and both the statements read and the ones not read go through it:
+
+| Database | Silent: no record, no doubt |
+|---|---|
+| PostgreSQL 16 | `UPDATE article …`, `UPDATE ARTICLE …` (an unquoted name is folded: the same table), a WITH … UPDATE article, `UPDATE public.Article …` |
+| SQLite | the same four, with `main.Article` |
+| MySQL 8 | `UPDATE audit4.Article …` (lower case is another table on Linux, and refused) |
+
+Probe: `scratchpad/ZzTableNameCaseProbeTest.php.red`, red in each cell as above; `UPDATE Article`
+as mapped is followed. Not (a′)'s — the comparison is older — but the same promise: a write of a
+watched table this does not follow is doubt. **MEDIUM**, a silent miss; on PostgreSQL the natural
+spelling of hand-written SQL is the lower case one.
+
+Options: (a) a name not quoted compares without case, and a qualified name compares by its last
+part — doubt, never a replay, when it is not the mapping's own spelling; (b) resolve the name as the
+platform does (folding, `search_path`, `lower_case_table_names`). **Recommended: (a)** — the rule
+only has to say doubt, and a wrong doubt costs a warning where a wrong miss costs history.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
