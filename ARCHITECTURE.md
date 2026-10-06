@@ -502,6 +502,10 @@ failed on, of the covered, to the set's `floor` in `parts.json`, in integers and
 A timeout is shown and not counted: whether a mutant times out depends on the machine, and the same
 mutant of one tree was a timeout in one run and escaped in the next.
 
+- **A floor is the score measured, exactly, with no room under it.** Red because killed mutants
+  timed out is mended by the timeout or the threads, never by the floor; the refusal says which of
+  the two it is.
+
 - **The timeout is set so that nothing is skipped.** Infection skips a mutant, uncounted, when the
   tests covering its line add up to more than the timeout; with too low a one the score is a score
   of fewer mutants, and the gate says so rather than passing it. Raising the timeout for speed

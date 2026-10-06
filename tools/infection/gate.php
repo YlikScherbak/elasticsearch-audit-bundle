@@ -487,7 +487,15 @@ function summarise(string $root, string $setName, string $dir): int
     // ends: the same mutant was each in two runs of one tree. Counted, the score would be
     // the machine's.
     if (!reaches($killed, $covered, $set['floor'])) {
-        fwrite(\STDERR, sprintf("%s is below its floor: %d more of the %d would have to be killed by a test.\n", $setName, shortBy($killed, $covered, $set['floor']), $covered));
+        $short = shortBy($killed, $covered, $set['floor']);
+
+        // Why, from the statuses: a floor that the timed out would reach is the machine's to
+        // answer -- a mutant's timeout or the threads -- never the floor's; one they would not is
+        // the code's, and the escaped are where to look.
+        $why = $short <= $counts['timeouted'] + $counts['errored']
+            ? sprintf('%d timed out or errored, and as many of them killed would reach it: a mutant killed elsewhere that times out here is the timeout\'s or the threads\' to mend, not the floor\'s', $counts['timeouted'] + $counts['errored'])
+            : sprintf('more escaped than the floor allows: the %d timed out or errored would not reach it, and the escaped are where to look', $counts['timeouted'] + $counts['errored']);
+        fwrite(\STDERR, sprintf("%s is below its floor: %d more of the %d would have to be killed by a test -- %s.\n", $setName, $short, $covered, $why));
 
         return 1;
     }

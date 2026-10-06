@@ -182,16 +182,25 @@ final class TheMutationGateTest extends TestCase
                 $test->floor('75');
                 $test->runEverything(mutants: ['rest' => ['killed' => [['src/A/Two.php', 'Plus', 3]], 'escaped' => [['src/A/Two.php', 'Minus', 4]]]]);
             },
-            'set is below its floor: 1 more of the 4 would have to be killed by a test',
+            'set is below its floor: 1 more of the 4 would have to be killed by a test -- more escaped than the floor allows: the 0 timed out or errored would not reach it',
         ];
 
-        // Infection's own count, 75%, would reach the floor; the gate's does not.
+        // Infection's own count, 75%, would reach the floor; the gate's does not -- and says the
+        // timeout is what to look at.
         yield 'a timeout, which is not counted as killed' => [
             static function (self $test): void {
                 $test->floor('75');
                 $test->runEverything();
             },
-            'set is below its floor: 1 more of the 4',
+            'set is below its floor: 1 more of the 4 would have to be killed by a test -- 1 timed out or errored, and as many of them killed would reach it',
+        ];
+
+        yield 'a timeout too few to reach the floor' => [
+            static function (self $test): void {
+                $test->floor('100');
+                $test->runEverything();
+            },
+            'set is below its floor: 2 more of the 4 would have to be killed by a test -- more escaped than the floor allows: the 1 timed out or errored would not reach it',
         ];
 
         // Two of three: shown as 66.67%, and short of a floor of 66.67 all the same.
