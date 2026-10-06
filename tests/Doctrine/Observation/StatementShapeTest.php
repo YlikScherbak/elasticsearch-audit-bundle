@@ -258,6 +258,9 @@ final class StatementShapeTest extends TestCase
         yield 'a DELETE FROM two names USING' => ['DELETE FROM s, a USING scratch s JOIN Article a ON a.id = s.id', [null]];
         yield 'a DELETE of an alias, with no join' => ['DELETE a FROM Article a WHERE a.id = 1', [null]];
         yield 'a DELETE with modifiers of names before FROM' => ['DELETE LOW_PRIORITY a FROM Article a JOIN scratch s ON a.id = s.id', [null]];
+        yield 'an UPDATE of two tables after an index hint' => ['UPDATE a USE INDEX (i1), b SET n = 1', [null]];
+        yield 'an UPDATE with a join, in lower case' => ['update scratch s join article a on a.id = s.id set a.title = ?', [null]];
+        yield 'OR and its word not passed after TRUNCATE' => ['TRUNCATE OR IGNORE a', [null]];
         yield 'a TRUNCATE of two tables' => ['TRUNCATE TABLE scratch, Article RESTART IDENTITY', [null]];
         // ... and not what only reads other tables, or a comma that is not the write's.
         yield 'a TRUNCATE of one table with its options' => ['TRUNCATE TABLE a RESTART IDENTITY CASCADE', ['a']];

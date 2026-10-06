@@ -851,7 +851,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "LogicalOrAllSubExprNegation",
-            "line": 672,
+            "line": 676,
             "text": "if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
             "diff": [
                 "- if ((ctype_alpha($c) || $c === '_') && preg_match('/\\G[A-Za-z_][A-Za-z0-9_$]*/', $sql, $m, 0, $i) === 1) {",
@@ -864,7 +864,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "IncrementInteger",
-            "line": 687,
+            "line": 691,
             "text": "$tokens[] = ['symbol', $m[0]];",
             "diff": [
                 "- $tokens[] = ['symbol', $m[0]];",
@@ -877,7 +877,7 @@
             "file": "src/Doctrine/Observation/StatementShape.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementShape::tokens",
             "mutator": "IncrementInteger",
-            "line": 688,
+            "line": 692,
             "text": "$i += \\strlen($m[0]);",
             "diff": [
                 "- $i += \\strlen($m[0]);",

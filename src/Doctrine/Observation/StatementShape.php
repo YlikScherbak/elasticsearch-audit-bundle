@@ -484,7 +484,7 @@ final class StatementShape
             $several = match ($keyword) {
                 'DELETE' => !$from || self::aCommaOrAJoin($words, $depths, $next, ['USING', 'WHERE', 'ORDER', 'LIMIT', 'RETURNING', 'PARTITION']),
                 'UPDATE' => self::aCommaOrAJoin($words, $depths, $next, ['SET']),
-                'TRUNCATE' => self::aCommaOrAJoin($words, $depths, $next, ['RESTART', 'CONTINUE', 'CASCADE', 'RESTRICT']),
+                'TRUNCATE' => self::aCommaOrAJoin($words, $depths, $next, []), // its options have no comma
                 default => false,
             };
 
@@ -504,7 +504,11 @@ final class StatementShape
      */
     private static function aCommaOrAJoin(array $words, array $depths, int $at, array $until): bool
     {
-        $depth = $depths[$at] ?? 0;
+        if (!isset($words[$at])) {
+            return false;
+        }
+
+        $depth = $depths[$at];
 
         for ($i = $at; isset($words[$i]) && $depths[$i] >= $depth && $words[$i] !== ['symbol', ';']; ++$i) {
             if ($depths[$i] !== $depth) {

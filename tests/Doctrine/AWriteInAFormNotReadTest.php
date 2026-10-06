@@ -119,6 +119,28 @@ final class AWriteInAFormNotReadTest extends DoctrineTestCase
         self::assertSame(['What the connection ran could not be followed for 1 statement(s) of '.Comment::class.', an unknown table since the history was last written, so the history may be missing what they did.'], $this->logs);
     }
 
+    /**
+     * The same on SQLite, where the mutation run is: a table named `only` -- a word a DELETE
+     * passes over on PostgreSQL -- cannot be named here, and a watched table after it can.
+     */
+    public function testATableNotNamedStaysDoubtWhenAnotherIsNamedAfterItOnSqlite(): void
+    {
+        $this->onlyOn('SQLite');
+        $connection = $this->em->getConnection();
+        $connection->executeStatement('CREATE TABLE only (id INTEGER)');
+        $this->em->persist($article = new Article('One'));
+        $this->em->persist($other = new Article('Other'));
+        $this->em->flush();
+        $this->unownedStatementsAreExpected = true;
+
+        $connection->executeStatement(sprintf("DELETE FROM only WHERE id = 1; UPDATE Article SET title = 'Replaced' WHERE id = %d", $other->id));
+        $article->title = 'One, again';
+        $this->em->flush();
+
+        self::assertSame('Replaced', $connection->fetchOne('SELECT title FROM Article WHERE id = ?', [$other->id]), 'the premise: the article was written');
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of '.Article::class.', an unknown table since the history was last written, so the history may be missing what they did.'], $this->logs);
+    }
+
     /** One statement writing two watched tables: one doubt, naming both. */
     public function testAWriteOfTwoWatchedTablesIsOneDoubtOfBoth(): void
     {

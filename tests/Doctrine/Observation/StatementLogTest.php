@@ -33,6 +33,10 @@ final class StatementLogTest extends TestCase
         yield 'one past it' => ['9223372036854775808', null];
         yield 'far past it' => ['99999999999999999999', null];
         yield 'no count' => [null, null];
+        yield 'the most an int holds, behind a space and zeros' => [' 0009223372036854775807', \PHP_INT_MAX];
+        yield 'below none' => ['-1', null];
+        yield 'not a whole number' => ['1.5', null];
+        yield 'not a number at all' => ['5 rows', null];
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('counts')]
