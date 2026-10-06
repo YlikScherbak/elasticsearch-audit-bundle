@@ -212,7 +212,9 @@ final class LinkFacts
                             break;
 
                         case 'all':
-                            if ($state === null || \count($state) !== $event['affected']) {
+                            // A count not known is not held against what was known: the replay
+                            // has said it is doubt.
+                            if ($state === null || ($event['affected'] !== null && \count($state) !== $event['affected'])) {
                                 $told->doubt($at, $root, $state === null
                                     ? sprintf('every link of %s %s taken, and which they were is not known', $of, $id)
                                     : sprintf('every link of %s %s taken: %d rows, and %d held', $of, $id, $event['affected'], \count($state)));
@@ -290,7 +292,7 @@ final class LinkFacts
 
                 $said = \count(array_filter($told->facts, static fn (array $fact): bool => $fact['association'] === $of && $fact['at'] === $went['at']));
 
-                if ($said !== $went['affected']) {
+                if ($went['affected'] !== null && $said !== $went['affected']) {
                     $told->doubt($went['at'], $root, sprintf('%s %s taken out of %d of %s, and %d were known to hold it', $target->name, $went['target'], $went['affected'], $of, $said));
                 }
             }
@@ -404,7 +406,7 @@ final class LinkFacts
 
             if ($shape->kind === StatementShape::INSERT) {
                 unset($targets[$targetId]);
-            } elseif ((int) $statement['affected'] > 0) {
+            } elseif ($statement['affected'] !== 0) {
                 $targets[$targetId] = $binding->element;
             }
         }

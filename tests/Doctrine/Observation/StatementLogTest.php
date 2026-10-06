@@ -17,6 +17,59 @@ use PHPUnit\Framework\TestCase;
  */
 final class StatementLogTest extends TestCase
 {
+    /**
+     * DBAL's count is int|numeric-string: a string when a driver's count is past what an int
+     * holds. Kept as the int, or as not known -- never cut to PHP_INT_MAX, never nought.
+     *
+     * @return iterable<string, array{int|string|null, int|null}>
+     */
+    public static function counts(): iterable
+    {
+        yield 'none' => [0, 0];
+        yield 'none, as a string' => ['0', 0];
+        yield 'some' => [5, 5];
+        yield 'some, as a string' => ['5', 5];
+        yield 'the most an int holds, as a string' => [(string) \PHP_INT_MAX, \PHP_INT_MAX];
+        yield 'one past it' => ['9223372036854775808', null];
+        yield 'far past it' => ['99999999999999999999', null];
+        yield 'no count' => [null, null];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('counts')]
+    public function testACountIsKeptAsAnIntOrAsNotKnown(int|string|null $given, ?int $kept): void
+    {
+        $log = new StatementLog();
+        $at = $log->executed('DELETE FROM CrateItem WHERE id = ?', [1 => 2], $given);
+
+        self::assertNotNull($at);
+        $statement = $log->statement($at);
+        self::assertNotNull($statement);
+        self::assertSame($kept, $statement['affected']);
+    }
+
+    public function testACountNotKnownIsLookedAfterAsADeleteThatTookRows(): void
+    {
+        // Watched, a DELETE whose count is past an int is looked at as one that took rows: not
+        // known is not none.
+        $log = new StatementLog();
+        $log->watch(1, 'Crate::items', 'CrateItem', ['id'], ['2' => true], 'SELECT 1');
+
+        self::assertNotSame([], $log->toObserveAfter('DELETE FROM CrateItem WHERE id = ?', [1 => 2], '9223372036854775808'));
+        self::assertNotSame([], $log->toObserveAfter('DELETE FROM CrateItem WHERE id = ?', [1 => 2], null), 'nor is no count');
+        self::assertSame([], $log->toObserveAfter('DELETE FROM CrateItem WHERE id = ?', [1 => 2], '0'), 'and none is none');
+    }
+
+    public function testAJoinRowWrittenWithACountNotKnownMakesItsTargetOneToLookAt(): void
+    {
+        // A target about to go, not held when the flush began: a join row written for it since
+        // is a reason to look -- with a count not known as with one.
+        $log = new StatementLog();
+        $log->watch(1, 'Article::tags', 'Tag', ['id'], [], 'SELECT 1', ['7' => true], ['table' => 'article_tag', 'columns' => ['tag_id']]);
+        $log->executed('INSERT INTO article_tag (article_id, tag_id) VALUES (?, ?)', [1 => 3, 2 => 7], '9223372036854775808');
+
+        self::assertNotSame([], $log->toObserveAfter('DELETE FROM Tag WHERE id = ?', [1 => 7], 1));
+    }
+
     public function testTwoNestedFlushesOnTheSameSavepointNameAreTwoFrames(): void
     {
         // DBAL names a savepoint after its level, so two nested flushes one after the other

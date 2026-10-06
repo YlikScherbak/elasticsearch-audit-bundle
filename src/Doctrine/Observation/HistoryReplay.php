@@ -90,7 +90,7 @@ final class HistoryReplay
     /** @var array<string, list<string>> the key's column names, by class: one array for every fact of it */
     private array $keyColumns = [];
 
-    /** @var array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int, by: string}>}> */
+    /** @var array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int|null}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int|null, by: string}>}> */
     private array $links = [];
 
     /**
@@ -237,6 +237,16 @@ final class HistoryReplay
                 continue;
             }
 
+            // A count not known -- none given, or one past what an int holds -- is never read as
+            // none: the statement is taken as it was written, and is doubt.
+            if ($statement['affected'] === null) {
+                $watched = $this->watchedClassOf($shape->table);
+
+                if ($watched !== null) {
+                    $this->doubt('its count not known: '.$statement['sql'], $watched);
+                }
+            }
+
             if ($binding->kind === RowBinding::ROWS_OF_OWNER) {
                 $this->emptied($shape, $binding, $statement['affected']);
 
@@ -261,7 +271,7 @@ final class HistoryReplay
             // A row going takes it out of every collection it was in, whether or not a history
             // is written about the row itself: by the database, for join columns that cascade,
             // with no statement of the join table's at all.
-            if ($shape->kind === StatementShape::DELETE && $binding->key !== null && (int) $statement['affected'] > 0) {
+            if ($shape->kind === StatementShape::DELETE && $binding->key !== null && $statement['affected'] !== 0) {
                 $this->aTargetWent($binding->class, $binding->key);
             }
 
@@ -288,7 +298,7 @@ final class HistoryReplay
      * owner's own -- a link added or removed, or all of its links taken -- and the targets that
      * went, by a join table's statement or by their own row's DELETE.
      *
-     * @return array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int, by: string}>}>
+     * @return array<string, array{owners?: array<string, list<array{at: int, kind: string, owner: array<string, mixed>, target: string|null, key: array<string, mixed>|null, affected: int|null}>>, targets?: list<array{at: int, target: string, key: array<string, mixed>, affected: int|null, by: string}>}>
      */
     public function linkStatements(): array
     {
@@ -640,7 +650,7 @@ final class HistoryReplay
     /**
      * A statement of a join table, kept if the association's links are watched.
      */
-    private function linkStatement(StatementShape $shape, RowBinding $binding, int|string|null $affected): void
+    private function linkStatement(StatementShape $shape, RowBinding $binding, ?int $affected): void
     {
         if ($binding->class === null || $binding->association === null) {
             return;
@@ -657,7 +667,7 @@ final class HistoryReplay
 
         if ($binding->kind === RowBinding::JOIN_ROWS_OF_TARGET) {
             $key = $binding->element ?? [];
-            $this->links[$of]['targets'][] = ['at' => $this->at, 'target' => self::keyOf($target, $key), 'key' => $key, 'affected' => (int) $affected, 'by' => 'statement'];
+            $this->links[$of]['targets'][] = ['at' => $this->at, 'target' => self::keyOf($target, $key), 'key' => $key, 'affected' => $affected, 'by' => 'statement'];
 
             return;
         }
@@ -669,7 +679,7 @@ final class HistoryReplay
             'owner' => $ownerKey,
             'target' => $binding->element === null ? null : self::keyOf($target, $binding->element),
             'key' => $binding->element,
-            'affected' => (int) $affected,
+            'affected' => $affected,
         ];
     }
 
@@ -770,7 +780,7 @@ final class HistoryReplay
      * @param array<array-key, mixed> $params
      * @param array<string, mixed>    $key
      */
-    private function updated(ClassMetadata $metadata, StatementShape $shape, array $params, array $key, int|string|null $affected = null): void
+    private function updated(ClassMetadata $metadata, StatementShape $shape, array $params, array $key, ?int $affected = null): void
     {
         $root = $metadata->rootEntityName;
         $id = self::keyOf($metadata, $key);
@@ -784,7 +794,7 @@ final class HistoryReplay
         // remembered by at the next preFlush is Doctrine's, not the database's. MySQL counts the
         // rows it changed instead, and there none is no row that took a new value: below. A count
         // the driver did not give says nothing.
-        $reachedNothing = $affected !== null && (int) $affected === 0;
+        $reachedNothing = $affected === 0;
 
         if ($reachedNothing && !$this->countsTheRowsItChanged()) {
             return;
@@ -1034,10 +1044,11 @@ final class HistoryReplay
      * @param ClassMetadata<object> $metadata
      * @param array<string, mixed>  $key
      */
-    private function deleted(ClassMetadata $metadata, array $key, int|string|null $affected): void
+    private function deleted(ClassMetadata $metadata, array $key, ?int $affected): void
     {
-        // A DELETE counts the rows it took on every engine; none means there was no row.
-        if ((int) $affected === 0) {
+        // A DELETE counts the rows it took on every engine; none means there was no row. A
+        // count not known is not none.
+        if ($affected === 0) {
             return;
         }
 
@@ -1244,7 +1255,7 @@ final class HistoryReplay
         return isset($this->gone[$root][$id], $this->goneAt[$root][$id]) && $this->log?->ownerOf($this->goneAt[$root][$id]) === $flush;
     }
 
-    private function emptied(StatementShape $shape, RowBinding $binding, int|string|null $affected): void
+    private function emptied(StatementShape $shape, RowBinding $binding, ?int $affected): void
     {
         $elements = null;
 
@@ -1283,7 +1294,7 @@ final class HistoryReplay
 
         // What the rows held is what went -- if the count says so. A difference is the rows
         // having changed in a way this did not follow.
-        if (\count($held) !== (int) $affected) {
+        if ($affected !== null && \count($held) !== $affected) {
             $this->doubt(sprintf('an emptying of %s took %s rows where %d were known', $shape->table, self::scalar($affected), \count($held)), $root);
 
             return;

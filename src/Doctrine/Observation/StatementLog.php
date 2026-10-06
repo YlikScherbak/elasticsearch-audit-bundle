@@ -64,7 +64,7 @@ final class StatementLog
     public const VOID = 'void';
     public const COMMITTED = 'committed';
 
-    /** @var array<int, array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>, key?: int|string}> by sequence number */
+    /** @var array<int, array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|null, failed: bool, frame: int, void: bool, owner?: int, observed?: array<string, list<list<mixed>>|null>, key?: int|string}> by sequence number */
     private array $statements = [];
 
     /** @var array<int, array{parent: int|null, label: int|null, savepoint: string|null, committed: bool, dead: bool}> by identity, in the order they were opened */
@@ -107,7 +107,7 @@ final class StatementLog
     /**
      * The entry of the last statement not kept, which the next one of its frame shares.
      *
-     * @var array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|string|null, failed: bool, frame: int, void: bool}|null
+     * @var array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|null, failed: bool, frame: int, void: bool}|null
      */
     private ?array $unkept = null;
 
@@ -252,6 +252,8 @@ final class StatementLog
      */
     public function executed(string $sql, array $params, int|string|null $affected, bool $failed = false): ?int
     {
+        $affected = self::counted($affected);
+
         // What is read is the statement without its comments -- a query tagger's, before or
         // after it. What is kept is the statement as it ran: the copy is never its text.
         $read = ReadableSql::of($sql, $this->dialect)->text;
@@ -299,7 +301,8 @@ final class StatementLog
             }
         }
 
-        if ($read !== null && !$failed && (int) $affected > 0) {
+        // A count not known may be rows written.
+        if ($read !== null && !$failed && $affected !== 0) {
             $this->aJoinRowWritten($read, $params);
         }
 
@@ -314,6 +317,33 @@ final class StatementLog
         ];
 
         return $this->sequence;
+    }
+
+    /**
+     * The count a statement reports, as this log keeps it: DBAL's is int|numeric-string, a string
+     * where a driver's count is past what an int holds. The int, or null -- not known -- for one
+     * past it, for none given, for anything not a count; read by its digits and never through a
+     * float, so that it is not cut to PHP_INT_MAX. Not known is never nought: what reads a count
+     * takes such a statement as written, and the replay says it is doubt.
+     */
+    private static function counted(int|string|null $affected): ?int
+    {
+        if (!\is_string($affected)) {
+            return $affected;
+        }
+
+        if (preg_match('/^\s*\+?0*([0-9]+)\s*$/', $affected, $m) !== 1) {
+            return null;
+        }
+
+        $digits = $m[1];
+        $most = (string) \PHP_INT_MAX;
+
+        if (\strlen($digits) > \strlen($most) || (\strlen($digits) === \strlen($most) && strcmp($digits, $most) > 0)) {
+            return null;
+        }
+
+        return (int) $digits;
     }
 
     /**
@@ -391,7 +421,7 @@ final class StatementLog
     {
         $read = ReadableSql::of($sql, $this->dialect)->text;
 
-        if ($read === null || $this->watches === [] || (int) $affected === 0 || preg_match('/^\s*DELETE\b/i', $read) !== 1) {
+        if ($read === null || $this->watches === [] || self::counted($affected) === 0 || preg_match('/^\s*DELETE\b/i', $read) !== 1) {
             return [];
         }
 
@@ -639,7 +669,7 @@ final class StatementLog
     }
 
     /**
-     * @return array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|string|null, failed: bool, key: int|string|null}|null
+     * @return array{sql: string, read: string|null, params: array<array-key, mixed>, affected: int|null, failed: bool, key: int|string|null}|null
      */
     public function statement(int $statement): ?array
     {

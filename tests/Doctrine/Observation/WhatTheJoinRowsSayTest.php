@@ -39,6 +39,9 @@ final class WhatTheJoinRowsSayTest extends DoctrineTestCase
     /** @var array<string, string> every owner's name, by id */
     private array $names = [];
 
+    /** The statements the driver counts past what an int holds, if any. */
+    private ?string $pastAnInt = null;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -459,6 +462,84 @@ final class WhatTheJoinRowsSayTest extends DoctrineTestCase
         $this->end();
     }
 
+    /**
+     * A count past what an int holds is not known, and never none: the statement is taken as it
+     * was written, and nothing is held against its count -- the replay says it is doubt.
+     */
+    public function testAnOwnersLinksAllTakenWithACountNotKnownAreWhatItsRowsHeld(): void
+    {
+        $this->countsPastAnIntFor('/^DELETE FROM article_tag WHERE article_id/');
+        [$read] = $this->anArticle('Read', 'php', 'db');
+
+        $this->begin();
+        $this->seed($read);
+        $read->tags->clear();
+        $this->em->flush();
+
+        $told = $this->told();
+        self::assertSame(['Read -php (emptied)', 'Read -db (emptied)'], $this->said($told));
+        self::assertSame([], $told->doubts());
+        self::assertSame([], $this->heldBy($told, $read));
+        self::assertSame(['What the connection ran could not be followed for 1 statement(s) of '.Article::class.' since the history was last written, so the history may be missing what they did.'], $this->logs, 'and the count said to be doubt');
+        $this->logs = [];
+        $this->end();
+    }
+
+    public function testATargetTakenOutByTheJoinTablesStatementWithACountNotKnownIsAFactPerHolder(): void
+    {
+        $this->countsPastAnIntFor('/^DELETE FROM article_tag WHERE tag_id/');
+        $a = $this->aTag('a');
+        [$one] = $this->anArticle('One', $a);
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->holdersOf($a);
+        $this->em->getConnection()->executeStatement('DELETE FROM article_tag WHERE tag_id = ?', [$a->id]);
+
+        $told = $this->told();
+        self::assertSame(['One -a (target)'], $this->said($told));
+        self::assertSame([], $told->doubts());
+        self::assertSame([], $this->heldBy($told, $one));
+        $this->end();
+    }
+
+    public function testAnAccountReadAfterALinkTakenWithACountNotKnownIsUndoneToWhatItHeld(): void
+    {
+        // The account is read after the link's DELETE ran, so it is undone to before it: a count
+        // not known undoes the DELETE as one that took its row.
+        $this->countsPastAnIntFor('/^DELETE FROM article_tag WHERE article_id = \? AND tag_id/');
+        [$one, $php] = $this->anArticle('One', 'php', 'db');
+        $this->unownedStatementsAreExpected = true;
+
+        $this->begin();
+        $this->em->getConnection()->executeStatement('DELETE FROM article_tag WHERE article_id = ? AND tag_id = ?', [$one->id, $php->id]);
+        $this->seed($one);
+
+        $told = $this->told();
+        self::assertSame(['One -php (row)'], $this->said($told));
+        self::assertSame([], $told->doubts());
+        self::assertSame(['db'], $this->heldBy($told, $one));
+        $this->end();
+    }
+
+    public function testATargetGoneByARowWithACountNotKnownIsTakenOutOfItsLists(): void
+    {
+        $this->countsPastAnIntFor('/^DELETE FROM Tag /');
+        $a = $this->aTag('a');
+        [$one] = $this->anArticle('One', $a);
+        [$two] = $this->anArticle('Two', $a);
+
+        $this->begin();
+        $this->holdersOf($a);
+        $this->em->remove($a);
+        $this->em->flush();
+
+        $told = $this->told();
+        self::assertSame(['One -a (target)', 'Two -a (target)'], $this->said($told));
+        self::assertSame([[], []], [$this->heldBy($told, $one), $this->heldBy($told, $two)]);
+        $this->end();
+    }
+
     public function testAnOwnerGoneHoldsNothingAndItsLinksAreNoFactsOfTheirOwn(): void
     {
         [$article] = $this->anArticle('One', 'php');
@@ -498,6 +579,23 @@ final class WhatTheJoinRowsSayTest extends DoctrineTestCase
     private static function tags(): string
     {
         return JoinRowMemory::associationOf(Article::class, 'tags');
+    }
+
+    /** The statements matching a pattern counted past what an int holds, on a connection made again. */
+    private function countsPastAnIntFor(string $pattern): void
+    {
+        if (\Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware::onDbal3()) {
+            self::markTestSkipped('DBAL 3 counts in an int.');
+        }
+
+        $this->pastAnInt = $pattern;
+        $this->watchTheConnection(FailurePolicy::Log);
+        $this->links = new JoinRowMemory($this->statements);
+    }
+
+    protected function middlewaresOfTheTest(): array
+    {
+        return $this->pastAnInt === null ? [] : [new CountsPastAnInt($this->pastAnInt)];
     }
 
     private function aTag(string $label): Tag
