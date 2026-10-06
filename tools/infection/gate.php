@@ -32,7 +32,8 @@ declare(strict_types=1);
  *   php tools/infection/gate.php fingerprint <set>
  *   php tools/infection/gate.php record <set> <part|plan> <log.json> <exit-code> <fingerprint-before> <threads> <cpus> <out-dir>
  *   php tools/infection/gate.php excluded <set> <whole-log.json> <out-dir>   # the exclusions, against the plan made without them
- *   php tools/infection/gate.php summarise <set> <dir>
+ *   php tools/infection/gate.php summarise <set> <dir>                  # writes <dir>/<set>-statuses.json too
+ *   php tools/infection/gate.php transitions <statuses.json> <statuses.json>   # two runs, mutant by mutant
  *
  * --root=<dir> points it at another tree than this one, which is how its tests run it.
  */
@@ -49,7 +50,7 @@ function refuse(string $message): void
     throw new GateRefused($message);
 }
 
-/** @return array{config: string, threads: int, floor: string, sources: list<string>, parts: array<string, list<string>>} */
+/** @return array{config: string, threads: int, floor: string, base?: array{run: string, plan: string, counts: array<string, int>}, sources: list<string>, parts: array<string, list<string>>} */
 function setOf(string $root, string $set): array
 {
     $manifest = json_decode((string) file_get_contents($root . '/tools/infection/parts.json'), true, 512, \JSON_THROW_ON_ERROR);
@@ -66,6 +67,14 @@ function setOf(string $root, string $set): array
     // the floor held.
     if (!\is_string($manifest[$set]['floor'] ?? null) || preg_match('/^[0-9]{1,3}(\.[0-9]{1,4})?$/', $manifest[$set]['floor']) !== 1 || !reaches(1, 1, $manifest[$set]['floor'])) {
         refuse(sprintf('parts.json gives set "%s" no floor (a percentage written as a string, "92.49").', $set));
+    }
+
+    // The counts of the run the floor was measured on, with the run and its plan: optional.
+    $base = $manifest[$set]['base'] ?? null;
+
+    if ($base !== null && !(\is_array($base) && \is_string($base['run'] ?? null) && \is_string($base['plan'] ?? null)
+        && array_filter(['killed', 'escaped', 'timeouted', 'errored'], static fn (string $status): bool => !\is_int($base['counts'][$status] ?? null)) === [])) {
+        refuse(sprintf('parts.json gives set "%s" a base without its run, its plan, or the counts killed, escaped, timeouted and errored.', $set));
     }
 
     return $manifest[$set];
@@ -264,7 +273,7 @@ function record(string $root, string $setName, string $part, string $log, string
  *
  * @param list<string> $files
  *
- * @return array{counts: array<string, int>, mutants: array<string, int>}
+ * @return array{counts: array<string, int>, mutants: array<string, int>, statuses: array<string, list<string>>, why: array<string, list<string>>}
  */
 function readLog(string $where, string $path, array $files): array
 {
@@ -286,6 +295,8 @@ function readLog(string $where, string $path, array $files): array
 
     $counts = ['skipped' => (int) ($log['stats']['skippedCount'] ?? -1)];
     $mutants = [];
+    $statuses = [];
+    $why = [];
 
     foreach (STATUSES as $status) {
         if (!isset($log[$status]) || !\is_array($log[$status])) {
@@ -303,8 +314,19 @@ function readLog(string $where, string $path, array $files): array
 
             $key = implode(' | ', [$file, $mutant['mutator']['mutatorName'], $mutant['mutator']['originalStartLine'], sha1($mutant['diff'])]);
             $mutants[$key] = ($mutants[$key] ?? 0) + 1;
+            $statuses[$key][] = $status;
+
+            // What a mutant that errored or timed out left of its run: the end of it, where a
+            // crash or a test that never finished says what it was.
+            if ($status === 'errored' || $status === 'timeouted') {
+                $output = (string) ($mutant['processOutput'] ?? '');
+                $why[$key][] = \strlen($output) > 2000 ? '…'.substr($output, -2000) : $output;
+            }
         }
     }
+
+    ksort($statuses);
+    ksort($why);
 
     if ($counts['skipped'] !== 0) {
         refuse(sprintf(
@@ -318,7 +340,7 @@ function readLog(string $where, string $path, array $files): array
         refuse(sprintf('%s: the log lists %d mutants and says it made %d.', $where, array_sum($counts), $log['stats']['totalMutantsCount'] ?? -1));
     }
 
-    return ['counts' => $counts, 'mutants' => $mutants];
+    return ['counts' => $counts, 'mutants' => $mutants, 'statuses' => $statuses, 'why' => $why];
 }
 
 /** The part's file an absolute path from the run is, wherever the run had the tree. */
@@ -366,6 +388,8 @@ function summarise(string $root, string $setName, string $dir): int
     $plan = null;
     $counts = [];
     $mutants = [];
+    $statuses = [];
+    $why = [];
 
     foreach ($records as $part => $record) {
         $where = $setName . '.' . $part;
@@ -404,6 +428,14 @@ function summarise(string $root, string $setName, string $dir): int
 
         foreach ($read['counts'] as $status => $count) {
             $counts[$status] = ($counts[$status] ?? 0) + $count;
+        }
+
+        foreach ($record['statuses'] ?? [] as $key => $of) {
+            $statuses[$key] = [...($statuses[$key] ?? []), ...$of];
+        }
+
+        foreach ($record['why'] ?? [] as $key => $of) {
+            $why[$key] = [...($why[$key] ?? []), ...$of];
         }
 
         foreach ($read['mutants'] as $key => $count) {
@@ -483,24 +515,107 @@ function summarise(string $root, string $setName, string $dir): int
 
     printf("  floor %s%% of the covered, counting only what a test failed on (parts.json)\n", $set['floor']);
 
-    // A timeout is a mutant the machine was too slow to finish, as often as one that never
-    // ends: the same mutant was each in two runs of one tree. Counted, the score would be
-    // the machine's.
-    if (!reaches($killed, $covered, $set['floor'])) {
-        $short = shortBy($killed, $covered, $set['floor']);
+    // Every mutant's status by name, red or green: what two runs are compared by, mutant by
+    // mutant (`gate.php transitions`) -- a difference of counts says that something moved, and
+    // never which mutant, or why.
+    ksort($statuses);
+    ksort($why);
+    file_put_contents($dir . '/' . $setName . '-statuses.json', json_encode(['fingerprint' => $fingerprint, 'infection' => $infection, 'plan' => planHash($plan), 'statuses' => $statuses, 'why' => $why], \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));
 
-        // Why, from the statuses: a floor that the timed out would reach is the machine's to
-        // answer -- a mutant's timeout or the threads -- never the floor's; one they would not is
-        // the code's, and the escaped are where to look.
-        $why = $short <= $counts['timeouted'] + $counts['errored']
-            ? sprintf('%d timed out or errored, and as many of them killed would reach it: a mutant killed elsewhere that times out here is the timeout\'s or the threads\' to mend, not the floor\'s', $counts['timeouted'] + $counts['errored'])
-            : sprintf('more escaped than the floor allows: the %d timed out or errored would not reach it, and the escaped are where to look', $counts['timeouted'] + $counts['errored']);
-        fwrite(\STDERR, sprintf("%s is below its floor: %d more of the %d would have to be killed by a test -- %s.\n", $setName, $short, $covered, $why));
+    $against = againstTheBase($set, $plan, $counts, $killed);
+
+    if ($against !== null) {
+        printf("  %s\n", $against);
+    }
+
+    // A timeout or an error is shown and not counted: whether a mutant times out depends on the
+    // machine. Nothing here says what made a run short: the counts cannot, and the statuses by
+    // name are where to look.
+    if (!reaches($killed, $covered, $set['floor'])) {
+        fwrite(\STDERR, sprintf(
+            "%s is below its floor: %d more of the %d would have to be killed by a test.%s The cause is not established: compare the mutants' statuses by name (gate.php transitions, %s-statuses.json against the base run's).\n",
+            $setName,
+            shortBy($killed, $covered, $set['floor']),
+            $covered,
+            $against === null ? '' : ' ' . ucfirst($against) . '.',
+            $setName,
+        ));
 
         return 1;
     }
 
     return 0;
+}
+
+/** What identifies a plan: its mutants, as a multiset. */
+function planHash(array $plan): string
+{
+    ksort($plan);
+
+    return hash('sha256', json_encode($plan, \JSON_THROW_ON_ERROR));
+}
+
+/**
+ * The run against the counts of the run the floor was measured on, when parts.json keeps them --
+ * and only when both are of one plan: counts of other mutants differ by what was planned, not by
+ * what became of the same ones.
+ *
+ * @param array<string, int> $plan
+ * @param array<string, int> $counts
+ */
+function againstTheBase(array $set, array $plan, array $counts, int $killed): ?string
+{
+    $base = $set['base'] ?? null;
+
+    if (!\is_array($base)) {
+        return null;
+    }
+
+    if ($base['plan'] !== planHash($plan)) {
+        return sprintf('the plan is not the one of the base (run %s): its counts are of other mutants, and are not compared', $base['run']);
+    }
+
+    return sprintf(
+        'against the base (run %s, one plan): killed %+d, escaped %+d, timed out %+d, errored %+d',
+        $base['run'],
+        $killed - $base['counts']['killed'],
+        $counts['escaped'] - $base['counts']['escaped'],
+        $counts['timeouted'] - $base['counts']['timeouted'],
+        $counts['errored'] - $base['counts']['errored'],
+    );
+}
+
+/**
+ * Two runs' statuses, mutant by mutant: every mutant whose status is not the same in both, with
+ * what an errored or timed-out one left of its run.
+ */
+function transitions(string $from, string $to): void
+{
+    $a = json_decode((string) file_get_contents($from), true, 512, \JSON_THROW_ON_ERROR);
+    $b = json_decode((string) file_get_contents($to), true, 512, \JSON_THROW_ON_ERROR);
+
+    if ($a['plan'] !== $b['plan']) {
+        printf("The two runs are of different plans: only the mutants of both are compared.\n");
+    }
+
+    $moved = 0;
+
+    foreach ($b['statuses'] as $key => $statuses) {
+        $before = $a['statuses'][$key] ?? null;
+
+        if ($before === null || $before === $statuses) {
+            continue;
+        }
+
+        ++$moved;
+        printf("%s: %s -> %s\n", $key, implode(', ', $before), implode(', ', $statuses));
+
+        foreach ($b['why'][$key] ?? [] as $output) {
+            printf("    %s\n", str_replace("\n", "\n    ", trim(substr($output, -600))));
+        }
+    }
+
+    printf("%d mutant(s) changed status; %d only in the first run, %d only in the second.\n", $moved, \count(array_diff_key($a['statuses'], $b['statuses'])), \count(array_diff_key($b['statuses'], $a['statuses'])));
 }
 
 /**
@@ -767,6 +882,9 @@ try {
             exit(0);
         case 'summarise':
             exit(summarise($root, $arguments[1], $arguments[2]));
+        case 'transitions':
+            transitions($arguments[1], $arguments[2]);
+            exit(0);
         default:
             fwrite(\STDERR, "Usage: see the docblock of tools/infection/gate.php.\n");
             exit(2);

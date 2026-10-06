@@ -69,11 +69,54 @@ final class TheMutationGateTest extends TestCase
         self::assertStringContainsString('covered MSI 75.00% counting only what a test failed on', $output);
     }
 
-    public function floor(mixed $floor): void
+    /** @param array<string, mixed>|null $base */
+    public function floor(mixed $floor, ?array $base = null): void
     {
         $this->write('tools/infection/parts.json', json_encode([
-            'set' => ['config' => 'infection.json5', 'threads' => 2, 'floor' => $floor, 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'rest' => ['*']]],
+            'set' => ['config' => 'infection.json5', 'threads' => 2, 'floor' => $floor, 'sources' => ['src/A'], 'parts' => ['one' => ['src/A/One.php'], 'rest' => ['*']]] + ($base === null ? [] : ['base' => $base]),
         ], \JSON_THROW_ON_ERROR));
+    }
+
+    /** The plan of runEverything(), as gate.php's planHash() identifies it: its four mutants, once each. */
+    private static function plan(): string
+    {
+        $plan = [];
+
+        foreach ([['src/A/One.php', 'Plus', 1], ['src/A/One.php', 'Minus', 2], ['src/A/Two.php', 'Plus', 3], ['src/A/Two.php', 'Minus', 4]] as [$file, $mutator, $line]) {
+            $plan[implode(' | ', [$file, $mutator, $line, sha1(sprintf('--- line %d, %s', $line, $mutator))])] = 1;
+        }
+
+        ksort($plan);
+
+        return hash('sha256', json_encode($plan, \JSON_THROW_ON_ERROR));
+    }
+
+    public function testEveryMutantsStatusIsWrittenByNameWithWhatAnErroredOneLeft(): void
+    {
+        $this->runEverything(mutants: ['rest' => ['killed' => [['src/A/Two.php', 'Plus', 3]], 'errored' => [['src/A/Two.php', 'Minus', 4]]]]);
+
+        [$code, $output] = $this->gate('summarise', 'set', $this->root . '/out');
+        $written = json_decode((string) file_get_contents($this->root . '/out/set-statuses.json'), true, 512, \JSON_THROW_ON_ERROR);
+
+        self::assertSame(0, $code, $output);
+        // By key: One's Minus and Plus, then Two's.
+        self::assertSame(['escaped', 'killed', 'errored', 'killed'], array_merge(...array_values($written['statuses'])));
+        self::assertSame(['src/A/Two.php | Minus | 4'], array_map(static fn (string $key): string => substr($key, 0, strrpos($key, ' | ')), array_keys($written['why'])));
+        self::assertSame(['the run of line 4, Minus'], array_merge(...array_values($written['why'])));
+    }
+
+    public function testTwoRunsAreComparedMutantByMutant(): void
+    {
+        $this->runEverything();
+        $this->gate('summarise', 'set', $this->root . '/out');
+        rename($this->root . '/out/set-statuses.json', $this->root . '/first.json');
+        $this->runEverything(mutants: ['rest' => ['killed' => [['src/A/Two.php', 'Plus', 3]], 'errored' => [['src/A/Two.php', 'Minus', 4]]]]);
+        $this->gate('summarise', 'set', $this->root . '/out');
+
+        [$code, $output] = $this->gate('transitions', $this->root . '/first.json', $this->root . '/out/set-statuses.json');
+
+        self::assertSame(0, $code, $output);
+        self::assertMatchesRegularExpression('~src/A/Two\.php \| Minus \| 4 \| \w+: timeouted -> errored\n    the run of line 4, Minus\n1 mutant\(s\) changed status; 0 only in the first run, 0 only in the second\.~', $output);
     }
 
     /**
@@ -182,25 +225,42 @@ final class TheMutationGateTest extends TestCase
                 $test->floor('75');
                 $test->runEverything(mutants: ['rest' => ['killed' => [['src/A/Two.php', 'Plus', 3]], 'escaped' => [['src/A/Two.php', 'Minus', 4]]]]);
             },
-            'set is below its floor: 1 more of the 4 would have to be killed by a test -- more escaped than the floor allows: the 0 timed out or errored would not reach it',
+            "set is below its floor: 1 more of the 4 would have to be killed by a test. The cause is not established: compare the mutants' statuses by name",
         ];
 
-        // Infection's own count, 75%, would reach the floor; the gate's does not -- and says the
-        // timeout is what to look at.
+        // Infection's own count, 75%, would reach the floor; the gate's does not -- and says no
+        // more of why than it knows.
         yield 'a timeout, which is not counted as killed' => [
             static function (self $test): void {
                 $test->floor('75');
                 $test->runEverything();
             },
-            'set is below its floor: 1 more of the 4 would have to be killed by a test -- 1 timed out or errored, and as many of them killed would reach it',
+            "set is below its floor: 1 more of the 4 would have to be killed by a test. The cause is not established: compare the mutants' statuses by name",
         ];
 
-        yield 'a timeout too few to reach the floor' => [
+        // Against the counts of the run the floor was measured on, when of one plan.
+        yield 'a run short against its base' => [
             static function (self $test): void {
-                $test->floor('100');
+                $test->floor('75', ['run' => '42', 'plan' => self::plan(), 'counts' => ['killed' => 3, 'escaped' => 1, 'timeouted' => 0, 'errored' => 0]]);
                 $test->runEverything();
             },
-            'set is below its floor: 2 more of the 4 would have to be killed by a test -- more escaped than the floor allows: the 1 timed out or errored would not reach it',
+            'Against the base (run 42, one plan): killed -1, escaped +0, timed out +1, errored +0. The cause is not established',
+        ];
+
+        yield 'a run of another plan than its base' => [
+            static function (self $test): void {
+                $test->floor('75', ['run' => '42', 'plan' => 'another', 'counts' => ['killed' => 3, 'escaped' => 1, 'timeouted' => 0, 'errored' => 0]]);
+                $test->runEverything();
+            },
+            'The plan is not the one of the base (run 42): its counts are of other mutants, and are not compared.',
+        ];
+
+        yield 'a base without its counts' => [
+            static function (self $test): void {
+                $test->runEverything();
+                $test->floor('50', ['run' => '42', 'plan' => self::plan(), 'counts' => ['killed' => 3]]);
+            },
+            'parts.json gives set "set" a base without its run, its plan, or the counts',
         ];
 
         // Two of three: shown as 66.67%, and short of a floor of 66.67 all the same.
@@ -363,7 +423,7 @@ final class TheMutationGateTest extends TestCase
             $log[$status] = array_map(static fn (array $mutant): array => [
                 'mutator' => ['mutatorName' => $mutant[1], 'originalFilePath' => '/app/' . $mutant[0], 'originalStartLine' => $mutant[2]],
                 'diff' => sprintf('--- line %d, %s', $mutant[2], $mutant[1]),
-                'processOutput' => '',
+                'processOutput' => sprintf('the run of line %d, %s', $mutant[2], $mutant[1]),
             ], $byStatus[$status] ?? []);
             $log['stats']['totalMutantsCount'] += \count($log[$status]);
         }

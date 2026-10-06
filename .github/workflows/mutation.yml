@@ -166,3 +166,14 @@ jobs:
           mkdir -p var/infection/gate
           find var/infection/records \( -name '${{ inputs.set }}.*.json' -o -name '${{ inputs.set }}-exclusions.json' \) -exec cp {} var/infection/gate/ \;
           php tools/infection/gate.php summarise '${{ inputs.set }}' var/infection/gate
+
+      # Every mutant's status by name, and what an errored or timed-out one left of its run: what
+      # a red run is compared with another by (gate.php transitions), red or green.
+      - name: The statuses of every mutant
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-${{ inputs.set }}-statuses
+          path: var/infection/gate/${{ inputs.set }}-statuses.json
+          if-no-files-found: ignore
+          retention-days: 90

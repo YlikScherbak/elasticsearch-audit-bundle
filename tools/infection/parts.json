@@ -3,6 +3,11 @@
         "config": "infection.json5",
         "threads": 3,
         "floor": "96.00",
+        "base": {
+            "run": "37458201712",
+            "plan": "854ed77370a530e2e00e5307981f55ae74be736d2542a14da57f672951828273",
+            "counts": {"killed": 2619, "escaped": 104, "timeouted": 0, "errored": 5}
+        },
         "sources": [
             "src/Privacy",
             "src/Coalescing",
@@ -22,6 +27,11 @@
         "config": "infection.doctrine.json5",
         "threads": 3,
         "floor": "92.71",
+        "base": {
+            "run": "37458201712",
+            "plan": "114789a1c548bf3ad2ade670425ffcc9edd3ceec286268195a81416da5c6ed39",
+            "counts": {"killed": 4038, "escaped": 281, "timeouted": 29, "errored": 0}
+        },
         "sources": ["src/Doctrine"],
         "parts": {
             "subscriber": ["src/Doctrine/AuditSubscriber.php"],
