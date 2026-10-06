@@ -51,6 +51,21 @@ final class StatementLogTest extends TestCase
         self::assertSame($kept, $statement['affected']);
     }
 
+    public function testAStatementOutsideEveryFrameIsNotVoidedByTheOnlyFrameRollingBack(): void
+    {
+        // One frame in the log, and a statement that ran before it, outside it: the frame's
+        // rollback is not the statement's.
+        $log = new StatementLog();
+        $outside = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [1 => 2, 2 => 1], 1);
+        $log->began();
+        $inside = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [1 => 3, 2 => 1], 1);
+        $log->rolledBack();
+
+        self::assertNotNull($outside);
+        self::assertNotNull($inside);
+        self::assertSame([StatementLog::COMMITTED, StatementLog::VOID], [$log->fate($outside), $log->fate($inside)]);
+    }
+
     public function testACountNotKnownIsLookedAfterAsADeleteThatTookRows(): void
     {
         // Watched, a DELETE whose count is past an int is looked at as one that took rows: not

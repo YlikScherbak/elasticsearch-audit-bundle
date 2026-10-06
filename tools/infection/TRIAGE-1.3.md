@@ -1421,6 +1421,18 @@ asked, before the tag:
 The base in `parts.json` is of `adfd434`'s plans; this commit changes main's (2747 → 2763 planned),
 so its run will say that its counts are not compared, until the base is the run the tag is on.
 
+CI 37473835830 (`2e2bbd4`), green: main 2640 of 2744, **96.21%**, 0 errored; Doctrine 4037 of 4348,
+92.85%, and against the base, of one plan, killed −1 and timed out +1 — the gate saying it in one
+line, as it was asked to. By name (the first run with statuses kept, against the text logs of the
+one before): StatementLog 828, `LogicalAndNegation` of `isInside()`'s loop. Under the mutant a
+statement outside every frame walks for ever; whether a test failed first or the walk timed out
+was the order Infection ran the tests in, by their time. `isInside()` now walks at most as many
+steps as there are frames, with the same answers, and no mutant of it can go on for ever (Infection
+on StatementLog: no timeout of it). Of its new mutants one is the bundle's own equivalent — the
+`return false` above the outermost frame taken away, the walk ending the same a step later — and the
+last `return false` made true had no case: a statement outside the only frame there is, which that
+frame's rollback must not void. It has one now.
+
 ### FrameBuffer 356: the gap closed (ad03de9)
 
 `[] ?? $this->moved[$key]` on a REMOVE: the held record went out as if no field had moved, and a

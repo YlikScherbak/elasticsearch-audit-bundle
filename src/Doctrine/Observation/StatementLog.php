@@ -825,10 +825,23 @@ final class StatementLog
 
     private function isInside(int $frame, int $outer): bool
     {
-        for ($f = $frame; $f !== -1 && $f !== null; $f = $this->frames[$f]['parent'] ?? null) {
+        // A frame's chain of parents is never longer than the frames there are: walked that many
+        // steps at most, so that no mutant of the walk can make it go on for ever -- one did, and
+        // timed out on one machine where a test caught it on another.
+        $f = $frame;
+
+        foreach ($this->frames as $_) {
             if ($f === $outer) {
                 return true;
             }
+
+            // Above the outermost frame; -1, a statement outside every frame, has no entry and is
+            // there one step later.
+            if ($f === null) {
+                return false;
+            }
+
+            $f = $this->frames[$f]['parent'] ?? null;
         }
 
         return false;
