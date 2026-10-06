@@ -142,7 +142,7 @@ final class HistoryReplay
     /** Whether the last representer this called threw: the fact it was for is marked, never guessed. */
     private bool $representFailed = false;
 
-    /** @var list<array{at: int, class: string|null}> where each doubt was, and about which class: no value it held */
+    /** @var list<array{at: int, classes: non-empty-list<string|null>}> where each doubt was, and about which classes: no value it held */
     private array $doubtsAt = [];
 
     /**
@@ -201,22 +201,24 @@ final class HistoryReplay
                 } else {
                     // The words of a write outside literals and quoted names, whatever the form --
                     // behind a common table expression, MySQL's REPLACE, SQLite's INSERT OR
-                    // REPLACE, a MERGE: doubt of the table each names, if the history watches it,
-                    // and of any, if a name cannot be read.
-                    $watched = null;
-                    $doubt = false;
+                    // REPLACE, a MERGE: one doubt, of every watched class a name is of, and of any
+                    // table besides if a name cannot be read -- which a name read after it does
+                    // not take back.
+                    $watched = [];
+                    $unnamed = false;
 
                     foreach (StatementShape::writesItCannotRead($statement['read']) as $table) {
                         $class = $table === null ? null : $this->watchedClassOf($table);
 
-                        if ($table === null || $class !== null) {
-                            $doubt = true;
-                            $watched ??= $class;
+                        if ($table === null) {
+                            $unnamed = true;
+                        } elseif ($class !== null && !\in_array($class, $watched, true)) {
+                            $watched[] = $class;
                         }
                     }
 
-                    if ($doubt) {
-                        $this->doubt('not read: '.$statement['sql'], $watched);
+                    if ($watched !== [] || $unnamed) {
+                        $this->doubtOf('not read: '.$statement['sql'], $unnamed ? [...$watched, null] : $watched);
                     }
                 }
 
@@ -609,15 +611,26 @@ final class HistoryReplay
 
     private function doubt(string $text, ?string $class): void
     {
-        $this->doubts[] = $text;
-        $this->doubtsAt[] = ['at' => $this->at, 'class' => $class];
+        $this->doubtOf($text, [$class]);
     }
 
     /**
-     * The doubts of the statements after a position: where, and about which class, and nothing a
+     * One doubt of a statement, about each class it may have written, null among them for a
+     * table it may have written and this cannot name.
+     *
+     * @param non-empty-list<string|null> $classes
+     */
+    private function doubtOf(string $text, array $classes): void
+    {
+        $this->doubts[] = $text;
+        $this->doubtsAt[] = ['at' => $this->at, 'classes' => $classes];
+    }
+
+    /**
+     * The doubts of the statements after a position: where, and about which classes, and nothing a
      * statement carried -- for a writer to say what the history may be missing.
      *
-     * @return list<array{at: int, class: string|null}>
+     * @return list<array{at: int, classes: non-empty-list<string|null>}>
      */
     public function doubtsAfter(int $at): array
     {

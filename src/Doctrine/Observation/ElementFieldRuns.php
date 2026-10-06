@@ -160,7 +160,7 @@ final class ElementFieldRuns
         if ($doubts !== []) {
             $this->logger->warning('What the connection ran could not be followed for {count} statement(s) of {classes} since the history was last written, so the history may be missing what they did.', [
                 'count' => \count($doubts),
-                'classes' => implode(', ', array_unique(array_map(static fn (array $doubt): string => $doubt['class'] ?? 'an unknown table', $doubts))),
+                'classes' => implode(', ', array_unique(array_map(static fn (?string $class): string => $class ?? 'an unknown table', array_merge(...array_column($doubts, 'classes'))))),
             ]);
         }
 

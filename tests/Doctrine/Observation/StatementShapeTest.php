@@ -248,5 +248,28 @@ final class StatementShapeTest extends TestCase
         yield 'a literal that ends before a quote' => ["WITH x AS (SELECT 'a'x' DELETE FROM b", []];
         yield 'a doubled quote in an escape string' => ["WITH x AS (SELECT E'a''\\' DELETE FROM b' AS t) SELECT t FROM x", []];
         yield 'a write right after a literal, with no space' => ["SELECT 'x'DELETE FROM a", ['a']];
+
+        // A write of several tables, MySQL's: any table -- which of them it writes is not read.
+        yield 'an UPDATE with a join' => ['UPDATE scratch s JOIN Article a ON a.id = s.id SET a.title = ?', [null]];
+        yield 'an UPDATE with a STRAIGHT_JOIN' => ['UPDATE scratch s STRAIGHT_JOIN Article a ON a.id = s.id SET a.title = ?', [null]];
+        yield 'an UPDATE of two tables' => ['UPDATE scratch s, Article a SET a.title = ? WHERE a.id = s.id', [null]];
+        yield 'a DELETE of names before FROM' => ['DELETE s, a FROM scratch s JOIN Article a ON a.id = s.id', [null]];
+        yield 'a DELETE of an alias' => ['DELETE a FROM Article a JOIN scratch s ON a.id = s.id', [null]];
+        yield 'a DELETE FROM two names USING' => ['DELETE FROM s, a USING scratch s JOIN Article a ON a.id = s.id', [null]];
+        yield 'a DELETE of an alias, with no join' => ['DELETE a FROM Article a WHERE a.id = 1', [null]];
+        yield 'a DELETE with modifiers of names before FROM' => ['DELETE LOW_PRIORITY a FROM Article a JOIN scratch s ON a.id = s.id', [null]];
+        yield 'a TRUNCATE of two tables' => ['TRUNCATE TABLE scratch, Article RESTART IDENTITY', [null]];
+        // ... and not what only reads other tables, or a comma that is not the write's.
+        yield 'a TRUNCATE of one table with its options' => ['TRUNCATE TABLE a RESTART IDENTITY CASCADE', ['a']];
+        yield 'a DELETE USING other tables' => ['DELETE FROM a USING b, c WHERE a.id = b.id', ['a']];
+        yield 'a DELETE with an alias and USING' => ['DELETE FROM a AS x USING b WHERE x.id = b.id', ['a']];
+        yield 'an UPDATE FROM other tables' => ['UPDATE a SET n = 1 FROM b, c WHERE a.id = b.id', ['a']];
+        yield 'an UPDATE with an alias' => ['UPDATE a AS x SET n = 1', ['a']];
+        yield 'an UPDATE with index hints' => ['UPDATE a USE INDEX (i1, i2) SET n = 1', ['a']];
+        yield 'a comma in another expression after the write\'s' => ['WITH g AS (DELETE FROM a), h AS (SELECT 1, 2) SELECT 1', ['a']];
+        yield 'a comma in a quoted name' => ['UPDATE `a,b` SET n = 1', ['a,b']];
+        yield 'a comma after the expression the write is in' => ['WITH g AS (DELETE FROM a) SELECT 1 FROM x, y', ['a']];
+        yield 'a join after the expression the write is in' => ['WITH g AS (UPDATE a SET n = 1 RETURNING id) SELECT 1 FROM g JOIN y ON y.id = g.id', ['a']];
+        yield 'a second statement after a write' => ['DELETE FROM a; SELECT 1 FROM x, y', ['a']];
     }
 }

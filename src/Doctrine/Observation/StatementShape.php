@@ -423,6 +423,23 @@ final class StatementShape
             ++$i;
         }
 
+        // How deep in parentheses each word stands: a comma or a join is the write's only at its
+        // own depth, not inside a subquery or after the expression the write is in.
+        $depths = [];
+        $depth = 0;
+
+        foreach ($words as $at => $one) {
+            if ($one === ['symbol', ')']) {
+                --$depth;
+            }
+
+            $depths[$at] = $depth;
+
+            if ($one === ['symbol', '(']) {
+                ++$depth;
+            }
+        }
+
         $tables = [];
 
         foreach ($words as $at => [$kind, $word]) {
@@ -440,11 +457,13 @@ final class StatementShape
             }
 
             $next = $at + 1;
+            $from = false;
 
             // What may stand between the word and the table: a modifier, SQLite's OR and its one
             // word, INTO or FROM, ONLY, TABLE.
             while (($words[$next][0] ?? '') === 'word') {
                 $passed = strtoupper($words[$next][1]);
+                $from = $from || $passed === 'FROM';
 
                 if ($passed === 'OR' && \in_array(strtoupper($words[$next + 1][1] ?? ''), ['REPLACE', 'IGNORE', 'ABORT', 'FAIL', 'ROLLBACK'], true) && ($keyword === 'INSERT' || $keyword === 'UPDATE')) {
                     $next += 2;
@@ -459,10 +478,57 @@ final class StatementShape
                 ++$next;
             }
 
-            $tables[] = self::nameAt($words, $next);
+            // Writes of several tables -- MySQL's names before a DELETE's FROM, a comma after its
+            // first name, an UPDATE's join or comma before SET; PostgreSQL's TRUNCATE of a list --
+            // and MySQL's DELETE of an alias: which tables they write is not read here, so any.
+            $several = match ($keyword) {
+                'DELETE' => !$from || self::aCommaOrAJoin($words, $depths, $next, ['USING', 'WHERE', 'ORDER', 'LIMIT', 'RETURNING', 'PARTITION']),
+                'UPDATE' => self::aCommaOrAJoin($words, $depths, $next, ['SET']),
+                'TRUNCATE' => self::aCommaOrAJoin($words, $depths, $next, ['RESTART', 'CONTINUE', 'CASCADE', 'RESTRICT']),
+                default => false,
+            };
+
+            $tables[] = $several ? null : self::nameAt($words, $next);
         }
 
         return $tables;
+    }
+
+    /**
+     * Whether a comma or a join stands at the write's own depth between its first name, at $at,
+     * and the first of $until -- or the end of the expression or the statement the write is in.
+     *
+     * @param list<array{0: string, 1: string}> $words
+     * @param array<int, int>                   $depths
+     * @param list<string>                      $until
+     */
+    private static function aCommaOrAJoin(array $words, array $depths, int $at, array $until): bool
+    {
+        $depth = $depths[$at] ?? 0;
+
+        for ($i = $at; isset($words[$i]) && $depths[$i] >= $depth && $words[$i] !== ['symbol', ';']; ++$i) {
+            if ($depths[$i] !== $depth) {
+                continue;
+            }
+
+            if ($words[$i][0] === 'word') {
+                $word = strtoupper($words[$i][1]);
+
+                if (\in_array($word, $until, true)) {
+                    return false;
+                }
+
+                if ($word === 'JOIN' || $word === 'STRAIGHT_JOIN') {
+                    return true;
+                }
+            }
+
+            if ($words[$i] === ['symbol', ',']) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
