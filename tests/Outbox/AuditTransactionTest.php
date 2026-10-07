@@ -157,6 +157,79 @@ final class AuditTransactionTest extends TestCase
         self::assertSame(0, $this->queued());
     }
 
+    public function testAStreamInAnAuditedColumnRefusesTheCommitThoughTheRestOfItsRecordIsTrue(): void
+    {
+        // Outside a transaction the field is doubt and the rest of the record is written. In
+        // one whose purpose is a whole history, a field the history could not read makes it
+        // short: the commit is refused, every time it is met.
+        // Made outside one: on DBAL 3 every value of a BINARY column is a stream already.
+        $digest = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABinary('report.pdf', 'DIGEST');
+        $this->em->persist($digest);
+        $this->em->flush();
+        $queued = $this->queued();
+
+        foreach (['first', 'second'] as $attempt) {
+            $stream = fopen('php://memory', 'r+b');
+            self::assertIsResource($stream);
+            fwrite($stream, 'OTHER');
+            rewind($stream);
+
+            try {
+                $this->transaction->run(function () use ($digest, $stream, $attempt): void {
+                    $digest->digest = $stream;
+                    $digest->name = $attempt.'.pdf';
+                    $this->em->flush();
+                });
+                self::fail(sprintf('the %s operation was committed with a field its history could not read', $attempt));
+            } catch (OutboxException $e) {
+                self::assertStringContainsString('was not committed', $e->getMessage(), $attempt);
+            }
+
+            self::assertSame('report.pdf', $this->connection->fetchOne('SELECT name FROM AuditsABinary'), $attempt);
+            self::assertSame($queued, $this->queued(), $attempt);
+            $this->em->clear();
+            $digest = $this->em->find(\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABinary::class, $digest->id);
+            self::assertNotNull($digest);
+        }
+    }
+
+    public function testAChangeFromAStreamRefusesTheCommitToo(): void
+    {
+        // A, then a stream B committed outside a transaction, then C inside one. C's old side
+        // is B's bytes, which the history never read, so C's change is not in it either: the
+        // same cause as the stream's own, and the same refusal - every time it is met.
+        $digest = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABinary('report.pdf', 'AAAA');
+        $this->em->persist($digest);
+        $this->em->flush();
+
+        $stream = fopen('php://memory', 'r+b');
+        self::assertIsResource($stream);
+        fwrite($stream, 'BBBB');
+        rewind($stream);
+        $digest->digest = $stream;
+        $this->em->flush();
+        $queued = $this->queued();
+
+        foreach (['first', 'second'] as $attempt) {
+            try {
+                // A value of its own each time: after the rollback Doctrine still takes the
+                // last one for what the row holds, and would not write it again.
+                $this->transaction->run(function () use ($digest, $attempt): void {
+                    $digest->digest = 'C-'.$attempt;
+                    $this->em->flush();
+                });
+                self::fail(sprintf('the %s operation was committed with a change its history could not read', $attempt));
+            } catch (OutboxException $e) {
+                self::assertStringContainsString('was not committed', $e->getMessage(), $attempt);
+            }
+
+            self::assertSame($queued, $this->queued(), $attempt);
+        }
+
+        $stored = $this->connection->fetchOne('SELECT digest FROM AuditsABinary');
+        self::assertSame('BBBB', \is_resource($stored) ? stream_get_contents($stored) : $stored, 'C was rolled back');
+    }
+
     public function testARollbackTakesBothHalvesWithIt(): void
     {
         try {

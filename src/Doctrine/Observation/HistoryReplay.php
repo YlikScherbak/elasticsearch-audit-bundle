@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Doctrine\Observation;
 use Borsche\ElasticsearchAuditBundle\Doctrine\ChangeSetBuilder;
 use Borsche\ElasticsearchAuditBundle\Doctrine\CollectionRowsQuery;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Metadata\AuditMetadataFactory;
+use Borsche\ElasticsearchAuditBundle\Exception\DeclarationMistake;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
@@ -387,7 +388,8 @@ final class HistoryReplay
     }
 
     /**
-     * What the application's representers threw. Each is a doubt as well: the fact it was
+     * What the application's representers threw, and the fields written as a stream or
+     * changed from one ({@see doubtOfAStream()}). Each is a doubt as well: the fact it was
      * for carries no value, and whoever writes the history reports these through its failure
      * policy -- a replay only reads, and has no policy of its own to follow.
      *
@@ -631,10 +633,24 @@ final class HistoryReplay
      * A column written as a stream: the driver read the stream to its end, so what it held is
      * nothing this can read - and a column whose last value was one is not known either, so
      * the next change of it has no old side to give.
+     *
+     * A failure as well as a doubt, reported through the policy as a representer's is: unlike
+     * a statement the log could not follow, this is a declaration the application can change,
+     * and inside an AuditTransaction a history short of a field is no reason to commit.
      */
-    private function doubtOfAStream(string $class, string $field): void
+    private function doubtOfAStream(string $class, string $field, bool $written): void
     {
         $this->doubt(sprintf('not read: %s::$%s was written as a stream, which the driver read to its end - record its size, a checksum or a file\'s identifier instead', $class, $field), $class);
+
+        $failure = new DeclarationMistake(sprintf(
+            $written
+                ? '%s::$%s was written as a stream, which the driver read to its end, so the history cannot say what it holds: this change of it is not in the history, the rest of the record is. Audit what describes it instead - its size, a checksum or the identifier of the file.'
+                : '%s::$%s changed from a value written as a stream, which the history never read, so this change of it has no old side and is not in the history; the rest of the record is. Audit what describes it instead - its size, a checksum or the identifier of the file.',
+            $class,
+            $field,
+        ));
+        $this->failures[] = $failure;
+        $this->failuresAt[] = ['at' => $this->at, 'failure' => $failure];
     }
 
     private function doubt(string $text, ?string $class): void
@@ -975,10 +991,11 @@ final class HistoryReplay
         }
 
         // A field written as a stream is not a value the history read: doubt, named, and the
-        // rest of the row's change is kept - the row is true in every other column.
+        // rest of the row's change is kept - the row is true in every other column. Nor is
+        // the next change of it, whose old side is the stream's.
         foreach ($fields as $field => $sides) {
             if (\is_resource($sides['old']) || \is_resource($sides['new'])) {
-                $this->doubtOfAStream($class->name, $field);
+                $this->doubtOfAStream($class->name, $field, \is_resource($sides['new']));
                 unset($fields[$field]);
             }
         }

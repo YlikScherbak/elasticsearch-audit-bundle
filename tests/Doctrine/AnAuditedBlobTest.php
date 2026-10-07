@@ -119,6 +119,34 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         self::assertStringContainsString('for 1 statement(s)', $this->doubtsOf(AuditsABinary::class)[0]);
     }
 
+    public function testAValueWrittenAfterAStreamHasNoOldSideNotTheOneBeforeIt(): void
+    {
+        // A, then a stream B, then C: what the row held before C is B's bytes, which the
+        // history never read. Not "A became C", not "'' became C", and not SQL NULL either.
+        $this->attachListener(FailurePolicy::Log);
+        $this->unownedStatementsAreExpected = true;
+
+        $digest = new AuditsABinary('report.pdf', 'AAAA');
+        $this->em->persist($digest);
+        $this->em->flush();
+
+        $stream = fopen('php://memory', 'r+b');
+        self::assertIsResource($stream);
+        fwrite($stream, 'BBBB');
+        rewind($stream);
+        $digest->digest = $stream;
+        $this->em->flush();
+
+        $digest->digest = 'CCCC';
+        $this->em->flush();
+
+        // C's change has no old side the history knows, so it is doubt as B was: no record
+        // says digest moved - from A, from '', from NULL or from anything else.
+        $later = \array_slice($this->documents(), 1);
+        self::assertSame([], array_values(array_filter($later, static fn (array $d): bool => isset($d['changes']['digest']))), 'a change of digest was told with an old side nobody read');
+        self::assertCount(ObservingMiddleware::onDbal3() ? 3 : 2, $this->doubtsOf(AuditsABinary::class), 'B and C are doubt, each once');
+    }
+
     /**
      * The doubt the listener says of a class, said as it says every doubt: that the history may
      * be missing what a statement did.
