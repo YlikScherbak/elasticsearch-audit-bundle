@@ -123,6 +123,11 @@ final class AuditTransaction
         try {
             $result = $operation();
 
+            // One level opened, one level closed: the operation has to leave the
+            // transaction where it found it. Before the frame, so that records of an
+            // operation already found unbalanced are not queued only to be undone.
+            $this->assertTheOperationLeftOneLevel();
+
             // The records go into the queue here, inside the transaction. A failure is
             // the operation's failure now, not a line in a log after the fact.
             $this->frame->end();
@@ -134,6 +139,10 @@ final class AuditTransaction
             if ($this->frame->isOpen()) {
                 throw OutboxException::frameLeftOpen();
             }
+
+            // And again: closing the frame ran the application's listeners, and a level one
+            // of them opened or closed was not there when the operation returned.
+            $this->assertTheOperationLeftOneLevel();
 
             $this->commitIfTheHistoryIsWhole();
 
@@ -200,6 +209,30 @@ final class AuditTransaction
     }
 
     /**
+     * The one level run() opened, and nothing above or below it.
+     *
+     * Above it, one commit() would close only the innermost level - on DBAL 4 it releases
+     * a savepoint - and run() would return with the change and its history uncommitted,
+     * the transaction left open for whatever runs next on the connection. Below it, the
+     * operation ended run()'s transaction itself, and whether that was a commit or a
+     * rollback is not something the level says.
+     *
+     * @throws OutboxException
+     */
+    private function assertTheOperationLeftOneLevel(): void
+    {
+        $level = $this->connection->getTransactionNestingLevel();
+
+        if ($level > 1) {
+            throw OutboxException::transactionLeftOpen($level - 1);
+        }
+
+        if ($level < 1) {
+            throw OutboxException::transactionEndedInside();
+        }
+    }
+
+    /**
      * @throws OutboxException
      */
     private function commitIfTheHistoryIsWhole(): void
@@ -228,7 +261,12 @@ final class AuditTransaction
     {
         try {
             try {
-                if ($this->connection->isTransactionActive()) {
+                // Every level, down to none - run() refuses to start inside a transaction,
+                // so all of them are this one's: the operation may have left a level open,
+                // and one rollBack() would close that one and leave the outer transaction
+                // holding the rows of an operation that failed. Counted down from the level
+                // found, so a driver that does not lower it cannot keep this going.
+                for ($levels = $this->connection->getTransactionNestingLevel(); $levels > 0 && $this->connection->isTransactionActive(); --$levels) {
                     $this->connection->rollBack();
                 }
             } catch (\Throwable $rollback) {

@@ -27,6 +27,16 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   `name` is one: a DTO with a readonly property, or an enum anywhere but on a `Change`'s side,
   made the encoding throw. The same walk unset every null property of the application's own object.
   Neither happens to a value built by the bundle.
+- **`AuditTransaction::run()` reported a commit that had not happened.** An operation that opened a
+  transaction and did not close it made run()'s one `commit()` close the innermost level only — on
+  DBAL 4 it released a savepoint — and run() returned with the change and its history uncommitted
+  and the transaction open for whatever ran next on the connection. Its undo closed one level too,
+  leaving the outer transaction holding the rows of an operation that failed. The level is checked
+  when the operation returns and again after the frame is closed, since closing it runs the
+  application's listeners; a level left open is refused and every level rolled back. An operation
+  that ended run()'s transaction itself is refused as well, with a message that does not say
+  whether it was a commit or a rollback, because the level cannot tell. The code responsible dates
+  from 1.1.0.
 - **`redact.max_depth` and `redact.max_nodes` did nothing without `redact.fields`.** Nothing was
   registered then, and a limit written down bounded nothing. Set, they now apply either way.
 
