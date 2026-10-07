@@ -108,6 +108,14 @@ final class CheckCommandDeclarationsTest extends TestCase
         $config->setMiddlewares([new ObservingMiddleware($statements)]);
         $connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config);
         $audited = $managerOnAnotherConnection ? DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true], $config) : $connection;
+
+        // As the bundle wants the audited connection on DBAL 3: otherwise audit:check rightly
+        // fails on the connection, which is not what these tests are about.
+        foreach ([$connection, $audited] as $each) {
+            if (ObservingMiddleware::onDbal3()) {
+                $each->setNestTransactionsWithSavepoints(true);
+            }
+        }
         $em = new EntityManager($connection, $config);
 
         $transport = new SyncTransport(new InMemoryGateway());
