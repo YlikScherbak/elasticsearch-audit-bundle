@@ -637,6 +637,9 @@ final class ElasticsearchAuditExtension extends Extension
             new Reference(sprintf('doctrine.dbal.%s_connection', $connection), ContainerInterface::NULL_ON_INVALID_REFERENCE),
             $connection,
             $provenance,
+            // And every declaration on the audited connection, asked as a flush asks it.
+            new Reference('doctrine', ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            new Reference(self::SERVICE_DOCTRINE_LISTENER, ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]))->addTag('console.command'));
     }
 }

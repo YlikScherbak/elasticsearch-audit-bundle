@@ -13,6 +13,9 @@ use Borsche\ElasticsearchAuditBundle\Exception\AuditException;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
 use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Doctrine\DBAL\Connection;
+use Borsche\ElasticsearchAuditBundle\Doctrine\AuditSubscriber;
+use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineTransport;
 use Borsche\ElasticsearchAuditBundle\Model\AuditQuery;
 use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
@@ -70,6 +73,11 @@ final class CheckCommand extends Command
         private readonly ?Connection $doctrineConnection = null,
         private readonly string $doctrineConnectionName = 'default',
         private readonly string $nestedFlushProvenance = 'strict',
+        // The entity managers to ask, and the listener whose checks they are asked with: the
+        // declarations a flush would refuse, said before anything is flushed. Both null
+        // without DoctrineBundle, and then there is nothing to declare.
+        private readonly ?ManagerRegistry $doctrine = null,
+        private readonly ?AuditSubscriber $listener = null,
     ) {
         parent::__construct();
     }
@@ -141,6 +149,7 @@ final class CheckCommand extends Command
 
         $healthy = $this->checkTheOutbox($io) && $healthy;
         $healthy = $this->checkTheWatchedConnection($io) && $healthy;
+        $healthy = $this->checkTheDeclarations($io) && $healthy;
 
         return $healthy ? self::SUCCESS : self::FAILURE;
     }
@@ -181,6 +190,51 @@ final class CheckCommand extends Command
         $io->text(sprintf('Doctrine connection <info>%s</info>: watched, and a nested flush is told apart by its savepoint', $this->doctrineConnectionName));
 
         return true;
+    }
+
+    /**
+     * Every audit declaration of every entity on the audited connection, asked the questions a
+     * flush asks - and no other. A flush refuses a declaration it cannot honour through the
+     * failure policy, which by default is a line in a log; a deployment wants to meet it here,
+     * with a code that stops the release.
+     *
+     * A class declared through AuditableInterface answers per instance, and there is no
+     * instance here: it is named as not checked, rather than counted as sound.
+     */
+    private function checkTheDeclarations(SymfonyStyle $io): bool
+    {
+        if ($this->doctrine === null || $this->listener === null || $this->doctrineConnection === null) {
+            return true; // no entity is audited
+        }
+
+        $refused = [];
+        $perInstance = [];
+        $sound = 0;
+
+        foreach ($this->doctrine->getManagers() as $manager) {
+            if (!$manager instanceof EntityManagerInterface || $manager->getConnection() !== $this->doctrineConnection) {
+                continue; // another connection's entities are not audited by this listener
+            }
+
+            $found = $this->listener->checkTheDeclarations($manager);
+            $refused += $found['refused'];
+            $perInstance = [...$perInstance, ...$found['perInstance']];
+            $sound += \count($found['sound']);
+        }
+
+        foreach ($refused as $message) {
+            $io->text(sprintf('<error>Declaration</error>: %s', $message));
+        }
+
+        foreach (array_unique($perInstance) as $class) {
+            $io->text(sprintf('<comment>%s</comment>: declared per instance (AuditableInterface), so it can only be checked by the flush that meets one - not here.', $class));
+        }
+
+        if ($refused === []) {
+            $io->text(sprintf('Declarations: <info>%d</info> audited entity class(es), every one can be honoured', $sound));
+        }
+
+        return $refused === [];
     }
 
     /**

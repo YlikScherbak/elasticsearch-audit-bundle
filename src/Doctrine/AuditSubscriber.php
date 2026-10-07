@@ -606,11 +606,61 @@ final class AuditSubscriber
         $metadata = $this->metadataFactory->for($entity);
 
         if ($metadata !== null) {
-            $this->assertAuditedFieldsAreThere($em, $entity, $metadata);
-            $this->assertTrackedCollectionsAreServable($em, $entity, $metadata);
+            $this->assertAuditedFieldsAreThere($em, $entity::class, $metadata);
+            $this->assertTrackedCollectionsAreServable($em, $entity::class, $metadata);
         }
 
         return $metadata;
+    }
+
+    /**
+     * Every declaration of an entity this manager maps, checked as a flush checks it - the same
+     * checks, no other - and without an entity: what audit:check asks before anything is
+     * written.
+     *
+     * A class that declares itself through AuditableInterface answers per instance, so it can
+     * only be asked of one; it is listed apart rather than called sound, and checked at the
+     * flush that meets it as before.
+     *
+     * @internal for audit:check
+     *
+     * @return array{refused: array<class-string, string>, perInstance: list<class-string>, sound: list<class-string>}
+     */
+    public function checkTheDeclarations(EntityManagerInterface $em): array
+    {
+        $found = ['refused' => [], 'perInstance' => [], 'sound' => []];
+
+        foreach ($em->getMetadataFactory()->getAllMetadata() as $classMetadata) {
+            $class = $classMetadata->getName();
+
+            if ($classMetadata->isMappedSuperclass || $classMetadata->isEmbeddedClass) {
+                continue;
+            }
+
+            if (is_a($class, AuditableInterface::class, true)) {
+                $found['perInstance'][] = $class;
+
+                continue;
+            }
+
+            try {
+                $metadata = $this->metadataFactory->forClass($class, static function (): object {
+                    throw new \LogicException('an attribute declaration needs no instance');
+                });
+
+                if ($metadata === null) {
+                    continue; // nobody audits it
+                }
+
+                $this->assertAuditedFieldsAreThere($em, $class, $metadata);
+                $this->assertTrackedCollectionsAreServable($em, $class, $metadata);
+                $found['sound'][] = $class;
+            } catch (DeclarationMistake $e) {
+                $found['refused'][$class] = $e->getMessage();
+            }
+        }
+
+        return $found;
     }
     public function preRemove(PreRemoveEventArgs $args): void
     {
@@ -1515,8 +1565,8 @@ final class AuditSubscriber
                         continue;
                     }
 
-                    $this->assertAuditedFieldsAreThere($em, $owner, $metadata);
-                    $this->assertTrackedCollectionsAreServable($em, $owner, $metadata);
+                    $this->assertAuditedFieldsAreThere($em, $owner::class, $metadata);
+                    $this->assertTrackedCollectionsAreServable($em, $owner::class, $metadata);
                 }
             }
         } catch (\Throwable $e) {
@@ -1564,13 +1614,13 @@ final class AuditSubscriber
      *
      * Asked once per class and field list, like the tracking check above.
      */
-    private function assertAuditedFieldsAreThere(EntityManagerInterface $em, object $entity, AuditMetadata $metadata): void
+    private function assertAuditedFieldsAreThere(EntityManagerInterface $em, string $class, AuditMetadata $metadata): void
     {
         // Cached for a declaration that cannot change between instances, and repeated
         // for one that can: getAuditedFields() and getAlwaysRecordedFields() are the
         // instance's answer, and the checks below read the representers and the
         // always-recorded list, not only the field names.
-        $checked = $entity instanceof AuditableInterface ? null : $entity::class."\0fields";
+        $checked = is_a($class, AuditableInterface::class, true) ? null : $class."\0fields";
 
         if ($checked !== null && isset($this->checkedTracking[$checked])) {
             return;
@@ -1578,7 +1628,7 @@ final class AuditSubscriber
 
         $fields = array_keys($metadata->fields);
 
-        $classMetadata = $em->getClassMetadata($entity::class);
+        $classMetadata = $em->getClassMetadata($class);
 
         // An always-recorded field is read straight off the entity and stored as it is,
         // which only a scalar can be: withAlwaysRecorded() skips associations, so naming
@@ -1587,7 +1637,7 @@ final class AuditSubscriber
         // for that field.
         foreach ($metadata->alwaysRecorded as $always) {
             if ($classMetadata->hasAssociation($always)) {
-                throw new DeclarationMistake(sprintf('%s::$%s is listed as always recorded, but it is an association. Always-recorded fields are stored as they are beside the changes, which a related object cannot be; audit it as a field with a representer, and it is recorded when it changes.', $entity::class, $always));
+                throw new DeclarationMistake(sprintf('%s::$%s is listed as always recorded, but it is an association. Always-recorded fields are stored as they are beside the changes, which a related object cannot be; audit it as a field with a representer, and it is recorded when it changes.', $class, $always));
             }
         }
 
@@ -1609,12 +1659,12 @@ final class AuditSubscriber
                     $mappedBy = $classMetadata->getAssociationMappedByTargetField($field);
 
                     if ($mappedBy === '' || !$em->getClassMetadata($classMetadata->getAssociationTargetClass($field))->isSingleValuedAssociation($mappedBy)) {
-                        throw new DeclarationMistake(sprintf('%s::$%s is an audited collection whose elements reach back through a collection of their own (the inverse side of a ManyToMany), and nothing reports that to this side: neither what the collection holds nor what joins and leaves it would ever be recorded. Audit it on the owning side instead.', $entity::class, $field));
+                        throw new DeclarationMistake(sprintf('%s::$%s is an audited collection whose elements reach back through a collection of their own (the inverse side of a ManyToMany), and nothing reports that to this side: neither what the collection holds nor what joins and leaves it would ever be recorded. Audit it on the owning side instead.', $class, $field));
                     }
                 }
 
                 if ($metadata->fields[$field] === null) {
-                    throw new DeclarationMistake(sprintf('%s::$%s is an audited association and has no representer. Give the declaration a callable turning the related object into what the history should show (a name, a reference), or the record could only say that something changed and not what.', $entity::class, $field));
+                    throw new DeclarationMistake(sprintf('%s::$%s is an audited association and has no representer. Give the declaration a callable turning the related object into what the history should show (a name, a reference), or the record could only say that something changed and not what.', $class, $field));
                 }
 
                 continue;
@@ -1624,7 +1674,7 @@ final class AuditSubscriber
             // embeddable's own name, which is exactly the name Doctrine never reports a
             // change under.
             if (\in_array($field, $classMetadata->getFieldNames(), true)) {
-                self::assertTheColumnSaysWhatTheRowHolds($entity, $classMetadata, $field);
+                self::assertTheColumnSaysWhatTheRowHolds($class, $classMetadata, $field);
 
                 continue;
             }
@@ -1637,8 +1687,8 @@ final class AuditSubscriber
             ));
 
             throw new DeclarationMistake($parts === []
-                ? sprintf('%s::$%s is audited, but Doctrine maps it as neither a field nor an association, so nothing about it would ever be recorded.', $entity::class, $field)
-                : sprintf('%s::$%s is audited, but it is an embeddable: Doctrine reports its columns as %s and never as "%s", so nothing about it would ever be recorded. Name those columns instead — which #[AuditField] cannot do, since there is no property called "%s" to put it on: declare them through AuditableInterface::getAuditedFields(), which takes the names as strings.', $entity::class, $field, implode(', ', array_map(static fn (string $p): string => '"'.$p.'"', $parts)), $field, $parts[0]));
+                ? sprintf('%s::$%s is audited, but Doctrine maps it as neither a field nor an association, so nothing about it would ever be recorded.', $class, $field)
+                : sprintf('%s::$%s is audited, but it is an embeddable: Doctrine reports its columns as %s and never as "%s", so nothing about it would ever be recorded. Name those columns instead — which #[AuditField] cannot do, since there is no property called "%s" to put it on: declare them through AuditableInterface::getAuditedFields(), which takes the names as strings.', $class, $field, implode(', ', array_map(static fn (string $p): string => '"'.$p.'"', $parts)), $field, $parts[0]));
         }
 
         if ($checked !== null) {
@@ -1667,10 +1717,10 @@ final class AuditSubscriber
      *
      * @param ClassMetadata<object> $classMetadata
      */
-    private static function assertTheColumnSaysWhatTheRowHolds(object $entity, ClassMetadata $classMetadata, string $field): void
+    private static function assertTheColumnSaysWhatTheRowHolds(string $class, ClassMetadata $classMetadata, string $field): void
     {
         if ($classMetadata->isVersioned && $classMetadata->versionField === $field) {
-            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is the version column: Doctrine writes it itself to hold the optimistic lock, so a history line about it describes the lock rather than anything a person did.', $entity::class, $field));
+            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is the version column: Doctrine writes it itself to hold the optimistic lock, so a history line about it describes the lock rather than anything a person did.', $class, $field));
         }
 
         $mapping = $classMetadata->fieldMappings[$field] ?? null;
@@ -1688,7 +1738,7 @@ final class AuditSubscriber
         $type = (string) ($mapping['type'] ?? '');
 
         if ($type !== '' && Type::hasType($type) && (Type::getType($type) instanceof BlobType || Type::getType($type) instanceof BinaryType)) {
-            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is a binary column (%s): its value is bytes, read back as a stream, which a history cannot hold and json_encode cannot write - the record was lost on encoding. Audit what describes it instead - its size, a checksum or the identifier of the file - as a field of its own on the entity, or by recording it with AuditWriter::record(); there is no representer for a scalar column.', $entity::class, $field, $type));
+            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is a binary column (%s): its value is bytes, read back as a stream, which a history cannot hold and json_encode cannot write - the record was lost on encoding. Audit what describes it instead - its size, a checksum or the identifier of the file - as a field of its own on the entity, or by recording it with AuditWriter::record(); there is no representer for a scalar column.', $class, $field, $type));
         }
 
         $reason = match (true) {
@@ -1699,7 +1749,7 @@ final class AuditSubscriber
         };
 
         if ($reason !== null) {
-            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it %s. What Doctrine reports as its change is not what the row took, and a history line that disagrees with the database is worse than one that is missing.', $entity::class, $field, $reason));
+            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it %s. What Doctrine reports as its change is not what the row took, and a history line that disagrees with the database is worse than one that is missing.', $class, $field, $reason));
         }
     }
 
@@ -1715,7 +1765,7 @@ final class AuditSubscriber
      *
      * Asked once per class — a mapping does not change while the process runs.
      */
-    private function assertTrackedCollectionsAreServable(EntityManagerInterface $em, object $entity, AuditMetadata $metadata): void
+    private function assertTrackedCollectionsAreServable(EntityManagerInterface $em, string $class, AuditMetadata $metadata): void
     {
         if ($metadata->trackedCollections() === []) {
             return;
@@ -1728,13 +1778,13 @@ final class AuditSubscriber
         // As above: an instance that declares its own tracked collections declares its
         // own tracked element fields with them, and a typo in the second is what this
         // check is for.
-        $checked = $entity instanceof TracksCollectionElementsInterface ? null : $entity::class."\0collections";
+        $checked = is_a($class, TracksCollectionElementsInterface::class, true) ? null : $class."\0collections";
 
         if ($checked !== null && isset($this->checkedTracking[$checked])) {
             return;
         }
 
-        $classMetadata = $em->getClassMetadata($entity::class);
+        $classMetadata = $em->getClassMetadata($class);
 
         foreach ($metadata->trackedCollections() as $field) {
             $reason = match (true) {
@@ -1752,7 +1802,7 @@ final class AuditSubscriber
             };
 
             if ($reason !== null) {
-                throw new DeclarationMistake(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $entity::class, $field, $reason));
+                throw new DeclarationMistake(sprintf('%s::$%s tracks its elements, but it %s. Element tracking watches the inverse side of a OneToMany, whose elements refer back to their owner.', $class, $field, $reason));
             }
 
             // And the field names, when the declaration names them. Only the fields on the
@@ -1775,7 +1825,7 @@ final class AuditSubscriber
                     continue;
                 }
 
-                throw new DeclarationMistake(sprintf('%s::$%s tracks the element field "%s", which %s. Element tracking records what changed inside an element, and only its own scalar columns are reported that way.', $entity::class, $field, $name, $element->hasAssociation($name) ? 'is an association of '.$element->getName() : 'is not a field of '.$element->getName()));
+                throw new DeclarationMistake(sprintf('%s::$%s tracks the element field "%s", which %s. Element tracking records what changed inside an element, and only its own scalar columns are reported that way.', $class, $field, $name, $element->hasAssociation($name) ? 'is an association of '.$element->getName() : 'is not a field of '.$element->getName()));
             }
         }
 

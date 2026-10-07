@@ -9,6 +9,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Added
+- **`audit:check` checks every audit declaration on the audited connection.** The questions a
+  flush asks — an always-recorded association, an association without a representer, a field
+  Doctrine does not map, a version, generated or binary column, a collection whose elements
+  cannot be tracked — asked of every class at once, without an entity, before anything is
+  flushed; one it cannot honour fails the check. A flush says the same through the failure
+  policy, by default a line in a log the first time such an entity is written. A class declared
+  through `AuditableInterface` answers per instance, and is named as checked only at flush.
+
 ### Fixed
 - **An object in a record reached the queue whole, private properties included.** Redaction read
   an object — what `jsonSerialize()` answered, or its public properties — and handed the object
