@@ -9,6 +9,23 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 
 ---
 
+## To 1.3.1
+
+**Nothing is required, unless code of yours reads a record's values as objects.** A record now
+leaves the writer as plain values: scalars, arrays and `stdClass` objects the bundle built.
+
+- A listener on `RecordCreatedEvent` or `RecordFailedEvent`, or a test reading
+  `CollectedRecord::$document`, that does `$record->changes['profile'] instanceof ProfileDto` finds
+  a `stdClass` with the DTO's public properties — or, for a `JsonSerializable`, what it answered.
+  Read the properties, not the class.
+- A `DateTimeInterface` or an enum on a `Change`'s side, or anywhere in `changes`, is now the
+  string (or the enum's value) it was always stored as. Compare against that form —
+  `'2026-10-07 07:00:00'`, UTC — or parse it back.
+- Code that relied on a record carrying the application's own object to a worker — reading a
+  property `json_encode` does not show — has to put that value in the record explicitly.
+
+---
+
 ## To 1.3.0
 
 **On DBAL 4, nothing is required.** On **DBAL 3**, an application whose audited connection does

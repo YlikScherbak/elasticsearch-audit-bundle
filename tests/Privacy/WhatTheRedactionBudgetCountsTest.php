@@ -82,11 +82,14 @@ final class WhatTheRedactionBudgetCountsTest extends TestCase
     {
         // Each would read as an object with properties, and a rule naming one of them --
         // "timezone", "name" -- would turn the value into a masked array.
+        // It leaves as the plain value a Change's side has always been stored as - the
+        // date or the enum itself does not travel - and nothing in it is masked.
         $record = new AuditRecord('o', 1, 'update', changes: ['when' => new Change(null, $value)]);
 
         $redacted = (new ChangeRedactor(['timezone', 'name', 'value', 'date']))->redact($record);
 
-        self::assertSame($record, $redacted, 'nothing in it to redact');
+        \assert($value instanceof \DateTimeInterface || $value instanceof \UnitEnum);
+        self::assertSame(['old' => null, 'new' => Change::plain($value)], $redacted->changes['when']->toArray(), 'nothing in it to redact');
     }
 }
 

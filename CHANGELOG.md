@@ -9,6 +9,51 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+### Fixed
+- **An object in a record reached the queue whole, private properties included.** Redaction read
+  an object — what `jsonSerialize()` answered, or its public properties — and handed the object
+  itself on. Messenger's `PhpSerializer` then stored every property of it in the queue, the
+  private ones too, and with the outbox that queue is a table of the application's own database.
+  The index looked clean, because `json_encode` shows public properties only. With no
+  `redact.fields` configured nothing read the record at all, so the same happened without any
+  redactor in sight. The code responsible dates from 1.0.0 (objects in redaction) and from the
+  first Messenger transport (an object in `changes` travelling as itself).
+- **What redaction checked was not what was written.** The client asked a `JsonSerializable` for
+  its JSON a second time, after redaction had read it; an object that answered differently wrote
+  what nobody had checked. Every object is now asked once per write, and what it answered is what
+  travels.
+- **A readonly property or an enum in a record lost the record.** elastic/transport walks a body
+  by reference to drop its nulls, PHP refuses a reference to a readonly property, and an enum's
+  `name` is one: a DTO with a readonly property, or an enum anywhere but on a `Change`'s side,
+  made the encoding throw. The same walk unset every null property of the application's own object.
+  Neither happens to a value built by the bundle.
+- **`redact.max_depth` and `redact.max_nodes` did nothing without `redact.fields`.** Nothing was
+  registered then, and a limit written down bounded nothing. Set, they now apply either way.
+
+### Changed
+- **A record leaves the writer as plain values.** Scalars, arrays and `stdClass` objects built by
+  the bundle — never an object the application made. `RecordCreatedEvent`, `CollectedRecord`, the
+  failure path and every transport see these: a listener testing `$record->changes['x'] instanceof
+  MyDto`, or a `DateTimeInterface` on a `Change`'s side, now finds a `stdClass`, an array, a
+  string. See UPGRADE.md.
+- **Dates and enums take one form per place.** Anywhere in `changes` — a `Change`'s side, a value
+  filed under a field, a pair built by hand, inside an array or an object — the form a `Change`'s
+  sides have always had: UTC `Y-m-d H:i:s`, with the fraction when there is one; a backed enum's
+  value, a pure enum's name. A date inside an object in `changes` was written as
+  `{"date": …, "timezone_type": …, "timezone": …}` before and is a string now; `changes` is not
+  indexed, so no mapping depends on it. In an **attribute**, which a mapping indexes, a date is
+  exactly what `json_encode` made of it before, built anew without what was private to it. A pure
+  enum, which lost the record on encoding, is written by its name in both.
+- **Without a rule, a record is bounded only as JSON bounds it** — 512 levels of the whole
+  document, a value that leads back into itself — **and by one count of the bundle's own: at most
+  1000 `jsonSerialize()` calls along one chain** of wrappers answering with wrappers. That count is
+  the one place a value `json_encode` would have written is refused: a chain of 100 000 wrappers
+  encoded, and an endless one never finished. With a rule the limits are what they were, 16 levels
+  and 10 000 places unless configured. A value too deep for JSON, which was lost on encoding, is
+  refused earlier and by name; so is a stream or another resource.
+- **`redact.max_depth` and `redact.max_nodes` default to `~`:** 16 and 10 000 with a rule, JSON's
+  own bounds without one.
+
 ## [1.3.0] - 2026-10-06
 
 ### Added

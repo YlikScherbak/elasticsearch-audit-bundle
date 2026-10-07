@@ -133,8 +133,8 @@ borsche_elasticsearch_audit:
     fallback: system                      # recorded when nobody is authenticated
   redact:
     fields: [password, token]             # values replaced before anything is written
-    max_depth: 16                         # how deep a rule is followed into a value (since 1.0)
-    max_nodes: 10000                      # how many places it looks in one record (since 1.0)
+    max_depth: ~                          # how deep a rule is followed into a value: 16 with a rule, JSON's own without (since 1.0; ~ since 1.3.1)
+    max_nodes: ~                          # how many places it looks in one record: 10000 with a rule, none without (since 1.0; ~ since 1.3.1)
   reader:                                 # both keys since 0.8
     max_limit: 1000                       # largest page; raise for screens showing thousands of rows
     max_result_window: 10000              # how deep page/limit may reach; match index.max_result_window
@@ -1404,8 +1404,18 @@ the synchronous bus, so exactly the requests that produce the most audit records
 that still wait for Elasticsearch.
 
 The request now only pays for the dispatch; a worker writes the document. The message carries
-plain arrays, so it serialises with any Messenger serializer and survives a deploy that changes
-the model. Failures in the worker propagate on purpose — Messenger's retry strategy is the right
+**plain PHP values only** — scalars, arrays and `stdClass` objects the bundle built (**since
+1.3.1**; before, an object the application recorded travelled as itself, private properties and
+all). So no class of the application's is named in the queue, and a deploy that renames one cannot
+leave a message nobody can read. Three things are separate here:
+
+- **what the message holds** — the plain values above, whatever the serializer;
+- **which serializer** — Messenger's `PhpSerializer` (the default) keeps them exactly;
+- **whether `{}` stays `{}` after the queue** — guaranteed with `PhpSerializer`. Symfony's
+  Serializer with JSON may turn an empty `stdClass` into an array on the way back, which writes
+  `[]` where `{}` was; that is the serializer's reading of JSON, not the record.
+
+Failures in the worker propagate on purpose — Messenger's retry strategy is the right
 place to deal with a flaky cluster — and a retry is safe: the document is written under the
 record's id, so a redelivery after a timeout overwrites the same document instead of adding a
 second one.
@@ -1700,6 +1710,23 @@ half-checked** (`RedactionLimitExceeded`): `redact.max_depth` levels (16) and `r
 places to look in one record (10 000), both configurable **since 1.0**. Depth alone did not bound
 the work — a flat array of a million elements is one level deep, and the walk happens on the
 request, before anything is written.
+
+**What is read is what is written (since 1.3.1).** An object in a record — a DTO, a
+`JsonSerializable`, a `stdClass` — is read once, the way `json_encode` reads it (its public
+properties, or what `jsonSerialize()` answers), and leaves as a `stdClass` built from that; the
+object itself goes no further. Before, the redactor read it and handed it on, and what came next
+asked again: the client called `jsonSerialize()` a second time and wrote what it said then, and
+Messenger serialised the object whole, private properties included. This happens **with or without
+a rule** — with none configured nothing is masked, but every record is still made plain — and
+bounded accordingly: without a rule only by what `json_encode` itself refuses (512 levels of the
+whole document, a value that leads back into itself) and by one count of its own, **at most 1000
+`jsonSerialize()` calls along one chain** of wrappers answering with wrappers, which `json_encode`
+does not count and an endless one never finished. Limits set by hand apply with or without a rule.
+
+A date or an enum becomes a value where it stands: anywhere in `changes` — which is not indexed —
+the form a `Change`'s sides have always had (UTC, `Y-m-d H:i:s` with the fraction when there is
+one; an enum's value, or a pure enum's name); in an **attribute**, which a mapping indexes, exactly
+what `json_encode` made of it before. A stream or other resource is refused by name.
 
 For **tracked collection elements** the rule names a field, not a path: `password` also covers
 `lines.42.password`, and a rule naming the collection covers everything reached through it —

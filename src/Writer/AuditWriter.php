@@ -60,7 +60,7 @@ final class AuditWriter
         ?LoggerInterface $logger = null,
         private readonly ?EventDispatcherInterface $events = null,
         private readonly ?FrameBuffer $frame = null,
-        private readonly ?ChangeRedactor $redactor = null,
+        ?ChangeRedactor $redactor = null,
         private readonly int $batchSize = 500,
         ?FailureDetails $failureDetails = null,
         private readonly ?OutboxContext $outbox = null,
@@ -80,6 +80,11 @@ final class AuditWriter
         // cache:warmup. See enrichers() for how the list is read instead.
         $this->enrichers = $enrichers;
         $this->logger = $logger ?? new NullLogger();
+        // Never none. With no rule configured there is still something to do on the way
+        // out: the record is turned into plain values, so that what a transport is
+        // handed is what was read - not an object of the application's that a queue
+        // serialises whole, private properties and all.
+        $this->redactor = $redactor ?? ChangeRedactor::materialisingOnly();
         // "Cause" unless somebody asks for more, whether or not anything is redacted.
         // The two used to be tied together — no redactor meant a raw cause — and they
         // are not the same question. What redaction covers is the record; what this
@@ -95,6 +100,7 @@ final class AuditWriter
 
     /** @var iterable<DeclaresAuditFieldsInterface> */
     private readonly iterable $enrichers;
+    private readonly ChangeRedactor $redactor;
     /** @var list<DeclaresAuditFieldsInterface>|null */
     private ?array $materialized = null;
     private readonly LoggerInterface $logger;
@@ -394,6 +400,14 @@ final class AuditWriter
      */
     private function sendBatch(BatchTransportInterface $transport, array $records): void
     {
+        $this->redactor->once(fn () => $this->sendBatchOnce($transport, $records));
+    }
+
+    /**
+     * @param list<AuditRecord> $records
+     */
+    private function sendBatchOnce(BatchTransportInterface $transport, array $records): void
+    {
         $items = [];
         $sent = [];
         $unpreparable = [];
@@ -513,6 +527,13 @@ final class AuditWriter
      */
     private function deliver(AuditRecord $record, bool $immediately): void
     {
+        // One reading of every object for the whole of it: both passes of redaction, a
+        // listener's replacement, and the failure path that redacts the record again.
+        $this->redactor->once(fn () => $this->deliverOnce($record, $immediately));
+    }
+
+    private function deliverOnce(AuditRecord $record, bool $immediately): void
+    {
         $prepared = null;
 
         try {
@@ -596,13 +617,13 @@ final class AuditWriter
         // Redaction happens here, on the way out, and not in complete(): a frame has to
         // see the real values to know that a field moved, and the event below is the
         // first place a record is seen outside the writer.
-        $record = $this->redactor?->redact($record) ?? $record;
+        $record = $this->redactor->redact($record);
 
         if ($this->events === null) {
             return $record;
         }
 
-        $event = new RecordCreatedEvent($record, $this->redactor === null ? null : $this->redactor->redact(...));
+        $event = new RecordCreatedEvent($record, $this->redactor->redact(...));
         $this->events->dispatch($event);
 
         if ($event->isVetoed()) {
@@ -628,7 +649,7 @@ final class AuditWriter
         // record wholesale, and one that reaches for the entity again to add something
         // would hand back the value the first pass removed. The redactor is the last word
         // before the transport, or it is not a policy.
-        return $this->redactor?->redact($event->getRecord()) ?? $event->getRecord();
+        return $this->redactor->redact($event->getRecord());
     }
 
 
@@ -948,7 +969,7 @@ final class AuditWriter
         // which is why the exception the outside world sees is the sanitised one and
         // the original stays behind getPrevious() for whoever catches it.
         try {
-            $record = $record === null ? null : ($this->redactor?->redact($record) ?? $record);
+            $record = $record === null ? null : $this->redactor->once(fn (): AuditRecord => $this->redactor->redact($record));
         } catch (\Throwable $redaction) {
             // The redactor itself failed. Whatever the record holds is unredacted by
             // definition now, so it does not leave here at all: the failure is reported

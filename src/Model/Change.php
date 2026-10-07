@@ -59,20 +59,38 @@ final class Change
      */
     private static function normalize(mixed $value): mixed
     {
-        if ($value instanceof \DateTimeInterface) {
-            $utc = \DateTimeImmutable::createFromInterface($value)->setTimezone(new \DateTimeZone('UTC'));
-
-            return $utc->format($utc->format('u') === '000000' ? 'Y-m-d H:i:s' : 'Y-m-d H:i:s.u');
-        }
-
-        if ($value instanceof \UnitEnum) {
-            return $value instanceof \BackedEnum ? $value->value : $value->name;
+        if ($value instanceof \DateTimeInterface || $value instanceof \UnitEnum) {
+            return self::plain($value);
         }
 
         if (\is_array($value)) {
             return array_map(self::normalize(...), $value);
         }
 
+        // Into a stdClass as into an array, and back out as one: a date one level inside
+        // an object is the same date as one inside an array, and `{}` stays `{}`.
+        if ($value instanceof \stdClass) {
+            return (object) array_map(self::normalize(...), get_object_vars($value));
+        }
+
         return $value;
+    }
+
+    /**
+     * A date or an enum as a Change's side holds it: the one place that says so, for the
+     * sides themselves and for redaction, which makes every value in `changes` plain
+     * before it travels.
+     *
+     * @internal
+     */
+    public static function plain(\DateTimeInterface|\UnitEnum $value): string|int
+    {
+        if ($value instanceof \UnitEnum) {
+            return $value instanceof \BackedEnum ? $value->value : $value->name;
+        }
+
+        $utc = \DateTimeImmutable::createFromInterface($value)->setTimezone(new \DateTimeZone('UTC'));
+
+        return $utc->format($utc->format('u') === '000000' ? 'Y-m-d H:i:s' : 'Y-m-d H:i:s.u');
     }
 }

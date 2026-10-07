@@ -139,20 +139,23 @@ final class WhatARedactionRuleReachesTest extends TestCase
         self::assertStringNotContainsString('secret', (string) json_encode($record->changes));
     }
 
-    public function testNothingIsRebuiltWhenNothingWasRemoved(): void
+    public function testNothingIsRemovedWhenNothingIsNamed(): void
     {
-        // The other half: a structure with nothing to redact comes back as the same
-        // value, not as a copy — cheaper, and it keeps whatever the application put
-        // there exactly as it put it.
+        // The other half: a structure with nothing to redact keeps every value it had.
+        // An array of plain values comes back as the record it was in; an object does
+        // not, and must not - the application's own object is what a queue serialised
+        // whole, private properties and all, so it leaves as a stdClass built here with
+        // the same values.
         $redactor = new ChangeRedactor(['password']);
+        $plain = new AuditRecord('user', 1, AuditEvent::UPDATE, changes: ['payload' => ['a' => ['b' => 'plain'], 'c' => 'also plain']]);
 
-        // Asserted on an object, because two equal arrays are assertSame to PHPUnit and
-        // the question here is whether it is the *same* value or a rebuilt copy.
+        self::assertSame($plain, $redactor->redact($plain), 'plain values with nothing to remove were rebuilt anyway');
+
         $payload = (object) ['a' => ['b' => 'plain'], 'c' => 'also plain'];
-
         $record = $redactor->redact(new AuditRecord('user', 1, AuditEvent::UPDATE, changes: ['payload' => $payload]));
 
-        self::assertSame($payload, $record->changes['payload'], 'a structure with nothing to remove was rebuilt anyway');
+        self::assertEquals($payload, $record->changes['payload'], 'a value was lost on the way');
+        self::assertNotSame($payload, $record->changes['payload'], 'the application\'s own object travelled on');
     }
 
     public function testARuleForAnotherObjectTypeDoesNotHideTheRulesAfterIt(): void

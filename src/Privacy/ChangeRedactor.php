@@ -64,23 +64,84 @@ final class ChangeRedactor
     public const DEFAULT_MAX_NODES = 10_000;
 
     /**
-     * What is left of this record's node budget. Reset by redact(), spent by scrub().
+     * How many times in a row jsonSerialize() is followed to the object it answers with.
+     *
+     * Not a property of JSON: json_encode counts a hop as no level at all, and a chain
+     * of a hundred thousand wrappers encodes. An endless one — each answering with a new
+     * wrapper, so no object is ever seen twice — hung the process on encoding, and
+     * nothing but a count stops it. Real wrappers are one to three deep; a thousand is
+     * the one bound this places on a value that json_encode would have written.
      */
-    private int $budget = self::DEFAULT_MAX_NODES;
+    public const MAX_HOPS = 1000;
 
     /**
+     * How deeply json_encode nests before it refuses, and where each kind of value
+     * stands in the document: the document is one level and `changes` a second, so a
+     * value filed under a field opens the third, a side of a Change the fourth (its pair
+     * is the third), and an attribute the second.
+     */
+    private const JSON_DEPTH = 512;
+    private const IN_CHANGES = 3;
+    private const IN_A_CHANGE = 4;
+    private const IN_ATTRIBUTES = 2;
+
+    /**
+     * The flags elastic/transport encodes a body with, so a value read here as JSON is
+     * the value the client would have written.
+     */
+    private const JSON_FLAGS = \JSON_PRESERVE_ZERO_FRACTION | \JSON_INVALID_UTF8_SUBSTITUTE | \JSON_THROW_ON_ERROR;
+
+    /** null: no bound but JSON's own. */
+    private readonly ?int $maxDepth;
+    private readonly ?int $maxNodes;
+
+    /**
+     * What is left of this record's node budget. Reset by redact(), spent by scrub().
+     */
+    private ?int $budget = null;
+
+    /**
+     * Objects on the way down from the value being walked: a circle is an object met
+     * again inside itself, not one met twice side by side.
+     *
+     * @var \SplObjectStorage<object, null>
+     */
+    private \SplObjectStorage $path;
+
+    /**
+     * What each object answered while once() runs, so that one write asks it once —
+     * across both passes, a listener's replacement and the failure path. Outside once()
+     * nothing is kept: an object answering differently in the next write is the next
+     * write's value.
+     *
+     * @var \SplObjectStorage<object, mixed>|null
+     */
+    private ?\SplObjectStorage $answered = null;
+
+    /**
+     * Rules that name nothing still leave the redactor something to do: every record is
+     * turned into plain values on its way out, so with no rule configured the limits
+     * default to JSON's own rather than to the ones a rule is followed with.
+     *
      * @param list<string> $fields      field names, optionally scoped as "objectType.field"
      * @param string       $placeholder what the value is replaced with
+     * @param int|null     $maxDepth    null: 16 with a rule, JSON's own without one
+     * @param int|null     $maxNodes    null: 10 000 with a rule, none without one
      */
     public function __construct(
         private readonly array $fields,
         private readonly string $placeholder = '***',
-        private readonly int $maxDepth = self::DEFAULT_MAX_DEPTH,
-        private readonly int $maxNodes = self::DEFAULT_MAX_NODES,
+        ?int $maxDepth = null,
+        ?int $maxNodes = null,
     ) {
-        if ($maxDepth < 1 || $maxNodes < 1) {
-            throw new \InvalidArgumentException(sprintf('Redaction needs room to look: max_depth and max_nodes are at least 1, %d and %d given.', $maxDepth, $maxNodes));
+        if (($maxDepth !== null && $maxDepth < 1) || ($maxNodes !== null && $maxNodes < 1)) {
+            throw new \InvalidArgumentException(sprintf('Redaction needs room to look: max_depth and max_nodes are at least 1, %s and %s given.', var_export($maxDepth, true), var_export($maxNodes, true)));
         }
+
+        // Each on its own: an explicit depth does not switch the default node budget off.
+        $this->maxDepth = $maxDepth ?? ($fields === [] ? null : self::DEFAULT_MAX_DEPTH);
+        $this->maxNodes = $maxNodes ?? ($fields === [] ? null : self::DEFAULT_MAX_NODES);
+        $this->path = new \SplObjectStorage();
 
         foreach ($fields as $rule) {
             $field = str_contains($rule, '.') ? substr($rule, (int) strpos($rule, '.') + 1) : $rule;
@@ -118,8 +179,44 @@ final class ChangeRedactor
     }
 
     /**
-     * The record with the named fields' values replaced; the same instance when there
-     * is nothing to replace.
+     * No rule, and the plain values every record is turned into on its way out — what
+     * the writer uses when nothing is configured to be redacted.
+     */
+    public static function materialisingOnly(): self
+    {
+        return new self([]);
+    }
+
+    /**
+     * Runs an operation in which every object is asked for its JSON once.
+     *
+     * @internal the writer's, around one write
+     *
+     * @template T
+     *
+     * @param callable(): T $operation
+     *
+     * @return T
+     */
+    public function once(callable $operation): mixed
+    {
+        if ($this->answered !== null) {
+            return $operation();
+        }
+
+        $this->answered = new \SplObjectStorage();
+
+        try {
+            return $operation();
+        } finally {
+            $this->answered = null;
+        }
+    }
+
+    /**
+     * The record with the named fields' values replaced and every value in it made plain:
+     * scalars, arrays and stdClass objects built here, never an object the application
+     * made. The same instance when there is nothing to replace or to build.
      */
     public function redact(AuditRecord $record): AuditRecord
     {
@@ -127,6 +224,7 @@ final class ChangeRedactor
         // much work a single write can ask for, and a record with a thousand small
         // structures costs the same as one with a single large one.
         $this->budget = $this->maxNodes;
+        $this->path = new \SplObjectStorage();
 
         // The record's own keys are places to look like any other. Counting only what
         // was nested left the widest records free: fifty thousand change fields, or a
@@ -178,7 +276,7 @@ final class ChangeRedactor
         $inside = [];
 
         foreach ($record->attributes as $name => $value) {
-            $scrubbed = $this->scrub($record->objectType, $value);
+            $scrubbed = $this->scrub($record->objectType, $value, self::IN_ATTRIBUTES);
 
             if ($scrubbed !== $value) {
                 $inside[$name] = $scrubbed;
@@ -197,8 +295,8 @@ final class ChangeRedactor
         if ($change instanceof Change) {
             $this->spend(2); // the two sides, like the two keys of the pair below
 
-            $old = $this->scrub($objectType, $change->old);
-            $new = $this->scrub($objectType, $change->new);
+            $old = $this->scrub($objectType, $change->old, self::IN_A_CHANGE);
+            $new = $this->scrub($objectType, $change->new, self::IN_A_CHANGE);
 
             return $old === $change->old && $new === $change->new ? $change : new Change($old, $new);
         }
@@ -207,7 +305,7 @@ final class ChangeRedactor
             return $this->scrubPair($objectType, $change);
         }
 
-        return $this->scrub($objectType, $change);
+        return $this->scrub($objectType, $change, self::IN_CHANGES);
     }
 
     /**
@@ -236,38 +334,96 @@ final class ChangeRedactor
 
         foreach ($pair as $key => $value) {
             if ($key === 'old' || $key === 'new') {
-                $out[$key] = $this->scrub($objectType, $value);
+                $out[$key] = $this->scrub($objectType, $value, self::IN_A_CHANGE);
 
                 continue;
             }
 
             $out[$key] = \is_string($key) && $this->redacts($objectType, $key)
                 ? $this->mask($value)
-                : $this->scrub($objectType, $value);
+                : $this->scrub($objectType, $value, self::IN_A_CHANGE);
         }
 
         return $out;
     }
 
     /**
-     * Walks a value the application built and masks every key a rule names, however
-     * deep it sits.
+     * Walks a value the application built, masks every key a rule names however deep it
+     * sits, and hands back plain values only.
+     *
+     * Plain, because what was read has to be what travels. This used to read an object -
+     * what jsonSerialize() answered, or its public properties - and hand the object on,
+     * and whatever came next asked it again: the client encoding the body called
+     * jsonSerialize() a second time and wrote what it said then, and Messenger's
+     * PhpSerializer did not ask at all, putting every property in the queue, the private
+     * ones included. Now an object leaves as a stdClass built here from what it was read
+     * as, and nothing the application made goes past this.
+     *
+     * Where the value stands - $base, its level in the document - also decides what a
+     * date becomes: inside `changes`, which is stored unindexed, the form a Change's sides
+     * have always had; in an attribute, indexed by somebody's mapping, what json_encode
+     * made of it before. An enum is its value, or a pure one its name, wherever it is.
      *
      * The depth is bounded because this walks data the bundle did not make: an audit
      * record can hold whatever an enricher or a caller put in it, and a privacy pass is
-     * not the place to discover how deep that goes. Past the bound the value is left as
-     * it is — the alternative is dropping data that was never named — and sixteen levels
-     * of nesting inside one audited field is not a shape any of this was written for.
+     * not the place to discover how deep that goes. With a rule the bound is sixteen
+     * levels unless configured; without one it is JSON's own, so that nothing json_encode
+     * would have written is refused here.
      */
-    private function scrub(string $objectType, mixed $value, int $depth = 0): mixed
+    private function scrub(string $objectType, mixed $value, int $base, int $depth = 0): mixed
     {
-        $inside = $this->keysInside($value);
-
-        if ($inside === null) {
-            return $value; // nothing a rule could name
+        if ($value === null || \is_scalar($value)) {
+            return $value;
         }
 
-        if ($depth >= $this->maxDepth) {
+        if (\is_resource($value) || get_debug_type($value) === 'resource (closed)') {
+            // A stream - a blob read from the database, a file handle - is not a value an
+            // index can hold, and json_encode refuses it anyway. Said here, by name,
+            // before it reaches a queue that would serialise it as a number.
+            throw RedactionLimitExceeded::aResource();
+        }
+
+        if ($value instanceof \UnitEnum) {
+            return Change::plain($value);
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            if ($base !== self::IN_ATTRIBUTES) {
+                return Change::plain($value);
+            }
+
+            // An attribute keeps the form it had, so a mapping built for it still holds -
+            // and the form is read from json_encode itself rather than rebuilt by hand:
+            // which properties a date shows, and in what order, is json_encode's to say.
+            // What comes back is plain, and a public property of it is looked at below
+            // like any other.
+            $value = $this->asJson($value);
+
+            if ($value === null || \is_scalar($value)) {
+                return $value;
+            }
+        }
+
+        if ($value instanceof \JsonSerializable) {
+            return $this->followed($objectType, $value, $base, $depth);
+        }
+
+        if (!\is_array($value) && !\is_object($value)) {
+            return $value; // nothing else is left, but the analyser cannot know it
+        }
+
+        $isObject = \is_object($value);
+
+        if ($isObject && $this->path->contains($value)) {
+            // Fail closed: a value that leads back into itself cannot be seen to the
+            // bottom, so nothing can promise that what a rule names is not in it.
+            throw RedactionLimitExceeded::goingInCircles($this->fields !== []);
+        }
+
+        // An object as json_encode reads it: its public properties.
+        $inside = $isObject ? get_object_vars($value) : $value;
+
+        if ($this->maxDepth !== null && $depth >= $this->maxDepth) {
             // Fail closed. Leaving the rest of the structure alone was the DoS-safe
             // choice for a data transformer and the wrong one for this: a rule that reads
             // as "this name, anywhere" would stop applying at a depth nobody thinks
@@ -276,36 +432,138 @@ final class ChangeRedactor
             throw RedactionLimitExceeded::deeperThan($this->maxDepth);
         }
 
+        if ($base + $depth > self::JSON_DEPTH) {
+            // What json_encode would refuse on the way to the cluster, refused here by
+            // name instead: the record was lost either way, and this way somebody is told
+            // which value it was.
+            throw RedactionLimitExceeded::deeperThanJson(self::JSON_DEPTH);
+        }
+
         // Spent per place to look rather than per value visited: what costs the request
         // is the walk itself, and a flat array of a hundred thousand entries is one
         // value and a hundred thousand places.
         $this->spend(\count($inside));
 
         $out = [];
-        $touched = false;
+        // An object is always built anew, whatever it holds: handing the application's
+        // own on is the thing this walk exists not to do.
+        $touched = $isObject;
 
-        foreach ($inside as $key => $item) {
-            if (\is_string($key) && $this->redacts($objectType, $key)) {
-                $out[$key] = $this->mask($item);
-                $touched = true;
+        if ($isObject) {
+            $this->path->attach($value);
+        }
 
-                continue;
+        try {
+            foreach ($inside as $key => $item) {
+                if (\is_string($key) && $this->redacts($objectType, $key)) {
+                    $out[$key] = $this->mask($item);
+                    $touched = true;
+
+                    continue;
+                }
+
+                $scrubbed = $this->scrub($objectType, $item, $base, $depth + 1);
+                $touched = $touched || $scrubbed !== $item;
+                $out[$key] = $scrubbed;
             }
-
-            $scrubbed = $this->scrub($objectType, $item, $depth + 1);
-            $touched = $touched || $scrubbed !== $item;
-            $out[$key] = $scrubbed;
+        } finally {
+            if ($isObject) {
+                $this->path->detach($value);
+            }
         }
 
         if (!$touched) {
-            return $value; // untouched, and in the shape it arrived in
+            return $value; // an array of plain values, as it arrived
         }
 
-        // Rebuilt only when something had to be removed. An object is handed back as an
-        // object where that is possible, so a record that needed no redaction and one
-        // that did are written the same way — json_encode turns both into the same
-        // object, and an empty array is not an empty object.
-        return $value instanceof \stdClass ? (object) $out : $out;
+        // An object goes on as an object, so `{}` stays `{}` and keys that look like
+        // numbers stay keys: json_encode writes a stdClass the way it wrote the object.
+        return $isObject ? (object) $out : $out;
+    }
+
+    /**
+     * A JsonSerializable followed to what it answers with, hop by hop, and that walked.
+     *
+     * The hops are counted, and the objects of the chain stay on the path while what they
+     * answered is walked: an answer that holds a wrapper of its own chain again is a
+     * circle, and one that builds a new wrapper every time is stopped by the count.
+     *
+     * Kept as objects rather than as spl_object_id(), and that is the whole of it: a
+     * wrapper that builds the next one while being serialised is freed the moment the
+     * walk moves on, PHP hands its id straight to the object built next, and a finite
+     * chain was refused as a circle - which, this being fail-closed, meant the record was
+     * not written at all.
+     */
+    private function followed(string $objectType, \JsonSerializable $value, int $base, int $depth): mixed
+    {
+        /** @var \SplObjectStorage<object, null> $chain */
+        $chain = new \SplObjectStorage();
+        $answer = $value;
+
+        while ($answer instanceof \JsonSerializable && !$answer instanceof \DateTimeInterface) {
+            if ($this->path->contains($answer) || $chain->contains($answer)) {
+                throw RedactionLimitExceeded::goingInCircles($this->fields !== []);
+            }
+
+            if (\count($chain) >= self::MAX_HOPS) {
+                throw RedactionLimitExceeded::pastHops(self::MAX_HOPS);
+            }
+
+            $chain->attach($answer);
+            $answer = $this->answerOf($answer);
+
+            if (\is_object($answer)) {
+                // A wrapper that serialises to another object is followed rather than
+                // trusted - and the hop costs a node, so a long chain runs out of budget
+                // like anything else does.
+                $this->spend(1);
+            }
+        }
+
+        foreach ($chain as $hop) {
+            $this->path->attach($hop);
+        }
+
+        try {
+            return $this->scrub($objectType, $answer, $base, $depth);
+        } finally {
+            foreach ($chain as $hop) {
+                $this->path->detach($hop);
+            }
+        }
+    }
+
+    private function answerOf(\JsonSerializable $value): mixed
+    {
+        if ($this->answered !== null && $this->answered->contains($value)) {
+            return $this->answered[$value];
+        }
+
+        $answer = $value->jsonSerialize();
+        $this->answered?->attach($value, $answer);
+
+        return $answer;
+    }
+
+    /**
+     * What json_encode makes of a date, as plain values. The flags are the client's, so
+     * this is what it would have written.
+     */
+    private function asJson(\DateTimeInterface $date): mixed
+    {
+        if ($this->answered !== null && $this->answered->contains($date)) {
+            return $this->answered[$date];
+        }
+
+        try {
+            $json = json_decode(json_encode($date, self::JSON_FLAGS), false, self::JSON_DEPTH, \JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            throw RedactionLimitExceeded::notEncodable();
+        }
+
+        $this->answered?->attach($date, $json);
+
+        return $json;
     }
 
     /**
@@ -318,82 +576,14 @@ final class ChangeRedactor
      */
     private function spend(int $places): void
     {
+        if ($this->budget === null || $this->maxNodes === null) {
+            return; // no budget: no rule, and none configured
+        }
+
         $this->budget -= $places;
 
         if ($this->budget < 0) {
             throw RedactionLimitExceeded::pastNodes($this->maxNodes);
-        }
-    }
-
-    /**
-     * What a rule could match inside this value, or null when there is nothing.
-     *
-     * Arrays are obvious. Objects are the case that was missing, and it was not an
-     * exotic one: `changes` takes `mixed` by contract, so a DTO or a `stdClass` is a
-     * legal thing to record — and it went past redaction untouched, straight into
-     * json_encode, which then wrote every property of it. What is read here is what the
-     * document will hold: JsonSerializable answers for itself, anything else by its
-     * public properties, exactly as json_encode would.
-     *
-     * Dates and enums are values rather than structures — they carry no key a rule could
-     * name — and are left alone; Change::normalize() turns them into what is stored.
-     *
-     * @return array<array-key, mixed>|null
-     */
-    private function keysInside(mixed $value): ?array
-    {
-        // Following a wrapper to what it serialises to is a walk of its own, and it used
-        // to be an unbounded one: the recursion spent no depth, no budget and kept no
-        // record of where it had been, so an object whose jsonSerialize() answers with
-        // itself - or two that answer with each other - exhausted memory before either
-        // limit was consulted. The hops are counted now, and the objects remembered.
-        //
-        // Remembered as objects, and that is the whole of it. Keeping spl_object_id()
-        // alone remembered a number and let the object go: a wrapper that builds the
-        // next one while being serialised is freed the moment the walk moves on, PHP
-        // hands its id straight to the object built next, and a perfectly finite chain
-        // was refused as a circle - which, this being fail-closed, meant the record was
-        // not written at all. SplObjectStorage holds them, so the ids stay theirs.
-        $seen = new \SplObjectStorage();
-
-        while (true) {
-            if (\is_array($value)) {
-                return $value;
-            }
-
-            if (!\is_object($value) || $value instanceof \DateTimeInterface || $value instanceof \UnitEnum) {
-                return null;
-            }
-
-            if ($seen->contains($value)) {
-                // Fail closed, like the other two limits: a value that leads back into
-                // itself cannot be seen to the bottom, so nothing can promise that what
-                // a rule names is not somewhere in it.
-                throw RedactionLimitExceeded::goingInCircles();
-            }
-
-            $seen->attach($value);
-
-            if (!$value instanceof \JsonSerializable) {
-                return get_object_vars($value);
-            }
-
-            $serialized = $value->jsonSerialize();
-
-            if (\is_array($serialized)) {
-                return $serialized;
-            }
-
-            if (!\is_object($serialized)) {
-                return null;
-            }
-
-            // A wrapper that serialises to a DTO is followed rather than trusted - and
-            // the hop costs a node, so a long chain runs out of budget like anything
-            // else does.
-            $this->spend(1);
-
-            $value = $serialized;
         }
     }
 
