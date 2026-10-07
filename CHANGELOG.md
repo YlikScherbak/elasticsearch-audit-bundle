@@ -9,6 +9,95 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+The defects of 1.3.1 that 1.2.x has as well, fixed the same way and held by the same tests where
+1.2.x has what they test; see 1.3.1 for the rest. **What 1.2.x cannot see**: an operation that
+commits `AuditTransaction::run()`'s transaction and begins another, or controls it with SQL — 1.3.1
+watches the connection to see that, and 1.2.x does not.
+
+### Fixed
+- **An object in a record reached the queue whole, private properties included.** Redaction read
+  an object — what `jsonSerialize()` answered, or its public properties — and handed the object
+  itself on. Messenger's `PhpSerializer` then stored every property of it in the queue, the
+  private ones too, and with the outbox that queue is a table of the application's own database.
+  The index looked clean, because `json_encode` shows public properties only. With no
+  `redact.fields` configured nothing read the record at all, so the same happened without any
+  redactor in sight. The code responsible dates from 1.0.0 (objects in redaction) and from the
+  first Messenger transport (an object in `changes` travelling as itself).
+- **What redaction checked was not what was written.** The client asked a `JsonSerializable` for
+  its JSON a second time, after redaction had read it; an object that answered differently wrote
+  what nobody had checked. Every object is now asked once per write, and what it answered is what
+  travels.
+- **A readonly property or an enum in a record lost the record.** elastic/transport walks a body
+  by reference to drop its nulls (measured on 8.11 with client 8.19, and on 9.0 with client 9.x),
+  PHP refuses a reference to a readonly property, and an enum's `name` is one: a DTO with a
+  readonly property, or an enum anywhere but on a `Change`'s side, made the encoding throw. The
+  same walk unset every null property of the application's own object. Neither happens to a value
+  built by the bundle.
+- **`AuditTransaction::run()` reported a commit that had not happened.** An operation that opened a
+  transaction and did not close it made run()'s one `commit()` close the innermost level only — on
+  DBAL 4 it released a savepoint — and run() returned with the change and its history uncommitted
+  and the transaction open for whatever ran next on the connection. Its undo closed one level too,
+  leaving the outer transaction holding the rows of an operation that failed. The level is checked
+  when the operation returns and again after the frame is closed, since closing it runs the
+  application's listeners; a level left open is refused and every level rolled back. An operation
+  that ended run()'s transaction itself is refused as well, with a message that does not say
+  whether it was a commit or a rollback, because the level cannot tell. The code responsible dates
+  from 1.1.0.
+- **A rollback that failed left its transaction open for the next request.** `AuditTransaction`
+  reported the failed rollback and carried on, so the connection kept a transaction nobody could
+  describe, and whatever ran next on it ran inside. The connection is now closed — that session is
+  over, and the next use opens a new one. Nothing claims a rollback that nobody saw. The code
+  responsible dates from 1.1.0.
+- **A `BLOB` column under `#[AuditField]` lost its records after the commit.** The value is
+  bytes, and a stream once Doctrine reads the row back; the record was built anyway and refused on
+  encoding. The declaration is now refused like the other ones that cannot be honoured
+  — on every flush that meets it, through the failure policy — naming the class, the field and
+  what to audit instead.
+- **A stream written to an audited column reached the transport, and an `AuditTransaction`
+  committed it.** The record carried the resource, which the client's encoder refused after the
+  commit, and which the outbox's queue stored as nothing anyone could read. The record is now
+  refused on its way out, by its value and through the failure policy, saying what to record
+  instead; inside an `AuditTransaction` that refuses the commit. In 1.3.1 only the field is left
+  out, since 1.3.1 reads the change from the statement; 1.2.x reads it from the unit of work and
+  refuses the record.
+- **`redact.max_depth` and `redact.max_nodes` did nothing without `redact.fields`.** Nothing was
+  registered then, and a limit written down bounded nothing. Set, they now apply either way.
+
+### Changed
+- **`immediately: true` is described as what it does:** the record is written before the request
+  ends, and a search finds it after the index's next refresh. The documentation called it visible
+  immediately; nothing about the write changed.
+- **A record leaves the writer as plain values.** Scalars, arrays and `stdClass` objects built by
+  the bundle — never an object the application made. `RecordCreatedEvent`, the failure path and
+  every transport see these: a listener testing `$record->changes['x'] instanceof MyDto`, or a
+  `DateTimeInterface` on a `Change`'s side, now finds a `stdClass`, an array, a string. See
+  UPGRADE.md.
+- **Dates and enums take one form per place.** Anywhere in `changes` — a `Change`'s side, a value
+  filed under a field, a pair built by hand, inside an array or an object — the form a `Change`'s
+  sides have always had: UTC `Y-m-d H:i:s`, with the fraction when there is one; a backed enum's
+  value, a pure enum's name. A date inside an object in `changes` was written as
+  `{"date": …, "timezone_type": …, "timezone": …}` before and is a string now; `changes` is not
+  indexed, so no mapping depends on it. In an **attribute**, which a mapping indexes, a date is
+  exactly what `json_encode` made of it before, built anew without what was private to it. A pure
+  enum, which lost the record on encoding, is written by its name in both.
+- **Without a rule, a record is bounded only as JSON bounds it** — 512 levels of the whole
+  document, a value that leads back into itself — **and by one count of the bundle's own: at most
+  1000 `jsonSerialize()` calls along one chain** of wrappers answering with wrappers. That count is
+  the one place a value `json_encode` would have written is refused: a chain of 100 000 wrappers
+  encoded, and an endless one never finished. With a rule the limits are what they were, 16 levels
+  and 10 000 places unless configured. A value too deep for JSON, which was lost on encoding, is
+  refused earlier and by name; so is a stream or another resource.
+- **When an audit transaction cannot roll back, `run()` raises `OutboxException`, with the
+  operation's own exception as its `getPrevious()`.** It used to raise the operation's exception
+  itself; now the connection has been closed and the EntityManager has to be reset, which the
+  caller cannot be left to guess. See UPGRADE.md.
+- **Under `on_failure: throw`, a `BLOB` column under `#[AuditField]` stops the flush before it
+  commits.** The refusal is a declaration's now and comes from inside the flush; before, the flush
+  committed and the record failed on encoding afterwards. With `log` the flush goes on and the
+  record of what can be recorded is written. A `BINARY` column is not refused.
+- **`redact.max_depth` and `redact.max_nodes` default to `~`:** 16 and 10 000 with a rule, JSON's
+  own bounds without one.
+
 ## [1.2.5] - 2026-10-02
 
 ### Fixed

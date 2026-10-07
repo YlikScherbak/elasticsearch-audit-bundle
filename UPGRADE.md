@@ -9,6 +9,41 @@ nothing** — it is 0.12 with the promises frozen. See "What 1.0 freezes" at the
 
 ---
 
+## To 1.2.6
+
+**Nothing is required, unless code of yours reads a record's values as objects.** A record now
+leaves the writer as plain values: scalars, arrays and `stdClass` objects the bundle built. The
+same change is in 1.3.1.
+
+- A listener on `RecordCreatedEvent` or `RecordFailedEvent` that does
+  `$record->changes['profile'] instanceof ProfileDto` finds a `stdClass` with the DTO's public
+  properties — or, for a `JsonSerializable`, what it answered. Read the properties, not the class.
+- A `DateTimeInterface` on a `Change`'s side, or anywhere in `changes`, is now the string it was
+  always stored as — `'2026-10-07 07:00:00'`, UTC; compare against that form or parse it back. An
+  enum there is its value (a string or an int, as it is backed) or, for a pure enum, its name.
+- Code that relied on a record carrying the application's own object to a worker — reading a
+  property `json_encode` does not show — has to put that value in the record explicitly.
+
+**A `BLOB` column under `#[AuditField]`** is refused as a declaration now (a `BINARY` one is not:
+a string in it is written as before, and a stream in it refuses its record, by its value). Take
+the attribute off it and audit what describes it — a size, a checksum, a file's identifier — as a
+field of its own, or record it yourself with `AuditWriter::record()`. Under `on_failure: throw` the
+flush that meets it does not commit.
+
+**`AuditTransaction::run()` whose rollback fails** raises `OutboxException` now, with your own
+exception as `getPrevious()`: the connection was closed, and the EntityManager has to be reset (or
+cleared) before anything else goes through it. A `catch (YourException $e)` around `run()` that
+must see that case as well looks one level down:
+
+```php
+} catch (OutboxException $e) {
+    $em->clear();
+    $cause = $e->getPrevious(); // what your operation threw, the same object
+}
+```
+
+---
+
 ## To 1.2.0
 
 **Nothing is required.** Both changes below are additive, and an application that changes nothing

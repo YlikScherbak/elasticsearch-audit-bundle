@@ -126,8 +126,8 @@ borsche_elasticsearch_audit:
     fallback: system                      # recorded when nobody is authenticated
   redact:
     fields: [password, token]             # values replaced before anything is written
-    max_depth: 16                         # how deep a rule is followed into a value (since 1.0)
-    max_nodes: 10000                      # how many places it looks in one record (since 1.0)
+    max_depth: ~                          # how deep a rule is followed into a value: 16 with a rule, JSON's own without (since 1.0; ~ since 1.2.6)
+    max_nodes: ~                          # how many places it looks in one record: 10000 with a rule, none without (since 1.0; ~ since 1.2.6)
   reader:                                 # both keys since 0.8
     max_limit: 1000                       # largest page; raise for screens showing thousands of rows
     max_result_window: 10000              # how deep page/limit may reach; match index.max_result_window
@@ -443,8 +443,11 @@ record in the same database as the change.
 > insert.
 
 A mistake in an audit declaration — `alwaysRecord` naming a field that is not audited, an
-association without a representer — is handled by the same policy: logged and skipped by
-default, fatal to the flush with `throw`. Composite identifiers are joined with `|`; an
+association without a representer, a `BLOB` column under `#[AuditField]` (**since 1.2.6**:
+bytes, read back as a stream, are nothing a history can hold — audit their size, a
+checksum or a file's identifier as a field of its own, or record it with `AuditWriter::record()`) —
+is handled by the same policy, on every flush that meets it: logged and skipped by default, fatal
+to the flush with `throw`, and inside an `AuditTransaction` a reason not to commit. Composite identifiers are joined with `|`; an
 identifier that is itself an entity is represented by that entity's identifier.
 
 ### Changes inside the elements of a collection
@@ -1190,17 +1193,32 @@ the synchronous bus, so exactly the requests that produce the most audit records
 that still wait for Elasticsearch.
 
 The request now only pays for the dispatch; a worker writes the document. The message carries
-plain arrays, so it serialises with any Messenger serializer and survives a deploy that changes
-the model. Failures in the worker propagate on purpose — Messenger's retry strategy is the right
+**plain PHP values only** — scalars, arrays and `stdClass` objects the bundle built (**since
+1.2.6**; before, an object the application recorded travelled as itself, private properties and
+all). So no class of the application's is named in the queue, and a deploy that renames one cannot
+leave a message nobody can read. Three things are separate here:
+
+- **what the message holds** — the plain values above, whatever the serializer;
+- **which serializer** — Messenger's `PhpSerializer` (the default) keeps them exactly;
+- **whether `{}` stays `{}` after the queue** — guaranteed with `PhpSerializer`. Symfony's
+  Serializer with JSON may turn an empty `stdClass` into an array on the way back, which writes
+  `[]` where `{}` was; that is the serializer's reading of JSON, not the record.
+
+Failures in the worker propagate on purpose — Messenger's retry strategy is the right
 place to deal with a flaky cluster — and a retry is safe: the document is written under the
 record's id, so a redelivery after a timeout overwrites the same document instead of adding a
 second one.
 
-A record that must be visible before the request ends can bypass the queue:
+A record that must reach Elasticsearch before the request ends can bypass the queue:
 
 ```php
 $this->audit->write($record, immediately: true);
 ```
+
+That is written synchronously, not made searchable: the cluster shows a document to a search
+after its next refresh (`index.refresh_interval`, a second by default), so an `AuditReader` asking
+right after the write may not find it yet. Forcing a refresh on every audit record is not
+something the bundle does — on a busy index it costs more than the record is worth.
 
 ## One commit for the change and its history
 
@@ -1279,12 +1297,30 @@ and leaves the transaction perfectly committable, and a veto never touches the d
   opened — they decide when it commits, possibly after catching what this raises;
 - **it does not nest.** The frame behind it is shared, so an inner transaction would be rolling
   back records that are not its own;
+- **the operation leaves the transaction as it found it** (**checked since 1.2.6**). A transaction
+  the operation opens inside is fine if it closes it; one left open is refused and everything is
+  rolled back — one `commit()` would have closed only the innermost level and reported the change
+  done while nothing was committed. Committing or rolling back the transaction `run()` opened is
+  refused too, without guessing which of the two it was: what was committed then is committed, and
+  its history was not written. Both are checked when the operation returns and again after its
+  history is queued, since that runs the application's listeners. **What 1.2.x cannot see**: an
+  operation that commits the transaction and begins another leaves the level at one, and is
+  committed as if the change and its history had been one commit — 1.3.1 counts the driver's
+  commits on the audited connection and refuses it;
 - **no `write($record, immediately: true)` inside it.** That call exists to reach Elasticsearch
   before the request ends, which is exactly what must not happen for a change that may roll back;
 - **the queue is on the connection being audited.** A second connection to the same database is a
   second transaction, and the guarantee is about one;
 - **after a rollback the EntityManager is out of step with the database**, as after any hand-rolled
   transaction. Clear or reset it.
+
+**When even the rollback fails** (**since 1.2.6**) the connection is closed: the session is over,
+the database discards what an unfinished transaction held when its connection drops, and the next
+use of the connection opens a new one — rather than the next request's writes landing inside a
+transaction nobody will ever end. `run()` then raises `OutboxException` saying so, with the
+operation's own exception as its `getPrevious()`; it does not claim anything was rolled back,
+because nothing saw that happen. On a **persistent** connection closing it does not drop the
+session, and this guarantees nothing about what the database still holds.
 
 **What it still does not promise.** The record is durable and will be delivered; it is not
 searchable by the time `run()` returns. Elasticsearch cannot be part of a database transaction,
@@ -1454,6 +1490,23 @@ half-checked** (`RedactionLimitExceeded`): `redact.max_depth` levels (16) and `r
 places to look in one record (10 000), both configurable **since 1.0**. Depth alone did not bound
 the work — a flat array of a million elements is one level deep, and the walk happens on the
 request, before anything is written.
+
+**What is read is what is written (since 1.2.6).** An object in a record — a DTO, a
+`JsonSerializable`, a `stdClass` — is read once, the way `json_encode` reads it (its public
+properties, or what `jsonSerialize()` answers), and leaves as a `stdClass` built from that; the
+object itself goes no further. Before, the redactor read it and handed it on, and what came next
+asked again: the client called `jsonSerialize()` a second time and wrote what it said then, and
+Messenger serialised the object whole, private properties included. This happens **with or without
+a rule** — with none configured nothing is masked, but every record is still made plain — and
+bounded accordingly: without a rule only by what `json_encode` itself refuses (512 levels of the
+whole document, a value that leads back into itself) and by one count of its own, **at most 1000
+`jsonSerialize()` calls along one chain** of wrappers answering with wrappers, which `json_encode`
+does not count and an endless one never finished. Limits set by hand apply with or without a rule.
+
+A date or an enum becomes a value where it stands: anywhere in `changes` — which is not indexed —
+the form a `Change`'s sides have always had (UTC, `Y-m-d H:i:s` with the fraction when there is
+one; an enum's value, or a pure enum's name); in an **attribute**, which a mapping indexes, exactly
+what `json_encode` made of it before. A stream or other resource is refused by name.
 
 For **tracked collection elements** the rule names a field, not a path: `password` also covers
 `lines.42.password`, and a rule naming the collection covers everything reached through it —

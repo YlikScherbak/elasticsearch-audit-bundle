@@ -124,7 +124,8 @@ final class AuditWriter
      * Writes a fully built record.
      *
      * @param bool $immediately bypass the configured transport and write synchronously —
-     *                          for the rare record that must be visible before the request ends
+     *                          for the rare record that must reach Elasticsearch before the
+     *                          request ends; a search finds it after the index's next refresh
      */
     public function write(AuditRecord $record, bool $immediately = false): void
     {
