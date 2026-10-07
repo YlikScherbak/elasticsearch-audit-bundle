@@ -9,6 +9,10 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 
 ## [Unreleased]
 
+1.2.6 fixes the same defects where 1.2.x has them, held by the same tests; it does not see an
+operation that commits the transaction and begins another, nor transaction control sent as SQL,
+since it does not watch the connection.
+
 ### Added
 - **`audit:check` checks every audit declaration on the audited connection.** The questions a
   flush asks — an always-recorded association, an association without a representer, a field
