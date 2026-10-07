@@ -8,6 +8,7 @@ use Borsche\ElasticsearchAuditBundle\Actor\ChainActorResolver;
 use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
 use Borsche\ElasticsearchAuditBundle\Coalescing\FrameBuffer;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
+use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Outbox\AuditTransaction;
 use Borsche\ElasticsearchAuditBundle\Outbox\OutboxContext;
 use Borsche\ElasticsearchAuditBundle\Tests\FrozenClock;
@@ -69,9 +70,12 @@ final class WhatARefusedRollbackSaysTest extends TestCase
 
             self::fail('the operation should have failed');
         } catch (\Throwable $thrown) {
-            // The caller is told, and told the truth: this is the reason the operation
-            // failed, not the reason the rollback did.
-            self::assertStringContainsString(self::MARKER, $thrown->getMessage(), 'the premise: the caller keeps the cause it threw');
+            // The caller is told, and told the truth: the session had to be abandoned,
+            // which is more to do than the operation's failure alone (since 1.3.1) - and
+            // the reason the operation failed is right behind it, not the rollback's.
+            self::assertInstanceOf(OutboxException::class, $thrown);
+            self::assertStringNotContainsString(self::MARKER, $thrown->getMessage(), 'the bundle\'s own message quoted the operation\'s');
+            self::assertStringContainsString(self::MARKER, (string) $thrown->getPrevious()?->getMessage(), 'the premise: the caller keeps the cause it threw');
         }
 
         self::assertNotSame([], $this->logs, 'the premise: the refused rollback was reported');
@@ -176,8 +180,10 @@ final class WhatARefusedRollbackSaysTest extends TestCase
 
             self::fail('the operation should have failed');
         } catch (\Throwable $thrown) {
-            self::assertInstanceOf(\DomainException::class, $thrown, 'the caller was handed the wrong failure: '.$thrown->getMessage());
-            self::assertSame('the operation itself failed', $thrown->getMessage());
+            // The abandoned session, and the operation's failure behind it - not the logger's.
+            self::assertInstanceOf(OutboxException::class, $thrown, 'the caller was handed the wrong failure: '.$thrown->getMessage());
+            self::assertInstanceOf(\DomainException::class, $thrown->getPrevious(), 'the caller was handed the wrong failure behind it');
+            self::assertSame('the operation itself failed', $thrown->getPrevious()->getMessage());
         }
     }
 
@@ -315,10 +321,10 @@ final class WhatARefusedRollbackSaysTest extends TestCase
         // application supplies separately, and one the tests until now always gave a
         // working one.
         //
-        // The same instance, not a matching class or message: what the caller is holding
-        // has to be the object they threw, or an error handler keyed on identity —
-        // retries, compensations, a `catch` that rethrows one particular object — is
-        // looking at something else.
+        // The same instance, not a matching class or message: what the caller finds behind
+        // the abandoned session has to be the object they threw, or an error handler keyed
+        // on identity — retries, compensations, a `catch` that rethrows one particular
+        // object — is looking at something else.
         if (!\extension_loaded('pdo_sqlite')) {
             self::markTestSkipped('pdo_sqlite is needed for a connection to fail rolling back.');
         }
@@ -350,7 +356,8 @@ final class WhatARefusedRollbackSaysTest extends TestCase
 
             self::fail('the operation should have failed');
         } catch (\Throwable $thrown) {
-            self::assertSame($ours, $thrown, 'the caller was handed something other than the exception it threw: '.$thrown->getMessage());
+            self::assertInstanceOf(OutboxException::class, $thrown, 'the caller was not told the session was abandoned: '.$thrown->getMessage());
+            self::assertSame($ours, $thrown->getPrevious(), 'the caller was handed something other than the exception it threw');
         }
 
         self::assertSame(0, $buffer->count(), 'and the frame was emptied all the same');
