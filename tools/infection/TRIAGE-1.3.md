@@ -1490,6 +1490,13 @@ first pilots outside the one application meet.
 - **A search-visibility mode for `immediately`** if a real case asks for one — not a `bool`: not
   refreshed, refreshed, waited for.
 
+### Left for 1.4: a stream in an element's field, or in an always-recorded one
+
+A stream written to an audited column of an entity's own row is doubt since 1.3.1: that field is
+left out, and the rest of the record is written. In a tracked element's field, or in a field the
+entity records always, it is still refused with the whole record, by its value and naming why -
+no case of either was found, and a guard nothing tests is a mutant the gate keeps.
+
 ### Left for 1.4: the mutants 1.3.1's triage found in code it did not touch
 
 Infection on `ChangeRedactor.php` and `AuditTransaction.php`, with nothing skipped (timeout 3000):

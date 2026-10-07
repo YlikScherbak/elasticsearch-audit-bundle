@@ -51,29 +51,55 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         self::assertSame([], $this->gateway->documents);
     }
 
-    public function testABinaryColumnIsWrittenAsItWasAndAStreamInItIsRefusedByItsValue(): void
+    public function testABinaryColumnIsWrittenAsItWasAndAStreamInItIsDoubtNotARecordLost(): void
     {
         // Not a declaration to refuse: DBAL 4 reads a BINARY column back as a string, and a
-        // string in it was written before 1.3.1 and is now. What cannot be written is a stream
-        // - what DBAL 3 reads it back as, or what the application put there - and that is
-        // refused where every stream is, by its value, naming what to record instead.
+        // string in it was written before 1.3.1 and is now. A stream in it - what DBAL 3 turns
+        // every value of one into, or what the application put there - the driver reads to its
+        // end, so what it held is nothing the history can read: that field is doubt, and the rest
+        // of the record is written.
         $this->attachListener(FailurePolicy::Log);
+        $this->unownedStatementsAreExpected = true;
 
         $digest = new AuditsABinary('report.pdf', 'DIGEST');
         $this->em->persist($digest);
         $this->em->flush();
 
-        if (ObservingMiddleware::onDbal3()) {
-            // DBAL 3 turns every BINARY value into a stream, the one just written too: such a
-            // record was lost on encoding before 1.3.1, and is refused by its value now.
-            self::assertSame([], $this->documents());
-            self::assertNotEmpty(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'is a resource')));
-            self::assertSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'binary column')), 'a BINARY declaration was refused');
+        $created = $this->documents()[0]['changes'];
+        self::assertSame(['old' => null, 'new' => 'report.pdf'], $created['name']);
 
-            return;
+        if (ObservingMiddleware::onDbal3()) {
+            self::assertArrayNotHasKey('digest', $created, 'a stream DBAL 3 made of the value was recorded');
+            self::assertNotEmpty($this->doubtsOf(AuditsABinary::class));
+        } else {
+            self::assertSame(['old' => null, 'new' => 'DIGEST'], $created['digest']);
+            self::assertSame([], $this->doubtsOf(AuditsABinary::class));
         }
 
-        self::assertSame(['old' => null, 'new' => 'DIGEST'], $this->documents()[0]['changes']['digest']);
+        $stream = fopen('php://memory', 'r+b');
+        self::assertIsResource($stream);
+        fwrite($stream, 'OTHER');
+        rewind($stream);
+        $digest->digest = $stream;
+        $digest->name = 'with-stream.pdf';
+        $this->em->flush();
+
+        // Not "digest became ''", and not the rename lost with it.
+        self::assertSame(['name' => ['old' => 'report.pdf', 'new' => 'with-stream.pdf']], $this->documents()[1]['changes']);
+        self::assertNotEmpty($this->doubtsOf(AuditsABinary::class));
+        self::assertSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'binary column')), 'a BINARY declaration was refused');
+    }
+
+    public function testAFlushAfterAStreamDoesNotInventTheColumnsOldValue(): void
+    {
+        // What the row holds after a stream was written to it is not something the history read,
+        // and the next flush that changes something else must not say the column moved.
+        $this->attachListener(FailurePolicy::Log);
+        $this->unownedStatementsAreExpected = true;
+
+        $digest = new AuditsABinary('report.pdf', 'DIGEST');
+        $this->em->persist($digest);
+        $this->em->flush();
 
         $stream = fopen('php://memory', 'r+b');
         self::assertIsResource($stream);
@@ -82,11 +108,26 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         $digest->digest = $stream;
         $this->em->flush();
 
-        // Not a record saying it became '': the driver read the stream to its end, and what was
-        // left of it is not what the row holds.
-        self::assertCount(1, $this->documents(), 'a record holding a stream was written');
-        self::assertNotEmpty(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'is a resource')));
-        self::assertSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'binary column')), 'a BINARY declaration was refused');
+        $digest->name = 'renamed.pdf';
+        $this->em->flush();
+
+        $last = $this->documents()[\count($this->documents()) - 1];
+        self::assertSame(['name' => ['old' => 'report.pdf', 'new' => 'renamed.pdf']], $last['changes']);
+
+        // One statement wrote the stream, and one is what the doubt counts.
+        self::assertCount(1, $this->doubtsOf(AuditsABinary::class));
+        self::assertStringContainsString('for 1 statement(s)', $this->doubtsOf(AuditsABinary::class)[0]);
+    }
+
+    /**
+     * The doubt the listener says of a class, said as it says every doubt: that the history may
+     * be missing what a statement did.
+     *
+     * @return list<string>
+     */
+    private function doubtsOf(string $class): array
+    {
+        return array_values(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'may be missing what they did') && str_contains($line, $class)));
     }
 
     public function testEveryFlushMeetsTheRefusalAgain(): void
@@ -107,12 +148,14 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         self::assertCount(2, $refusals);
 
         // The refusal is the declaration's, not the entity's: what can be recorded is, as for
-        // every other declaration that cannot be honoured. The insertion carried the bytes and
-        // is not written; the rename carries none and is.
+        // every other declaration that cannot be honoured. The bytes are no value the history
+        // read - the column is doubt - and the rest of each record is written.
         self::assertSame(
-            [['update', ['name' => ['old' => 'report.pdf', 'new' => 'report-v2.pdf']]]],
+            [['create', ['name' => ['old' => null, 'new' => 'report.pdf']]], ['update', ['name' => ['old' => 'report.pdf', 'new' => 'report-v2.pdf']]]],
             array_map(static fn (array $d): array => [$d['event'], $d['changes']], $this->documents()),
         );
+        self::assertNotEmpty($this->doubtsOf(AuditsABlob::class));
+        $this->unownedStatementsAreExpected = true;
     }
 
     /** @return iterable<string, array{class-string, int}> */

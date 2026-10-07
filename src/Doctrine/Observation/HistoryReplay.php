@@ -627,6 +627,16 @@ final class HistoryReplay
         ], $this->representFailed);
     }
 
+    /**
+     * A column written as a stream: the driver read the stream to its end, so what it held is
+     * nothing this can read - and a column whose last value was one is not known either, so
+     * the next change of it has no old side to give.
+     */
+    private function doubtOfAStream(string $class, string $field): void
+    {
+        $this->doubt(sprintf('not read: %s::$%s was written as a stream, which the driver read to its end - record its size, a checksum or a file\'s identifier instead', $class, $field), $class);
+    }
+
     private function doubt(string $text, ?string $class): void
     {
         $this->doubtOf($text, $class === null ? [] : [$class], [], $class === null);
@@ -962,6 +972,15 @@ final class HistoryReplay
 
         if ($this->audited->forClass($class->name, $class->newInstance(...)) === null) {
             return;
+        }
+
+        // A field written as a stream is not a value the history read: doubt, named, and the
+        // rest of the row's change is kept - the row is true in every other column.
+        foreach ($fields as $field => $sides) {
+            if (\is_resource($sides['old']) || \is_resource($sides['new'])) {
+                $this->doubtOfAStream($class->name, $field);
+                unset($fields[$field]);
+            }
         }
 
         $key = self::keyColumnsOf($metadata, $row);

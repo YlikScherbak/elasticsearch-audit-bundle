@@ -525,7 +525,14 @@ association without a representer, a `BLOB` column under `#[AuditField]` (**sinc
 bytes, read back as a stream, are nothing a history can hold — audit their size, a
 checksum or a file's identifier as a field of its own, or record it with `AuditWriter::record()`) —
 is handled by the same policy, on every flush that meets it: logged and skipped by default, fatal
-to the flush with `throw`, and inside an `AuditTransaction` a reason not to commit. `audit:check`
+to the flush with `throw`, and inside an `AuditTransaction` a reason not to commit.
+
+A `BINARY` column is no declaration mistake, but know what its history holds. Its value is written
+as a string — and bytes that are not UTF-8 reach the index with the replacement character in their
+place, so the history of such a field is not the bytes of the row; audit their size or a hash where
+that matters. A stream in any audited column (what DBAL 3 makes of every `BINARY` value, or one the
+application wrote) is read by the driver to its end, so that field is doubt, named in the warning
+of its class, and the rest of the record is written. `audit:check`
 asks the same questions of every audited class on the connection before anything is flushed, and
 fails on the first it cannot honour (**since 1.3.1**) — a class declared through
 `AuditableInterface` answers per instance and is named as checked only at flush. Composite identifiers are joined with `|`; an
