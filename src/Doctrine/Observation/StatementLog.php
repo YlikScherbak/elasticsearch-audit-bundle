@@ -80,6 +80,14 @@ final class StatementLog
     /** How many statements a rollback has voided, ever: what a reader that keeps its place asks whether it can. */
     private int $voided = 0;
 
+    /**
+     * How many times the driver committed, and rolled back, an outermost transaction: what a
+     * boundary that opened one asks of the operation it ran - whether it ended that one and
+     * began another, which leaves the level where it was.
+     */
+    private int $commits = 0;
+    private int $rollbacks = 0;
+
     /** Whether an observer was put in front of a driver: what audit:check asks of the audited connection. */
     private bool $watching = false;
 
@@ -224,6 +232,8 @@ final class StatementLog
     /** The outermost transaction committed: what survived in it is final. */
     public function committed(): void
     {
+        ++$this->commits;
+
         foreach ($this->open as $frame) {
             if (isset($this->frames[$frame])) {
                 $this->frames[$frame]['committed'] = true;
@@ -236,6 +246,8 @@ final class StatementLog
     /** The outermost transaction rolled back: nothing in it happened. */
     public function rolledBack(): void
     {
+        ++$this->rollbacks;
+
         if ($this->open !== []) {
             $this->voidFrom($this->open[0]);
         }
@@ -597,6 +609,18 @@ final class StatementLog
     public function voided(): int
     {
         return $this->voided;
+    }
+
+    /**
+     * The driver's commits and rollbacks of an outermost transaction so far, counted once it
+     * had answered - a commit that threw is not one. A nested level never reaches the driver:
+     * DBAL turns it into a savepoint statement, or into nothing at all without savepoints.
+     *
+     * @return array{commits: int, rollbacks: int}
+     */
+    public function transactionsEnded(): array
+    {
+        return ['commits' => $this->commits, 'rollbacks' => $this->rollbacks];
     }
 
     /** Where the log has got to, for a caller that wants to know what ran after this point. */

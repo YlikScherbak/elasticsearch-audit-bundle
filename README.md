@@ -1506,10 +1506,22 @@ and leaves the transaction perfectly committable, and a veto never touches the d
 - **the operation leaves the transaction as it found it** (**checked since 1.3.1**). A transaction
   the operation opens inside is fine if it closes it; one left open is refused and everything is
   rolled back — one `commit()` would have closed only the innermost level and reported the change
-  done while nothing was committed. Committing or rolling back the transaction `run()` opened is
-  refused too, without guessing which of the two it was: what was committed then is committed, and
-  its history was not written. Both are checked when the operation returns and again after its
-  history is queued, since that runs the application's listeners;
+  done while nothing was committed. Ending the transaction `run()` opened is refused as well, and
+  what that means depends on what it was. On the connection the bundle watches, the driver's own
+  commits and rollbacks are counted, so an operation that ends it and begins another is seen too:
+  - **it committed, and finished:** everything its history describes is committed, so the history
+    is written and committed after it, and `run()` raises `OutboxException` saying the two were not
+    committed together — for a moment the change stood without its history;
+  - **it rolled back:** its history may describe what was undone, so none of it is written, and
+    what was left is rolled back;
+  - **it committed, then failed** (or its history was refused): what it committed stays committed
+    without a history, the rest is rolled back, and the refusal carries the failure as
+    `getPrevious()`.
+
+  On a connection the bundle does not watch — the outbox without audited entities — only the level
+  is checked: ending the transaction is refused without saying whether it was a commit, and one
+  ended and begun again is not seen. Both are checked when the operation returns and again after
+  its history is queued, since that runs the application's listeners;
 - **no `write($record, immediately: true)` inside it.** That call exists to reach Elasticsearch
   before the request ends, which is exactly what must not happen for a change that may roll back;
 - **the queue is on the connection being audited.** A second connection to the same database is a

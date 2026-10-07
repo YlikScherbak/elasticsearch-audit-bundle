@@ -37,6 +37,13 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   that ended run()'s transaction itself is refused as well, with a message that does not say
   whether it was a commit or a rollback, because the level cannot tell. The code responsible dates
   from 1.1.0.
+- **An operation that committed or rolled back run()'s transaction and began another went
+  unnoticed.** The level was one again, and run() committed as if the change and its history had
+  been one commit. On the audited connection the driver's commits and rollbacks are now counted:
+  after a commit the history — true, since all it describes is committed — is written and run()
+  says the two were not committed together; after a rollback nothing of the history is kept; a
+  failure after a commit says what stays committed. Without the observer only the level is
+  checked, and this is not seen. The code responsible dates from 1.1.0.
 - **A rollback that failed left its transaction open for the next request.** `AuditTransaction`
   reported the failed rollback and carried on, so the connection kept a transaction nobody could
   describe, and whatever ran next on it ran inside. The connection is now closed — that session is

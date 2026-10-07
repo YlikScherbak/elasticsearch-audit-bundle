@@ -68,6 +68,21 @@ final class OutboxException extends \RuntimeException implements AuditException,
         return new self('The operation ended the audit transaction itself - code it called, or a listener run while its history was written, committed it or rolled it back, and which of the two cannot be told from here. Its history was not written, and what was already committed cannot be undone by this transaction. Do not commit or roll back the transaction AuditTransaction::run() opened: its commit is the one the change and its history share.');
     }
 
+    public static function operationCommittedItself(): self
+    {
+        return new self('The operation committed the transaction AuditTransaction::run() opened itself - code it called, or a listener run while its history was written. Its changes and their history are both committed, but not together: for a moment the change stood in the database without its history, and a process that died then would have left it so. The history was kept because everything it describes was committed. Do not commit the transaction run() opened: its commit is the one the change and its history share.');
+    }
+
+    public static function transactionRolledBackInside(): self
+    {
+        return new self('The operation rolled back the transaction AuditTransaction::run() opened itself - code it called, or a listener run while its history was written. Its history was not written, since what it describes may have been undone, and whatever was left was rolled back. Anything the operation committed itself before that stays committed, and may have no history. Do not roll back the transaction run() opened: throw instead, and it is rolled back for you.');
+    }
+
+    public static function committedBeforeFailing(\Throwable $failure): self
+    {
+        return new self('The operation committed part of its work itself - the transaction AuditTransaction::run() opened, ended by code it called or by a listener - and then did not complete: the previous exception says why. What it committed stays committed, nothing here can undo it, and its history was not written; what came after was rolled back. Do not commit the transaction run() opened: its commit is the one the change and its history share.', 0, $failure);
+    }
+
     public static function sessionAbandoned(\Throwable $operation): self
     {
         return new self('The operation failed and its transaction could not be rolled back, so the connection was closed: that session is over, nothing it left unfinished is used again, and the next use of the connection opens a new one. Whether the database rolled the transaction back is not something this can see - it discards an unfinished transaction when the connection drops, unless the connection is persistent. The EntityManager still holds the operation\'s objects as if it had happened: reset it, or clear() it, before any further work through it. The operation\'s own failure is the previous exception.', 0, $operation);

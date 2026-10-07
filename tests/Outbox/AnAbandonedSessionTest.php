@@ -27,11 +27,6 @@ use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
 use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\Driver;
-use Doctrine\DBAL\Driver\Connection as DriverConnection;
-use Doctrine\DBAL\Driver\Middleware;
-use Doctrine\DBAL\Driver\Middleware\AbstractConnectionMiddleware;
-use Doctrine\DBAL\Driver\Middleware\AbstractDriverMiddleware;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
@@ -59,8 +54,6 @@ use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
  */
 final class AnAbandonedSessionTest extends TestCase
 {
-    public static bool $rollBackFails = false;
-
     private string $file;
     private Connection $connection;
     private EntityManager $em;
@@ -73,7 +66,7 @@ final class AnAbandonedSessionTest extends TestCase
             self::markTestSkipped('pdo_sqlite is needed for the outbox tests.');
         }
 
-        self::$rollBackFails = false;
+        RollBackFailsWhenAsked::$fails = false;
         $this->file = sys_get_temp_dir().'/audit-abandoned-'.bin2hex(random_bytes(4)).'.sqlite';
 
         $config = new Configuration();
@@ -188,14 +181,14 @@ final class AnAbandonedSessionTest extends TestCase
             $this->transaction->run(function (): void {
                 $this->em->persist(new Shipment('SH-ABANDONED'));
                 $this->em->flush();
-                self::$rollBackFails = true;
+                RollBackFailsWhenAsked::$fails = true;
 
                 throw new \DomainException('the operation failed');
             });
         } catch (OutboxException $e) {
             return $e;
         } finally {
-            self::$rollBackFails = false;
+            RollBackFailsWhenAsked::$fails = false;
         }
 
         self::fail('run() did not say that its session was abandoned');
@@ -228,34 +221,5 @@ final class AnAbandonedSessionTest extends TestCase
     private function other(): Connection
     {
         return DriverManager::getConnection(['driver' => 'pdo_sqlite', 'path' => $this->file]);
-    }
-}
-
-/**
- * A driver whose rollback fails, when the test says so, without rolling anything back -
- * what a connection that is gone, or a server that refuses, looks like from above.
- */
-final class RollBackFailsWhenAsked implements Middleware
-{
-    public function wrap(Driver $driver): Driver
-    {
-        return new class($driver) extends AbstractDriverMiddleware {
-            /**
-             * @param array<string, mixed> $params
-             */
-            public function connect(array $params): DriverConnection
-            {
-                return new class(parent::connect($params)) extends AbstractConnectionMiddleware {
-                    public function rollBack(): void
-                    {
-                        if (AnAbandonedSessionTest::$rollBackFails) {
-                            throw new \RuntimeException('the server did not answer the rollback');
-                        }
-
-                        parent::rollBack();
-                    }
-                };
-            }
-        };
     }
 }

@@ -124,13 +124,19 @@ final class AuditTransaction
             throw $e;
         }
 
+        // What the driver has committed and rolled back so far, where the bundle watches the
+        // connection. A count rather than a flag of "ours": the commit this transaction makes
+        // is the one after the operation, and anything the count gains before it, the
+        // operation did - whoever's code it was.
+        $before = $this->statements?->transactionsEnded();
+
         try {
             $result = $operation();
 
             // One level opened, one level closed: the operation has to leave the
             // transaction where it found it. Before the frame, so that records of an
             // operation already found unbalanced are not queued only to be undone.
-            $this->assertTheOperationLeftOneLevel();
+            $this->assertTheOperationLeftOneLevel($before);
 
             // The records go into the queue here, inside the transaction. A failure is
             // the operation's failure now, not a line in a log after the fact.
@@ -146,15 +152,55 @@ final class AuditTransaction
 
             // And again: closing the frame ran the application's listeners, and a level one
             // of them opened or closed was not there when the operation returned.
-            $this->assertTheOperationLeftOneLevel();
+            $this->assertTheOperationLeftOneLevel($before);
 
-            $this->commitIfTheHistoryIsWhole();
+            if (!$this->committedSince($before)) {
+                $this->commitIfTheHistoryIsWhole();
 
-            return $result;
+                return $result;
+            }
+
+            // The operation committed the transaction itself, and nothing was rolled back:
+            // what the frame describes is committed already, or is about to be by the commit
+            // below, so its history is true and is kept. What cannot be kept is the promise
+            // of one commit for both, and that is said after - outside the catch, because it
+            // is not a reason to undo anything.
+            $this->commitTheRest();
         } catch (\Throwable $e) {
-            throw $this->undo($e) ?? $e;
+            throw $this->undo($e) ?? ($this->committedSince($before) ? OutboxException::committedBeforeFailing($e) : $e);
         } finally {
             $this->context->leave();
+        }
+
+        throw OutboxException::operationCommittedItself();
+    }
+
+    /**
+     * @param array{commits: int, rollbacks: int}|null $before
+     */
+    private function committedSince(?array $before): bool
+    {
+        return $before !== null && $this->statements !== null && $this->statements->transactionsEnded()['commits'] > $before['commits'];
+    }
+
+    /**
+     * After the operation committed run()'s transaction itself: its history goes the same
+     * way the rest of its change did. Into the transaction it opened again if there is one,
+     * committed with it; and if there is none, the records were queued as they were written,
+     * each committed on its own.
+     *
+     * @throws OutboxException
+     */
+    private function commitTheRest(): void
+    {
+        $spoiled = $this->context->spoiledBecause();
+
+        if ($spoiled !== null) {
+            throw OutboxException::cannotCommit($spoiled);
+        }
+
+        if ($this->connection->getTransactionNestingLevel() === 1) {
+            $this->connection->commit();
         }
     }
 
@@ -219,17 +265,32 @@ final class AuditTransaction
      * operation ended run()'s transaction itself, and whether that was a commit or a
      * rollback is not something the level says.
      *
+     * Where the connection is watched, the level is not all there is to ask: an operation
+     * that committed or rolled back the transaction and began another leaves it at one. The
+     * driver's own count says so. A rollback means the frame may describe what was undone,
+     * and nothing in it is kept; a commit is let through to the caller, which decides.
+     *
+     * @param array{commits: int, rollbacks: int}|null $before
+     *
      * @throws OutboxException
      */
-    private function assertTheOperationLeftOneLevel(): void
+    private function assertTheOperationLeftOneLevel(?array $before): void
     {
+        $ended = $before !== null && $this->statements !== null ? $this->statements->transactionsEnded() : null;
+
+        if ($ended !== null && $ended['rollbacks'] > $before['rollbacks']) {
+            throw OutboxException::transactionRolledBackInside();
+        }
+
         $level = $this->connection->getTransactionNestingLevel();
 
         if ($level > 1) {
             throw OutboxException::transactionLeftOpen($level - 1);
         }
 
-        if ($level < 1) {
+        // Below one, with no commit counted, nothing can tell a commit from a rollback - and
+        // without a log to count them, neither can anything here.
+        if ($level < 1 && ($ended === null || $ended['commits'] === $before['commits'])) {
             throw OutboxException::transactionEndedInside();
         }
     }
