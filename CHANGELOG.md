@@ -17,6 +17,9 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   flushed; one it cannot honour fails the check. A flush says the same through the failure
   policy, by default a line in a log the first time such an entity is written. A class declared
   through `AuditableInterface` answers per instance, and is named as checked only at flush.
+- **`audit:check` says when the outbox's connection is not watched**, since `AuditTransaction` can
+  then check only the level, and an operation that ends the transaction and begins another goes
+  unseen.
 
 ### Fixed
 - **An object in a record reached the queue whole, private properties included.** Redaction read
@@ -64,9 +67,6 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   refused on encoding. The declaration is now refused like the other ones that cannot be honoured
   — on every flush that meets it, through the failure policy — naming the class, the field and
   what to audit instead.
-- **`audit:check` says when the outbox's connection is not watched**, since `AuditTransaction` can
-  then check only the level, and an operation that ends the transaction and begins another goes
-  unseen.
 - **A rollback that failed left its transaction open for the next request.** `AuditTransaction`
   reported the failed rollback and carried on, so the connection kept a transaction nobody could
   describe, and whatever ran next on it ran inside. The connection is now closed — that session is
