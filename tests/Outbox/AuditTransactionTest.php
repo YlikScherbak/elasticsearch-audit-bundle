@@ -128,6 +128,64 @@ final class AuditTransactionTest extends TestCase
         self::assertSame(1, $this->queued(), 'and one record for the whole operation, in the queue');
     }
 
+    public function testADeclarationThatCannotBeHonouredRefusesEveryTransactionItIsIn(): void
+    {
+        // A binary column under #[AuditField] is refused through the failure policy, which
+        // inside an audit transaction means the commit is refused: the history would be short.
+        // Every time - the second operation is no more whole than the first.
+        foreach (['first', 'second'] as $attempt) {
+            try {
+                $this->transaction->run(function () use ($attempt): void {
+                    $this->em->persist(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABlob($attempt, 'PDF-BYTES'));
+                    $this->em->flush();
+                });
+                self::fail(sprintf('the %s operation was committed with its history short', $attempt));
+            } catch (OutboxException $e) {
+                self::assertStringContainsString('was not committed', $e->getMessage(), $attempt);
+            }
+
+            $this->em->clear();
+        }
+
+        self::assertSame(0, (int) $this->connection->fetchOne('SELECT COUNT(*) FROM AuditsABlob'));
+        self::assertSame(0, $this->queued());
+    }
+
+    public function testAStreamInAnAuditedColumnRefusesTheCommit(): void
+    {
+        // A stream is no value a history can hold: its record is refused by its value, which
+        // in a transaction whose purpose is a whole history refuses the commit - every time.
+        $digest = new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABinary('report.pdf', 'DIGEST');
+        $this->em->persist($digest);
+        $this->em->flush();
+        $queued = $this->queued();
+
+        foreach (['first', 'second'] as $attempt) {
+            $stream = fopen('php://memory', 'r+b');
+            self::assertIsResource($stream);
+            fwrite($stream, 'OTHER');
+            rewind($stream);
+
+            try {
+                $this->transaction->run(function () use ($digest, $stream, $attempt): void {
+                    $digest->digest = $stream;
+                    $digest->name = $attempt.'.pdf';
+                    $this->em->flush();
+                });
+                self::fail(sprintf('the %s operation was committed with a field its history could not read', $attempt));
+            } catch (OutboxException $e) {
+                self::assertStringContainsString('was not committed', $e->getMessage(), $attempt);
+            }
+
+            self::assertSame('report.pdf', $this->connection->fetchOne('SELECT name FROM AuditsABinary'), $attempt);
+            self::assertSame($queued, $this->queued(), $attempt);
+            $this->em->clear();
+            $digest = $this->em->find(\Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABinary::class, $digest->id);
+            self::assertNotNull($digest);
+        }
+    }
+
+
     public function testARollbackTakesBothHalvesWithIt(): void
     {
         try {
