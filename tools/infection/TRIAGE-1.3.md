@@ -1439,6 +1439,34 @@ frame's rollback must not void. It has one now.
 field that went and came back stayed as context. A frame with one field 1 → 2 → 1 and another 5 → 6,
 then a REMOVE, now says the record goes out with the second alone — red under the mutant.
 
+## The tag's runs, and the work of 1.4
+
+The floors' base is CI 37490863815 (`9e174ed`): timeout 120 s a mutant, 3 threads a part; main
+2640 of 2744 (96.21%), Doctrine 4036 of 4345 (92.89%). The code of `5039704` is that code; measured
+again it gave Doctrine 92.91% (CI 37503491508) and 92.84% (release dry run 37503561653), and main
+the same 96.21% each time, with no transition. The same code, but other versions of the
+environment: between the runs CI moved PHPUnit 12.5.35 → 12.5.38 and PHP 8.3.33 → 8.3.35, since
+nothing pins them. The movement is not put down to the order of the tests alone; that was not
+isolated.
+
+By name, from the statuses of the three runs:
+
+- `HistoryReplay.php:174`, `LessThanOrEqualToNegotiation`: killed → timed out.
+- `StatementLog.php:620`, `LogicalAndNegation` in `ownerOf()`: killed → timed out.
+- `StatementLog.php:864`, `NotIdentical`: timed out → killed.
+
+Each is a loop that, under the mutant, a test may end first or may not. The first work of 1.4 is
+to make them as `isInside()` was made: a loop bounded by what it walks, so the mutant is killed by
+an assertion, whatever the machine.
+
+Apart from them, `ReadableSql.php:39` goes escaped ↔ timed out. It does not move the strict score —
+both count against it — and it belongs to another class; it is named here so that a transition of
+it is not taken for news.
+
+Also 1.4: a reproducible environment for the gate — the mutation image's PHP, PHPUnit and Infection
+pinned, so that a base is measured again under what it was measured under. The compatibility
+matrix stays unpinned, as it is there to meet what users install.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

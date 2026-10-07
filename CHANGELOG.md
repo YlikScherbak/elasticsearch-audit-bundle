@@ -600,6 +600,12 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   gives the difference from the measured run and claims no cause. Mutants that a stack running out
   or a test order killed on one machine and not another are killed by an assertion now. Nothing
   the bundle does changed for this.
+- **The floors were measured on CI run 37490863815** (`9e174ed`), with a timeout of 120 seconds a
+  mutant and 3 threads a part: the bundle 2640 killed of 2744 covered, **96.21%**; the Doctrine
+  listener 4036 of 4345, **92.89%**. The same code measured on the release candidate gave the
+  Doctrine listener 92.91% and 92.84% — the same code under other versions of the environment
+  (PHPUnit and PHP are not pinned); the three mutants that moved are named in
+  `tools/infection/TRIAGE-1.3.md`.
 
 ## [1.2.5] - 2026-10-02
 
