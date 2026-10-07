@@ -27,6 +27,9 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
+use Doctrine\DBAL\Types\BinaryType;
+use Doctrine\DBAL\Types\BlobType;
+use Doctrine\DBAL\Types\Type;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\Event\OnClearEventArgs;
@@ -1679,6 +1682,15 @@ final class AuditSubscriber
         // Read as an array either way: ORM 3's FieldMapping is an ArrayAccess over the
         // same keys, and reading one shape covers both majors without asking which is
         // installed.
+        // Bytes, and a stream once Doctrine reads the row back: no history can hold that, and
+        // json_encode cannot write it. Asked of the type rather than its name, so a custom
+        // type built on either is the same column.
+        $type = (string) ($mapping['type'] ?? '');
+
+        if ($type !== '' && Type::hasType($type) && (Type::getType($type) instanceof BlobType || Type::getType($type) instanceof BinaryType)) {
+            throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is a binary column (%s): its value is bytes, read back as a stream, which a history cannot hold and json_encode cannot write - the record was lost on encoding. Audit what describes it instead - its size, a checksum or the identifier of the file - as a field of its own on the entity, or by recording it with AuditWriter::record(); there is no representer for a scalar column.', $entity::class, $field, $type));
+        }
+
         $reason = match (true) {
             (bool) ($mapping['notInsertable'] ?? false) => 'is mapped as not insertable, so an INSERT leaves it to the database',
             (bool) ($mapping['notUpdatable'] ?? false) => 'is mapped as not updatable, so an UPDATE never writes it — the property can move in PHP while the row keeps what it had',

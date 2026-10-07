@@ -24,6 +24,11 @@ leaves the writer as plain values: scalars, arrays and `stdClass` objects the bu
 - Code that relied on a record carrying the application's own object to a worker — reading a
   property `json_encode` does not show — has to put that value in the record explicitly.
 
+**A `BLOB` or `BINARY` column under `#[AuditField]`** is refused as a declaration now. Take the
+attribute off it and audit what describes it — a size, a checksum, a file's identifier — as a field
+of its own, or record it yourself with `AuditWriter::record()`. Under `on_failure: throw` the flush
+that meets it does not commit.
+
 **`AuditTransaction::run()` whose rollback fails** raises `OutboxException` now, with your own
 exception as `getPrevious()`: the connection was closed, and the EntityManager has to be reset (or
 cleared) before anything else goes through it. A `catch (YourException $e)` around `run()` that

@@ -50,6 +50,11 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   reads `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK` and `ABORT` as whole statements,
   applies them to its frames, and counts them apart; run() refuses an operation that sent one. A
   commit MySQL makes on its own for DDL is still not seen, and the README says so.
+- **A `BLOB` or `BINARY` column under `#[AuditField]` lost its records after the commit.** The
+  value is bytes, and a stream once Doctrine reads the row back; the record was built anyway and
+  refused on encoding. The declaration is now refused like the other ones that cannot be honoured
+  — on every flush that meets it, through the failure policy — naming the class, the field and
+  what to audit instead.
 - **`audit:check` says when the outbox's connection is not watched**, since `AuditTransaction` can
   then check only the level, and an operation that ends the transaction and begins another goes
   unseen.
@@ -88,6 +93,11 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   itself; now the connection has been closed and the EntityManager has to be reset, which the
   caller cannot be left to guess. Code that catches its own exception type around `run()` sees it
   one level down in that one case. See UPGRADE.md.
+- **Under `on_failure: throw`, a `BLOB` or `BINARY` column under `#[AuditField]` stops the flush
+  before it commits.** The refusal is a declaration's now and comes from inside the flush; before,
+  the flush committed and the record failed on encoding afterwards. A `BINARY` column given a
+  string, which used to be written as that string, is refused as well — the same column read back
+  is a stream. With `log` the flush goes on and the record of what can be recorded is written.
 - **`redact.max_depth` and `redact.max_nodes` default to `~`:** 16 and 10 000 with a rule, JSON's
   own bounds without one.
 

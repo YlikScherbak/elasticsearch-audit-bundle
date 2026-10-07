@@ -521,8 +521,11 @@ record in the same database as the change.
 > insert.
 
 A mistake in an audit declaration — `alwaysRecord` naming a field that is not audited, an
-association without a representer — is handled by the same policy: logged and skipped by
-default, fatal to the flush with `throw`. Composite identifiers are joined with `|`; an
+association without a representer, a `BLOB` or `BINARY` column under `#[AuditField]` (**since
+1.3.1**: bytes, read back as a stream, are nothing a history can hold — audit their size, a
+checksum or a file's identifier as a field of its own, or record it with `AuditWriter::record()`) —
+is handled by the same policy, on every flush that meets it: logged and skipped by default, fatal
+to the flush with `throw`, and inside an `AuditTransaction` a reason not to commit. Composite identifiers are joined with `|`; an
 identifier that is itself an entity is represented by that entity's identifier.
 
 ### Changes inside the elements of a collection

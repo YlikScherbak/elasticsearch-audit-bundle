@@ -134,6 +134,29 @@ final class AuditTransactionTest extends TestCase
         self::assertFalse($this->connection->isTransactionActive(), 'no transaction left open');
     }
 
+    public function testADeclarationThatCannotBeHonouredRefusesEveryTransactionItIsIn(): void
+    {
+        // A binary column under #[AuditField] is refused through the failure policy, which
+        // inside an audit transaction means the commit is refused: the history would be short.
+        // Every time - the second operation is no more whole than the first.
+        foreach (['first', 'second'] as $attempt) {
+            try {
+                $this->transaction->run(function () use ($attempt): void {
+                    $this->em->persist(new \Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABlob($attempt, 'PDF-BYTES'));
+                    $this->em->flush();
+                });
+                self::fail(sprintf('the %s operation was committed with its history short', $attempt));
+            } catch (OutboxException $e) {
+                self::assertStringContainsString('was not committed', $e->getMessage(), $attempt);
+            }
+
+            $this->em->clear();
+        }
+
+        self::assertSame(0, (int) $this->connection->fetchOne('SELECT COUNT(*) FROM AuditsABlob'));
+        self::assertSame(0, $this->queued());
+    }
+
     public function testARollbackTakesBothHalvesWithIt(): void
     {
         try {
