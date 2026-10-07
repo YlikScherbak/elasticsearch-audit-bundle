@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Outbox;
 
 use Borsche\ElasticsearchAuditBundle\Coalescing\AuditFrame;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Exception\OutboxException;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Writer\FailureDetails;
@@ -63,6 +64,9 @@ final class AuditTransaction
         // Appended, because the ones above are passed positionally. Two foreign
         // exceptions meet on the rollback path and this says whether either is repeated.
         private readonly FailureDetails $failureDetails = FailureDetails::Cause,
+        // What the connection did, where the bundle watches it: told when a session is
+        // abandoned, so that what it left unfinished is not read as still going on.
+        private readonly ?StatementLog $statements = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
@@ -148,9 +152,7 @@ final class AuditTransaction
 
             return $result;
         } catch (\Throwable $e) {
-            $this->undo($e);
-
-            throw $e;
+            throw $this->undo($e) ?? $e;
         } finally {
             $this->context->leave();
         }
@@ -256,9 +258,15 @@ final class AuditTransaction
     /**
      * Rolls back both halves. The frame is reset rather than closed: what it holds
      * describes rows that are being undone.
+     *
+     * @return OutboxException|null what to raise instead of the operation's own failure:
+     *                              said when the rollback failed and the session had to be
+     *                              abandoned, because then the caller has more to do
      */
-    private function undo(\Throwable $cause): void
+    private function undo(\Throwable $cause): ?OutboxException
     {
+        $abandoned = null;
+
         try {
             try {
                 // Every level, down to none - run() refuses to start inside a transaction,
@@ -288,6 +296,8 @@ final class AuditTransaction
                     ],
                     $rollback,
                 );
+
+                $abandoned = $this->abandon($cause);
             }
         } finally {
             // Every level rather than just the outermost: the operation may have left one
@@ -302,6 +312,31 @@ final class AuditTransaction
             // today; it is here for the day a line is added above it that can throw.
             $this->frame->dropEverything();
         }
+
+        return $abandoned;
+    }
+
+    /**
+     * Ends a session whose transaction could not be rolled back.
+     *
+     * Left as it was, the connection would carry a transaction nobody can describe into
+     * whatever runs next on it - the next request's writes inside it, uncommitted for as
+     * long as the process lives. Closed, it is over: the database discards what an
+     * unfinished transaction held when its connection drops, and DBAL opens a new one on
+     * the next use. That is a reason to close it, not a claim that anything was rolled
+     * back, and neither the log nor the exception says it was.
+     */
+    private function abandon(\Throwable $cause): OutboxException
+    {
+        try {
+            $this->connection->close();
+        } catch (\Throwable $close) {
+            $this->report('The audit transaction could not close its connection after a failed rollback: {reason}.', ['reason' => $this->failureDetails->of($close)->getMessage()], $close);
+        }
+
+        $this->statements?->sessionEnded();
+
+        return OutboxException::sessionAbandoned($cause);
     }
 
     /**

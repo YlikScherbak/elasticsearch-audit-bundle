@@ -485,6 +485,9 @@ final class ElasticsearchAuditExtension extends Extension
                 // Two foreign exceptions meet on its rollback path: the operation's own
                 // and the driver's.
                 $failureDetails,
+                // Told when a session has to be abandoned, so that the history read from
+                // the connection does not keep an unfinished transaction open for ever.
+                new Reference(self::SERVICE_STATEMENT_LOG, ContainerInterface::NULL_ON_INVALID_REFERENCE),
             ]));
             $container->setAlias(AuditTransaction::class, self::SERVICE_AUDIT_TRANSACTION);
         } elseif ($transport === 'collector') {

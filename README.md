@@ -1517,6 +1517,14 @@ and leaves the transaction perfectly committable, and a veto never touches the d
 - **after a rollback the EntityManager is out of step with the database**, as after any hand-rolled
   transaction. Clear or reset it.
 
+**When even the rollback fails** (**since 1.3.1**) the connection is closed: the session is over,
+the database discards what an unfinished transaction held when its connection drops, and the next
+use of the connection opens a new one — rather than the next request's writes landing inside a
+transaction nobody will ever end. `run()` then raises `OutboxException` saying so, with the
+operation's own exception as its `getPrevious()`; it does not claim anything was rolled back,
+because nothing saw that happen. On a **persistent** connection closing it does not drop the
+session, and this guarantees nothing about what the database still holds.
+
 **What it still does not promise.** The record is durable and will be delivered; it is not
 searchable by the time `run()` returns. Elasticsearch cannot be part of a database transaction,
 and nothing here pretends otherwise — what changed is that the record can no longer be lost, only

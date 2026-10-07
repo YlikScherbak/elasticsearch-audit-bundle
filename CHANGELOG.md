@@ -37,6 +37,12 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   that ended run()'s transaction itself is refused as well, with a message that does not say
   whether it was a commit or a rollback, because the level cannot tell. The code responsible dates
   from 1.1.0.
+- **A rollback that failed left its transaction open for the next request.** `AuditTransaction`
+  reported the failed rollback and carried on, so the connection kept a transaction nobody could
+  describe, and whatever ran next on it ran inside. The connection is now closed — that session is
+  over, and the next use opens a new one — and the log the history is read from is told the same:
+  what the session left unfinished is void and no frame of it stays open. Nothing claims a
+  rollback that nobody saw. The code responsible dates from 1.1.0.
 - **`redact.max_depth` and `redact.max_nodes` did nothing without `redact.fields`.** Nothing was
   registered then, and a limit written down bounded nothing. Set, they now apply either way.
 
@@ -61,6 +67,11 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   encoded, and an endless one never finished. With a rule the limits are what they were, 16 levels
   and 10 000 places unless configured. A value too deep for JSON, which was lost on encoding, is
   refused earlier and by name; so is a stream or another resource.
+- **When an audit transaction cannot roll back, `run()` raises `OutboxException`, with the
+  operation's own exception as its `getPrevious()`.** It used to raise the operation's exception
+  itself; now the connection has been closed and the EntityManager has to be reset, which the
+  caller cannot be left to guess. Code that catches its own exception type around `run()` sees it
+  one level down in that one case. See UPGRADE.md.
 - **`redact.max_depth` and `redact.max_nodes` default to `~`:** 16 and 10 000 with a rule, JSON's
   own bounds without one.
 

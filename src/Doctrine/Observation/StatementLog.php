@@ -244,6 +244,27 @@ final class StatementLog
     }
 
     /**
+     * The session the open transactions ran in is over: its connection was closed because a
+     * rollback failed, and the next use of it opens a new one.
+     *
+     * Not a rollback this log saw, and not recorded as one by anything that reads it: the
+     * database discards what an unfinished transaction held when its connection drops, but
+     * nothing here watched that happen. What it means for the log is narrower and certain -
+     * nothing that session left unfinished is used again. Its statements are void, so no
+     * history is built from them and no later commit can make them final; and no frame is
+     * left open, so the next flush is not read as one nested inside a transaction that will
+     * never end.
+     */
+    public function sessionEnded(): void
+    {
+        if ($this->open !== []) {
+            $this->voidFrom($this->open[0]);
+        }
+
+        $this->open = [];
+    }
+
+    /**
      * A statement ran -- or a savepoint statement, which is how DBAL nests.
      *
      * @param array<array-key, mixed> $params

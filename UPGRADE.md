@@ -24,6 +24,18 @@ leaves the writer as plain values: scalars, arrays and `stdClass` objects the bu
 - Code that relied on a record carrying the application's own object to a worker — reading a
   property `json_encode` does not show — has to put that value in the record explicitly.
 
+**`AuditTransaction::run()` whose rollback fails** raises `OutboxException` now, with your own
+exception as `getPrevious()`: the connection was closed, and the EntityManager has to be reset (or
+cleared) before anything else goes through it. A `catch (YourException $e)` around `run()` that
+must see that case as well looks one level down:
+
+```php
+} catch (OutboxException $e) {
+    $em->clear();
+    $cause = $e->getPrevious(); // what your operation threw, the same object
+}
+```
+
 ---
 
 ## To 1.3.0

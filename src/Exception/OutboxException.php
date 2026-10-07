@@ -68,6 +68,11 @@ final class OutboxException extends \RuntimeException implements AuditException,
         return new self('The operation ended the audit transaction itself - code it called, or a listener run while its history was written, committed it or rolled it back, and which of the two cannot be told from here. Its history was not written, and what was already committed cannot be undone by this transaction. Do not commit or roll back the transaction AuditTransaction::run() opened: its commit is the one the change and its history share.');
     }
 
+    public static function sessionAbandoned(\Throwable $operation): self
+    {
+        return new self('The operation failed and its transaction could not be rolled back, so the connection was closed: that session is over, nothing it left unfinished is used again, and the next use of the connection opens a new one. Whether the database rolled the transaction back is not something this can see - it discards an unfinished transaction when the connection drops, unless the connection is persistent. The EntityManager still holds the operation\'s objects as if it had happened: reset it, or clear() it, before any further work through it. The operation\'s own failure is the previous exception.', 0, $operation);
+    }
+
     public static function queueIsNotTransactional(string $class): self
     {
         return new self(sprintf('The outbox queue is a %s, which is not a Doctrine transport, so its records are not written on the connection this transaction commits on - they go somewhere else entirely, and the change and its record are no longer one commit. That is the only thing transport: outbox provides over transport: messenger, which asks nothing of where the queue lives. Point outbox.transport at a Doctrine transport, or use messenger.', $class));
