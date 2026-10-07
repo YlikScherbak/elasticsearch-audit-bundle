@@ -25,7 +25,8 @@ leaves the writer as plain values: scalars, arrays and `stdClass` objects the bu
   property `json_encode` does not show — has to put that value in the record explicitly.
 
 **A `BLOB` column under `#[AuditField]`** is refused as a declaration now (a `BINARY` one is not:
-it is written as before, and only a stream in it is refused). Take the
+it is written as before, and only a stream in it is reported, with the rest of the record
+written under `on_failure: log`, and the commit refused inside an `AuditTransaction`). Take the
 attribute off it and audit what describes it — a size, a checksum, a file's identifier — as a field
 of its own, or record it yourself with `AuditWriter::record()`. Under `on_failure: throw` the flush
 that meets it does not commit.

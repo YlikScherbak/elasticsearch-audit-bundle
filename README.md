@@ -530,9 +530,17 @@ to the flush with `throw`, and inside an `AuditTransaction` a reason not to comm
 A `BINARY` column is no declaration mistake, but know what its history holds. Its value is written
 as a string — and bytes that are not UTF-8 reach the index with the replacement character in their
 place, so the history of such a field is not the bytes of the row; audit their size or a hash where
-that matters. A stream in any audited column (what DBAL 3 makes of every `BINARY` value, or one the
-application wrote) is read by the driver to its end, so that field is doubt, named in the warning
-of its class, and the rest of the record is written. `audit:check`
+that matters.
+
+A stream in an audited column of the entity's own row (what DBAL 3 makes of every `BINARY` value,
+or one the application wrote) is read by the driver to its end, so the history cannot say what it
+holds: that field's change is left out of the record and reported through the same policy, naming
+the class and the field. With `log`, outside an `AuditTransaction`, the rest of the record is
+written. Inside one, the commit is refused. With `throw`, the failure leaves `flush()` — which is
+not a rollback where the record is published after the commit. **The next change of that field is
+not in the history either**: its old side is the stream's, which nobody read, so it is reported
+the same way rather than told as a change from a value the row did not hold. In a tracked
+element's field, or in an always-recorded one, a stream still refuses the whole record. `audit:check`
 asks the same questions of every audited class on the connection before anything is flushed, and
 fails on the first it cannot honour (**since 1.3.1**) — a class declared through
 `AuditableInterface` answers per instance and is named as checked only at flush. Composite identifiers are joined with `|`; an

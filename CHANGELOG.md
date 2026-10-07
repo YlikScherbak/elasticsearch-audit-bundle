@@ -70,9 +70,13 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
 - **A stream written to an audited column was recorded as `''`.** The history read the value from
   the statement's parameter after the driver had read the stream to its end, and the column's type
   read what was left of it: a `BINARY` column given a stream was said to have become an empty
-  string while the row held every byte. A bound stream is no longer converted: that field is
-  doubt, named in the warning of the class, and the rest of the record is written — the row is
-  true in every other column. The code responsible dates from 1.3.0.
+  string while the row held every byte. A bound stream is no longer converted: that field's
+  change is left out and reported through the failure policy, naming the class and the field, as
+  is the next change of it, whose old side nobody read. Under `on_failure: log` the rest of the
+  record is written — the row is true in every other column; inside an `AuditTransaction` the
+  commit is refused; under `throw` the failure leaves the flush. In a tracked element's field or
+  an always-recorded one a stream still refuses the whole record. The code responsible dates from
+  1.3.0.
 - **A rollback that failed left its transaction open for the next request.** `AuditTransaction`
   reported the failed rollback and carried on, so the connection kept a transaction nobody could
   describe, and whatever ran next on it ran inside. The connection is now closed — that session is
@@ -116,8 +120,8 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   committed and the record failed on encoding afterwards. With `log` the flush goes on and the
   record of what can be recorded is written. A `BINARY` column is not refused: DBAL 4 reads it back
   as a string, which is written as before; DBAL 3 turns every value of one into a stream, and that
-  field — whose records were lost on encoding until now — is doubt, with the rest of the record
-  written.
+  field — whose records were lost on encoding until now — is reported through the policy, with the
+  rest of the record written under `log`. Under `throw` such a flush fails, as it did before.
 - **`redact.max_depth` and `redact.max_nodes` default to `~`:** 16 and 10 000 with a rule, JSON's
   own bounds without one.
 

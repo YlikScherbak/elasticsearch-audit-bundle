@@ -1495,7 +1495,26 @@ first pilots outside the one application meet.
 A stream written to an audited column of an entity's own row is doubt since 1.3.1: that field is
 left out, and the rest of the record is written. In a tracked element's field, or in a field the
 entity records always, it is still refused with the whole record, by its value and naming why -
-no case of either was found, and a guard nothing tests is a mutant the gate keeps.
+no live case of either was found, and a guard nothing tests is a mutant the gate keeps. That is
+why it is a limit and not an oversight.
+
+### Left for 1.4: the change after a stream
+
+1.3.1 leaves the next change of a field written as a stream out of the history and reports it:
+its new value is known from the statement's parameter, its old side is the stream's, which nobody
+read. Two ways to keep it, neither taken in a patch:
+
+- **A one-sided change**: `new` as written, `old` marked as not read - "it became C" is true and
+  worth an audit without "it was".
+- **One SELECT of the column before the UPDATE** when the row memory holds it as unknown after a
+  stream - `LookRightAfter`'s mechanism, before the statement instead of after it.
+
+### For 1.4: is doubt compatible with `require_transaction`?
+
+Doubt does not spoil the outbox: a statement the log could not follow writes the record without
+that part of the history, and `AuditTransaction` commits it - as 1.3.0 does. 1.3.1 makes one kind
+of doubt a failure, a stream in an audited column, because the application can change what causes
+it. Whether every doubt should refuse the commit that promises a whole history is the question.
 
 ### Left for 1.4: the mutants 1.3.1's triage found in code it did not touch
 
