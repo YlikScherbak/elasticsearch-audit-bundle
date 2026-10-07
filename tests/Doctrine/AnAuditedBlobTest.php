@@ -114,9 +114,11 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         $last = $this->documents()[\count($this->documents()) - 1];
         self::assertSame(['name' => ['old' => 'report.pdf', 'new' => 'renamed.pdf']], $last['changes']);
 
-        // One statement wrote the stream, and one is what the doubt counts.
-        self::assertCount(1, $this->doubtsOf(AuditsABinary::class));
-        self::assertStringContainsString('for 1 statement(s)', $this->doubtsOf(AuditsABinary::class)[0]);
+        // One statement wrote the stream, and one is what the doubt counts - on DBAL 3 the
+        // INSERT's value was a stream already, and is a doubt of its own.
+        $doubts = $this->doubtsOf(AuditsABinary::class);
+        self::assertCount(ObservingMiddleware::onDbal3() ? 2 : 1, $doubts);
+        self::assertStringContainsString('for 1 statement(s)', $doubts[\count($doubts) - 1]);
     }
 
     public function testAValueWrittenAfterAStreamHasNoOldSideNotTheOneBeforeIt(): void
