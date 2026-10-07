@@ -75,6 +75,42 @@ final class ElasticsearchAuditExtensionTest extends TestCase
         self::assertFalse($container->hasDefinition(ChangeRedactor::class));
     }
 
+    public function testWithoutConfiguredFieldsARecordStillLeavesAsPlainValues(): void
+    {
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']]]);
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        $writer->record('user', 1, 'update', ['profile' => new class {
+            public string $status = 'active';
+            private string $secret = 'kept back';
+        }]);
+
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        self::assertEquals((object) ['status' => 'active'], $gateway->only('audit_log')['changes']['profile']);
+        self::assertSame(\stdClass::class, $gateway->only('audit_log')['changes']['profile']::class);
+    }
+
+    public function testALimitSetByHandAppliesWithoutARule(): void
+    {
+        // It used to be ignored: with no field named nothing was registered, and a
+        // max_depth somebody wrote down bounded nothing.
+        $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']], 'redact' => ['max_depth' => 2]]);
+
+        /** @var AuditWriter $writer */
+        $writer = $container->get(AuditWriter::class);
+        $writer->record('user', 1, 'update', ['shallow' => [['fits']]]);
+        $writer->record('user', 2, 'update', ['deep' => [[['too deep']]]]);
+
+        /** @var InMemoryGateway $gateway */
+        $gateway = $container->get(GatewayInterface::class);
+
+        self::assertCount(1, $gateway->documents['audit_log'] ?? []);
+        self::assertSame(1, $gateway->documents['audit_log'][0]['objectId']);
+    }
+
     public function testTheFrameIsWiredIntoTheWriter(): void
     {
         $container = $this->build(['client' => ['hosts' => ['http://localhost:9200']], 'coalescing' => ['numeric_fields' => ['fact']]]);

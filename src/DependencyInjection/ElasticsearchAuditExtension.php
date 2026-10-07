@@ -148,11 +148,15 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{fields: list<string>, placeholder: string, max_depth: int, max_nodes: int} $redact
+     * @param array{fields: list<string>, placeholder: string, max_depth: ?int, max_nodes: ?int} $redact
      */
     private function registerRedaction(array $redact, ContainerBuilder $container): void
     {
-        if ($redact['fields'] === []) {
+        // Without a rule as well, and only when there is something to say: limits set by
+        // hand apply whether or not a field is named - they used to be ignored without
+        // one, silently - and with nothing set the writer makes its own, which turns every
+        // record into plain values on its way out.
+        if ($redact['fields'] === [] && $redact['max_depth'] === null && $redact['max_nodes'] === null) {
             return;
         }
 
@@ -492,7 +496,7 @@ final class ElasticsearchAuditExtension extends Extension
     }
 
     /**
-     * @param array{fields: list<string>, placeholder: string, max_depth: int, max_nodes: int, failure_details: ?string} $redact
+     * @param array{fields: list<string>, placeholder: string, max_depth: ?int, max_nodes: ?int, failure_details: ?string} $redact
      */
     private function registerWriter(string $onFailure, int $batchSize, array $redact, ContainerBuilder $container): void
     {

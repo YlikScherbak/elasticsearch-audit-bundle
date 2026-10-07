@@ -330,6 +330,120 @@ final class EveryChannelSweepTest extends TestCase
         $this->assertNothingLeaked();
     }
 
+    /** @return iterable<string, array{?ChangeRedactor}> */
+    public static function redactors(): iterable
+    {
+        yield 'with a rule' => [new ChangeRedactor(['password'])];
+        yield 'with no rule at all' => [null];
+    }
+
+    /**
+     * An object the application recorded, holding the marker in a private property that
+     * nothing serialises - nothing but a queue, which serialised the object itself. The
+     * index looked clean; the row in the outbox table did not.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('redactors')]
+    public function testAnObjectsPrivatePropertyIsNotInTheOutboxRow(?ChangeRedactor $redactor): void
+    {
+        if (!\extension_loaded('pdo_sqlite')) {
+            self::markTestSkipped('pdo_sqlite is needed for the outbox row.');
+        }
+
+        $connection = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true]);
+        $queue = new QueueConnection(['table_name' => 'audit_outbox', 'queue_name' => 'audit', 'auto_setup' => false], $connection);
+        $queue->setup();
+
+        $sender = new class($queue) implements SenderInterface {
+            public function __construct(private readonly QueueConnection $queue)
+            {
+            }
+
+            public function send(Envelope $envelope): Envelope
+            {
+                $encoded = (new PhpSerializer())->encode($envelope);
+                $this->queue->send($encoded['body'], $encoded['headers'] ?? []);
+
+                return $envelope;
+            }
+        };
+
+        $writer = new AuditWriter(
+            new OutboxTransport($sender, new OutboxContext(), onlyInsideATransaction: false),
+            new SyncTransport($this->gateway(null)),
+            new IndexResolver('audit_log'),
+            new ChainActorResolver([], 'tests'),
+            new FrozenClock(),
+            [],
+            FailurePolicy::Log,
+            $this->logger(),
+            $this->events(false),
+            null,
+            $redactor,
+        );
+
+        $writer->record('user', 7, 'update', ['profile' => new KeepsTheMarkerPrivately(), 'next' => new Change(null, new KeepsTheMarkerPrivately())], ['owner' => new KeepsTheMarkerPrivately()]);
+
+        /** @var list<array<string, mixed>> $rows */
+        $rows = $connection->fetchAllAssociative('SELECT * FROM audit_outbox');
+        // The body as stored escapes the NUL bytes of private names; read it as text.
+        $this->channels['outbox'] = array_map(static fn (array $row): string => stripslashes((string) $row['body']), $rows);
+
+        self::assertCount(1, $rows, 'nothing reached the queue, so nothing was swept');
+        $this->assertNothingLeaked();
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('redactors')]
+    public function testAnObjectsPrivatePropertyIsNotInTheFailureTransport(?ChangeRedactor $redactor): void
+    {
+        $refusal = ['error' => ['type' => 'document_parsing_exception', 'reason' => 'failed to parse field [profile]']];
+
+        $queued = &$this->channels['queued message'];
+        $queued = [];
+        $stored = &$this->channels['failure transport'];
+        $stored = [];
+
+        $handler = new IndexAuditRecordHandler($this->gateway($refusal));
+
+        $bus = new class($handler, $queued, $stored) implements MessageBusInterface {
+            /**
+             * @param list<string> $queued
+             * @param list<string> $stored
+             */
+            public function __construct(
+                private readonly IndexAuditRecordHandler $handler,
+                private array &$queued,
+                private array &$stored,
+            ) {
+            }
+
+            /**
+             * @param array<object> $stamps
+             */
+            public function dispatch(object $message, array $stamps = []): Envelope
+            {
+                $envelope = Envelope::wrap($message, $stamps);
+                $serializer = new PhpSerializer();
+                $this->queued[] = stripslashes($serializer->encode($envelope)['body']);
+
+                try {
+                    ($this->handler)($message);
+                } catch (\Throwable $thrown) {
+                    $this->stored[] = stripslashes($serializer->encode($envelope->with(ErrorDetailsStamp::create($thrown)))['body']);
+                }
+
+                return $envelope;
+            }
+        };
+
+        $transport = new MessengerTransport($bus);
+        $writer = new AuditWriter($transport, $transport, new IndexResolver('audit_log'), new ChainActorResolver([], 'tests'), new FrozenClock(), [], FailurePolicy::Log, $this->logger(), $this->events(false), null, $redactor);
+
+        $writer->record('user', 7, 'update', ['profile' => new KeepsTheMarkerPrivately()], ['owner' => new KeepsTheMarkerPrivately()]);
+
+        self::assertNotSame([], $stored, 'the handler did not fail, so the channel this test is about was never written');
+        $this->assertNothingLeaked();
+    }
+
     public function testTheSweepIsSensitiveAndFullDetailsIsExactlyWhatItSounds(): void
     {
         // Both halves of one fact. A sweep that cannot see a leak proves nothing, so
@@ -364,6 +478,11 @@ final class EveryChannelSweepTest extends TestCase
             $text = (string) json_encode($channel, \JSON_PARTIAL_OUTPUT_ON_ERROR | \JSON_INVALID_UTF8_SUBSTITUTE);
 
             self::assertStringNotContainsString(self::MARKER, $text, sprintf('the marker reached the "%s" channel', $name));
+
+            // And what json_encode does not show: a private property is invisible to it
+            // and is exactly what a queue serialises. print_r reads every property of
+            // every object a channel holds.
+            self::assertStringNotContainsString(self::MARKER, print_r($channel, true), sprintf('the marker reached the "%s" channel, in a property json_encode does not show', $name));
         }
 
         self::assertNotSame([], $this->channels, 'nothing was collected, so nothing was swept');
@@ -548,5 +667,20 @@ final class EveryChannelSweepTest extends TestCase
                 return $out;
             }
         };
+    }
+}
+
+/**
+ * An object an application might well record: what it shows is harmless, and what it
+ * keeps to itself is not.
+ */
+final class KeepsTheMarkerPrivately
+{
+    public string $status = 'active';
+    private string $password = 'LEAK_MARKER_7c1f2a';
+
+    public function password(): string
+    {
+        return $this->password;
     }
 }

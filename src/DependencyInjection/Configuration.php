@@ -248,14 +248,14 @@ final class Configuration implements ConfigurationInterface
             ->end();
 
         $children->integerNode('max_depth')
-            ->info('How deep redaction follows a rule into a value the application built. Past it the record is refused rather than written half-checked: a rule that reads as "this name, anywhere" must not quietly stop applying at a depth nobody thinks about.')
+            ->info(sprintf('How deep redaction follows a rule into a value the application built. Past it the record is refused rather than written half-checked: a rule that reads as "this name, anywhere" must not quietly stop applying at a depth nobody thinks about. Left unset: %d with a rule in "fields"; without one, only as deep as json_encode itself goes, since every record is still made plain on its way out and nothing it would have written is refused. Set, it applies with or without a rule.', ChangeRedactor::DEFAULT_MAX_DEPTH))
             ->min(1)
-            ->defaultValue(ChangeRedactor::DEFAULT_MAX_DEPTH);
+            ->defaultNull();
 
         $children->integerNode('max_nodes')
-            ->info('How many places redaction looks inside one record before it refuses it. Depth alone does not bound the work: a flat array of a million elements is one level deep, and walking it happens on the request, before anything is written.')
+            ->info(sprintf('How many places redaction looks inside one record before it refuses it. Depth alone does not bound the work: a flat array of a million elements is one level deep, and walking it happens on the request, before anything is written. Left unset: %d with a rule in "fields", no bound without one. Set, it applies with or without a rule.', ChangeRedactor::DEFAULT_MAX_NODES))
             ->min(1)
-            ->defaultValue(ChangeRedactor::DEFAULT_MAX_NODES);
+            ->defaultNull();
 
         $children->enumNode('failure_details')
             ->info('How much of a failed write\'s cause the bundle repeats in the log line and in RecordFailedEvent. "cause": the class, plus messages the bundle wrote itself — the original stays reachable through WriteFailedException::getPrevious(). "full": the cause\'s message too. Left unset it follows redact.fields: configured means "cause", because a cluster or an enricher may quote a value you asked never to keep.')
