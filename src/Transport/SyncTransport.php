@@ -10,7 +10,8 @@ use Psr\Clock\ClockInterface;
 
 /**
  * Writes to Elasticsearch in the same request: one call per record, or one _bulk
- * call for a batch. Simple and visible immediately.
+ * call for a batch. Written when the call returns - and searchable after the index's next
+ * refresh, which this does not ask for.
  */
 final class SyncTransport implements BatchTransportInterface
 {

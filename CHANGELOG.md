@@ -77,6 +77,9 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   registered then, and a limit written down bounded nothing. Set, they now apply either way.
 
 ### Changed
+- **`immediately: true` is described as what it does:** the record is written before the request
+  ends, and a search finds it after the index's next refresh. The documentation called it visible
+  immediately; nothing about the write changed.
 - **A record leaves the writer as plain values.** Scalars, arrays and `stdClass` objects built by
   the bundle — never an object the application made. `RecordCreatedEvent`, `CollectedRecord`, the
   failure path and every transport see these: a listener testing `$record->changes['x'] instanceof

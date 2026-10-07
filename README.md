@@ -1426,11 +1426,16 @@ place to deal with a flaky cluster — and a retry is safe: the document is writ
 record's id, so a redelivery after a timeout overwrites the same document instead of adding a
 second one.
 
-A record that must be visible before the request ends can bypass the queue:
+A record that must reach Elasticsearch before the request ends can bypass the queue:
 
 ```php
 $this->audit->write($record, immediately: true);
 ```
+
+That is written synchronously, not made searchable: the cluster shows a document to a search
+after its next refresh (`index.refresh_interval`, a second by default), so an `AuditReader` asking
+right after the write may not find it yet. Forcing a refresh on every audit record is not
+something the bundle does — on a busy index it costs more than the record is worth.
 
 ## One commit for the change and its history
 

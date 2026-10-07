@@ -1467,6 +1467,29 @@ Also 1.4: a reproducible environment for the gate — the mutation image's PHP, 
 pinned, so that a base is measured again under what it was measured under. The compatibility
 matrix stays unpinned, as it is there to meet what users install.
 
+### From the external reviews of 1.3.0, for 1.4 (1.3.1 fixed what they found)
+
+Results for whoever uses the bundle, rather than a mutation count; the scope to be set by what the
+first pilots outside the one application meet.
+
+- **Publishing the true part of a broken audit transaction.** An operation that committed and then
+  failed, or rolled back, loses the history of what it had committed: the frame cannot tell its
+  records apart. Doctrine's records are tied to positions in the statement log, so their fate is
+  known when they are published; what stands in the way is the frame merging the records of one
+  object from before and after the commit.
+- **A byte limit for a batch**, and a decision for the one record larger than it, which no
+  splitting helps: `batch_size` counts records, and wide records can pass the cluster's
+  `http.max_content_length`.
+- **Signals for the queue:** the age of the oldest undelivered record and the state of the failure
+  transport. `writtenAt` shows what has arrived.
+- **The ORM and DBAL versions the history is read correctly on, as a matrix**, an alarm when the
+  share of statements read as doubt grows, and a strict mode for operations that must not have a
+  doubtful history.
+- **A binary column's change as its size and a hash**, as an option of the declaration rather than a
+  silent substitute.
+- **A search-visibility mode for `immediately`** if a real case asks for one — not a `bool`: not
+  refreshed, refreshed, waited for.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the
