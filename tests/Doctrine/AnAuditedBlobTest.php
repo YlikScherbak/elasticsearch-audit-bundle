@@ -7,6 +7,7 @@ namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABinary;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABlob;
+use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\KeepsABinaryUnaudited;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\KeepsABlobUnaudited;
 use Borsche\ElasticsearchAuditBundle\Writer\FailurePolicy;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -84,19 +85,32 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         );
     }
 
-    public function testAnUnauditedBlobGoesToTheDatabaseWholeAndLeavesTheStreamWhereItWas(): void
+    /** @return iterable<string, array{class-string, int}> */
+    public static function unauditedBinaryColumns(): iterable
+    {
+        // Two types, two of DBAL's conversions; on PostgreSQL both are bytea, read back as a
+        // stream. A BINARY column holds what its length allows.
+        yield 'a BLOB' => [KeepsABlobUnaudited::class, 2000];
+        yield 'a BINARY' => [KeepsABinaryUnaudited::class, 30];
+    }
+
+    /**
+     * @param class-string<KeepsABlobUnaudited|KeepsABinaryUnaudited> $class
+     */
+    #[DataProvider('unauditedBinaryColumns')]
+    public function testAnUnauditedBlobGoesToTheDatabaseWholeAndLeavesTheStreamWhereItWas(string $class, int $repeat): void
     {
         // The statements carrying the bytes are watched like any other: the listener must not
         // read the stream, move it, or take what the driver writes.
         $this->attachListener(FailurePolicy::Throw);
 
-        $bytes = str_repeat("BYTES\x00", 2000);
+        $bytes = str_repeat("BYTES\x00", $repeat);
         $stream = fopen('php://memory', 'r+b');
         self::assertIsResource($stream);
         fwrite($stream, $bytes);
         rewind($stream);
 
-        $attachment = new KeepsABlobUnaudited('a.pdf', $stream);
+        $attachment = new $class('a.pdf', $stream);
         $this->em->persist($attachment);
         $this->em->flush();
 
@@ -105,7 +119,7 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         $attachment->name = 'b.pdf';
         $this->em->flush();
 
-        $stored = $this->em->getConnection()->fetchOne('SELECT content FROM '.$this->em->getClassMetadata(KeepsABlobUnaudited::class)->getTableName());
+        $stored = $this->em->getConnection()->fetchOne('SELECT content FROM '.$this->em->getClassMetadata($class)->getTableName());
         self::assertSame($bytes, \is_resource($stored) ? stream_get_contents($stored) : $stored);
 
         self::assertSame(

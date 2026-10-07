@@ -1554,7 +1554,9 @@ use of the connection opens a new one — rather than the next request's writes 
 transaction nobody will ever end. `run()` then raises `OutboxException` saying so, with the
 operation's own exception as its `getPrevious()`; it does not claim anything was rolled back,
 because nothing saw that happen. On a **persistent** connection closing it does not drop the
-session, and this guarantees nothing about what the database still holds.
+socket; what it measured to do (pdo_mysql and pdo_pgsql, PHP 8.3, DBAL 4.4) is that PDO rolls back
+an unfinished transaction when it lets the handle go, so the next connection had none and another
+session saw nothing of it. Other drivers were not measured.
 
 **What it still does not promise.** The record is durable and will be delivered; it is not
 searchable by the time `run()` returns. Elasticsearch cannot be part of a database transaction,
