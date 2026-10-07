@@ -1552,6 +1552,14 @@ final class HistoryReplay
             return $value;
         }
 
+        // A stream bound as a parameter has been read by the driver already, to its end:
+        // converting it now - BinaryType reads what is left of it - made the history say the
+        // column became '' while the row holds every byte. Left as it is, it is refused where
+        // every stream is, by its value, with what to record instead.
+        if (\is_resource($value)) {
+            return $value;
+        }
+
         $type = $metadata->getTypeOfField($field);
         $value = \is_string($type) ? Type::getType($type)->convertToPHPValue($value, $this->em()->getConnection()->getDatabasePlatform()) : $value;
 

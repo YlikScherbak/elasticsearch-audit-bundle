@@ -1490,6 +1490,22 @@ first pilots outside the one application meet.
 - **A search-visibility mode for `immediately`** if a real case asks for one — not a `bool`: not
   refreshed, refreshed, waited for.
 
+### Left for 1.4: the mutants 1.3.1's triage found in code it did not touch
+
+Infection on `ChangeRedactor.php` and `AuditTransaction.php`, with nothing skipped (timeout 3000):
+369 mutants, 361 killed, none errored or timed out. The eight that escaped are all in code older
+than 1.3.1, and are left as they are rather than fixed in a patch:
+
+- `ChangeRedactor.php:147` CastInt and `:153` UnwrapTrim ×2, IncrementInteger, DecrementInteger —
+  the validation of a rule's spelling, since 1.0: the scope and the field are cut out of the rule
+  with offsets a test of a rule like `.field` or ` user.x` would hold.
+- `ChangeRedactor.php:269` UnwrapArrayValues — the names of the attributes a rule drops, since
+  0.9.3: their order and keys are never read, so this may be the bundle's own equivalent.
+- `AuditTransaction.php:256` TrueValue — the memo of the queue's connection check, since 1.1: a
+  mutant asks again on every run, which costs and changes nothing a test sees.
+- `AuditTransaction.php:361` UnwrapFinally — the undo's finally around dropping the frame, which its
+  own comment says is not observable today.
+
 ## Killed outside coverage
 
 Mutants the whole suite kills that coverage did not hand to the run. Fixed at the cause where the

@@ -35,7 +35,7 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   what nobody had checked. Every object is now asked once per write, and what it answered is what
   travels.
 - **A readonly property or an enum in a record lost the record.** elastic/transport walks a body
-  by reference to drop its nulls, PHP refuses a reference to a readonly property, and an enum's
+  by reference to drop its nulls (measured on 8.11 with client 8.19, and on 9.0 with client 9.x), PHP refuses a reference to a readonly property, and an enum's
   `name` is one: a DTO with a readonly property, or an enum anywhere but on a `Change`'s side,
   made the encoding throw. The same walk unset every null property of the application's own object.
   Neither happens to a value built by the bundle.
@@ -62,11 +62,17 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   reads `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK` and `ABORT` as whole statements,
   applies them to its frames, and counts them apart; run() refuses an operation that sent one. A
   commit MySQL makes on its own for DDL is still not seen, and the README says so.
-- **A `BLOB` or `BINARY` column under `#[AuditField]` lost its records after the commit.** The
-  value is bytes, and a stream once Doctrine reads the row back; the record was built anyway and
-  refused on encoding. The declaration is now refused like the other ones that cannot be honoured
+- **A `BLOB` column under `#[AuditField]` lost its records after the commit.** The value is
+  bytes, and a stream once Doctrine reads the row back; the record was built anyway and refused on
+  encoding. The declaration is now refused like the other ones that cannot be honoured
   — on every flush that meets it, through the failure policy — naming the class, the field and
   what to audit instead.
+- **A stream written to an audited column was recorded as `''`.** The history read the value from
+  the statement's parameter after the driver had read the stream to its end, and the column's type
+  read what was left of it: a `BINARY` column given a stream was said to have become an empty
+  string while the row held every byte. A bound stream is no longer converted, and is refused by
+  its value like every other, saying what to record instead. The code responsible dates from
+  1.3.0.
 - **A rollback that failed left its transaction open for the next request.** `AuditTransaction`
   reported the failed rollback and carried on, so the connection kept a transaction nobody could
   describe, and whatever ran next on it ran inside. The connection is now closed — that session is
@@ -105,11 +111,12 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   itself; now the connection has been closed and the EntityManager has to be reset, which the
   caller cannot be left to guess. Code that catches its own exception type around `run()` sees it
   one level down in that one case. See UPGRADE.md.
-- **Under `on_failure: throw`, a `BLOB` or `BINARY` column under `#[AuditField]` stops the flush
-  before it commits.** The refusal is a declaration's now and comes from inside the flush; before,
-  the flush committed and the record failed on encoding afterwards. A `BINARY` column given a
-  string, which used to be written as that string, is refused as well — the same column read back
-  is a stream. With `log` the flush goes on and the record of what can be recorded is written.
+- **Under `on_failure: throw`, a `BLOB` column under `#[AuditField]` stops the flush before it
+  commits.** The refusal is a declaration's now and comes from inside the flush; before, the flush
+  committed and the record failed on encoding afterwards. With `log` the flush goes on and the
+  record of what can be recorded is written. A `BINARY` column is not refused: DBAL 4 reads it back
+  as a string, which is written as before; DBAL 3 turns every value of one into a stream, and such
+  a record — lost on encoding until now — is refused by its value, as every stream is.
 - **`redact.max_depth` and `redact.max_nodes` default to `~`:** 16 and 10 000 with a rule, JSON's
   own bounds without one.
 

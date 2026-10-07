@@ -27,7 +27,6 @@ use Borsche\ElasticsearchAuditBundle\Model\AuditRecord;
 use Borsche\ElasticsearchAuditBundle\Model\Change;
 use Borsche\ElasticsearchAuditBundle\Writer\AuditWriter;
 use Borsche\ElasticsearchAuditBundle\Writer\Provenance;
-use Doctrine\DBAL\Types\BinaryType;
 use Doctrine\DBAL\Types\BlobType;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\ORM\EntityManagerInterface;
@@ -1732,12 +1731,14 @@ final class AuditSubscriber
         // Read as an array either way: ORM 3's FieldMapping is an ArrayAccess over the
         // same keys, and reading one shape covers both majors without asking which is
         // installed.
-        // Bytes, and a stream once Doctrine reads the row back: no history can hold that, and
-        // json_encode cannot write it. Asked of the type rather than its name, so a custom
-        // type built on either is the same column.
+        // A BLOB is read back as a stream on every DBAL this supports: no history can hold that,
+        // and json_encode cannot write it. Asked of the type rather than its name, so a custom
+        // type built on it is the same column. Not BINARY: DBAL 4 reads that back as a string,
+        // which is written as it always was - and a stream in one, which DBAL 3 reads back, is
+        // refused where every stream is, by its value.
         $type = (string) ($mapping['type'] ?? '');
 
-        if ($type !== '' && Type::hasType($type) && (Type::getType($type) instanceof BlobType || Type::getType($type) instanceof BinaryType)) {
+        if ($type !== '' && Type::hasType($type) && Type::getType($type) instanceof BlobType) {
             throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is a binary column (%s): its value is bytes, read back as a stream, which a history cannot hold and json_encode cannot write - the record was lost on encoding. Audit what describes it instead - its size, a checksum or the identifier of the file - as a field of its own on the entity, or by recording it with AuditWriter::record(); there is no representer for a scalar column.', $class, $field, $type));
         }
 

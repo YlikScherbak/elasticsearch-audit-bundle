@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\ElasticsearchAuditBundle\Tests\Doctrine;
 
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\ObservingMiddleware;
 use Borsche\ElasticsearchAuditBundle\Exception\WriteFailedException;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABinary;
 use Borsche\ElasticsearchAuditBundle\Tests\Fixtures\AuditsABlob;
@@ -26,21 +27,12 @@ use PHPUnit\Framework\Attributes\DataProvider;
  */
 final class AnAuditedBlobTest extends DoctrineTestCase
 {
-    /** @return iterable<string, array{\Closure(): object, string, string}> */
-    public static function binaryColumns(): iterable
+    public function testTheDeclarationIsRefusedAndSaysWhatToAuditInstead(): void
     {
-        yield 'a BLOB' => [static fn (): object => new AuditsABlob('report.pdf', 'PDF-BYTES'), AuditsABlob::class, 'content'];
-        yield 'a BINARY' => [static fn (): object => new AuditsABinary('report.pdf', 'DIGEST'), AuditsABinary::class, 'digest'];
-    }
-
-    /**
-     * @param \Closure(): object $entity
-     */
-    #[DataProvider('binaryColumns')]
-    public function testTheDeclarationIsRefusedAndSaysWhatToAuditInstead(\Closure $entity, string $class, string $field): void
-    {
+        $class = AuditsABlob::class;
+        $field = 'content';
         $this->attachListener(FailurePolicy::Throw);
-        $this->em->persist($entity());
+        $this->em->persist(new AuditsABlob('report.pdf', 'PDF-BYTES'));
 
         try {
             $this->em->flush();
@@ -57,6 +49,44 @@ final class AnAuditedBlobTest extends DoctrineTestCase
         $this->em->clear();
         self::assertSame(0, (int) $this->em->getConnection()->fetchOne('SELECT COUNT(*) FROM '.$this->em->getClassMetadata($class)->getTableName()));
         self::assertSame([], $this->gateway->documents);
+    }
+
+    public function testABinaryColumnIsWrittenAsItWasAndAStreamInItIsRefusedByItsValue(): void
+    {
+        // Not a declaration to refuse: DBAL 4 reads a BINARY column back as a string, and a
+        // string in it was written before 1.3.1 and is now. What cannot be written is a stream
+        // - what DBAL 3 reads it back as, or what the application put there - and that is
+        // refused where every stream is, by its value, naming what to record instead.
+        $this->attachListener(FailurePolicy::Log);
+
+        $digest = new AuditsABinary('report.pdf', 'DIGEST');
+        $this->em->persist($digest);
+        $this->em->flush();
+
+        if (ObservingMiddleware::onDbal3()) {
+            // DBAL 3 turns every BINARY value into a stream, the one just written too: such a
+            // record was lost on encoding before 1.3.1, and is refused by its value now.
+            self::assertSame([], $this->documents());
+            self::assertNotEmpty(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'is a resource')));
+            self::assertSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'binary column')), 'a BINARY declaration was refused');
+
+            return;
+        }
+
+        self::assertSame(['old' => null, 'new' => 'DIGEST'], $this->documents()[0]['changes']['digest']);
+
+        $stream = fopen('php://memory', 'r+b');
+        self::assertIsResource($stream);
+        fwrite($stream, 'OTHER');
+        rewind($stream);
+        $digest->digest = $stream;
+        $this->em->flush();
+
+        // Not a record saying it became '': the driver read the stream to its end, and what was
+        // left of it is not what the row holds.
+        self::assertCount(1, $this->documents(), 'a record holding a stream was written');
+        self::assertNotEmpty(array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'is a resource')));
+        self::assertSame([], array_filter($this->logs, static fn (string $line): bool => str_contains($line, 'binary column')), 'a BINARY declaration was refused');
     }
 
     public function testEveryFlushMeetsTheRefusalAgain(): void
