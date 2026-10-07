@@ -460,7 +460,7 @@ final class WhatTheTransportIsHandedTest extends TestCase
             {
             }
 
-            public function log($level, \Stringable|string $message, array $context = []): void
+            public function log($level, $message, array $context = []): void // untyped $message: psr/log 1.x
             {
                 $this->logs[] = strtr((string) $message, array_map(static fn (mixed $v): string => \is_scalar($v) ? (string) $v : '', array_combine(array_map(static fn (string|int $k): string => '{'.$k.'}', array_keys($context)), $context)));
             }

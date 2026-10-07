@@ -121,7 +121,7 @@
             "file": "src/Command/CheckCommand.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Command\\CheckCommand::diagnostic",
             "mutator": "UnwrapArrayValues",
-            "line": 321,
+            "line": 382,
             "text": "return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));",
             "diff": [
                 "- return implode(' — ', array_values(array_unique(array_filter($said, static fn (string $line): bool => $line !== ''))));",
@@ -253,7 +253,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::keepingOnlyTheHistorysTables",
             "mutator": "TrueValue",
-            "line": 347,
+            "line": 349,
             "text": "$this->keptFor[$em] = true;",
             "diff": [
                 "- $this->keptFor[$em] = true;",
