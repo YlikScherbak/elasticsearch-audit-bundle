@@ -225,6 +225,13 @@ final class CheckCommand extends Command
 
         $io->text(sprintf('Outbox <info>%s</info>: on the audited connection, %d record(s) waiting for a worker', $this->outboxQueueName, $waiting));
 
+        // Not a failure - the outbox works without audited entities - but a weaker promise,
+        // and one nobody would guess: AuditTransaction counts the driver's commits through
+        // the observer the listener brings, and without it only the level is left to ask.
+        if ($this->statements === null || !$this->statements->isWatching()) {
+            $io->text(sprintf('<comment>Outbox %s</comment>: its connection is not watched (no audited entities), so AuditTransaction checks only the transaction level: an operation that commits or rolls back the transaction and begins another is not seen, and its change and history are reported committed together when they were not.', $this->outboxQueueName));
+        }
+
         return true;
     }
 

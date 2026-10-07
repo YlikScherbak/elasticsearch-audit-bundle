@@ -88,6 +88,9 @@ final class StatementLog
     private int $commits = 0;
     private int $rollbacks = 0;
 
+    /** How many of those, and of the transactions begun, were SQL sent round DBAL rather than asked of it. */
+    private int $textual = 0;
+
     /** Whether an observer was put in front of a driver: what audit:check asks of the audited connection. */
     private bool $watching = false;
 
@@ -305,6 +308,26 @@ final class StatementLog
 
         if (preg_match('/^\s*ROLLBACK\s+TO\s+SAVEPOINT\s+(\S+)\s*$/i', $read ?? '', $m) === 1) {
             $this->rollBackTo($m[1]);
+
+            return null;
+        }
+
+        // A transaction begun, committed or rolled back by its SQL rather than through DBAL:
+        // the statement as a whole, so that a block that merely starts with BEGIN is not one.
+        // DBAL itself never sends these - it asks the driver - so whoever did went round DBAL,
+        // whose own count of levels no longer matches the database's. Applied to the frames
+        // all the same, because the database did it, and counted apart for whoever has to
+        // know that DBAL no longer can be asked. One that failed changed nothing.
+        $control = $failed ? null : self::transactionControl($read);
+
+        if ($control !== null) {
+            ++$this->textual;
+
+            match ($control) {
+                'begin' => $this->began(),
+                'commit' => $this->committed(),
+                'rollback' => $this->rolledBack(),
+            };
 
             return null;
         }
@@ -616,11 +639,36 @@ final class StatementLog
      * had answered - a commit that threw is not one. A nested level never reaches the driver:
      * DBAL turns it into a savepoint statement, or into nothing at all without savepoints.
      *
-     * @return array{commits: int, rollbacks: int}
+     * `textual` counts the BEGIN, COMMIT and ROLLBACK sent as SQL text among them: each one
+     * leaves DBAL's level out of step with the database.
+     *
+     * @return array{commits: int, rollbacks: int, textual: int}
      */
     public function transactionsEnded(): array
     {
-        return ['commits' => $this->commits, 'rollbacks' => $this->rollbacks];
+        return ['commits' => $this->commits, 'rollbacks' => $this->rollbacks, 'textual' => $this->textual];
+    }
+
+    /**
+     * BEGIN, COMMIT or ROLLBACK as a statement of its own, in the spellings the supported
+     * databases take: START TRANSACTION, the WORK and TRANSACTION noise words, SQLite's
+     * DEFERRED, IMMEDIATE and EXCLUSIVE, and END and ABORT, which PostgreSQL and SQLite read
+     * as COMMIT and ROLLBACK.
+     *
+     * @return 'begin'|'commit'|'rollback'|null
+     */
+    private static function transactionControl(?string $read): ?string
+    {
+        if ($read === null) {
+            return null;
+        }
+
+        return match (true) {
+            preg_match('/^\s*(?:BEGIN|START\s+TRANSACTION)(?:\s+(?:WORK|TRANSACTION|DEFERRED|IMMEDIATE|EXCLUSIVE)){0,2}\s*;?\s*$/i', $read) === 1 => 'begin',
+            preg_match('/^\s*(?:COMMIT|END)(?:\s+(?:WORK|TRANSACTION))?\s*;?\s*$/i', $read) === 1 => 'commit',
+            preg_match('/^\s*(?:ROLLBACK|ABORT)(?:\s+(?:WORK|TRANSACTION))?\s*;?\s*$/i', $read) === 1 => 'rollback',
+            default => null,
+        };
     }
 
     /** Where the log has got to, for a caller that wants to know what ran after this point. */

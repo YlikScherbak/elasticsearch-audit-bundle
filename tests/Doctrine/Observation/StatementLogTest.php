@@ -437,4 +437,53 @@ final class StatementLogTest extends TestCase
             'the first answer, beside its INSERT; nothing beside the others, and nothing carried to the next INSERT',
         );
     }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function transactionControlAsText(): iterable
+    {
+        yield 'COMMIT' => ['COMMIT', StatementLog::COMMITTED];
+        yield 'commit work;' => ['commit work;', StatementLog::COMMITTED];
+        yield 'END TRANSACTION' => ['END TRANSACTION', StatementLog::COMMITTED];
+        yield 'ROLLBACK' => ['ROLLBACK', StatementLog::VOID];
+        yield 'ABORT' => ['ABORT', StatementLog::VOID];
+        yield 'rollback transaction' => ['rollback transaction', StatementLog::VOID];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('transactionControlAsText')]
+    public function testATransactionEndedByItsSqlIsEndedInTheLogAndCountedApart(string $sql, string $fate): void
+    {
+        // Sent round DBAL: the database did it, so the log's frames follow - and it is
+        // counted apart, since DBAL's own level no longer says where the database is.
+        $log = new StatementLog();
+        $log->began();
+        $inside = $log->executed('UPDATE CrateItem SET quantity = ? WHERE id = ?', [1 => 3, 2 => 1], 1);
+
+        self::assertNull($log->executed($sql, [], 0), 'transaction control kept as a statement');
+        self::assertSame($fate, $log->fate((int) $inside));
+        self::assertFalse($log->inTransaction());
+        self::assertSame(1, $log->transactionsEnded()['textual']);
+    }
+
+    public function testATransactionBegunByItsSqlOpensAFrame(): void
+    {
+        $log = new StatementLog();
+
+        foreach (['BEGIN', 'START TRANSACTION', 'BEGIN IMMEDIATE TRANSACTION'] as $i => $begin) {
+            $log->executed($begin, [], 0);
+            self::assertTrue($log->inTransaction(), $begin);
+            self::assertSame($i + 1, $log->transactionsEnded()['textual']);
+            $log->rolledBack();
+        }
+    }
+
+    public function testABlockThatStartsWithBeginIsNotATransaction(): void
+    {
+        // A whole statement or nothing: a block, a failed BEGIN, a ROLLBACK TO a savepoint.
+        $log = new StatementLog();
+        $log->executed('BEGIN UPDATE CrateItem SET quantity = 1; END;', [], 0);
+        $log->executed('BEGIN', [], 0, failed: true);
+
+        self::assertFalse($log->inTransaction());
+        self::assertSame(0, $log->transactionsEnded()['textual']);
+    }
 }

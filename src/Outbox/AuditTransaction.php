@@ -176,7 +176,7 @@ final class AuditTransaction
     }
 
     /**
-     * @param array{commits: int, rollbacks: int}|null $before
+     * @param array{commits: int, rollbacks: int, textual: int}|null $before
      */
     private function committedSince(?array $before): bool
     {
@@ -270,13 +270,20 @@ final class AuditTransaction
      * driver's own count says so. A rollback means the frame may describe what was undone,
      * and nothing in it is kept; a commit is let through to the caller, which decides.
      *
-     * @param array{commits: int, rollbacks: int}|null $before
+     * @param array{commits: int, rollbacks: int, textual: int}|null $before
      *
      * @throws OutboxException
      */
     private function assertTheOperationLeftOneLevel(?array $before): void
     {
         $ended = $before !== null && $this->statements !== null ? $this->statements->transactionsEnded() : null;
+
+        // First, because it decides how much the rest can be trusted: SQL that began, committed
+        // or rolled back a transaction round DBAL leaves DBAL's level out of step with the
+        // database, and nothing read from that level means what it says any more.
+        if ($ended !== null && $ended['textual'] > $before['textual']) {
+            throw OutboxException::transactionControlledAsText();
+        }
 
         if ($ended !== null && $ended['rollbacks'] > $before['rollbacks']) {
             throw OutboxException::transactionRolledBackInside();

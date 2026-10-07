@@ -44,6 +44,15 @@ Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0
   says the two were not committed together; after a rollback nothing of the history is kept; a
   failure after a commit says what stays committed. Without the observer only the level is
   checked, and this is not seen. The code responsible dates from 1.1.0.
+- **A transaction begun, committed or rolled back by its SQL went unseen.** `COMMIT` sent through
+  `executeStatement()` left DBAL's level at one while the database had none, so run() went on as
+  if nothing had happened and the log of the connection kept the transaction open. The log now
+  reads `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK` and `ABORT` as whole statements,
+  applies them to its frames, and counts them apart; run() refuses an operation that sent one. A
+  commit MySQL makes on its own for DDL is still not seen, and the README says so.
+- **`audit:check` says when the outbox's connection is not watched**, since `AuditTransaction` can
+  then check only the level, and an operation that ends the transaction and begins another goes
+  unseen.
 - **A rollback that failed left its transaction open for the next request.** `AuditTransaction`
   reported the failed rollback and carried on, so the connection kept a transaction nobody could
   describe, and whatever ran next on it ran inside. The connection is now closed — that session is

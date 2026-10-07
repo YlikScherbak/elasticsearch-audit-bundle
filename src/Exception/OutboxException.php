@@ -78,6 +78,11 @@ final class OutboxException extends \RuntimeException implements AuditException,
         return new self('The operation rolled back the transaction AuditTransaction::run() opened itself - code it called, or a listener run while its history was written. Its history was not written, since what it describes may have been undone, and whatever was left was rolled back. Anything the operation committed itself before that stays committed, and may have no history. Do not roll back the transaction run() opened: throw instead, and it is rolled back for you.');
     }
 
+    public static function transactionControlledAsText(): self
+    {
+        return new self('The operation began, committed or rolled back a transaction by sending the SQL itself - BEGIN, COMMIT, ROLLBACK - rather than through the connection, inside AuditTransaction::run(). DBAL keeps its own count of transactions and did not see it, so the count no longer matches the database and nothing read from it can be trusted. Its history was not written; what the SQL committed stays committed. Use the connection\'s beginTransaction(), commit() and rollBack().');
+    }
+
     public static function committedBeforeFailing(\Throwable $failure): self
     {
         return new self('The operation committed part of its work itself - the transaction AuditTransaction::run() opened, ended by code it called or by a listener - and then did not complete: the previous exception says why. What it committed stays committed, nothing here can undo it, and its history was not written; what came after was rolled back. Do not commit the transaction run() opened: its commit is the one the change and its history share.', 0, $failure);

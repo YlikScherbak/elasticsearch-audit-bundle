@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\ElasticsearchAuditBundle\Tests\Command;
 
 use Borsche\ElasticsearchAuditBundle\Command\CheckCommand;
+use Borsche\ElasticsearchAuditBundle\Doctrine\Observation\StatementLog;
 use Borsche\ElasticsearchAuditBundle\Elasticsearch\IndexDefinition;
 use Borsche\ElasticsearchAuditBundle\Tests\InMemoryGateway;
 use Borsche\ElasticsearchAuditBundle\Writer\IndexResolver;
@@ -46,6 +47,21 @@ final class CheckCommandOutboxTest extends TestCase
 
         self::assertStringContainsString('on the audited connection', $output);
         self::assertStringContainsString('0 record(s) waiting', $output);
+    }
+
+    public function testAnOutboxOnAConnectionNobodyWatchesSaysWhatItCannotSee(): void
+    {
+        // Not a failure: the outbox needs no audited entity. A weaker promise all the same,
+        // and the line is how anybody would find out.
+        $queue = $this->queueOn($this->audited);
+        $queue->setup();
+
+        self::assertStringContainsString('checks only the transaction level', $this->check($queue));
+
+        $watched = new StatementLog();
+        $watched->watchesADriver();
+
+        self::assertStringNotContainsString('checks only the transaction level', $this->check($queue, statements: $watched));
     }
 
     public function testAQueueOnAnotherConnectionFailsTheCheck(): void
@@ -94,7 +110,7 @@ final class CheckCommandOutboxTest extends TestCase
         );
     }
 
-    private function check(?object $queue, int $expected = CheckCommand::SUCCESS): string
+    private function check(?object $queue, int $expected = CheckCommand::SUCCESS, ?StatementLog $statements = null): string
     {
         $gateway = new InMemoryGateway();
         $gateway->indices['audit_log'] = (new IndexDefinition())->toArray();
@@ -108,6 +124,7 @@ final class CheckCommandOutboxTest extends TestCase
             $queue,
             $queue === null ? null : $this->audited,
             $queue === null ? '' : 'audit_outbox',
+            statements: $statements,
         );
 
         $tester = new CommandTester($command);

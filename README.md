@@ -1520,8 +1520,16 @@ and leaves the transaction perfectly committable, and a veto never touches the d
 
   On a connection the bundle does not watch — the outbox without audited entities — only the level
   is checked: ending the transaction is refused without saying whether it was a commit, and one
-  ended and begun again is not seen. Both are checked when the operation returns and again after
-  its history is queued, since that runs the application's listeners;
+  ended and begun again is not seen; `audit:check` says so. Both are checked when the operation
+  returns and again after its history is queued, since that runs the application's listeners.
+
+  **SQL that controls the transaction itself** — `BEGIN`, `COMMIT`, `ROLLBACK` sent through
+  `executeStatement()` — goes round DBAL, whose own count of levels then no longer matches the
+  database. It is recognised on the watched connection and refused: what it committed stays
+  committed without a history, and if what is left cannot be rolled back because the database has
+  no transaction any more, the session is abandoned as above. What nothing can see is a commit the
+  database makes on its own: on **MySQL a DDL statement** (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`)
+  commits the open transaction implicitly. Keep schema changes out of `run()`;
 - **no `write($record, immediately: true)` inside it.** That call exists to reach Elasticsearch
   before the request ends, which is exactly what must not happen for a change that may roll back;
 - **the queue is on the connection being audited.** A second connection to the same database is a

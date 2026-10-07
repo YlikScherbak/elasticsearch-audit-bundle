@@ -300,6 +300,56 @@ final class AnOperationThatEndsItsTransactionTest extends TestCase
         self::assertSame([], $this->queuedIds());
     }
 
+    public function testACommitSentAsSqlIsRefusedAndTheConnectionStartedAfresh(): void
+    {
+        // DBAL's level says one; the database has none. Rolling back what is left fails, the
+        // session is abandoned, and the next use of the connection is in step again.
+        $refusal = $this->expectRefusal(function (): void {
+            $this->approve(1);
+            $this->connection->executeStatement('COMMIT');
+        }, 'could not be rolled back');
+
+        self::assertInstanceOf(OutboxException::class, $refusal->getPrevious());
+        self::assertStringContainsString('sending the SQL itself', $refusal->getPrevious()->getMessage());
+        self::assertSame(1, $this->committedOrders(), 'what the SQL committed is committed');
+        self::assertSame([], $this->queuedIds());
+        self::assertSame(0, $this->connection->getTransactionNestingLevel());
+
+        $this->transaction->run(function (): void {
+            $this->approve(2);
+        });
+
+        self::assertSame([2], $this->queuedIds(), 'the next operation is its own again');
+    }
+
+    public function testACommitAndABeginSentAsSqlLeaveOnlyWhatWasCommitted(): void
+    {
+        $refusal = $this->expectRefusal(function (): void {
+            $this->approve(1);
+            $this->connection->executeStatement('COMMIT');
+            $this->connection->executeStatement('BEGIN');
+            $this->approve(2);
+        }, 'committed part of its work itself');
+
+        self::assertStringContainsString('sending the SQL itself', (string) $refusal->getPrevious()?->getMessage());
+        self::assertSame(1, $this->committedOrders());
+        self::assertSame([], $this->queuedIds());
+        self::assertSame(0, $this->connection->getTransactionNestingLevel());
+    }
+
+    public function testARollbackAndABeginSentAsSqlKeepNothing(): void
+    {
+        $this->expectRefusal(function (): void {
+            $this->approve(1);
+            $this->connection->executeStatement('ROLLBACK');
+            $this->connection->executeStatement('BEGIN');
+            $this->approve(2);
+        }, 'sending the SQL itself');
+
+        self::assertSame(0, $this->committedOrders());
+        self::assertSame([], $this->queuedIds());
+    }
+
     public function testABalancedOperationIsCommittedWholeAndSaysNothing(): void
     {
         $this->transaction->run(function (): void {
