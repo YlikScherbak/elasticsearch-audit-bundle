@@ -128,7 +128,7 @@ final class AuditTransaction
         // connection. A count rather than a flag of "ours": the commit this transaction makes
         // is the one after the operation, and anything the count gains before it, the
         // operation did - whoever's code it was.
-        $before = $this->statements?->transactionsEnded();
+        $before = $this->statements === null ? null : ['log' => $this->statements, 'at' => $this->statements->transactionsEnded()];
 
         try {
             $result = $operation();
@@ -176,11 +176,11 @@ final class AuditTransaction
     }
 
     /**
-     * @param array{commits: int, rollbacks: int, textual: int}|null $before
+     * @param array{log: StatementLog, at: array{commits: int, rollbacks: int, textual: int}}|null $before
      */
     private function committedSince(?array $before): bool
     {
-        return $before !== null && $this->statements !== null && $this->statements->transactionsEnded()['commits'] > $before['commits'];
+        return self::gainedSince($before)['commits'] !== 0;
     }
 
     /**
@@ -270,22 +270,22 @@ final class AuditTransaction
      * driver's own count says so. A rollback means the frame may describe what was undone,
      * and nothing in it is kept; a commit is let through to the caller, which decides.
      *
-     * @param array{commits: int, rollbacks: int, textual: int}|null $before
+     * @param array{log: StatementLog, at: array{commits: int, rollbacks: int, textual: int}}|null $before
      *
      * @throws OutboxException
      */
     private function assertTheOperationLeftOneLevel(?array $before): void
     {
-        $ended = $before !== null && $this->statements !== null ? $this->statements->transactionsEnded() : null;
+        $gained = self::gainedSince($before);
 
         // First, because it decides how much the rest can be trusted: SQL that began, committed
         // or rolled back a transaction round DBAL leaves DBAL's level out of step with the
         // database, and nothing read from that level means what it says any more.
-        if ($ended !== null && $ended['textual'] > $before['textual']) {
+        if ($gained['textual'] !== 0) {
             throw OutboxException::transactionControlledAsText();
         }
 
-        if ($ended !== null && $ended['rollbacks'] > $before['rollbacks']) {
+        if ($gained['rollbacks'] !== 0) {
             throw OutboxException::transactionRolledBackInside();
         }
 
@@ -297,9 +297,32 @@ final class AuditTransaction
 
         // Below one, with no commit counted, nothing can tell a commit from a rollback - and
         // without a log to count them, neither can anything here.
-        if ($level < 1 && ($ended === null || $ended['commits'] === $before['commits'])) {
+        if ($level < 1 && $gained['commits'] === 0) {
             throw OutboxException::transactionEndedInside();
         }
+    }
+
+    /**
+     * What the driver has done since the count was taken; nothing, where there is no log to
+     * count with - the level is then all there is to ask.
+     *
+     * @param array{log: StatementLog, at: array{commits: int, rollbacks: int, textual: int}}|null $before
+     *
+     * @return array{commits: int, rollbacks: int, textual: int}
+     */
+    private static function gainedSince(?array $before): array
+    {
+        if ($before === null) {
+            return ['commits' => 0, 'rollbacks' => 0, 'textual' => 0];
+        }
+
+        $now = $before['log']->transactionsEnded();
+
+        return [
+            'commits' => $now['commits'] - $before['at']['commits'],
+            'rollbacks' => $now['rollbacks'] - $before['at']['rollbacks'],
+            'textual' => $now['textual'] - $before['at']['textual'],
+        ];
     }
 
     /**
@@ -342,7 +365,7 @@ final class AuditTransaction
                 // and one rollBack() would close that one and leave the outer transaction
                 // holding the rows of an operation that failed. Counted down from the level
                 // found, so a driver that does not lower it cannot keep this going.
-                for ($levels = $this->connection->getTransactionNestingLevel(); $levels > 0 && $this->connection->isTransactionActive(); --$levels) {
+                for ($levels = $this->connection->getTransactionNestingLevel(); $levels > 0; --$levels) {
                     $this->connection->rollBack();
                 }
             } catch (\Throwable $rollback) {

@@ -134,7 +134,7 @@ final class AnUnbalancedOperationTest extends TestCase
             ++$told;
         };
 
-        $this->expectRefusal('did not close', function (): void {
+        $this->expectRefusal('opened a transaction inside the audit transaction and did not close it', function (): void {
             $this->approve(1);
             $this->connection->beginTransaction(); // somebody's service, never closed
             $this->approve(2);
@@ -147,7 +147,7 @@ final class AnUnbalancedOperationTest extends TestCase
 
     public function testTwoLevelsLeftOpenAreBothClosed(): void
     {
-        $this->expectRefusal('did not close', function (): void {
+        $this->expectRefusal('opened 2 transactions inside the audit transaction and did not close them', function (): void {
             $this->approve(1);
             $this->connection->beginTransaction();
             $this->connection->beginTransaction();
@@ -200,7 +200,7 @@ final class AnUnbalancedOperationTest extends TestCase
             $this->connection->beginTransaction();
         };
 
-        $this->expectRefusal('did not close', function (): void {
+        $this->expectRefusal('opened a transaction inside the audit transaction and did not close it', function (): void {
             $this->approve(1);
         });
 

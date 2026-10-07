@@ -234,6 +234,9 @@ final class WhatTheTransportIsHandedTest extends TestCase
 
         self::assertSame([], $gateway->documents);
         self::assertStringContainsString('leads back into itself', implode("\n", $this->logs));
+        // Said as what it is: with a rule it is redaction that cannot see the bottom; without
+        // one there is no redaction to blame, and the value simply cannot be serialised.
+        self::assertStringContainsString($redactor === null ? 'so it could not be serialised' : 'redaction cannot see the bottom of it', implode("\n", $this->logs));
     }
 
     public function testJsonSerializeIsAskedOnceAcrossBothPassesAndTheFailure(): void

@@ -98,7 +98,7 @@ final class ChangeRedactor
     /**
      * What is left of this record's node budget. Reset by redact(), spent by scrub().
      */
-    private ?int $budget = null;
+    private int $budget = 0;
 
     /**
      * Objects on the way down from the value being walked: a circle is an object met
@@ -223,7 +223,9 @@ final class ChangeRedactor
         // One budget for the whole record rather than one per value: what matters is how
         // much work a single write can ask for, and a record with a thousand small
         // structures costs the same as one with a single large one.
-        $this->budget = $this->maxNodes;
+        if ($this->maxNodes !== null) {
+            $this->budget = $this->maxNodes;
+        }
         $this->path = new \SplObjectStorage();
 
         // The record's own keys are places to look like any other. Counting only what
@@ -372,8 +374,13 @@ final class ChangeRedactor
      */
     private function scrub(string $objectType, mixed $value, int $base, int $depth = 0): mixed
     {
-        if ($value === null || \is_scalar($value)) {
-            return $value;
+        // What a wrapper answers with is what is walked, here and not in a call of its own:
+        // a walk that came back into this method with the wrapper again would recurse until
+        // the stack was gone, and a process that dies is not a refusal anybody can read.
+        $chain = null;
+
+        if ($value instanceof \JsonSerializable && !$value instanceof \DateTimeInterface) {
+            [$value, $chain] = $this->unwrapped($value);
         }
 
         if (\is_resource($value) || get_debug_type($value) === 'resource (closed)') {
@@ -398,18 +405,10 @@ final class ChangeRedactor
             // What comes back is plain, and a public property of it is looked at below
             // like any other.
             $value = $this->asJson($value);
-
-            if ($value === null || \is_scalar($value)) {
-                return $value;
-            }
-        }
-
-        if ($value instanceof \JsonSerializable) {
-            return $this->followed($objectType, $value, $base, $depth);
         }
 
         if (!\is_array($value) && !\is_object($value)) {
-            return $value; // nothing else is left, but the analyser cannot know it
+            return $value; // a scalar or null: nothing a rule could name
         }
 
         $isObject = \is_object($value);
@@ -445,56 +444,57 @@ final class ChangeRedactor
         $this->spend(\count($inside));
 
         $out = [];
-        // An object is always built anew, whatever it holds: handing the application's
-        // own on is the thing this walk exists not to do.
-        $touched = $isObject;
 
         if ($isObject) {
             $this->path->attach($value);
         }
 
-        try {
-            foreach ($inside as $key => $item) {
-                if (\is_string($key) && $this->redacts($objectType, $key)) {
-                    $out[$key] = $this->mask($item);
-                    $touched = true;
-
-                    continue;
-                }
-
-                $scrubbed = $this->scrub($objectType, $item, $base, $depth + 1);
-                $touched = $touched || $scrubbed !== $item;
-                $out[$key] = $scrubbed;
-            }
-        } finally {
-            if ($isObject) {
-                $this->path->detach($value);
-            }
+        // The wrappers that answered with this stay on the path while it is walked: an
+        // answer holding one of them again is a circle.
+        foreach ($chain ?? [] as $hop) {
+            $this->path->attach($hop);
         }
 
-        if (!$touched) {
-            return $value; // an array of plain values, as it arrived
+        foreach ($inside as $key => $item) {
+            $out[$key] = \is_string($key) && $this->redacts($objectType, $key)
+                ? $this->mask($item)
+                : $this->scrub($objectType, $item, $base, $depth + 1);
         }
 
-        // An object goes on as an object, so `{}` stays `{}` and keys that look like
-        // numbers stay keys: json_encode writes a stdClass the way it wrote the object.
+        // Not in a finally: a walk that throws is the whole record's refusal, and redact()
+        // starts the next record with a path of its own.
+        if ($isObject) {
+            $this->path->detach($value);
+        }
+
+        foreach ($chain ?? [] as $hop) {
+            $this->path->detach($hop);
+        }
+
+        // An object is always built anew, whatever it holds: handing the application's own on
+        // is what this walk exists not to do. It goes on as an object, so `{}` stays `{}` and
+        // keys that look like numbers stay keys - json_encode writes a stdClass the way it
+        // wrote the object. An array is rebuilt with the same values, and an array with
+        // nothing to remove compares equal to the one that came in.
         return $isObject ? (object) $out : $out;
     }
 
     /**
-     * A JsonSerializable followed to what it answers with, hop by hop, and that walked.
+     * A JsonSerializable followed to what it answers with, hop by hop: the answer, and the
+     * wrappers that gave it.
      *
-     * The hops are counted, and the objects of the chain stay on the path while what they
-     * answered is walked: an answer that holds a wrapper of its own chain again is a
-     * circle, and one that builds a new wrapper every time is stopped by the count.
+     * The hops are counted - one that builds a new wrapper every time is stopped by the count -
+     * and a wrapper met again along the chain, or on the way down to it, is a circle.
      *
      * Kept as objects rather than as spl_object_id(), and that is the whole of it: a
      * wrapper that builds the next one while being serialised is freed the moment the
      * walk moves on, PHP hands its id straight to the object built next, and a finite
      * chain was refused as a circle - which, this being fail-closed, meant the record was
      * not written at all.
+     *
+     * @return array{mixed, \SplObjectStorage<object, null>}
      */
-    private function followed(string $objectType, \JsonSerializable $value, int $base, int $depth): mixed
+    private function unwrapped(\JsonSerializable $value): array
     {
         /** @var \SplObjectStorage<object, null> $chain */
         $chain = new \SplObjectStorage();
@@ -520,17 +520,7 @@ final class ChangeRedactor
             }
         }
 
-        foreach ($chain as $hop) {
-            $this->path->attach($hop);
-        }
-
-        try {
-            return $this->scrub($objectType, $answer, $base, $depth);
-        } finally {
-            foreach ($chain as $hop) {
-                $this->path->detach($hop);
-            }
-        }
+        return [$answer, $chain];
     }
 
     private function answerOf(\JsonSerializable $value): mixed
@@ -576,7 +566,7 @@ final class ChangeRedactor
      */
     private function spend(int $places): void
     {
-        if ($this->budget === null || $this->maxNodes === null) {
+        if ($this->maxNodes === null) {
             return; // no budget: no rule, and none configured
         }
 
