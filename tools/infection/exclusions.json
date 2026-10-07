@@ -266,7 +266,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
             "mutator": "TrueValue",
-            "line": 935,
+            "line": 987,
             "text": "$seen[$type][$id] = true;",
             "diff": [
                 "- $seen[$type][$id] = true;",
@@ -279,7 +279,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
             "mutator": "TrueValue",
-            "line": 950,
+            "line": 1002,
             "text": "$seen[$type][$id] = true;",
             "diff": [
                 "- $seen[$type][$id] = true;",
@@ -292,7 +292,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
             "mutator": "TrueValue",
-            "line": 999,
+            "line": 1051,
             "text": "$joined[$type][$id][$run['collection']][$run['flush']] = true;",
             "diff": [
                 "- $joined[$type][$id][$run['collection']][$run['flush']] = true;",
@@ -305,7 +305,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::drafts",
             "mutator": "TrueValue",
-            "line": 1014,
+            "line": 1066,
             "text": "$joined[$type][$id][$run['collection']][$run['flush']] = true;",
             "diff": [
                 "- $joined[$type][$id][$run['collection']][$run['flush']] = true;",
@@ -318,7 +318,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertAuditedFieldsAreThere",
             "mutator": "TrueValue",
-            "line": 1642,
+            "line": 1694,
             "text": "$this->checkedTracking[$checked] = true;",
             "diff": [
                 "- $this->checkedTracking[$checked] = true;",
@@ -331,7 +331,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTheColumnSaysWhatTheRowHolds",
             "mutator": "CastBool",
-            "line": 1683,
+            "line": 1746,
             "text": "(bool) ($mapping['notInsertable'] ?? false) => 'is mapped as not insertable, so an INSERT leaves it to the database',",
             "diff": [
                 "- (bool) ($mapping['notInsertable'] ?? false) => 'is mapped as not insertable, so an INSERT leaves it to the database',",
@@ -344,7 +344,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTheColumnSaysWhatTheRowHolds",
             "mutator": "CastBool",
-            "line": 1684,
+            "line": 1747,
             "text": "(bool) ($mapping['notUpdatable'] ?? false) => 'is mapped as not updatable, so an UPDATE never writes it — the property can move in PHP while the row keeps what it had',",
             "diff": [
                 "- (bool) ($mapping['notUpdatable'] ?? false) => 'is mapped as not updatable, so an UPDATE never writes it — the property can move in PHP while the row keeps what it had',",
@@ -357,7 +357,7 @@
             "file": "src/Doctrine/AuditSubscriber.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\AuditSubscriber::assertTrackedCollectionsAreServable",
             "mutator": "TrueValue",
-            "line": 1771,
+            "line": 1834,
             "text": "$this->checkedTracking[$checked] = true;",
             "diff": [
                 "- $this->checkedTracking[$checked] = true;",
@@ -422,7 +422,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::keyOf",
             "mutator": "CastString",
-            "line": 552,
+            "line": 554,
             "text": "$parts[] = \\is_scalar($value) ? (string) $value : '';",
             "diff": [
                 "- $parts[] = \\is_scalar($value) ? (string) $value : '';",
@@ -435,7 +435,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::deleted",
             "mutator": "TrueValue",
-            "line": 1118,
+            "line": 1154,
             "text": "$this->gone[$root][$id] = true;",
             "diff": [
                 "- $this->gone[$root][$id] = true;",
@@ -448,7 +448,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::copyAt",
             "mutator": "LogicalOr",
-            "line": 1155,
+            "line": 1191,
             "text": "if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
             "diff": [
                 "- if (!$metadata->isSingleValuedAssociation($association) || $metadata->isAssociationInverseSide($association)) {",
@@ -461,7 +461,7 @@
             "file": "src/Doctrine/Observation/HistoryReplay.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\HistoryReplay::emptied",
             "mutator": "TrueValue",
-            "line": 1356,
+            "line": 1392,
             "text": "$this->gone[$root][$id] = true;",
             "diff": [
                 "- $this->gone[$root][$id] = true;",
@@ -799,7 +799,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::aFlushStarts",
             "mutator": "TrueValue",
-            "line": 182,
+            "line": 193,
             "text": "$this->flushesStartedAfter[$this->sequence] = true;",
             "diff": [
                 "- $this->flushesStartedAfter[$this->sequence] = true;",
@@ -812,7 +812,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::aJoinRowWritten",
             "mutator": "TrueValue",
-            "line": 519,
+            "line": 575,
             "text": "$watch['keys'][$key] = true;",
             "diff": [
                 "- $watch['keys'][$key] = true;",
@@ -825,7 +825,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
             "mutator": "TrueValue",
-            "line": 746,
+            "line": 839,
             "text": "$used[$frame] = true;",
             "diff": [
                 "- $used[$frame] = true;",
@@ -838,7 +838,7 @@
             "file": "src/Doctrine/Observation/StatementLog.php",
             "method": "Borsche\\ElasticsearchAuditBundle\\Doctrine\\Observation\\StatementLog::forgetUpTo",
             "mutator": "TrueValue",
-            "line": 752,
+            "line": 845,
             "text": "$used[$f] = true;",
             "diff": [
                 "- $used[$f] = true;",
