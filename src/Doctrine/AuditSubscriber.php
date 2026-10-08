@@ -1010,10 +1010,11 @@ final class AuditSubscriber
         // and json_encode cannot write it. Asked of the type rather than its name, so a custom
         // type built on it is the same column. Not BINARY: DBAL 4 reads that back as a string,
         // which is written as it always was - and a stream in one, which DBAL 3 reads back, is
-        // refused where every stream is, by its value.
-        $type = (string) ($mapping['type'] ?? '');
+        // refused where every stream is, by its value. A mapped field's type is one Doctrine
+        // has registered: it could not have written the row otherwise.
+        $type = $classMetadata->getTypeOfField($field);
 
-        if ($type !== '' && Type::hasType($type) && Type::getType($type) instanceof BlobType) {
+        if ($type !== null && Type::getType($type) instanceof BlobType) {
             throw new DeclarationMistake(sprintf('%s::$%s is audited, but it is a binary column (%s): its value is bytes, read back as a stream, which a history cannot hold and json_encode cannot write - the record was lost on encoding. Audit what describes it instead - its size, a checksum or the identifier of the file - as a field of its own on the entity, or by recording it with AuditWriter::record(); there is no representer for a scalar column.', $entity::class, $field, $type));
         }
 

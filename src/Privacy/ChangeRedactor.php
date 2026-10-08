@@ -204,7 +204,11 @@ final class ChangeRedactor
             return $operation();
         }
 
-        $this->answered = new \SplObjectStorage();
+        // Typed by hand: the oldest PHPStan this branch allows, 2.0, reads a new storage as one
+        // of mixed keys and calls the property's own type unused.
+        /** @var \SplObjectStorage<object, mixed> $answered */
+        $answered = new \SplObjectStorage();
+        $this->answered = $answered;
 
         try {
             return $operation();
