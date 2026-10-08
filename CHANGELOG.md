@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0.x`, read
 [UPGRADE.md](UPGRADE.md). On the `0.x` line every minor could change the API.
 
-## [Unreleased]
+## [1.2.6] - 2026-10-08
 
 The defects of 1.3.1 that 1.2.x has as well, fixed the same way and held by the same tests where
 1.2.x has what they test; see 1.3.1 for the rest. **What 1.2.x cannot see**: an operation that
