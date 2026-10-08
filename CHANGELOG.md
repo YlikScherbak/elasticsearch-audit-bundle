@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Since 1.0 the public API (see the README) is stable within `1.x`; coming from `0.x`, read
 [UPGRADE.md](UPGRADE.md). On the `0.x` line every minor could change the API.
 
-## [Unreleased]
+## [1.3.1] - 2026-10-08
 
 1.2.6 fixes the same defects where 1.2.x has them, held by the same tests; it does not see an
 operation that commits the transaction and begins another, nor transaction control sent as SQL,
